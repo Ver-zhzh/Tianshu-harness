@@ -23,7 +23,10 @@ export interface RiskAssessment {
  * - Catch destructive, irreversible, or privilege-escalating commands
  */
 /** Force-push detection pattern — used by assessToolRisk for clearer reason text. */
-const FORCE_PUSH_PATTERN = /\bgit\s+push\b[^\n]*\s--force(?:-with-lease)?\b/i
+// 三种等价形态：长旗标 --force(-with-lease/-if-includes)、短旗标 -f（可与其它短旗标合写，如 -fu）、
+// 以及 refspec 前缀 `+`（git push origin +main ≡ 强推该分支）。旧式只认 --force，最常用的 -f 静默放行。
+// 检查窗口止于命令分隔符，避免 `git push; rm -f x` 跨段误报。
+const FORCE_PUSH_PATTERN = /\bgit\s+push\b[^\n;&|]*(?:\s--force(?:-with-lease|-if-includes)?\b|\s-[a-zA-Z]*f[a-zA-Z]*\b|\s\+[^\s+]+)/i
 
 /**
  * Global package installs — mutate the user environment, not the project.
@@ -147,7 +150,9 @@ export const DANGEROUS_BASH_PATTERNS: ReadonlyArray<Readonly<RegExp>> = [
   // SQL 清表（SECURITY.md 声明 TRUNCATE 受门禁——与既有 DROP TABLE 同档）
   /\btruncate\s+table\b/i,
   /\bgit\s+reset\s+--hard\b/,
-  /\bgit\s+clean\s+-[a-zA-Z]*f\b/,
+  // git clean 强制旗标位置任意：-fd / -fdx / -xdf / 分开写 -d -f / --force。旧式要求 f 为组合旗标
+  // 末字母（-[a-zA-Z]*f\b），最常见的 `git clean -fd`、`git clean -fdx` 全部漏判。
+  /\bgit\s+clean\b[^\n;&|]*\s(?:-[a-zA-Z]*f|--force\b)/,
   /\bgit\s+checkout\s+--(?:\s|$)/,      // discard working-tree changes (panic-chain 事故: checkout -- 不可逆销毁)
   /\bgit\s+restore\b/,                  // discard working-tree / staged changes
   /\bgit\s+stash\b(?!(?:\s+(?:pop|list|show|apply|drop|branch)))/,  // git stash without safe subcommand = destructive clear
@@ -159,7 +164,11 @@ export const DANGEROUS_BASH_PATTERNS: ReadonlyArray<Readonly<RegExp>> = [
   /\bwget\b.*\|\s*(?:\S*\/)?(?:sh|bash|zsh|fish)\b/,   // 管道进 shell——执行器可以是绝对路径（/bin/bash）
   /\bcurl\b.*\|\s*(?:\S*\/)?(?:sh|bash|zsh|fish)\b/,
   /\b(?:sh|bash|zsh|dash)\s+-c\s+["']?\$\(/,           // shell -c "<命令替换>"——无管道无 eval 的下载执行形态
-  /\beval\b.*\$[({]/,                   // eval "$(curl ...)" or eval $(...)
+  /\beval\b.*\$[({]/,
+  // PowerShell 下载即执行（curl|sh 的 Windows 等价，本产品主力平台）：iwr/irm … | iex，
+  // 以及 iex (New-Object Net.WebClient).DownloadString(...) / iex (irm …)。PS 大小写不敏感 → /i。
+  /\b(?:iwr|irm|curl|wget|invoke-webrequest|invoke-restmethod)\b[^\n]*\|\s*(?:iex|invoke-expression)\b/i,
+  /\b(?:iex|invoke-expression)\b[^\n]*\b(?:downloadstring|iwr|irm|invoke-webrequest|invoke-restmethod)\b/i,                   // eval "$(curl ...)" or eval $(...)
   FORCE_PUSH_PATTERN,                         // force push (reference shared for reason detection)
   /\b(?:shutdown|reboot|halt|poweroff)\b/,                    // system control — disruptive even without sudo
   /\bnpm\s+(?:publish|unpublish)\b/,                          // irreversible registry operations
