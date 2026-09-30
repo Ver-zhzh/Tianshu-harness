@@ -112,4 +112,46 @@ describe('buildImportGraphAsync（异步分片变体）', () => {
     assert.ok(g, '空目录应得空图（files=0 ≤ MAX_FILES）')
     assert.equal(g!.forward.size, 0)
   })
+
+  // 回归：旧 IMPORT_RE 的父级分支写成 `\.\\.`，且 `.*?` 不跨行、不认 export-from，
+  // 解析也不把 ESM 的 './x.js' 映射回 x.ts——下列依赖方除 plain 外全部静默丢边。
+  it('captures parent-relative, .js-suffixed, multi-line, re-export, side-effect and dynamic imports', () => {
+    mkdirSync(join(testDir, 'lib'))
+    mkdirSync(join(testDir, 'app'))
+    writeFileSync(join(testDir, 'lib', 'util.ts'), `export const u = 1\n`)
+    writeFileSync(join(testDir, 'lib', 'plain.ts'), `import { u } from './util'\n`)
+    writeFileSync(join(testDir, 'app', 'parent.ts'), `import { u } from '../lib/util'\n`)
+    writeFileSync(join(testDir, 'lib', 'esm.ts'), `import { u } from './util.js'\n`)
+    writeFileSync(join(testDir, 'lib', 'multi.ts'), `import {\n  u,\n} from './util'\n`)
+    writeFileSync(join(testDir, 'lib', 'reexport.ts'), `export { u } from './util.js'\n`)
+    writeFileSync(join(testDir, 'lib', 'star.ts'), `export * from './util'\n`)
+    writeFileSync(join(testDir, 'lib', 'typeonly.ts'), `import type { X } from './util.js'\n`)
+    writeFileSync(join(testDir, 'app', 'side.ts'), `import '../lib/util.js'\n`)
+    writeFileSync(join(testDir, 'app', 'dynamic.ts'), `const m = await import('../lib/util.js')\n`)
+
+    const graph = buildImportGraph(testDir)!
+    const deps = [...getReverseDeps(graph, join(testDir, 'lib', 'util.ts'))]
+      .map((f) => f.slice(testDir.length + 1).replace(/\\/g, '/'))
+      .sort()
+    assert.deepEqual(deps, [
+      'app/dynamic.ts', 'app/parent.ts', 'app/side.ts',
+      'lib/esm.ts', 'lib/multi.ts', 'lib/plain.ts', 'lib/reexport.ts', 'lib/star.ts', 'lib/typeonly.ts',
+    ])
+  })
+
+  it('side-effect import does not swallow the next import specifier', () => {
+    writeFileSync(join(testDir, 'a.ts'), `export const a = 1\n`)
+    writeFileSync(join(testDir, 'b.ts'), `export const b = 1\n`)
+    writeFileSync(join(testDir, 'main.ts'), `import './a'\nimport { b } from './b'\n`)
+    const graph = buildImportGraph(testDir)!
+    const fwd = [...graph.forward.get(join(testDir, 'main.ts'))!].map((f) => f.slice(testDir.length + 1)).sort()
+    assert.deepEqual(fwd, ['a.ts', 'b.ts'])
+  })
+
+  it('does not treat bare/package specifiers as edges', () => {
+    writeFileSync(join(testDir, 'a.ts'), `import fs from 'node:fs'\nimport x from 'lodash'\n`)
+    const graph = buildImportGraph(testDir)!
+    assert.equal(graph.forward.get(join(testDir, 'a.ts'))!.size, 0)
+  })
 })
+

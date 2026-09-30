@@ -3,14 +3,28 @@
  * 本模块保留仅供 fallback（tool-pipeline 无 meridianIndexer 时），计划在确认全量迁移后移除。
  */
 import { readFileSync, existsSync, readdirSync, statSync } from 'fs'
-import { join, resolve, dirname, isAbsolute } from 'path'
+import { join, resolve, dirname, isAbsolute, extname } from 'path'
 
 export interface ImportGraph {
   forward: Map<string, Set<string>>
   reverse: Map<string, Set<string>>
 }
 
-const IMPORT_RE = /(?:import\s+.*?\s+from|require\s*\(\s*)\s*['"](\.\/[^'"]+|\.\\.[^'"]+)['"]/g
+// 相对说明符的全部静态/动态引入形态：
+//   import x from './a' · import type { T } from '../b' · import './side-effect'
+//   export { x } from './c' · export * from '../d' · require('./e') · import('./f')
+// 旧正则两处缺陷（静默丢边 → impact hint 漏报）：
+//   1) 第二支写成 `\.\\.`（字面「.\」+任一字符），本意是 `../`——所有跨目录的父级引入恒不命中；
+//   2) `.*?` 不跨行，多行具名导入 `import {\n a,\n} from` 与 `export … from` 重导出均漏。
+// 花括号内只允许标识符/空白/逗号/`*`/`as`，不跨引号——保证侧效引入不会吞掉下一行的说明符。
+const IMPORT_RE = /(?:\b(?:import|export)\s+(?:type\s+)?(?:[\w$*{}\s,]+?\s+from\s*)?|\brequire\s*\(\s*|\bimport\s*\(\s*)['"](\.{1,2}\/[^'"]*)['"]/g
+/** ESM TS 惯例：源码写 './x.js'，磁盘上是 x.ts——解析时按此映射补候选。 */
+const JS_TO_TS: Record<string, string[]> = {
+  '.js': ['.ts', '.tsx'],
+  '.jsx': ['.tsx'],
+  '.mjs': ['.mts'],
+  '.cjs': ['.cts'],
+}
 const MAX_FILES = 1000
 
 function resolveImport(fromFile: string, importPath: string, cwd: string): string | null {
@@ -19,6 +33,15 @@ function resolveImport(fromFile: string, importPath: string, cwd: string): strin
   for (const ext of ['', '.ts', '.tsx', '.js', '.jsx']) {
     const candidate = absPath + ext
     if (existsSync(candidate) && statSync(candidate).isFile()) return candidate
+  }
+  const jsExt = extname(absPath)
+  const tsExts = JS_TO_TS[jsExt]
+  if (tsExts) {
+    const stem = absPath.slice(0, -jsExt.length)
+    for (const ext of tsExts) {
+      const candidate = stem + ext
+      if (existsSync(candidate) && statSync(candidate).isFile()) return candidate
+    }
   }
   // index 候选必须用 join 而非字符串拼 '/index.ts'：Windows 上拼出来是混合分隔符
   // （…\mod/index.ts），与 collectTsFiles 收集的原生路径（…\mod\index.ts）字符串不等，
