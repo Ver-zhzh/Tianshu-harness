@@ -121,7 +121,7 @@ import type { CacheStatus } from './tui/status-types.js'
 import { TuiPerfMonitor, isTuiPerfEnabled } from './tui/engine/perf-monitor.js'
 import { runTuiShutdownSequence } from './tui/engine/shutdown-sequence.js'
 import { contractModels } from './config/contract-models.js'
-import { disambiguateKeyPrefix, parseModelRef, findModelOwner, findModelInKey } from './config/provider-keys.js'
+import { resolveModelRef, findModelOwner, findModelInKey } from './config/provider-keys.js'
 import { tryResolveCredentialKey } from './api/factory.js'
 import { canonicalizeModelId } from './api/model-aliases.js'
 
@@ -372,9 +372,10 @@ async function main() {
     // 统一走 parseModelRef：手切两段认不出 `provider:keyId:modelId` 三段式；再经
     // disambiguateKeyPrefix 消解「中间段是 keyId 还是模型 id 自带冒号」（`ollama:qwen3:32b`
     // 的 qwen3 非 key id → 还原完整 modelRef）——漏后者会静默取错模型与凭据。
-    const modelParts = (r: string | undefined) => r ? disambiguateKeyPrefix(cfg.provider.providers, parseModelRef(r)) : null
+    // resolveModelRef 另判首段：`--model cn:x --provider workbuddy` 的 cn 不是 provider（#313）。
+    const modelParts = (r: string | undefined, target?: string) => r ? resolveModelRef(cfg.provider.providers, r, target) : null
     const defaultModelParts = modelParts(defaultModelRef)
-    const requestedParts = modelParts(requestedModel)
+    const requestedParts = modelParts(requestedModel, requestedProvider)
     const preferredProvider = defaultModelParts?.provider && cfg.provider.providers[defaultModelParts.provider]
       ? defaultModelParts.provider
       : undefined

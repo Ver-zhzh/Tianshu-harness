@@ -183,6 +183,26 @@ export function disambiguateKeyPrefix(
 }
 
 /**
+ * 「模型 id 自身带冒号」的完整消歧（issue #313：网关清单 id 形如 `cn:glm-5.3-flash`）。
+ * 在 disambiguateKeyPrefix（中间段是否 keyId）之上再判首段：只有首段确是已配置的
+ * provider、且与调用方指定的 targetProvider 不冲突时，才把它当 provider 限定；否则
+ * 整串就是模型 id。不做这一步，`cn:` 会被当 provider 名、真实 id 被截成后半段——
+ * /model 切换报 "not found in any provider"，headless `--model` 静默回退默认模型。
+ * 已知取舍：若恰有名为 `cn` 的 provider，`cn:x` 按 provider 限定解释（显式前缀优先）。
+ */
+export function resolveModelRef(
+  providers: Record<string, ProviderConfig>,
+  ref: string,
+  targetProvider?: string,
+): ParsedModelRef {
+  const parsed = disambiguateKeyPrefix(providers, parseModelRef(ref))
+  if (!parsed.provider) return parsed
+  const known = Object.prototype.hasOwnProperty.call(providers, parsed.provider)
+  if (known && (!targetProvider || targetProvider === parsed.provider)) return parsed
+  return { modelRef: ref }
+}
+
+/**
  * key 的 secrets keyRef 命名空间：默认 key 沿用 provider 名（存量 secret 继续
  * 被引用，迁移零改动），其余 key 用 `<provider>:<keyId>`，与 provider 名互不撞键。
  */

@@ -95,6 +95,7 @@ import { createAuthProvider } from './auth/registry.js'
 import { resolveCapabilities } from './api/provider.js'
 import { canonicalizeModelId } from './api/model-aliases.js'
 import { contractModels } from './config/contract-models.js'
+import { resolveModelRef } from './config/provider-keys.js'
 import { DelegationCoordinator } from './agent/coordinator.js'
 import { ProviderHealthTracker } from './agent/provider-health.js'
 import { effectiveBanditMode, resolveBanditPromotion } from './agent/bandit-promotion.js'
@@ -1451,9 +1452,8 @@ export function resolveProviderForModel(ctx: Pick<BootstrapContext, 'config' | '
   // session records. Before this parse, "deepseek:deepseek-v4-flash" never
   // matched any provider model entry (id was compared with the prefix still
   // attached) — the same false negative behind the 2026-09-08 resume failure.
-  const colon = modelId.indexOf(':')
-  const pinnedProvider = colon > 0 ? modelId.slice(0, colon) : undefined
-  const modelRef = pinnedProvider ? modelId.slice(colon + 1) : modelId
+  // 首段只有确是已配置 provider 时才当前缀拆（#313：`cn:glm-5.3-flash` 整串是模型 id）。
+  const { provider: pinnedProvider, modelRef } = resolveModelRef(ctx.config.provider.providers, modelId, targetProvider)
   const providerFilter = targetProvider ?? pinnedProvider
   if (!modelRef) return null
 

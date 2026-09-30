@@ -66,7 +66,7 @@ import { setTargetConventions, applyConfiguredGitBashPath, prewarmShellProbes } 
 import { prewarmResolvedEnv } from '../tools/resolved-env.js'
 import { isKeylessProviderEntry } from '../config/provider-presets.js'
 import { resolveApiKey, resolveCredentialKey } from '../api/factory.js'
-import { disambiguateKeyPrefix, findModelInKey, findModelOwner, parseModelRef } from '../config/provider-keys.js'
+import { findModelInKey, findModelOwner, resolveModelRef } from '../config/provider-keys.js'
 import { contractModels } from '../config/contract-models.js'
 import type { OaiMessage } from '../api/oai-types.js'
 import { findRecentUnrecordedWrites, formatDiskReconciliationNote, shouldReconcileDisk } from '../context/write-evidence-probe.js'
@@ -234,7 +234,7 @@ export function resolveModelSpec(ctx: ServeContext, modelId: string): ResolvedMo
   // keyId」的判据收成单一事实源。此前 serve 与 main.ts 各写一份，main.ts 那侧漂了
   // 很久（`ollama:qwen3:32b` 被当成 keyId → 模型/凭据双错），两侧注释却都写着「同语义」。
   const { provider: pinnedProvider, keyId: pinnedKeyId, modelRef } =
-    disambiguateKeyPrefix(ctx.config.provider.providers, parseModelRef(modelId))
+    resolveModelRef(ctx.config.provider.providers, modelId)
   if (!modelRef) return null
 
   const entries = pinnedProvider
@@ -333,7 +333,7 @@ export function classifyModelSpecMiss(config: Config, modelId: string): 'unknown
   // 与 resolveModelSpec 同一套消歧义 —— 否则 `provider:keyId:modelId` 与
   // 「模型 id 自带冒号」两种形态的未命中会被误判成 unknown-model。
   const { provider: pinnedProvider, keyId: pinnedKeyId, modelRef } =
-    disambiguateKeyPrefix(config.provider.providers, parseModelRef(modelId))
+    resolveModelRef(config.provider.providers, modelId)
   if (!modelRef) return 'unknown-model'
   const entries = pinnedProvider
     ? (config.provider.providers[pinnedProvider] ? [[pinnedProvider, config.provider.providers[pinnedProvider]] as const] : [])

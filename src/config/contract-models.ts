@@ -6,7 +6,7 @@
  * import provider-keys 会形成环。本模块只依赖 schema，谁都能用。
  */
 import type { ModelConfig, ProviderConfig } from './schema.js'
-import { parseModelRef } from './provider-keys.js'
+import { disambiguateKeyPrefix, parseModelRef } from './provider-keys.js'
 
 /** 契约层模型列表：provider 有 keys 池时取各 key 的并集（按 id 首次出现去重），
  *  否则返回顶层快照。
@@ -36,7 +36,8 @@ export function assertDefaultModelRef(
   providers: Record<string, ProviderConfig>,
   ref: string,
 ): void {
-  const parsed = parseModelRef(ref)
+  // 先消歧中间段：`workbuddy:cn:glm-5.3-flash` 的 cn 不是 key id 时属于模型 id（#313）。
+  const parsed = disambiguateKeyPrefix(providers, parseModelRef(ref))
   const providerName = parsed.provider
   const modelId = parsed.modelRef
   if (!providerName || !modelId) {
