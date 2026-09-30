@@ -143,3 +143,53 @@ describe('cpuPool idle recycle', () => {
     assert.equal(exit, 0)
   })
 })
+
+// ── esbuild service 子进程回收（issue #315）──
+// worker 内 esbuild.transform 会拉起 `esbuild --service` 子进程；子进程只能由拉起它的
+// 线程 waitpid。空闲回收直接 terminate worker 时它退出了也无人收尸 → 永久 <defunct>，
+// 每次写文件后 +1。子进程里真实跑三轮「transform → 空闲回收」，再数父进程为自身的
+// esbuild 僵尸。Windows 无僵尸进程语义，跳过。
+
+const ZOMBIE_SCRIPT = `
+import { execSync } from 'node:child_process'
+import { cpuPool } from './src/workers/cpu-pool.ts'
+const sleep = ms => new Promise(r => setTimeout(r, ms))
+const zombies = () => execSync('ps -A -o ppid=,stat=,comm=').toString().split('\\n')
+  .map(l => l.trim().split(/\\s+/))
+  .filter(([ppid, stat, comm]) => Number(ppid) === process.pid && stat.startsWith('Z') && (comm ?? '').includes('esbuild'))
+  .length
+for (let i = 0; i < 3; i++) {
+  await cpuPool.run('esbuildTransformRaw', ['const a: number = ' + i, { loader: 'ts' }], 20000)
+  await sleep(1200)
+}
+// 回收收尾期间立刻来新任务：旧 worker 退出不得连带杀掉新 worker
+await cpuPool.run('esbuildTransformRaw', ['let b = 1', { loader: 'ts' }], 20000)
+await sleep(105)
+const late = await cpuPool.run('diffUnifiedRaw', ['t.txt', 'a\\\\n', 'b\\\\n', 4000], 20000)
+await sleep(1200)
+console.log('zombies:' + zombies() + ' late:' + typeof late)
+process.exit(0)
+`
+
+describe('cpuPool esbuild 子进程回收（issue #315）', { skip: process.platform === 'win32' ? 'Windows 无僵尸进程语义' : false }, () => {
+  it('多轮 transform + 空闲回收后，不残留 esbuild 僵尸进程', async () => {
+    const out = await new Promise<string>((resolve, reject) => {
+      const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', ZOMBIE_SCRIPT], {
+        cwd: process.cwd(),
+        env: { ...process.env, RIVET_CPU_POOL_IDLE_MS: '100' },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+      let stdout = ''
+      let stderr = ''
+      const timer = setTimeout(() => { child.kill(); reject(new Error('runner 超时')) }, 60_000)
+      child.stdout.on('data', (c: Buffer) => { stdout += String(c) })
+      child.stderr.on('data', (c: Buffer) => { stderr += String(c) })
+      child.on('close', (code) => {
+        clearTimeout(timer)
+        if (code !== 0) reject(new Error(`runner exited ${code}: ${stderr.slice(0, 500)}`))
+        else resolve(stdout)
+      })
+    })
+    assert.match(out, /zombies:0 late:string/, out)
+  })
+})

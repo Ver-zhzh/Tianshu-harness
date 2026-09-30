@@ -165,11 +165,16 @@ export function parseEventsJsonlRaw(text: string): RawSessionEvent[] {
 // 二进制可阻塞事件循环数分钟——worker 线程内阻塞只影响本任务，主线程的
 // 软超时照常生效并降级）。与上面纯函数不同：本任务带模块级缓存的副作用。
 import { createRequire } from 'node:module'
+import type { ChildProcess } from 'node:child_process'
+const _require = createRequire(import.meta.url)
 
 interface EsbuildLike {
   transform(content: string, options: unknown): Promise<unknown>
+  stop?(): Promise<void> | void
 }
 let _esbuild: EsbuildLike | null | undefined
+/** 本 worker 里 esbuild 拉起、尚未被回收的 service 子进程（issue #315）。 */
+const _esbuildChildren = new Set<ChildProcess>()
 
 export async function esbuildTransformRaw(content: string, options: unknown): Promise<true> {
   if (_esbuild === undefined) {
@@ -181,8 +186,47 @@ export async function esbuildTransformRaw(content: string, options: unknown): Pr
     }
   }
   if (!_esbuild) throw new Error('esbuild unavailable in worker')
-  await _esbuild.transform(content, options)
+  // esbuild 在 transform() 的同步段里懒启动 `esbuild --service` 子进程，且不暴露句柄。
+  // 子进程只能由拉起它的线程回收（libuv 按 loop 各自 waitpid）：worker 被 terminate
+  // 后它退出了也没人收尸 → 永久 <defunct>，每次空闲回收 +1（issue #315）。这里只在
+  // 同步段内临时包一层 spawn 记下句柄，供 esbuildStopRaw 等它真正退出。
+  const cp = _require('node:child_process') as typeof import('node:child_process')
+  const origSpawn = cp.spawn
+  cp.spawn = ((...args: Parameters<typeof origSpawn>) => {
+    const child = origSpawn(...args)
+    _esbuildChildren.add(child)
+    child.once('exit', () => { _esbuildChildren.delete(child) })
+    return child
+  }) as typeof origSpawn
+  let pending: Promise<unknown>
+  try {
+    pending = _esbuild.transform(content, options)
+  } finally {
+    cp.spawn = origSpawn
+  }
+  await pending
   return true
+}
+
+/**
+ * 停掉 esbuild service 并等它的子进程被本线程回收（'exit' 事件在 waitpid 之后才发）。
+ * cpu-pool 空闲回收 worker 前调用；超时兜底，不让回收流程卡住。
+ */
+export async function esbuildStopRaw(graceMs = 1000): Promise<number> {
+  const children = [..._esbuildChildren]
+  if (children.length === 0) return 0
+  const exited = children.map(c => new Promise<void>(resolve => {
+    if (c.exitCode !== null || c.signalCode !== null) resolve()
+    else c.once('exit', () => resolve())
+  }))
+  try { await _esbuild?.stop?.() } catch { /* 已停 */ }
+  let timer: ReturnType<typeof setTimeout> | undefined
+  await Promise.race([
+    Promise.all(exited),
+    new Promise<void>(resolve => { timer = setTimeout(resolve, graceMs) }),
+  ])
+  if (timer) clearTimeout(timer)
+  return children.length
 }
 
 // ── AST 扫描（ast_grep 的 worker 通道）──

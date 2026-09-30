@@ -12,7 +12,7 @@
 
 import { parentPort } from 'node:worker_threads'
 // @ts-ignore — tsx dev worker uses .ts extension; tsup bundles this file separately
-import { diffUnifiedRaw, diffStructuredRaw, diffLinesRaw, parseEventsJsonlRaw, parseEventsTailRaw, esbuildTransformRaw, astScanRaw, astEditComputeRaw } from './cpu-tasks.ts'
+import { diffUnifiedRaw, diffStructuredRaw, diffLinesRaw, parseEventsJsonlRaw, parseEventsTailRaw, esbuildTransformRaw, esbuildStopRaw, astScanRaw, astEditComputeRaw } from './cpu-tasks.ts'
 
 type TaskFn = (...args: any[]) => unknown
 
@@ -23,6 +23,7 @@ const tasks: Record<string, TaskFn> = {
   parseEventsJsonlRaw: parseEventsJsonlRaw as TaskFn,
   parseEventsTailRaw: parseEventsTailRaw as TaskFn,
   esbuildTransformRaw: esbuildTransformRaw as TaskFn,
+  esbuildStopRaw: esbuildStopRaw as TaskFn,
   astScanRaw: astScanRaw as TaskFn,
   astEditComputeRaw: astEditComputeRaw as TaskFn,
 }

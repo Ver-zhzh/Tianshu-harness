@@ -95,9 +95,37 @@ function armIdleRecycle(): void {
   _idleTimer = setTimeout(() => {
     _idleTimer = null
     if (_worker !== null) {
-      killWorker()
+      retireWorker()
     }
   }, IDLE_TERMINATE_MS)
+}
+
+/** 空闲回收的收尾宽限：worker 内停 esbuild 并等其子进程被回收的上限。 */
+const RETIRE_GRACE_MS = 1500
+
+/**
+ * 空闲回收：先让 worker 停掉 esbuild service 并回收其子进程，再 terminate。
+ * 直接 terminate 会让 worker 拉起的 `esbuild --service` 成为永久僵尸——子进程只能
+ * 由拉起它的线程 waitpid，线程没了就没人收尸（issue #315：每次写文件后 +1）。
+ * worker 立即从池里摘下，期间的新任务直接起新 worker，不受收尾影响。
+ */
+function retireWorker(): void {
+  disarmIdleRecycle()
+  const w = _worker
+  if (!w || _pending.size > 0) return
+  _worker = null
+  const id = ++_seq
+  let done = false
+  const finish = () => {
+    if (done) return
+    done = true
+    clearTimeout(timer)
+    w.terminate().catch(() => { /* already dead */ })
+  }
+  const timer = setTimeout(finish, RETIRE_GRACE_MS)
+  timer.unref?.()
+  w.on('message', (msg: { id?: number }) => { if (msg?.id === id) finish() })
+  try { w.postMessage({ id, task: 'esbuildStopRaw', args: [] }) } catch { finish() }
 }
 
 // ── Internal helpers ──
@@ -127,11 +155,13 @@ function spawnWorker(): Worker | null {
     else p.reject(new Error(msg.error ?? 'unknown worker error'))
     if (_pending.size === 0) armIdleRecycle()
   })
+  // 只处置「当前」worker：被摘下（空闲回收）或已替换的旧 worker 退出时，
+  // 不得连带杀掉新 worker 与它的在途任务。
   w.on('error', () => {
-    killWorker()
+    if (_worker === w) killWorker()
   })
   w.on('exit', () => {
-    killWorker()
+    if (_worker === w) killWorker()
   })
   return w
 }
