@@ -40,7 +40,10 @@ const SENSITIVE_FILE_PATTERNS: Array<{ name: string; re: RegExp }> = [
   // 排除 `.env.example` / `.env.template` / `.env.sample`（白名单）
   {
     name: '.env (real)',
-    re: /\.env(?:\.(?:local|production|staging|development|prod|staging|dev))?$/,
+    // 后缀可叠加：Next.js/Vite/dotenv-flow 的标准形态 `.env.production.local` /
+    // `.env.development.local` / `.env.test.local` 都是真实凭证文件；旧正则只容 0–1 段后缀，
+    // 这些形态全部漏判（read_file/export_file/git 暂存门同时失明）。
+    re: /\.env(?:\.(?:local|production|prod|staging|development|dev|test|ci))*$/,
   },
   // credentials 文件
   // 来源：credentials.json / credentials.yaml / service-account-credentials.json
@@ -161,21 +164,32 @@ export const AGGREGATE_ADD_MARKER = '__aggregate_add__'
  *
  * @returns 匹配到的敏感文件名数组 + 可能的聚合哨兵项（可能为空）
  */
+/**
+ * 无法静态枚举暂存内容的参数：工作树根（`.` / `./` / Windows `.\`）、全部（-A/--all）、
+ * 已跟踪全部（-u/--update）、pathspec 通配 `*` 与仓库根魔法 pathspec `:/` / `:`。
+ */
+const AGGREGATE_ARGS = new Set(['.', './', '.\\', '*', ':/', ':', '-A', '-a', '--all', '-u', '--update'])
+
+function stripQuotes(arg: string): string {
+  return arg.replace(/^(['"`])(.*)\1$/, '$2')
+}
+
 export function detectSensitiveGitAdd(command: string): string[] {
   // 匹配 `git add <file>` — 提取文件参数（PowerShell/cmd 命令名不区分大小写 → /gi）
   // 来源：prompt security 段 "发现此类文件出现在 git add 中时中止"
-  const gitAddRe = /git\s+add\s+(.+)/gi
+  // `git -C <dir> add` / `git -c k=v add` 等全局选项形态同样是暂存命令，一并捕获。
+  const gitAddRe = /\bgit(?:\s+-[Cc]\s+\S+|\s+--[\w-]+(?:=\S+)?)*\s+add\s+(.+)/gi
   const sensitiveFiles: string[] = []
   let sawAggregate = false
 
   let match: RegExpExecArray | null
   while ((match = gitAddRe.exec(command)) !== null) {
     const args = match[1]!.trim()
-    // 拆分空格分隔的参数（简化处理，不处理引号边界情况）
-    const files = args.split(/\s+/)
+    // 拆分空格分隔的参数（简化处理，不处理引号内含空格的边界情况）；
+    // 单个参数两端的引号必须剥掉——否则 `git add ".env"` / `git add '.env'` 整体绕过检测。
+    const files = args.split(/\s+/).map(stripQuotes)
     for (const f of files) {
-      if (f === '.' || f === './') { sawAggregate = true; continue }
-      if (f === '-A' || f === '-a' || f === '--all') { sawAggregate = true; continue }
+      if (AGGREGATE_ARGS.has(f)) { sawAggregate = true; continue }
       if (f.startsWith('-')) continue
       const result = detectSensitiveFile(f)
       if (result.sensitive) sensitiveFiles.push(f)

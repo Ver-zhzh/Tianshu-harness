@@ -220,4 +220,34 @@ describe('sensitive-file-detector', () => {
       assert.equal(detectSensitiveGitAdd('git add   ').length, 0)
     })
   })
+
+  describe('stacked .env suffixes and git add bypass forms', () => {
+    it('flags framework-standard stacked .env variants', () => {
+      for (const f of ['.env.production.local', '.env.development.local', '.env.test.local', '.env.test', 'apps/web/.env.staging.local']) {
+        assert.equal(detectSensitiveFile(f).sensitive, true, f)
+      }
+    })
+
+    it('keeps templates and source files unflagged', () => {
+      for (const f of ['.env.example', '.env.sample', 'src/env.test.ts', 'config.env.ts']) {
+        assert.equal(detectSensitiveFile(f).sensitive, false, f)
+      }
+    })
+
+    it('strips quotes around git add arguments', () => {
+      assert.deepEqual(detectSensitiveGitAdd('git add ".env"'), ['.env'])
+      assert.deepEqual(detectSensitiveGitAdd("git add '.env.production.local'"), ['.env.production.local'])
+    })
+
+    it('recognizes git global options before add', () => {
+      assert.deepEqual(detectSensitiveGitAdd('git -C repo add .env'), ['.env'])
+      assert.deepEqual(detectSensitiveGitAdd('git -c core.autocrlf=false add credentials.json'), ['credentials.json'])
+    })
+
+    it('treats non-enumerable pathspecs as aggregate', () => {
+      for (const c of ['git add .\\', 'git add *', 'git add -u', 'git add --update', 'git add :/']) {
+        assert.deepEqual(detectSensitiveGitAdd(c), [AGGREGATE_ADD_MARKER], c)
+      }
+    })
+  })
 })
