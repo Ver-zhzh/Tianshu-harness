@@ -148,6 +148,20 @@ export class GoalContinuationController {
     return { kind: 'finalize' }
   }
 
+  /**
+   * 工具轮之间的接力检查（orchestrator 每个工具批次后调用）。handleGoalCheck
+   * 只在模型收尾（无工具调用）时运行，而一次长工具链能从 30% 一路跑到 90%——
+   * 真实模型验证中阈值 40% 实际到 72% 才有机会判定。到阈值即暂停 goal 并返回
+   * true，由调用方结束本 run；交接 run 仍在同一会话里，模型知道刚才做到哪。
+   */
+  requestRolloverIfDue(estimatedTokens: number): boolean {
+    const tracker = this.deps.getGoalTracker()
+    if (!tracker?.isRolloverDue(estimatedTokens)) return false
+    tracker.pause(GOAL_ROLLOVER_REASON, 'runtime')
+    this.persistGoalState(tracker)
+    return true
+  }
+
   private persistGoalState(tracker: GoalTracker): void {
     const sid = this.deps.getSessionId()
     if (sid) {

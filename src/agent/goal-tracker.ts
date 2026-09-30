@@ -264,8 +264,7 @@ export class GoalTracker {
 
     // 接力：还有会话名额时，在阈值处交棒而不是拖到 95% 暂停。名额用尽则
     // 退回旧语义（继续跑到 95% 再暂停），不会无限开会话。
-    const ro = this._rollover
-    if (ro && ro.generation < ro.maxSessions && estimatedTokens >= this._contextWindow * ro.ratio) {
+    if (this.isRolloverDue(estimatedTokens)) {
       return { shouldContinue: false, reason: 'context_rollover', iteration: this._iteration }
     }
 
@@ -278,6 +277,12 @@ export class GoalTracker {
     }
 
     return { shouldContinue: true, reason: 'continue', iteration: this._iteration }
+  }
+
+  /** 是否该接力：启用、还有会话名额、估算上下文 ≥ ratio × 窗口。纯判定，不改状态。 */
+  isRolloverDue(estimatedTokens: number): boolean {
+    const ro = this._rollover
+    return !!ro && this._status === 'active' && ro.generation < ro.maxSessions && estimatedTokens >= this._contextWindow * ro.ratio
   }
 
   /** Advance iteration counter. Called when a continuation is decided. */

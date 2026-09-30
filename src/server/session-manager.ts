@@ -2854,7 +2854,8 @@ export class RuntimeSessionManager {
       // MissionProjector + GoalBar can cold-start from the event stream instead
       // of relying on HTTP polling. No goalId/tracker yet — just an active empty
       // goal that moves the projector phase from 'draft' to 'executing'.
-      if (wasFirstUser) {
+      // 已挂 goal（如接力新会话先 setGoal 再 kickoff）时不发空基线，免得覆盖真实 goal 状态。
+      if (wasFirstUser && !this.resolveGoalHandles?.(id)?.goalTrackerRef.current) {
         this.append(session, 'goal_state', this.baselineGoalSnapshot() as unknown as Record<string, unknown>)
       }
       this.persistRecord(session)

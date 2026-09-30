@@ -35,6 +35,8 @@ export type StopReasonSource =
   | 'stream-error'
   /** C3 自治档检查点 — turn budget within a run reached, paused for user confirmation. */
   | 'checkpoint'
+  /** Goal 上下文接力：工具轮之间上下文到达接力阈值，收尾交给 session 层开新会话。 */
+  | 'goal-rollover'
 
 export interface StopReason {
   source: StopReasonSource
@@ -81,6 +83,8 @@ export function describeStopReason(r: StopReason): string {
       return '⏹ 流式错误中断'
     case 'checkpoint':
       return `⏸ 自治检查点（已连续执行 ${r.turn} 轮）— 等待确认后继续`
+    case 'goal-rollover':
+      return '⏸ 上下文到达接力阈值 — 交接后由新会话继续'
   }
 }
 

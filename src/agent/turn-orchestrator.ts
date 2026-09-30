@@ -1096,6 +1096,14 @@ export class TurnOrchestrator {
             break
           }
 
+          // Goal 上下文接力：工具批次后到阈值即收尾（见 requestRolloverIfDue）。
+          if (this.deps.goalContinuation.requestRolloverIfDue(this.deps.getEstimatedTokens())) {
+            this.emitStop({ source: 'goal-rollover', turn, voluntary: false }, callbacks)
+            await rejectOnAbort(this.deps.completeTurn({ turn, isFinal: true, callbacks }), signal!, 'post-turn-rollover')
+            finalTurnCompleted = true
+            break
+          }
+
           // Wedged-loop guard: a model that re-emits the SAME tool batch and gets
           // an all-error result every time (the classic "requires user approval"
           // denial loop — see the boundary-stall screenshot) would otherwise spin

@@ -5,17 +5,19 @@
  * - goal run 收尾且 tracker 以 GOAL_ROLLOVER_REASON 暂停 → 同会话自动发起交接 run；
  * - 交接 run 收尾且文档已归档 → 同 cwd 新会话：原目标原话 + 剩余迭代预算 +
  *   generation+1，kickoff prompt 带交接文档；旧会话 goal 取消；两边都有 goal_rollover 事件；
- * - 中止的 run / 缺失的交接文档 → 不开新会话，goal 保持暂停。
+ * - 中止的 run → 不开新会话，goal 保持暂停；
+ * - 交接文档没写出来 → 仍接力，但不注入陈旧文档（会话目录自动快照 / 旧项目文档）。
  */
 import { test, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, utimesSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { RuntimeSessionManager, type ManagedAgent, type GoalHandles } from '../session-manager.js'
 import { createRouter } from '../index.js'
 import { buildSessionRoutes } from '../session-routes.js'
 import { GoalTracker, GOAL_ROLLOVER_REASON } from '../../agent/goal-tracker.js'
+import { getSessionDir } from '../../agent/session-persist.js'
 import type { AgentCallbacks } from '../../agent/loop-types.js'
 import type { Artifact } from '../../artifact/types.js'
 import type { OaiMessage } from '../../api/oai-types.js'
@@ -138,18 +140,43 @@ test('goal run 被中止：不发起交接，goal 保持暂停', async () => {
   assert.equal(tracker.getStatus(), 'paused')
 })
 
-test('交接文档没写出来：不开新会话，goal 保持暂停并留事件', async () => {
+test('交接文档没写出来：仍接力，但绝不注入会话目录里的陈旧自动快照', async () => {
   const { manager, handles, agentOf } = setup()
   const { s, agent, tracker } = await startGoal(manager, handles, agentOf)
+  // 会话目录里已有 session-persist 早先轮次写的自动快照（真实模型验证中读到过它）
+  mkdirSync(getSessionDir(workDir), { recursive: true })
+  writeFileSync(join(getSessionDir(workDir), `${s.id}.handoff.md`), '<session-handoff>STALE-SNAPSHOT</session-handoff>')
+  // 项目内也有一份早于本次交接的旧文档
+  mkdirSync(join(workDir, '.rivet'), { recursive: true })
+  const old = join(workDir, '.rivet', 'HANDOFF.md')
+  writeFileSync(old, 'OLD-PROJECT-DOC')
+  utimesSync(old, new Date(Date.now() - 3_600_000), new Date(Date.now() - 3_600_000))
   tracker.pause(GOAL_ROLLOVER_REASON, 'runtime')
   agent.finish()
   await tick()
-  agent.finish() // 交接 run 收尾但未写文档
+  agent.finish() // 交接 run 收尾但模型没写文档
   await tick(120)
-  assert.equal(manager.listSessions().length, 1)
-  assert.equal(tracker.getStatus(), 'paused')
+  const next = manager.listSessions().find((r) => r.id !== s.id)
+  assert.ok(next, '无文档也要接力，不让夜间任务停摆')
+  const kickoff = agentOf(next!.id).prompts[0]!
+  assert.doesNotMatch(kickoff, /STALE-SNAPSHOT|OLD-PROJECT-DOC/)
+  assert.match(kickoff, /没有留下交接文档/)
   const texts = manager.getEvents(s.id)!.events.filter((e) => e.type === 'goal_rollover').map((e) => String((e.data as { text: string }).text))
-  assert.ok(texts.some((t) => t.includes('交接文档没有写出来')))
+  assert.ok(texts.some((t) => t.includes('没写出交接文档')))
+})
+
+test('新会话首条消息不发空的基线 goal_state（不覆盖接力 goal）', async () => {
+  const { manager, handles, agentOf } = setup()
+  const { s, agent, tracker } = await startGoal(manager, handles, agentOf)
+  tracker.pause(GOAL_ROLLOVER_REASON, 'runtime')
+  agent.finish(); await tick()
+  mkdirSync(join(workDir, '.rivet'), { recursive: true })
+  writeFileSync(join(workDir, '.rivet', 'HANDOFF.md'), 'doc')
+  agent.finish(); await tick(120)
+  const next = manager.listSessions().find((r) => r.id !== s.id)!
+  const states = manager.getEvents(next.id)!.events.filter((e) => e.type === 'goal_state').map((e) => (e.data as { goal: string }).goal)
+  assert.ok(states.length > 0)
+  assert.ok(states.every((g) => g === '把 utils 全部迁移到新 API'), `不应出现空 goal：${JSON.stringify(states)}`)
 })
 
 test('POST /sessions/:id/goal：rollover 参数经规范化透传，缺省不启用', async () => {
