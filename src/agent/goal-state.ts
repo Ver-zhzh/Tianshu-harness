@@ -29,6 +29,8 @@ export interface GoalStateRecord {
   readonly budgetLimits: GoalBudgetLimits
   readonly terminalReason?: string
   readonly completionCriterion?: string
+  /** 上下文接力配置（见 GoalRolloverConfig）；旧记录无此字段。 */
+  readonly rollover?: { readonly ratio: number; readonly maxSessions: number; readonly generation: number }
   readonly savedAt: number
 }
 

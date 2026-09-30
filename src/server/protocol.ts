@@ -168,6 +168,9 @@ export type SessionEventType =
   // 会话目录 <id>.handoff.md（loadPrevHandoff 注入管线认的位置）。
   // data: { text: string, src: string, dest: string }。旧版 UI 忽略即可。
   | 'handoff_archived'
+  // Goal 上下文接力（goal-rollover.ts）— 交接发起 / 新会话已接棒 / 中止原因。
+  // data: { text, ok, from, to?, generation, maxSessions }。旧版 UI 忽略即可。
+  | 'goal_rollover'
   // Goal mode — autonomous cross-turn goal tracker state change (created /
   // paused / resumed / cancelled / criteria-extracted / verdict-updated).
   // data: GoalSnapshot (see session-manager). The desktop GoalBar polls or

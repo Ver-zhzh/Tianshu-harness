@@ -34,6 +34,7 @@
  *   POST   /github/prs/:number/merge                   merge a PR (confirm-gated)
  *   POST   /github/prs/:number/push-fix                push auto-fix diff to PR head (confirm-gated)
  */
+import { normalizeRolloverConfig } from '../agent/goal-tracker.js'
 import { decodeRouteParam, type RouteHandler } from './index.js'
 import { allowedCorsOrigin } from './cors.js'
 import type { SseConnectionRegistry } from './sse-registry.js'
@@ -524,7 +525,7 @@ export function buildSessionRoutes(
     // by the manager. State changes emit `goal_state` events (SSE).
     'POST /sessions/:id/goal': withAuth(async (body, params) => {
       const id = params!.id!
-      const data = (body ?? {}) as { goal?: unknown; maxIterations?: unknown; wallClockMs?: unknown; successCriteria?: unknown; contextWindow?: unknown }
+      const data = (body ?? {}) as { goal?: unknown; maxIterations?: unknown; wallClockMs?: unknown; successCriteria?: unknown; contextWindow?: unknown; rollover?: unknown }
       if (typeof data.goal !== 'string' || data.goal.trim().length === 0) {
         return { status: 400, body: { error: 'Missing or empty "goal"' } }
       }
@@ -537,7 +538,9 @@ export function buildSessionRoutes(
         ...(typeof data.wallClockMs === 'number' && data.wallClockMs > 0 ? { wallClockMs: data.wallClockMs } : {}),
         ...(Array.isArray(data.successCriteria) ? { successCriteria: data.successCriteria.filter((c): c is string => typeof c === 'string') } : {}),
       }
-      const snap = await manager.setGoal(id, opts)
+      // 可选上下文接力 { ratio?, maxSessions? }：非法/缺省 = 不启用（goal-rollover.ts）。
+      const rollover = normalizeRolloverConfig(data.rollover)
+      const snap = await manager.setGoal(id, rollover ? { ...opts, rollover } : opts)
       if (!snap) return { status: 503, body: { error: 'Goal mode unavailable (session not found or sidecar not goal-capable)' } }
       return { status: 200, body: snap }
     }, apiToken),

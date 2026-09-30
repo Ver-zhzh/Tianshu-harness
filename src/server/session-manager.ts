@@ -16,6 +16,7 @@
  *  - Artifacts are surfaced from each session's own ArtifactStore, never shared
  *    across sessions (B4).
  */
+import { GoalRolloverCoordinator } from './goal-rollover.js'
 import type { AgentCallbacks, ApprovalMode } from '../agent/loop-types.js'
 import { touchActivity, setActivityPhase, beginRun as beginActivityRun, finishRun as finishActivityRun, withActivityRun } from '../agent/stall-observer.js'
 import { randomUUID } from 'node:crypto'
@@ -535,6 +536,8 @@ export interface GoalSnapshot {
   wallClockBudgetMs?: number
   terminalReason?: string
   successCriteria: string[]
+  /** 上下文接力配置（goal-rollover.ts）；未启用时缺省。 */
+  rollover?: { ratio: number; maxSessions: number; generation: number }
   /** Last completion-judge verdict (null until the first judge run). Shape
    *  mirrors StoredGoalJudgeVerdict from goal-tracker (kept as a structural
    *  type here to avoid a static import — the field is pass-through only). */
@@ -2953,6 +2956,7 @@ export class RuntimeSessionManager {
               }
             })
             this.maybeWatchdogAutoContinue(session)
+            setImmediate(() => { void this.goalRollover.onRunSettled(id).catch(() => { /* best-effort */ }) })
             this.scheduleQueueLaneFlush(session)
             if (session.record.archived) this.unloadSession(session)
           } finally {
@@ -3017,6 +3021,19 @@ export class RuntimeSessionManager {
     }
     return true
   }
+
+  // Goal 上下文接力：编排主体在 goal-rollover.ts，这里只注入 host（读私有 sessions/append）。
+  private readonly goalRollover = new GoalRolloverCoordinator({
+    getRecord: (id) => this.sessions.get(id)?.record,
+    getTracker: (id) => this.resolveGoalHandles?.(id)?.goalTrackerRef.current ?? this.sessions.get(id)?.agent?.getGoalTracker?.() ?? null,
+    requestHandoff: (id, note) => this.requestHandoff(id, note),
+    createSession: (input) => this.createSession(input),
+    setGoal: (id, opts) => this.setGoal(id, opts),
+    cancelGoal: (id) => this.cancelGoal(id),
+    ensureAgent: (id) => this.ensureSessionAgent(id),
+    run: (id, prompt) => this.run(id, prompt),
+    append: (id, type, data) => { const s = this.sessions.get(id); if (s) this.append(s, type, data) },
+  })
 
   /**
    * /handoff（桌面端入口）：登记归档任务后发起交接 run——agent 把交接文档写到
@@ -3815,6 +3832,7 @@ export class RuntimeSessionManager {
     wallClockMs?: number
     successCriteria?: string[]
     maxJudgeRuns?: number
+    rollover?: import('../agent/goal-tracker.js').GoalRolloverConfig
   }): Promise<GoalSnapshot | null> {
     const session = this.sessions.get(id)
     if (!session) return null
@@ -3829,6 +3847,7 @@ export class RuntimeSessionManager {
       ...(opts.wallClockMs !== undefined ? { wallClockMs: opts.wallClockMs } : {}),
       ...(opts.successCriteria ? { successCriteria: opts.successCriteria } : {}),
       ...(opts.maxJudgeRuns !== undefined ? { maxJudgeRuns: opts.maxJudgeRuns } : {}),
+      ...(opts.rollover ? { rollover: opts.rollover } : {}),
     })
     // Sync BOTH the agent field (drives GoalContinuationController) AND the refs
     // slot (read by update_goal / deliver_task tool closures). Out of sync →
@@ -3917,6 +3936,7 @@ export class RuntimeSessionManager {
       ...(terminalReason ? { terminalReason } : {}),
       successCriteria: t.getSuccessCriteria(),
       ...(t.getLastVerdict() ? { lastVerdict: t.getLastVerdict()! } : {}),
+      ...(t.getRollover() ? { rollover: t.getRollover()! } : {}),
     }
   }
 

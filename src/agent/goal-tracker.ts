@@ -12,6 +12,31 @@ export interface GoalTrackerConfig {
   maxJudgeRuns?: number
   /** Wall-clock budget in milliseconds. undefined = unlimited. */
   wallClockMs?: number
+  /** 可选：上下文跨会话接力（desktop/server 入口）。缺省 = 旧行为（95% 暂停）。 */
+  rollover?: GoalRolloverConfig
+}
+
+/**
+ * 上下文接力配置。ratio：估算上下文占窗口比例达到该值即请求接力（0.2–0.9）；
+ * maxSessions：含首个会话在内的会话总数上限；generation：当前是第几个会话（1 起）。
+ */
+export interface GoalRolloverConfig {
+  ratio: number
+  maxSessions: number
+  generation: number
+}
+
+/** 接力触发后 tracker 暂停时写入的 terminalReason——session 层据此识别接力请求。 */
+export const GOAL_ROLLOVER_REASON = 'context_rollover'
+
+/** 规范化接力配置：非法值返回 undefined（= 不启用），越界值夹紧到安全范围。 */
+export function normalizeRolloverConfig(input: unknown, generation = 1): GoalRolloverConfig | undefined {
+  if (!input || typeof input !== 'object') return undefined
+  const raw = input as { ratio?: unknown; maxSessions?: unknown }
+  const ratio = typeof raw.ratio === 'number' && Number.isFinite(raw.ratio) ? raw.ratio : 0.5
+  const maxSessions = typeof raw.maxSessions === 'number' && Number.isFinite(raw.maxSessions) ? Math.floor(raw.maxSessions) : 5
+  if (maxSessions < 2) return undefined
+  return { ratio: Math.min(0.9, Math.max(0.2, ratio)), maxSessions: Math.min(20, maxSessions), generation }
 }
 
 const DEFAULT_MAX_JUDGE_RUNS = 3
@@ -38,7 +63,7 @@ export function buildGoalModePrompt(goal: string): string {
 
 export interface GoalCheckResult {
   shouldContinue: boolean
-  reason: 'achieved' | 'budget_exhausted' | 'context_limit' | 'wall_clock_exhausted' | 'continue' | 'no_goal'
+  reason: 'achieved' | 'budget_exhausted' | 'context_limit' | 'context_rollover' | 'wall_clock_exhausted' | 'continue' | 'no_goal'
   iteration: number
 }
 
@@ -61,6 +86,7 @@ export class GoalTracker {
   private readonly _wallClockBudgetMs?: number
   private _wallClockAccumMs = 0
   private _wallClockResumedAt: number
+  private readonly _rollover?: GoalRolloverConfig
 
   constructor(config: GoalTrackerConfig) {
     this._goal = config.goal
@@ -71,6 +97,16 @@ export class GoalTracker {
     this._goalId = randomUUID()
     this._wallClockBudgetMs = config.wallClockMs
     this._wallClockResumedAt = Date.now()
+    if (config.rollover) this._rollover = { ...config.rollover }
+  }
+
+  /** 接力配置（未启用为 undefined）。 */
+  getRollover(): GoalRolloverConfig | undefined {
+    return this._rollover ? { ...this._rollover } : undefined
+  }
+
+  getContextWindow(): number {
+    return this._contextWindow
   }
 
   /** True only when status === 'active'. Existing callers rely on this semantic. */
@@ -226,6 +262,13 @@ export class GoalTracker {
       return { shouldContinue: false, reason: 'budget_exhausted', iteration: this._iteration }
     }
 
+    // 接力：还有会话名额时，在阈值处交棒而不是拖到 95% 暂停。名额用尽则
+    // 退回旧语义（继续跑到 95% 再暂停），不会无限开会话。
+    const ro = this._rollover
+    if (ro && ro.generation < ro.maxSessions && estimatedTokens >= this._contextWindow * ro.ratio) {
+      return { shouldContinue: false, reason: 'context_rollover', iteration: this._iteration }
+    }
+
     if (estimatedTokens > this._contextWindow * 0.95) {
       return { shouldContinue: false, reason: 'context_limit', iteration: this._iteration }
     }
@@ -298,6 +341,7 @@ export class GoalTracker {
       budgetLimits,
       ...(this._terminalReason ? { terminalReason: this._terminalReason } : {}),
       ...(this._successCriteria.length > 0 ? { completionCriterion: this._successCriteria.join('\n') } : {}),
+      ...(this._rollover ? { rollover: { ...this._rollover } } : {}),
       savedAt: Date.now(),
     }
   }
@@ -317,6 +361,7 @@ export class GoalTracker {
       ...(record.completionCriterion ? { successCriteria: record.completionCriterion.split('\n') } : {}),
       ...(extra?.successCriteria ? { successCriteria: extra.successCriteria } : {}),
       ...(extra?.maxJudgeRuns !== undefined ? { maxJudgeRuns: extra.maxJudgeRuns } : {}),
+      ...(record.rollover ? { rollover: record.rollover } : {}),
     })
     // Restore mutable state
     tracker._goalId = record.goalId

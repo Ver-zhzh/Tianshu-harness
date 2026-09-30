@@ -1,5 +1,6 @@
 import type { SrClass } from './context.js'
 import type { GoalTracker } from './goal-tracker.js'
+import { GOAL_ROLLOVER_REASON } from './goal-tracker.js'
 import type { GoalJudgeDeps } from './goal-judge.js'
 import { runGoalJudge } from './goal-judge.js'
 import { rejectOnAbort } from './turn-boundary-abort.js'
@@ -126,6 +127,14 @@ export class GoalContinuationController {
         this.deps.flushMeridianTurn()
         return { kind: 'accept' }
       }
+    }
+
+    // 接力：暂停（非失败），terminalReason 作为信号交给 session 层编排交接 + 新会话。
+    if (goalResult.reason === 'context_rollover') {
+      tracker.pause(GOAL_ROLLOVER_REASON, 'runtime')
+      this.persistGoalState(tracker)
+      this.deps.flushMeridianTurn()
+      return { kind: 'finalize' }
     }
 
     // budget/context/wall-clock/cancelled: deactivate
