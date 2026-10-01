@@ -20,7 +20,7 @@ function makeGroup(entries: CollapsedReadSearchGroup['entries']): CollapsedReadS
 }
 
 describe('formatCollapsedGroup', () => {
-  it('renders collapsed state with tree-style border and expand hint', () => {
+  it('renders collapsed actions with an expand route and no nested frame', () => {
     const group = makeGroup([
       { id: '1', toolName: 'read_file', input: { file_path: 'src/a.ts' }, displayName: 'src/a.ts', kind: 'read', completed: true, content: 'line1\nline2' },
       { id: '2', toolName: 'read_file', input: { file_path: 'src/b.ts' }, displayName: 'src/b.ts', kind: 'read', completed: true, content: 'line1' },
@@ -29,24 +29,19 @@ describe('formatCollapsedGroup', () => {
     ])
 
     const lines = formatCollapsedGroup({ group, expanded: false, theme, columns: 80 }).map(stripAnsi)
-    assert.ok(lines[0]!.includes('▶'), 'collapsed indicator')
     assert.ok(lines[0]!.includes('Read 4 files'), 'summary')
-    // fa41ac5c 视觉改版：折叠态去掉左边框竖线，树连接符 ╰─ → └─
-    assert.ok(lines.some(l => l.includes('└─')), 'tree connector')
+    assert.ok(!lines.some(l => /[│├└]/.test(l)), 'no nested frame')
     assert.ok(lines.some(l => l.includes('ctrl+o 展开')), 'expand hint')
   })
 
-  it('renders expanded state with nested tree connectors', () => {
+  it('renders all expanded actions without nested tree connectors', () => {
     const group = makeGroup([
       { id: '1', toolName: 'read_file', input: { file_path: 'src/a.ts' }, displayName: 'src/a.ts', kind: 'read', completed: true, content: 'line1\nline2' },
       { id: '2', toolName: 'read_file', input: { file_path: 'src/b.ts' }, displayName: 'src/b.ts', kind: 'read', completed: true, content: 'line1' },
     ])
 
     const lines = formatCollapsedGroup({ group, expanded: true, theme, columns: 80 }).map(stripAnsi)
-    assert.ok(lines[0]!.includes('▼'), 'expanded indicator')
-    assert.ok(lines.some(l => l.includes('├─')), 'middle connector')
-    // fa41ac5c 视觉改版：末项连接符 ╰─ → └─
-    assert.ok(lines.some(l => l.includes('└─')), 'last connector')
+    assert.ok(!lines.some(l => /[│├└]/.test(l)), 'no nested frame')
     assert.ok(lines.some(l => l.includes('src/a.ts')), 'first entry')
     assert.ok(lines.some(l => l.includes('src/b.ts')), 'last entry')
   })
@@ -56,7 +51,7 @@ describe('formatCollapsedGroup', () => {
       { id: '1', toolName: 'grep', input: { pattern: 'foo' }, displayName: '"foo"', kind: 'search', completed: false },
     ])
     const lines = formatCollapsedGroup({ group, expanded: false, theme, columns: 80 }).map(stripAnsi)
-    assert.ok(lines.some(l => l.includes('pending')), 'pending hint')
+    assert.ok(lines.some(l => l.includes('等待结果')), 'pending hint')
   })
 
   it('truncates CJK content by display width, not byte length', () => {

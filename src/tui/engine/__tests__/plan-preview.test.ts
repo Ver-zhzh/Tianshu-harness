@@ -7,7 +7,7 @@
  *  - plan-picker v → pager；q 返回 picker
  *  - 无 returnTo 的预览 q 退出后指针清空（不劫持后续 pager）
  *  - 预览态 v/m 是 no-op（无 verbose/message 可切）
- *  - 长计划 PgDn 翻页出页码
+ *  - 长计划 PgDn 移动半屏并显示真实行范围
  */
 
 import { test } from 'node:test'
@@ -181,7 +181,7 @@ test('/plan-view（无 returnTo）q 退出回主屏，指针不残留', () => {
   assert.ok(!screenOf(out).includes('计划预览'), '预览标题应消失')
 })
 
-test('预览支持 / 搜索与匹配计数（messages 传入后 n/N 可用）', () => {
+test('预览支持 / 搜索与行级匹配计数，Enter 后 n/N 导航', () => {
   const { app, out, stdin } = makeApp()
   app.openPlanPreview('fix-cache')
   out.clear()
@@ -189,11 +189,16 @@ test('预览支持 / 搜索与匹配计数（messages 传入后 n/N 可用）', 
   stdin.dataHandler!('计划第5')
   stdin.dataHandler!('\r') // 确认搜索
   const frame = screenOf(out)
-  // 匹配计数按「消息」口径（searchTranscript）：整份计划文本被 parse 成
-  // 1 条消息，含查询串即计 1 —— (1/1)。行级高亮由 highlightMatch 负责。
+  // 行级命中：计划第5行与计划第50..59行，共 11 处。
   const first2 = frame.split('\n').slice(0, 2).join(' | ')
   assert.ok(frame.includes('搜索 "计划第5"'), `搜索标题应出现，首两行: ${first2}`)
-  assert.ok(frame.includes('(1/1)'), `匹配计数应为 1/1，首两行: ${first2}`)
+  assert.ok(frame.includes('(1/11)'), `匹配计数应为 1/11，首两行: ${first2}`)
+  stdin.dataHandler!('n')
+  assert.equal(app['overlayController'].nav().pagerSearchCurrent, 2)
+  assert.ok(screenOf(out).includes('计划第50行'), '第二处命中在可见范围内')
+  stdin.dataHandler!('N')
+  assert.equal(app['overlayController'].nav().pagerSearchCurrent, 1)
+  assert.ok(screenOf(out).includes('计划第5行'), '返回首处命中')
 })
 
 test('预览态 v/m 是 no-op（无 verbose/message 可切，不 rerender）', () => {
@@ -206,12 +211,13 @@ test('预览态 v/m 是 no-op（无 verbose/message 可切，不 rerender）', (
   assert.equal(stripAnsi(out.chunks.join('')), '', 'm 不应触发 rerender')
 })
 
-test('长计划翻页：PgDn 后标题页码推进到 (2/3)', () => {
+test('长计划翻页：PgDn 移动半屏并显示 11-30 / 60 行', () => {
   const { app, out, stdin } = makeApp()
   app.openPlanPreview('fix-cache')
   out.clear()
   stdin.dataHandler!('\x1B[6~')
   const page2 = screenOf(out)
-  assert.ok(page2.includes('(2/3)'), `60 行 / pageSize 20 → 3 页，PgDn 后应显示 (2/3)，帧: ${page2}`)
-  assert.ok(page2.includes('计划第20行'), '第 2 页应从第 21 行起')
+  assert.ok(page2.includes('(11-30 / 60 行)'), `pageSize 20 → 半屏 10 行，帧: ${page2}`)
+  assert.ok(page2.includes('计划第10行') && page2.includes('计划第29行'), '半屏后应显示第 11 至 30 行')
+  assert.equal(app['overlayController'].nav().pagerLineOffset, 10)
 })

@@ -75,7 +75,7 @@ describe('formatToolCardLive', async () => {
       tailLines: 3,
     }, theme)
     const header = stripAnsi(lines[0]!)
-    assert.ok(header.includes('Run(sleep 1)') || header.includes('bash'), 'title present')
+    assert.match(header, /Run\s+sleep 1.*运行中/, 'action, object and running status present')
     assert.equal(lines.length, 1 + 3, 'fixed height with spinner')
   })
 

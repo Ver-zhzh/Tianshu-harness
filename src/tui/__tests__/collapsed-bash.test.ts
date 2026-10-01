@@ -171,8 +171,8 @@ describe('formatCollapsedBashGroup', () => {
       { id: '2', command: 'ls', completed: true, content: 'a\nb' },
     ])
     const lines = formatCollapsedBashGroup({ group, theme })
-    assert.ok(lines[0]!.includes('▶'))
     assert.ok(lines[0]!.includes('Ran 2 shell commands'))
+    assert.match(lines[0]!, / · \d+(?:\.\d+)?(?:ms|s)/, 'summary includes elapsed time')
   })
 
   it('lists commands when <= 3 entries', () => {
@@ -204,7 +204,7 @@ describe('formatCollapsedBashGroup', () => {
       { id: '1', command: 'false', completed: true, isError: true },
     ])
     const lines = formatCollapsedBashGroup({ group, theme })
-    assert.ok(lines.some(l => l.includes('✗')))
+    assert.ok(lines.some(l => /[x✗]/.test(l) && l.includes('失败') && l.includes('false')), 'failed command retains its object and terminal status')
   })
 })
 

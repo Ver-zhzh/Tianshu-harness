@@ -40,16 +40,16 @@ describe('formatSpinnerStatus', () => {
     assert.ok(!plain.includes('esc'), 'no interrupt hint appended')
   })
 
-  it('verb slot is shared across phases (all non-idle use the pool)', () => {
+  it('thinking uses the verb pool while streaming and waiting describe their activity', () => {
     resetSpinnerConfig()
     const thinking = stripAnsi(formatSpinnerStatus({ tick: 5, phase: 'thinking', elapsedMs: 0 }, theme)!)
     const streaming = stripAnsi(formatSpinnerStatus({ tick: 5, phase: 'streaming', elapsedMs: 0 }, theme)!)
     const analyzing = stripAnsi(formatSpinnerStatus({ tick: 5, phase: 'analyzing', elapsedMs: 0 }, theme)!)
     const waiting = stripAnsi(formatSpinnerStatus({ tick: 5, phase: 'waiting', elapsedMs: 0 }, theme)!)
     assert.ok(thinking.includes('thinking'))
-    assert.ok(streaming.includes('thinking'))
+    assert.ok(streaming.includes('正在生成'))
     assert.ok(analyzing.includes('thinking'))
-    assert.ok(waiting.includes('thinking'))
+    assert.ok(waiting.includes('等待响应'))
   })
 
   it('verb rotates by elapsed time slice (8s per verb), stable within a slice', () => {
@@ -123,7 +123,7 @@ describe('formatTurnWorkSummary', () => {
     }, theme))
     const useAscii = chalk.level < 3
     const expectedGlyph = useAscii ? '*' : '◆'
-    assert.ok(line.includes(`${expectedGlyph} 1m 6s`))
+    assert.ok(line.includes(`${expectedGlyph} 完成 · 1m 6s`))
     assert.ok(line.includes('12.3k→890'))
   })
 })

@@ -11,6 +11,7 @@ import type { ReadStream, WriteStream } from 'node:tty'
 import { TuiApp } from '../app.js'
 
 export class MockOut {
+  isTTY = true
   columns: number
   rows: number
   chunks: string[] = []

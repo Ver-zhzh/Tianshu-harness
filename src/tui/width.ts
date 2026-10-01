@@ -40,22 +40,7 @@ function isBoxOrBlock(cp: number): boolean {
   return cp >= 0x2500 && cp <= 0x259f
 }
 
-/** 一个 code point 在 wide/full 模式下相对 string-width 的额外宽度（0 或 1）。 */
-function ambiguousExtraForCp(cp: number): number {
-  if (isBoxOrBlock(cp)) return ambiguousWidthMode() === 'full' ? 1 : 0
-  return eastAsianWidthType(cp) === 'ambiguous' ? 1 : 0
-}
-
-/** 去掉 ANSI 后逐 code point 累计的 ambiguous 额外宽度。 */
-function ambiguousExtra(plain: string): number {
-  let extra = 0
-  for (const ch of plain) {
-    const cp = ch.codePointAt(0)
-    if (cp === undefined) continue
-    extra += ambiguousExtraForCp(cp)
-  }
-  return extra
-}
+const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
 
 export type AmbiguousWidthMode = 'narrow' | 'wide' | 'full'
 
@@ -97,13 +82,23 @@ export function displayWidth(text: string, opts: DisplayWidthOptions = {}): numb
   const plain = text.replace(ANSI_RE, '')
   const base = stringWidth(plain)
   if (!opts.ambiguousAsWide) return base
-  return base + ambiguousExtra(plain)
+  const wide = stringWidth(plain, { ambiguousIsNarrow: false })
+  // string-width handles combining marks and emoji clusters; xterm keeps box/block narrow.
+  let boxCount = 0, boxExtra = 0
+  for (const ch of plain) {
+    const cp = ch.codePointAt(0)!
+    if (isBoxOrBlock(cp)) {
+      boxCount++
+      if (eastAsianWidthType(cp) === 'ambiguous') boxExtra++
+    }
+  }
+  return ambiguousWidthMode() === 'full' ? wide + boxCount - boxExtra : wide - boxExtra
 }
 
 /**
  * 按显示宽度硬折行（纯文本 → 若干段，每段 ≤ max 显示列）。
  *
- * 与 truncateToDisplayWidth 同源的逐 code point 度量（wide 上界可选），但不丢
+ * 与 truncateToDisplayWidth 同源的逐 grapheme 度量（wide 上界可选），但不丢
  * 内容：放不下的字符整体挪到下一段。输入必须是 ANSI-free 纯文本（thinking 正文、
  * 流式 tail 均为纯文本，着色在分段之后施加）。
  *
@@ -115,14 +110,11 @@ export function displayWidth(text: string, opts: DisplayWidthOptions = {}): numb
 export function hardWrapToDisplayWidth(text: string, max: number, opts: DisplayWidthOptions = {}): string[] {
   if (max <= 0) return [text]
   if (displayWidth(text, opts) <= max) return [text]
-  const wide = !!opts.ambiguousAsWide
   const segments: string[] = []
   let current = ''
   let w = 0
-  for (const ch of text) {
-    const cp = ch.codePointAt(0)!
-    let cw = stringWidth(ch)
-    if (wide) cw += ambiguousExtraForCp(cp)
+  for (const { segment: ch } of graphemes.segment(text)) {
+    const cw = displayWidth(ch, opts)
     if (cw > 0 && w + cw > max && current !== '') {
       segments.push(current)
       current = ''
@@ -142,9 +134,16 @@ export function hardWrapToDisplayWidth(text: string, max: number, opts: DisplayW
 export function truncateToDisplayWidth(text: string, max: number, opts: DisplayWidthOptions = {}): string {
   if (max <= 0) return ''
   if (displayWidth(text, opts) <= max) return text
-  const wide = !!opts.ambiguousAsWide
+  let visibleEnd = 0
+  let width = 0
+  for (const { segment } of graphemes.segment(text.replace(ANSI_RE, ''))) {
+    const next = displayWidth(segment, opts)
+    if (width + next > max) break
+    width += next
+    visibleEnd += segment.length
+  }
   let out = ''
-  let w = 0
+  let visible = 0
   let i = 0
   let sawAnsi = false
   while (i < text.length) {
@@ -158,11 +157,9 @@ export function truncateToDisplayWidth(text: string, max: number, opts: DisplayW
     }
     const cp = text.codePointAt(i)!
     const ch = String.fromCodePoint(cp)
-    let cw = stringWidth(ch)
-    if (wide) cw += ambiguousExtraForCp(cp)
-    if (w + cw > max) break
+    if (visible + ch.length > visibleEnd) break
     out += ch
-    w += cw
+    visible += ch.length
     i += ch.length
   }
   if (!sawAnsi) return out

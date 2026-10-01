@@ -3,7 +3,7 @@
  *
  * 契约（CC 对标 f9001b16：ctx% 并入 ◧token 常驻，cache ⚡ 仅 <50% 浮出）：
  *  1. 设置 metricsProvider 后，GlanceBar 用真实 ◧Xk/Yk·$cost·⚡% 渲染。
- *  2. 无 provider 时不猜价格：cost 恒为 0，GlanceBar 不渲染费用段
+ *  2. 无 provider 时不猜价格：GlanceBar 明示暂无计价，不渲染费用金额
  *     （537ca8b0 起真实费用只来自 metricsProvider 的 findModelPricing +
  *     computeUsageCost；旧回退用硬编码定价且 += 累计快照，费用随回合膨胀）。
  */
@@ -43,6 +43,7 @@ function makeApp() {
   // 默认 compact 档保留 ⚡/effort，收起 cost/token 绝对值/goal/todo；本套件验证
   // metrics 管线（provider → 渲染）需要全量展示，固定 full 档。
   app.glanceDensity = 'full'
+  app.setSidePanelOpen(true)
   app.start()
   return { app, out }
 }
@@ -67,9 +68,9 @@ test('metricsProvider 提供真实 ◧Xk/Yk·$cost·⚡%（cache 命中率常驻
   const plain = stripAnsi(out.chunks.join(''))
   // estimatedTokens (50k) is the calibrated context occupancy; lastRealPromptTokens
   // is only used internally to compute the calibration ratio.
-  assert.ok(plain.includes('◧50k/200k'), `Xk/Yk: ${plain}`)
+  assert.ok(plain.includes('50k / 200k'), `Xk/Yk: ${plain}`)
   assert.ok(plain.includes('1.23'), `cost: ${plain}`)
-  assert.ok(plain.includes('⚡30%'), `cache 常驻展示: ${plain}`)
+  assert.ok(plain.includes('cache 30%'), `cache 常驻展示: ${plain}`)
 })
 
 test('cache 健康态（≥50%）常驻展示为 dim 色，不再门控隐藏', () => {
@@ -86,15 +87,15 @@ test('cache 健康态（≥50%）常驻展示为 dim 色，不再门控隐藏', 
   }))
   app.setModelInfo('test', 200_000)
   const plain = stripAnsi(out.chunks.join(''))
-  assert.ok(plain.includes('⚡60%'), `健康态也应常驻展示命中率: ${plain}`)
-  assert.ok(plain.includes('◧50k/200k'), `token 显示校准后的上下文占用: ${plain}`)
+  assert.ok(plain.includes('cache 60%'), `健康态也应常驻展示命中率: ${plain}`)
+  assert.ok(plain.includes('50k / 200k'), `token 显示校准后的上下文占用: ${plain}`)
 })
 
-test('无 provider 回退：不猜价格 — 多次 onTurnComplete 后也不渲染费用段', async () => {
+test('无 provider 回退：多次 onTurnComplete 后明示暂无计价且不渲染费用金额', async () => {
   const { app, out } = makeApp()
   // agent 每回合传入的是「累计」usage 快照。旧回退用硬编码定价估算，
   // 会把 1M input 渲染成费用并随回合膨胀；现契约是无 provider 时 cost 恒 0，
-  // GlanceBar 的费用段（¥X.XX，仅 cost > 0 渲染）完全不出现。
+  // GlanceBar 明示暂无计价，不能把未知成本显示成估算 ¥0.00。
   const cumulative = {
     input_tokens: 1_000_000,
     output_tokens: 0,
@@ -106,6 +107,7 @@ test('无 provider 回退：不猜价格 — 多次 onTurnComplete 后也不渲�
   app.callbacks.onTurnComplete(cumulative, 3, false)
   await tick(30)
   const plain = stripAnsi(out.chunks.join(''))
+  assert.ok(plain.includes('暂无计价'), `无 provider 应明示暂无计价: ${plain}`)
   assert.ok(!/¥\d/.test(plain), `无 provider 不应渲染任何费用: ${plain}`)
 })
 
@@ -123,9 +125,10 @@ test('GlanceBar 显示可见对话 token（conversationTokens），颜色仍按�
   }))
   app.setModelInfo('test', 1_000_000)
   const plain = stripAnsi(out.chunks.join(''))
-  assert.ok(plain.includes('◧47k/1.0M'), `应显示可见对话 token: ${plain}`)
+  assert.ok(plain.includes('95k / 1.0M'), `optional context panel shows the actual API-facing occupancy: ${plain}`)
+  assert.equal(app.getMetrics()?.conversationTokens, 47_000, 'visible conversation token count remains available to consumers')
   // 95k/1M = 9.5% → muted color, not warning/error; ratio is based on estimatedTokens.
-  assert.ok(!plain.includes('◧95k/1.0M'), `不应显示 API 总 prompt: ${plain}`)
+  assert.ok(!plain.includes('◧47k/1.0M'), 'removed default glance bar is not duplicated')
 })
 
 test('pricingPhase 接线：provider 给值时 GlanceBar 渲染计价段，缺省不渲染', () => {
@@ -144,7 +147,8 @@ test('pricingPhase 接线：provider 给值时 GlanceBar 渲染计价段，缺�
   }))
   app.setModelInfo('test', 200_000)
   const plain = stripAnsi(out.chunks.join(''))
-  assert.ok(plain.includes('◷闲时半价'), `offpeak 应渲染计价段: ${plain}`)
+  assert.equal(app.getMetrics()?.pricingPhase, 'offpeak', 'pricing phase remains available from the actual provider')
+  assert.ok(!plain.includes('◷闲时半价'), 'pricing advertisement no longer occupies default workspace chrome')
 
   // 非 deepseek：metrics 无 pricingPhase → 计价段消失
   out.chunks.length = 0

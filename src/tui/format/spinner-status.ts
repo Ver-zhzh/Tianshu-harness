@@ -131,7 +131,7 @@ export function formatSpinnerStatus(input: SpinnerStatusInput, theme: RivetTheme
   const elapsedText = formatElapsedHuman(input.elapsedMs)
   const label = input.activityLabel
     ? clipActivityLabel(input.activityLabel, input.columns, frame, elapsedText)
-    : `${verbFor(input.elapsedMs)}…`
+    : input.phase === 'streaming' ? '正在生成…' : input.phase === 'waiting' ? '等待响应…' : `${verbFor(input.elapsedMs)}…`
   const text = `${frame} ${label} ${elapsedText}`
   const phaseColor: Record<SpinnerPhase, string> = {
     idle: theme.muted,
@@ -209,13 +209,16 @@ export function formatJobAwaitWait(call: JobAwaitCall, jobRow: JobRow | undefine
 
 export function formatTurnWorkSummary(input: {
   elapsedMs: number
-  inputTokens: number
-  outputTokens: number
+  inputTokens?: number
+  outputTokens?: number
 }, theme: RivetTheme): string {
   const useAscii = useAsciiGlyphs()
   const glyph = useAscii ? '*' : '◆' // ASCII 降级原为 'Y'——与 ◆ 无语义关联，'*' 是通用近似
   const elapsed = formatElapsedHuman(input.elapsedMs)
-  const tokens = `${formatTokenCount(input.inputTokens)}→${formatTokenCount(input.outputTokens)}`
+  const tokens = input.inputTokens !== undefined && input.outputTokens !== undefined
+    ? `${formatTokenCount(input.inputTokens)}→${formatTokenCount(input.outputTokens)}`
+    : input.inputTokens !== undefined ? `${formatTokenCount(input.inputTokens)} in`
+      : input.outputTokens !== undefined ? `${formatTokenCount(input.outputTokens)} out` : ''
   // 颜色层级：glyph 是完成指示（accent），耗时/token 是元信息（muted）。
-  return `${color(glyph, theme.primary)} ${color(`${elapsed}`, theme.muted)} ${color(`· ${tokens}`, theme.muted)}`
+  return `${color(glyph, theme.primary)} ${color(`完成 · ${elapsed}`, theme.muted)}${tokens ? ' ' + color(`· ${tokens}`, theme.muted) : ''}`
 }

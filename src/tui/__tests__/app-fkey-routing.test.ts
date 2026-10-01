@@ -11,6 +11,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import type { ReadStream, WriteStream } from 'node:tty'
 import { TuiApp } from '../engine/app.js'
+import { DEFAULT_FRONTEND_PREFERENCES } from '../frontend-preferences.js'
 
 class MockOut {
   columns = 120; rows = 24; chunks: string[] = []
@@ -39,6 +40,7 @@ function makeApp() {
     modelName: 'test',
     contextWindow: 200_000,
   })
+  app.setFrontendPreferences({ ...DEFAULT_FRONTEND_PREFERENCES, renderer: 'classic', keymap: 'legacy', bindings: {} })
   return { app, stdin }
 }
 

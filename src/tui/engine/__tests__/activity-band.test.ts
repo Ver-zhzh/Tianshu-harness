@@ -11,10 +11,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { makeApp, stripAnsi } from './_harness.js'
-import { displayWidth } from '../../width.js'
+import { displayWidth, ambiguousWideEnabled } from '../../width.js'
 
 const flush = (): Promise<void> => new Promise(resolve => setImmediate(resolve))
-const WIDE = { ambiguousAsWide: true }
+const WIDE = { ambiguousAsWide: ambiguousWideEnabled() }
 
 interface Priv {
   state: { todos: unknown[] }
@@ -30,6 +30,7 @@ test('todo 只渲染一次——band 不重复画常驻任务面板的内容', a
     { id: '2', content: '写回归测试', status: 'pending' },
   ]
 
+  ;(app as any).state.todoExpanded = true
   out.clear()
   priv.renderLive()
   await flush()

@@ -16,7 +16,7 @@ import { color } from './engine/ansi.js'
 import { formatTokenProgressBar, type GoalStateSnapshot } from './format/glance-bar.js'
 import { formatTaskList, shouldShowTaskPanel } from './format/task-list.js'
 import { formatWorkerRow } from './format/worker-fleet.js'
-import { displayWidth, truncateToDisplayWidth } from './width.js'
+import { ambiguousWideEnabled, displayWidth, truncateToDisplayWidth } from './width.js'
 
 export interface SidePanelInput {
   /** 面板总宽度（含边框），通常 24-32 列 */
@@ -36,6 +36,7 @@ export interface SidePanelInput {
   maxTokens?: number
   cacheHitRate?: number
   cost?: number
+  costSource?: 'api' | 'estimate' | 'unknown'
   /** 当前已批准计划指针（XML 字符串），可选 */
   activePlan?: string
   /** team 编队运行态模型（team_orchestrate 进行中非空，已叠加 fleet 实时状态）。 */
@@ -59,12 +60,12 @@ const MAX_WORKERS = 5
 const MAX_TASK_ROWS = 6
 
 /** 展开右侧面板所需的最小终端宽度。 */
-export const SIDE_PANEL_MIN_COLUMNS = 100
+export const SIDE_PANEL_MIN_COLUMNS = 120
 
-/** 根据终端宽度选择侧栏宽度（100-119 用 24 列，≥120 用 32 列，<100 不展开）。 */
+/** 根据终端宽度选择侧栏宽度（120-159 用 28 列，≥160 用 32 列）。 */
 export function resolveSidePanelWidth(columns: number): number {
-  if (columns >= 120) return 32
-  if (columns >= SIDE_PANEL_MIN_COLUMNS) return 24
+  if (columns >= 160) return 32
+  if (columns >= SIDE_PANEL_MIN_COLUMNS) return 28
   return 0
 }
 
@@ -76,15 +77,16 @@ export function resolveSidePanelWidth(columns: number): number {
 export function renderSidePanel(input: SidePanelInput, theme: RivetTheme): string[] {
   const totalW = input.columns
   if (totalW < 16) return [] // 太窄不渲染
-  const contentW = totalW - 4 // 减去边框占用的 4 列：│ _content_ │
+  const AMBIGUOUS_WIDE = { ambiguousAsWide: ambiguousWideEnabled() }
+  const contentW = totalW - 2 * displayWidth('│ ', AMBIGUOUS_WIDE)
 
   const lines: string[] = []
   const h = '─'
-  const topBorder = color(`╭${h.repeat(totalW - 2)}╮`, theme.muted)
-  const botBorder = color(`╰${h.repeat(totalW - 2)}╯`, theme.muted)
+  const horizontal = h.repeat(Math.max(0, Math.floor((totalW - displayWidth('╭╮', AMBIGUOUS_WIDE)) / displayWidth(h, AMBIGUOUS_WIDE))))
+  const topBorder = color(`╭${horizontal}╮`, theme.muted)
+  const botBorder = color(`╰${horizontal}╯`, theme.muted)
   const leftEdge = color('│', theme.muted)
 
-  const AMBIGUOUS_WIDE = { ambiguousAsWide: true }
   const ELLIPSIS_WIDTH = displayWidth('…', AMBIGUOUS_WIDE)
 
   const pad = (text: string, target: number): string => {
@@ -102,7 +104,7 @@ export function renderSidePanel(input: SidePanelInput, theme: RivetTheme): strin
 
   const dim = (s: string) => color(s, theme.dim)
   const muted = (s: string) => color(s, theme.muted)
-  const sectionDivider = () => line(muted('─'.repeat(contentW)))
+  const sectionDivider = () => line(muted('─'.repeat(Math.floor(contentW / displayWidth('─', AMBIGUOUS_WIDE)))))
 
   // 归一化 currentTool
   const toolName = input.currentTool?.name ?? input.currentToolName
@@ -234,9 +236,15 @@ export function renderSidePanel(input: SidePanelInput, theme: RivetTheme): strin
     lines.push(line(color('◧ 上下文', theme.secondary, { bold: true })))
     const ratio = Math.min(1, input.estimatedTokens / input.maxTokens)
     lines.push(line(formatTokenProgressBar(ratio, theme)))
-    const costStr = input.cost !== undefined && input.cost > 0
-      ? `  ${input.cost.toFixed(2)}` : ''
-    lines.push(line(dim(`${formatTokensCompact(input.estimatedTokens)} / ${formatTokensCompact(input.maxTokens)}${costStr}`)))
+    lines.push(line(dim(`${formatTokensCompact(input.estimatedTokens)} / ${formatTokensCompact(input.maxTokens)}`)))
+  }
+
+  if (input.cost !== undefined || input.costSource) {
+    const known = input.costSource === 'api' || input.costSource === 'estimate' || (input.costSource === undefined && (input.cost ?? 0) > 0)
+    const label = known && input.cost !== undefined
+      ? `${input.costSource === 'api' ? 'API' : '估算'} ¥${input.cost.toFixed(2)}`
+      : '暂无计价'
+    lines.push(line(dim(label)))
   }
 
   // 缓存命中率指示
@@ -290,7 +298,7 @@ function safeFromCodePoint(cp: number): string {
 
 function truncateStr(s: string, max: number): string {
   if (max <= 0) return ''
-  const AMBIGUOUS_WIDE = { ambiguousAsWide: true }
+  const AMBIGUOUS_WIDE = { ambiguousAsWide: ambiguousWideEnabled() }
   const ELLIPSIS_WIDTH = displayWidth('…', AMBIGUOUS_WIDE)
   const dw = displayWidth(s, AMBIGUOUS_WIDE)
   if (dw <= max) return s

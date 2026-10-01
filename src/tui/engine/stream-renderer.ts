@@ -18,6 +18,7 @@
 
 import { formatMarkdown } from '../format/markdown.js'
 import { capLiveTailMarkdownSafe } from '../live-tail-cap.js'
+import { wrapReadingText } from '../format/reading-layout.js'
 import { hardWrapToDisplayWidth } from '../width.js'
 import type { RivetTheme } from '../theme.js'
 import type { TuiPerfMonitor } from './perf-monitor.js'
@@ -150,6 +151,24 @@ export class StreamRenderer {
     // 按 wide 上界折到 columns-1 内，任何终端每行恰占 1 显示行。
     const segWidth = Math.max(1, columns - 1)
     return capped.split('\n').flatMap(l => hardWrapToDisplayWidth(l, segWidth, { ambiguousAsWide: true }))
+  }
+
+  /** Format only the bounded live window; the raw tail remains available for boundary diagnostics. */
+  getLiveTailView(maxRows: number, extraTail = ''): string[] {
+    let tail = this.getLiveTailLines(maxRows, extraTail).join('\n')
+    if (!tail) return []
+    const source = (this.pending + extraTail).split('\n')
+    let fence = false, separator = -1
+    for (let i = 0; i < source.length; i++) {
+      if (source[i]!.startsWith('```')) fence = !fence
+      else if (!fence && i > 0 && /^\s*\|?\s*:?-{3,}:?\s*\|[\s|:-]*$/.test(source[i]!)) separator = i
+    }
+    if (separator >= 0 && source.slice(separator + 1).every(line => !line.trim() || line.trim().startsWith('|'))) {
+      tail = [source[separator - 1]!, source[separator]!, ...source.slice(Math.max(separator + 1, source.length - maxRows))].join('\n')
+    }
+    const columns = this.options.getColumns()
+    return formatMarkdown({ text: tail, columns }, this.options.getTheme())
+      .flatMap(line => wrapReadingText(line, Math.max(1, columns - 1))).slice(-maxRows)
   }
 
   private commitText(text: string): boolean {

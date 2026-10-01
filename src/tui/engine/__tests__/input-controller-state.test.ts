@@ -14,6 +14,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import type { ReadStream, WriteStream } from 'node:tty'
 import { TuiApp } from '../app.js'
+import { DEFAULT_FRONTEND_PREFERENCES } from '../../frontend-preferences.js'
 import { MockOut, MockIn } from './_harness.js'
 
 function makeApp() {
@@ -24,6 +25,7 @@ function makeApp() {
     stdin: stdin as unknown as ReadStream,
     cols: 120, rows: 24, modelName: 'test', contextWindow: 200_000,
   })
+  app.setFrontendPreferences({ ...DEFAULT_FRONTEND_PREFERENCES, renderer: 'classic', keymap: 'legacy', bindings: {} })
   return { app, out, stdin }
 }
 

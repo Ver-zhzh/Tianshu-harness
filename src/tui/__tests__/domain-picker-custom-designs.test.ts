@@ -11,7 +11,7 @@ function stripAnsi(s: string): string {
 }
 
 describe('renderTabBar UI Integration', () => {
-  it('renders standard centered Tab Bar in all three pickers', () => {
+  it('renders standard Chinese Tab Bar in all three pickers', () => {
     const dData: DomainPickerData = {
       entries: [
         { key: 'auto', name: 'Auto', motto: '自动', meta: 'meta', essence: 'essence', current: true },
@@ -31,10 +31,10 @@ describe('renderTabBar UI Integration', () => {
     const mLines = renderModelPicker(mData, 80, 15, theme)
     const tLines = renderThemePicker(tData, 80, 15, theme)
 
-    // All pickers should now have the centered Tab Bar indicating Domain, Model, and Theme tabs
-    assert.ok(dLines.some(l => stripAnsi(l).includes('Domain') && stripAnsi(l).includes('Model') && stripAnsi(l).includes('Theme')))
-    assert.ok(mLines.some(l => stripAnsi(l).includes('Domain') && stripAnsi(l).includes('Model') && stripAnsi(l).includes('Theme')))
-    assert.ok(tLines.some(l => stripAnsi(l).includes('Domain') && stripAnsi(l).includes('Model') && stripAnsi(l).includes('Theme')))
+    // 三个选择器共享左对齐中文页签。
+    assert.ok(dLines.some(l => stripAnsi(l).includes('星域') && stripAnsi(l).includes('模型') && stripAnsi(l).includes('主题')))
+    assert.ok(mLines.some(l => stripAnsi(l).includes('星域') && stripAnsi(l).includes('模型') && stripAnsi(l).includes('主题')))
+    assert.ok(tLines.some(l => stripAnsi(l).includes('星域') && stripAnsi(l).includes('模型') && stripAnsi(l).includes('主题')))
   })
 })
 

@@ -53,6 +53,19 @@ export interface InputLineDisplayOptions {
 
 export type VimMode = 'normal' | 'insert' | 'visual'
 
+export interface DraftSnapshot {
+  value: string
+  cursor: number
+  images: string[]
+  pastes: Array<[number, string]>
+  pasteSeq: number
+  vimEnabled: boolean
+  vimMode: VimMode
+  selectionAnchor: number | null
+  visualLineWise: boolean
+  newlineMode: boolean
+}
+
 /** Grapheme 分段器（Node 22+）。用于按用户感知字符（CJK/emoji/ZWJ 簇）步进光标。
  * WSL/Alpine 中若 Node.js 运行时缺少 ICU 数据，Intl.Segmenter 会抛出。
  * 降级到按 code-point 分割（仍正确处理多字节 UTF-8，但不支持 ZWJ emoji 簇）。 */
@@ -76,6 +89,8 @@ interface UndoUnit {
   kind: UndoKind
   /** 图片附件快照（引用拷贝，data URL 字符串不可变）——Ctrl+C 清空/退格删图后可整体恢复。 */
   images: string[]
+  pastes: Array<[number, string]>
+  pasteSeq: number
 }
 
 /** CJK 统一表意/扩展A/兼容/假名/谚文——与 \w 一起视为 word 字符。
@@ -104,7 +119,7 @@ const PASTE_FOLD_MIN_CHARS = 1000
 const PASTE_MARKER_RE = /\[paste #(\d+) \+\d+ lines?\]/g
 
 import { ambiguousWideEnabled, displayWidth } from '../width.js'
-import { ANSI } from './ansi.js'
+import { inputCaretAt, inputDisplayWidth, wrapInputLines, viewportWithCaret } from './input-layout.js'
 
 /**
  * Grapheme 边界缓存：Intl.Segmenter 对整串分段是 O(n)，而 prevGrapheme/
@@ -135,109 +150,6 @@ function graphemeBoundaries(value: string): number[] {
     }
   }
   return bounds
-}
-
-interface VisualLine {
-  text: string
-  cursor: boolean
-}
-
-function inputDisplayWidth(text: string, ambiguousAsWide: boolean): number {
-  return displayWidth(text, { ambiguousAsWide })
-}
-
-function pushWrappedSegment(
-  out: VisualLine[],
-  segment: string,
-  prefix: string,
-  maxContentWidth: number,
-  cursorOffset: number | null,
-  ambiguousAsWide: boolean,
-  /** 输出参数：记录 █ 插入点左侧的 cell 数（不含前缀）。仅在插入时写入。 */
-  caretCol?: { value: number },
-  /** segment 在 buffer 中的绝对起始偏移（选区高亮定位用）。 */
-  segAbsStart?: number,
-  /** 键盘选区（buffer 绝对偏移，start<end）：范围内字符反色渲染。 */
-  sel?: { start: number; end: number } | null,
-): void {
-  const chars = Array.from(segment)
-  let current = ''
-  let currentWidth = 0
-  let currentHasCursor = false
-  let offset = 0
-  let inSel = false
-
-  const flush = (): void => {
-    // 选区跨越折行边界：本行末 RESET 封口，下一视觉行重新 REVERSE 起头。
-    out.push({ text: `${prefix}${current}${inSel ? ANSI.RESET : ''}`, cursor: currentHasCursor })
-    current = inSel ? ANSI.REVERSE : ''
-    currentWidth = 0
-    currentHasCursor = false
-  }
-
-  for (const ch of chars) {
-    const absOff = (segAbsStart ?? 0) + offset
-    if (sel && inSel && absOff === sel.end) { current += ANSI.RESET; inSel = false }
-    if (sel && !inSel && absOff === sel.start) { current += ANSI.REVERSE; inSel = true }
-    if (cursorOffset !== null && offset === cursorOffset) {
-      const markerWidth = inputDisplayWidth('█', ambiguousAsWide)
-      if (currentWidth > 0 && currentWidth + markerWidth > maxContentWidth) flush()
-      if (caretCol) caretCol.value = currentWidth
-      current += '█'
-      currentWidth += markerWidth
-      currentHasCursor = true
-    }
-
-    const chWidth = Math.max(1, inputDisplayWidth(ch, ambiguousAsWide))
-    if (currentWidth > 0 && currentWidth + chWidth > maxContentWidth) flush()
-    current += ch
-    currentWidth += chWidth
-    offset += ch.length
-  }
-
-  if (cursorOffset !== null && cursorOffset === segment.length) {
-    const absOff = (segAbsStart ?? 0) + offset
-    if (sel && inSel && absOff === sel.end) { current += ANSI.RESET; inSel = false }
-    if (sel && !inSel && absOff === sel.start) { current += ANSI.REVERSE; inSel = true }
-    const markerWidth = inputDisplayWidth('█', ambiguousAsWide)
-    if (currentWidth > 0 && currentWidth + markerWidth > maxContentWidth) flush()
-    if (caretCol) caretCol.value = currentWidth
-    current += '█'
-    currentWidth += markerWidth
-    currentHasCursor = true
-  }
-
-  if (currentWidth > 0 || currentHasCursor || segment.length === 0) flush()
-}
-
-function wrapInputLines(value: string, cursor: number, maxWidth: number, sel?: { start: number; end: number } | null): { lines: string[]; cursorLine: number; cursorCol: number } {
-  const ambiguousAsWide = ambiguousWideEnabled()
-  const visual: VisualLine[] = []
-  const logicalLines = value.split('\n')
-  const prefixWidth = inputDisplayWidth('❯ ', ambiguousAsWide)
-  const maxContentWidth = Math.max(1, maxWidth - prefixWidth)
-  let cursorLine = 0
-  let cursorCol = prefixWidth
-  let absoluteOffset = 0
-
-  for (let lineIndex = 0; lineIndex < logicalLines.length; lineIndex++) {
-    const logicalLine = logicalLines[lineIndex]!
-    const lineStart = absoluteOffset
-    const lineEnd = lineStart + logicalLine.length
-    const cursorInLine = cursor >= lineStart && cursor <= lineEnd
-    const prefix = cursorInLine ? '❯ ' : '  '
-    const beforeCount = visual.length
-    const caretCol: { value: number } = { value: 0 }
-    pushWrappedSegment(visual, logicalLine, prefix, maxContentWidth, cursorInLine ? cursor - lineStart : null, ambiguousAsWide, caretCol, lineStart, sel)
-    if (cursorInLine) {
-      const found = visual.findIndex((line, idx) => idx >= beforeCount && line.cursor)
-      cursorLine = found >= 0 ? found : beforeCount
-      cursorCol = prefixWidth + caretCol.value
-    }
-    absoluteOffset = lineEnd + 1
-  }
-
-  return { lines: visual.map(line => line.text), cursorLine, cursorCol }
 }
 
 /** 在升序边界数组中找严格小于 cursor 的最大下标（光标左侧最近边界）。二分 O(log n)。 */
@@ -273,40 +185,6 @@ function atomicPasteMarkerBounds(value: string, bounds: number[]): number[] {
 }
 
 /** 视窗裁剪：返回可见行 + 光标行在【返回数组内】的下标（硬件光标归位需要）。 */
-function viewportWithCaret(lines: string[], cursorLine: number, maxLines?: number): { lines: string[]; caretLine: number } {
-  if (maxLines === undefined || lines.length <= maxLines) {
-    return { lines, caretLine: Math.min(Math.max(cursorLine, 0), lines.length - 1) }
-  }
-  const max = Math.max(1, Math.floor(maxLines))
-  const cursor = Math.min(Math.max(cursorLine, 0), lines.length - 1)
-  if (max === 1) return { lines: [lines[cursor]!], caretLine: 0 }
-  if (max === 2) {
-    return cursor < lines.length - 1
-      ? { lines: [lines[cursor]!, `… ${lines.length - cursor - 1} lines below`], caretLine: 0 }
-      : { lines: [`… ${cursor} lines above`, lines[cursor]!], caretLine: 1 }
-  }
-
-  const hasAbove = cursor > 0
-  const hasBelow = cursor < lines.length - 1
-  const contentSlots = Math.max(1, max - (hasAbove ? 1 : 0) - (hasBelow ? 1 : 0))
-  const minStart = hasAbove ? 1 : 0
-  const maxStart = hasBelow
-    ? Math.max(minStart, lines.length - 1 - contentSlots)
-    : Math.max(minStart, lines.length - contentSlots)
-  const centeredStart = cursor - Math.floor(contentSlots / 2)
-  const start = Math.min(Math.max(centeredStart, minStart), maxStart)
-  const visible = lines.slice(start, start + contentSlots)
-
-  return {
-    lines: [
-      ...(hasAbove ? [`… ${start} lines above`] : []),
-      ...visible,
-      ...(hasBelow ? [`… ${lines.length - (start + contentSlots)} lines below`] : []),
-    ],
-    caretLine: (hasAbove ? 1 : 0) + (cursor - start),
-  }
-}
-
 export class InputLine {
   private _value: string
   private _cursor: number
@@ -381,6 +259,42 @@ export class InputLine {
   get vimEnabled(): boolean { return this._vimEnabled }
   get placeholder(): string { return this._placeholder }
   get images(): string[] { return [...this._images] }
+
+  snapshot(): DraftSnapshot {
+    return { value: this._value, cursor: this._cursor, images: [...this._images], pastes: [...this._pastes], pasteSeq: this._pasteSeq,
+      vimEnabled: this._vimEnabled, vimMode: this._vimMode, selectionAnchor: this._selAnchor, visualLineWise: this._visualLineWise, newlineMode: this._newlineMode }
+  }
+
+  restore(snapshot: DraftSnapshot): void {
+    this.recordUndo('replace')
+    this._value = snapshot.value
+    this._cursor = snapshot.cursor
+    this._images = [...snapshot.images]
+    this._pastes = new Map(snapshot.pastes)
+    this._pasteSeq = snapshot.pasteSeq
+    this._vimEnabled = snapshot.vimEnabled
+    this._vimMode = snapshot.vimMode
+    this._selAnchor = snapshot.selectionAnchor
+    this._visualLineWise = snapshot.visualLineWise
+    this._newlineMode = snapshot.newlineMode
+    this.onChangeCallback?.(this._value, this._cursor)
+    this.onImagesChangeCallback?.([...this._images])
+  }
+
+  /** Mouse hit positions are display cells, never UTF-16 offsets. */
+  placeCaret(line: number, column: number, width: number, displayedCursor?: number): void {
+    this._cursor = inputCaretAt(this._value, line, column, width, displayedCursor)
+    this._selAnchor = null
+    this.onChangeCallback?.(this._value, this._cursor)
+  }
+
+  placeVisibleCaret(line: number, column: number, width: number, maxLines: number): void {
+    const wrapped = wrapInputLines(this._value, this._cursor, width)
+    const view = viewportWithCaret(wrapped.lines, wrapped.cursorLine, maxLines)
+    if (view.lines[line]?.startsWith('… ')) return
+    const start = wrapped.cursorLine - view.caretLine
+    this.placeCaret(Math.max(0, start + line), column, Math.max(1, width - displayWidth('❯ ', { ambiguousAsWide: ambiguousWideEnabled() })), this._cursor)
+  }
 
   /** 启用/停用 vim 键位。停用或启用时都复位到 insert 模式，避免残留 normal 态吞字符。 */
   setVimEnabled(enabled: boolean): void {
@@ -484,6 +398,12 @@ export class InputLine {
   expandPastes(text: string): string {
     if (this._pastes.size === 0) return text
     return text.replace(PASTE_MARKER_RE, (m, id) => this._pastes.get(Number(id)) ?? m)
+  }
+
+  removePaste(id: number): void {
+    if (!this._pastes.has(id)) return
+    this.setValue(this._value.replace(new RegExp(`\\[paste #${id} \\+\\d+ lines?\\]`, 'g'), ''))
+    this._pastes.delete(id)
   }
 
   /** 添加图片附件（data URL）。 */
@@ -637,7 +557,7 @@ export class InputLine {
       }
       // 粘滞换行模式（对齐公开仓 newlineMode）：Enter 语义是「插入换行」，
       // 发送用 Shift+Enter 退出模式后按 Enter（app 路由层拦截 shift 翻转）。
-      if (this._newlineMode) {
+      if (this._newlineMode && !ctrl) {
         return this.insertChar('\n')
       }
       const submitted = this.expandPastes(this._value)
@@ -759,7 +679,7 @@ export class InputLine {
       && this._undoOpen === kind
       && this._undoExpectCursor === this._cursor
     if (!canMerge) {
-      this._undoStack.push({ value: this._value, cursor: this._cursor, kind, images: [...this._images] })
+      this._undoStack.push({ value: this._value, cursor: this._cursor, kind, images: [...this._images], pastes: [...this._pastes], pasteSeq: this._pasteSeq })
       this._undoChars += this._value.length
       while (this._undoStack.length > UNDO_STACK_MAX || this._undoChars > UNDO_TOTAL_CHARS_MAX) {
         const dropped = this._undoStack.shift()
@@ -783,7 +703,7 @@ export class InputLine {
     this.sealUndo()
     if (!unit) return null
     this._undoChars -= unit.value.length
-    this._redoStack.push({ value: this._value, cursor: this._cursor, kind: unit.kind, images: [...this._images] })
+    this._redoStack.push({ value: this._value, cursor: this._cursor, kind: unit.kind, images: [...this._images], pastes: [...this._pastes], pasteSeq: this._pasteSeq })
     this._redoChars += this._value.length
     while (this._redoStack.length > UNDO_STACK_MAX || this._redoChars > UNDO_TOTAL_CHARS_MAX) {
       const dropped = this._redoStack.shift()
@@ -793,6 +713,8 @@ export class InputLine {
     this._value = unit.value
     this._cursor = Math.min(unit.cursor, this._value.length)
     this._images = [...unit.images]
+    this._pastes = new Map(unit.pastes)
+    this._pasteSeq = unit.pasteSeq
     this.onChangeCallback?.(this._value, this._cursor)
     this.onImagesChangeCallback?.([...this._images])
     return { type: 'change', value: this._value, cursor: this._cursor }
@@ -804,11 +726,13 @@ export class InputLine {
     this.sealUndo()
     if (!unit) return null
     this._redoChars -= unit.value.length
-    this._undoStack.push({ value: this._value, cursor: this._cursor, kind: unit.kind, images: [...this._images] })
+    this._undoStack.push({ value: this._value, cursor: this._cursor, kind: unit.kind, images: [...this._images], pastes: [...this._pastes], pasteSeq: this._pasteSeq })
     this._undoChars += this._value.length
     this._value = unit.value
     this._cursor = Math.min(unit.cursor, this._value.length)
     this._images = [...unit.images]
+    this._pastes = new Map(unit.pastes)
+    this._pasteSeq = unit.pasteSeq
     this.onChangeCallback?.(this._value, this._cursor)
     this.onImagesChangeCallback?.([...this._images])
     return { type: 'change', value: this._value, cursor: this._cursor }

@@ -36,7 +36,7 @@ type StartedApp = ReturnType<typeof makeStartedApp>
 const CTRL_C = '\x03'
 const ESC = '\x1B'
 const HINT = '再次按 Ctrl+C 退出'
-const INPUT_BORDER = /[╭┏┌]/
+const INPUT_BORDER = /[─━┄-]{3,}/
 const tick = (ms: number) => new Promise(r => setTimeout(r, ms))
 
 test('Esc 取消退出确认：输入框恢复、提示消失、不污染 rewind 计时', async () => {

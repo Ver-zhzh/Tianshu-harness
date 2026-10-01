@@ -3,7 +3,7 @@
  */
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { displayWidth } from '../width.js'
+import { ambiguousWideEnabled, displayWidth } from '../width.js'
 import { renderSidePanel, resolveSidePanelWidth, SIDE_PANEL_MIN_COLUMNS } from '../side-panel.js'
 import { getTheme } from '../theme.js'
 
@@ -142,13 +142,16 @@ describe('renderSidePanel', () => {
         domainGlyph: '❂', domainName: '天枢测试星域',
       }, theme)
       for (const line of lines) {
-        const w = displayWidth(line, { ambiguousAsWide: true })
+        const w = displayWidth(line, { ambiguousAsWide: ambiguousWideEnabled() })
         assert.ok(w <= width, `panel width=${width}: line display-width ${w} must be ≤ ${width}, got: "${stripAnsi(line)}"`)
       }
     }
   })
 
   it('lines with East-Asian Ambiguous symbols stay within panel width under wide metric', () => {
+    const previous = process.env.RIVET_AMBIGUOUS_WIDTH
+    process.env.RIVET_AMBIGUOUS_WIDTH = 'wide'
+    try {
     // — … · → 等 ambiguous 符号在 CJK 终端按 2 列渲染。narrow(stringWidth) 度量会
     // 低估，让含这些符号的行溢出折行。本测试用 wide 口径断言，确保 formatWorkerRow /
     // truncateStr / formatTaskList 都按 wide 截断，杜绝溢出。
@@ -176,9 +179,13 @@ describe('renderSidePanel', () => {
         domainGlyph: '❂', domainName: '天枢',
       }, theme)
       for (const line of lines) {
-        const w = displayWidth(line, { ambiguousAsWide: true })
+        const w = displayWidth(line, { ambiguousAsWide: ambiguousWideEnabled() })
         assert.ok(w <= width, `ambiguous width=${width}: wide display-width ${w} must be ≤ ${width}, got: "${stripAnsi(line)}"`)
       }
+    }
+    } finally {
+      if (previous === undefined) delete process.env.RIVET_AMBIGUOUS_WIDTH
+      else process.env.RIVET_AMBIGUOUS_WIDTH = previous
     }
   })
 
@@ -258,21 +265,21 @@ describe('renderSidePanel', () => {
 
 describe('resolveSidePanelWidth', () => {
   it('uses 32 columns on wide terminals', () => {
-    assert.equal(resolveSidePanelWidth(130), 32)
-    assert.equal(resolveSidePanelWidth(120), 32)
+    assert.equal(resolveSidePanelWidth(180), 32)
+    assert.equal(resolveSidePanelWidth(160), 32)
   })
 
-  it('falls back to 24 columns on medium terminals', () => {
-    assert.equal(resolveSidePanelWidth(119), 24)
-    assert.equal(resolveSidePanelWidth(100), 24)
+  it('uses 28 columns on standard wide terminals', () => {
+    assert.equal(resolveSidePanelWidth(159), 28)
+    assert.equal(resolveSidePanelWidth(120), 28)
   })
 
   it('returns 0 when terminal is too narrow', () => {
-    assert.equal(resolveSidePanelWidth(99), 0)
+    assert.equal(resolveSidePanelWidth(119), 0)
     assert.equal(resolveSidePanelWidth(80), 0)
   })
 
-  it('exposes a minimum threshold of 100 columns', () => {
-    assert.equal(SIDE_PANEL_MIN_COLUMNS, 100)
+  it('exposes a minimum threshold of 120 columns', () => {
+    assert.equal(SIDE_PANEL_MIN_COLUMNS, 120)
   })
 })

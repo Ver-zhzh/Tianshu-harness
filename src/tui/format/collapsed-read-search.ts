@@ -12,8 +12,8 @@
 
 import { color } from '../engine/ansi.js'
 import type { RivetTheme } from '../theme.js'
-import { displayWidth, truncateToDisplayWidth } from '../width.js'
-import { hiddenLinesMarker } from './hidden-lines.js'
+import { ambiguousWideEnabled, displayWidth, truncateToDisplayWidth } from '../width.js'
+import { formatToolCard } from './tool-card.js'
 import { EXPAND_HINT } from '../truncation-marker.js'
 
 // ── Types ──────────────────────────────────────────────────────
@@ -245,77 +245,42 @@ export interface FormatCollapsedGroupInput {
   expanded?: boolean
   theme: RivetTheme
   columns?: number
+  expandHint?: string
 }
 
 /** 渲染折叠的 read+search 组（用于 scrollback） */
 export function formatCollapsedGroup(input: FormatCollapsedGroupInput): string[] {
   const { group, expanded, theme } = input
-  const lines: string[] = []
-  const summary = buildSummaryText(group, false)
-  const elapsed = Date.now() - group.startMs
-  const elapsedStr = elapsed > 1000 ? `${(elapsed / 1000).toFixed(1)}s` : `${elapsed}ms`
-
-  // 摘要行：展开状态指示器 + 摘要 + 耗时
-  const indicatorStr = color(expanded ? '▼' : '▶', theme.secondary, { bold: true })
-  const summaryStr = color(summary, theme.primary, { bold: true })
-  const elapsedCol = color(`· ${elapsedStr}`, theme.dim)
-  lines.push(`${indicatorStr} ${summaryStr} ${elapsedCol}`)
-
-  const completed = group.entries.filter(e => e.completed)
-  const hasPending = group.entries.some(e => !e.completed)
-
-  if (completed.length === 0) {
-    if (hasPending) {
-      lines.push(`  ${color('│  (results pending…)', theme.dim)}`)
-    }
-    return lines
-  }
-
-  if (expanded || completed.length <= 3) {
-    // 展开模式 / 小折叠：树状连接符展示每个 entry
-    for (let i = 0; i < completed.length; i++) {
-      const entry = completed[i]!
-      const isLast = i === completed.length - 1
-      const connector = color(isLast ? '└─' : '├─', theme.dim)
-      const childPrefix = isLast ? '   ' : '│  '
-      const lineCount = entry.content ? entry.content.split('\n').length : 0
-      const lc = lineCount > 0 ? color(` (${lineCount}L)`, theme.dim) : ''
-      const entryNameStr = color(entry.displayName, theme.secondary)
-      
-      lines.push(`  ${connector} ${entryNameStr}${lc}`)
-      
-      if (entry.content) {
-        const maxWidth = Math.max(10, (input.columns ?? 80) - childPrefix.length - 4)
-        const previewLines = entry.content.split('\n').slice(0, expanded ? 30 : 3)
-        for (const pl of previewLines) {
-          const trimmed = displayWidth(pl) > maxWidth ? truncateToDisplayWidth(pl, maxWidth - 2) + '…' : pl
-          // 精细区分代码/搜索匹配行中的「行号」与「正文」
-          const lineNumMatch = trimmed.match(/^(\s*\d+:)(.*)$/)
-          let formattedLine: string
-          if (lineNumMatch) {
-            const lineNum = color(lineNumMatch[1]!, theme.dim)
-            const codeContent = color(lineNumMatch[2]!, theme.assistantColor ?? theme.secondary)
-            formattedLine = `${lineNum}${codeContent}`
-          } else {
-            formattedLine = color(trimmed, theme.assistantColor ?? theme.secondary)
-          }
-          lines.push(`  ${childPrefix} ${formattedLine}`)
-        }
-        const limit = expanded ? 30 : 3
-        if (lineCount > limit) {
-          lines.push(`  ${childPrefix} ${color(hiddenLinesMarker(lineCount - limit), theme.dim)}`)
-        }
+  const width = Math.max(2, (input.columns ?? 80) - 1)
+  const widthOptions = { ambiguousAsWide: ambiguousWideEnabled() }
+  const fit = (line: string) => displayWidth(line, widthOptions) > width
+    ? truncateToDisplayWidth(line, width - displayWidth('…', widthOptions), widthOptions) + '…' : line
+  const completed = group.entries.filter(entry => entry.completed)
+  const elapsed = Math.max(0, Date.now() - group.startMs)
+  const elapsedStr = elapsed > 1000 ? (elapsed / 1000).toFixed(1) + 's' : elapsed + 'ms'
+  const lines = group.entries.length > 1
+    ? [fit(color(buildSummaryText(group, false) + ' · ' + elapsedStr, theme.muted))] : []
+  if (!completed.length) return [fit(color('Read/Search · 等待结果', theme.muted))]
+  const shown = expanded ? completed : completed.filter((entry, index) => index < 3 || entry.isError)
+  for (const entry of shown) {
+    const card = formatToolCard({
+      toolName: entry.toolName, toolInput: entry.kind === 'read' && !entry.input.file_path && !entry.input.path ? { ...entry.input, file_path: entry.displayName } : entry.input, content: entry.content ?? '',
+      isError: entry.isError, columns: input.columns, maxLines: 3, expanded,
+      expandHint: input.expandHint,
+    }, theme)
+    if (expanded) lines.push(...card)
+    else {
+      lines.push(card[0]!)
+      if (entry.isError || completed.length === 1) {
+        const rows = (entry.content ?? '').replace(/\n+$/, '').split('\n')
+        const preview = entry.isError ? rows.slice(-3) : rows.slice(0, 2)
+        lines.push(...preview.filter(Boolean).map(row => fit(`  ${color(row, entry.isError ? theme.error : theme.muted)}`)))
       }
     }
-  } else {
-    // 大折叠（>3 条）：紧凑路径列表 + ctrl+o 提示
-    const files = completed.map(e => e.displayName).join(', ')
-    const maxWidth = Math.max(10, (input.columns ?? 80) - 9)
-    const preview = displayWidth(files) > maxWidth ? truncateToDisplayWidth(files, maxWidth - 2) + '…' : files
-    lines.push(`  └─ ${color(preview, theme.secondary)}`)
-    lines.push(`     ${color(`… +${completed.length - 3} 个文件`, theme.dim)} ${color(EXPAND_HINT, theme.warning)}`)
   }
-
+  if (!expanded && (completed.length > 1 || completed.some(entry => (entry.content ?? '').split('\n').length > 2))) {
+    lines.push(fit(color(`  ${shown.length < completed.length ? `… +${completed.length - shown.length} 个结果 · ` : ''}${input.expandHint ?? EXPAND_HINT} · 工具详情`, theme.muted)))
+  }
   return lines
 }
 
@@ -335,16 +300,19 @@ export function formatCollapsedGroupLive(
   const summary = buildSummaryText(group, true)
   const elapsed = Date.now() - group.startMs
   const elapsedStr = elapsed > 1000 ? `${(elapsed / 1000).toFixed(0)}s` : `${elapsed}ms`
-
-  lines.push(`● ${color(summary, theme.muted)} ${color(`· ${elapsedStr}`, theme.muted)}`)
+  const width = Math.max(2, (columns ?? 80) - 1)
+  const widthOptions = { ambiguousAsWide: ambiguousWideEnabled() }
+  const stats = computeGroupStats(group)
+  const header = `● ${summary} · ${elapsedStr}`
+  lines.push(color(displayWidth(header, widthOptions) <= width ? header : `● ${stats.pendingCount ? `运行中 ${stats.pendingCount}` : `完成 ${stats.completedCount}`} · ${elapsedStr}`, theme.muted))
 
   // 显示最近一条已完成 entry 的末 2 行作为进度预览
   const lastCompleted = [...group.entries].reverse().find(e => e.content && e.completed)
   if (lastCompleted?.content) {
-    const maxWidth = Math.max(10, (columns ?? 80) - 6)
+    const maxWidth = Math.max(0, width - 2)
     const tailLines = lastCompleted.content.replace(/\n+$/, '').split('\n').slice(-2)
     for (const line of tailLines) {
-      const trimmed = line.length > maxWidth ? line.slice(0, maxWidth - 1) + '…' : line
+      const trimmed = displayWidth(line, widthOptions) > maxWidth ? truncateToDisplayWidth(line, maxWidth - displayWidth('…', widthOptions), widthOptions) + '…' : line
       lines.push(`  ${color(trimmed, theme.muted)}`)
     }
   }

@@ -43,7 +43,7 @@ describe('renderJobsOverlay', () => {
     const rows = [running('a1', 'one'), running('b2', 'two')]
     const out = stripAnsi(renderJobsOverlay(rows, 80, 24, theme, 1).join('\n'))
     const twoLine = out.split('\n').find(l => l.includes('two'))!
-    assert.match(twoLine, /❯/)
+    assert.match(twoLine, />/)
   })
 
   it('does not produce newlines in any overlay line (end to end)', () => {

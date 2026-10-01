@@ -47,7 +47,7 @@ test('kimi topBorder contains model name after leftStr', async () => {
   assert.ok(output.length > 0, 'app should render output after start')
   // Default thin separator: top border contains ╭─
   const stripped = stripAnsi(output)
-  assert.ok(stripped.includes('\u256d'), 'top border should have thin corner')
+  assert.ok(/^─{3,}/m.test(stripped), 'composer uses its thin horizontal writing rule')
 })
 
 test('getInputChrome cache invalidates across separators', () => {

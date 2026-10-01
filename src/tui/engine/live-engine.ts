@@ -34,6 +34,10 @@ export interface LiveRegionLine {
    * 均 {...l} 透传该字段。
    */
   caretCol?: number
+  inputLine?: number
+  inputStartCol?: number
+  decisionPart?: 'title' | 'fact' | 'action' | 'footer'
+  region?: 'identity' | 'mode' | 'composer'
 }
 
 export interface LiveEngineOptions {
@@ -88,7 +92,21 @@ export function padDynamicRegion(
     rows -= rowsForLine(dynamic[dropUntil]!.text)
     dropUntil++
   }
-  const kept = dynamic.slice(dropUntil)
+  let kept = dynamic.slice(dropUntil)
+  if (dynamic.some(line => line.decisionPart)) {
+    const selected = new Set<number>()
+    rows = 0
+    for (const [index, line] of dynamic.entries()) {
+      const cost = rowsForLine(line.text)
+      if (line.decisionPart && rows + cost <= budget) { selected.add(index); rows += cost }
+    }
+    const start = dynamic.findIndex(line => line.decisionPart === 'title')
+    for (let index = Math.max(0, start); index < dynamic.length; index++) {
+      const cost = rowsForLine(dynamic[index]!.text)
+      if (!selected.has(index) && rows + cost <= budget) { selected.add(index); rows += cost }
+    }
+    kept = [...selected].sort((a, b) => a - b).map(index => dynamic[index]!)
+  }
 
   const padCount = Math.max(0, budget - rows)
   const padding: LiveRegionLine[] = Array.from({ length: padCount }, () => ({ text: '' }))

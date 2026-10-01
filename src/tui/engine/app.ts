@@ -16,9 +16,27 @@ import { CommitEngine } from './commit-engine.js'
 import { LiveEngine, padDynamicRegion, thinkingRowBudgetFor, type LiveRegionLine } from './live-engine.js'
 import { installOutputGuard, type OutputGuard } from './output-guard.js'
 import { OverlayEngine } from './overlay-engine.js'
+import { ModePanel } from './mode-panel.js'
+import { PermissionPanel } from './permission-panel.js'
+import type { PermissionView } from '../permission-view.js'
+import { HelpPanel } from './help-panel.js'
 import { InputHandler, type KeyPress } from './input-handler.js'
 import { ResizeHandler } from './resize-handler.js'
-import { InputLine } from './input-line.js'
+import { InputLine, type DraftSnapshot } from './input-line.js'
+import { FrontendSession } from './frontend-session.js'
+import { budgetInputChrome } from './input-layout.js'
+import { resolveFrontendRenderer } from './renderer-policy.js'
+import { FrontendWorkflow } from './frontend-workflow.js'
+import { FrontendMouse } from './frontend-mouse.js'
+import { handlePagerKey, pagerSearchLines } from './pager-controller.js'
+import { projectUnifiedTasks } from './task-projection.js'
+import { handleTasksKey, selectedTask } from './tasks-controller.js'
+import { previewFrontendSession } from '../frontend-session-provider.js'
+import { formatApprovalFacts } from '../format/approval-renderers.js'
+import { editDraftInEditor } from '../external-editor.js'
+import type { FrontendPreferences } from '../frontend-preferences.js'
+import type { FrontendAction } from '../keybindings.js'
+import { toolExpandHint } from '../truncation-marker.js'
 import { MAX_IMAGES } from './image-attach.js'
 import { formatImagePasteNotices, loadPastedImages, parseImagePathPaste } from './image-paste.js'
 import { readImageFromClipboard, readTextFromClipboard, looksLikeBinaryPaste, FOCUS_DEBOUNCE_MS } from './clipboard-image.js'
@@ -63,20 +81,21 @@ import { formatAskUserQuestion } from '../format/ask-user-question.js'
 import { formatToolCard, formatToolCardLive, isToolCardTruncated, toolCardTitle } from '../format/tool-card.js'
 import { formatCollapsedGroup, formatCollapsedGroupLive, CollapsedReadSearchBuffer, isCollapsibleTool, type CollapsedReadSearchGroup } from '../format/collapsed-read-search.js'
 import { formatCollapsedBashGroup, formatCollapsedBashGroupLive, isCollapsibleBashCommand, type CollapsedBashGroup } from '../format/collapsed-bash.js'
-import { formatPermissionDiff } from '../format/permission-diff.js'
-import { formatApprovalPrompt } from '../format/approval-renderers.js'
+import { formatApprovalPromptLayout } from '../format/approval-renderers.js'
+import { outOfWorkspaceFilePaths } from '../../agent/tool-pipeline.js'
 import { formatThinking } from '../format/thinking.js'
-import { ThinkingReviewStore, formatThinkingReview } from './thinking-review.js'
+import { ThinkingReviewStore } from './thinking-review.js'
 import { formatPromptFooter } from '../format/prompt-footer.js'
-import { formatGlanceBar, resolveStarDomainDisplay, formatGlanceLeft, formatGlanceRight, formatPermissionModeLine } from '../format/glance-bar.js'
+import { resolveStarDomainDisplay } from '../format/glance-bar.js'
+import { formatWorkspaceIdentity, formatWorkspaceMode, formatWorkspacePath } from '../format/workspace-chrome.js'
 import { remainingSec, shouldFire } from '../plan-auto-approve.js'
 import { STAR_DOMAINS } from '../../agent/star-domain.js'
 import { starDomainRegistry } from '../../agent/star-domain-registry.js'
-import { formatTaskList, shouldShowTaskPanel } from '../format/task-list.js'
+import { formatTaskList } from '../format/task-list.js'
 import {
   buildPlanReviewActions,
   clampPlanReviewScroll,
-  formatPlanReview,
+  formatPlanReviewLayout,
   planReviewBodyRows,
   recommendedPlanReviewAction,
 } from '../format/plan-review.js'
@@ -88,7 +107,7 @@ import { formatWorkerDispatchCard } from '../format/worker-dispatch-card.js'
 import { decodeTeamPanelModel, overlayFleetStatus, TEAM_PANEL_UI_PREFIX, type TeamPanelModel } from '../team-panel-model.js'
 import { decodeCouncilPanel, COUNCIL_PANEL_UI_PREFIX, type CouncilPanelModel } from '../council-panel-model.js'
 import { formatCouncilPanel } from '../format/council-panel.js'
-import { ActivityStore, formatActivityBand, formatJobsBar } from '../activity-store.js'
+import { ActivityStore } from '../activity-store.js'
 import { buildWorkerDetailContent } from '../worker-detail.js'
 import { renderSidePanel, resolveSidePanelWidth, SIDE_PANEL_MIN_COLUMNS, type SidePanelInput } from '../side-panel.js'
 import { loadWorkerSession } from '../../agent/worker-session-persist.js'
@@ -105,8 +124,6 @@ import { HANDOFF_NUDGE_RATIO, formatHandoffNudge } from '../handoff.js'
 import { STAR_GENESIS } from '../../agent/star-genesis-data.js'
 import {
   delegationObjectiveFromInput,
-  delegationProfileFromInput,
-  domainBadge,
   isDelegationTool,
 } from '../format/tool-domain.js'
 import { formatSpinnerStatus, formatTurnWorkSummary, formatJobAwaitWait, type JobAwaitCall } from '../format/spinner-status.js'
@@ -135,7 +152,7 @@ import { errorRecoveryGuidance } from '../../api/error-classifier.js'
 import { InitFlow, probeInitFlowInput, type InitCommit, type InitStepResult } from '../init-flow.js'
 import { renderSettings } from '../format/settings.js'
 import type { SettingsFlow, SettingsSaveRequest, SettingsSaveResult, SettingsView } from '../settings-flow.js'
-import { parseScrollbackTranscript, searchTranscript, findNextMatch, findPrevMatch } from '../scrollback-transcript.js'
+import { parseScrollbackTranscript } from '../scrollback-transcript.js'
 import { renderCockpit } from '../format/cockpit.js'
 import type { CockpitSnapshot, Panel } from '../cockpit/types.js'
 import { PANELS } from '../cockpit/types.js'
@@ -375,8 +392,9 @@ export interface TuiMetrics {
   cacheStatus?: CacheStatus
   /** DeepSeek 计价时段（仅 provider 为 deepseek 官方时给出；其他 provider 缺省不显示） */
   pricingPhase?: 'peak' | 'offpeak'
-  /** 会话累计费用（美元，单次从 getTotalUsage 计算，不累加） */
+  /** 会话累计费用（CNY，单次从 getTotalUsage 和模型定价计算） */
   cost: number
+  costSource?: 'api' | 'estimate' | 'unknown'
   /** 会话累计 input / output token（仅用于展示，不参与 += 累加） */
   inputTokens: number
   outputTokens: number
@@ -409,6 +427,19 @@ export class TuiApp {
   private input: InputHandler
   private resize: ResizeHandler
   private inputLine: InputLine
+  private frontend: FrontendSession
+  private modePanel: ModePanel
+  private permissionPanel?: PermissionPanel
+  private helpPanel: HelpPanel
+  private workflow: FrontendWorkflow
+  private detailPager: PagerData | null = null
+  private detailReturn?: { id: string; nav: ReturnType<OverlayController['nav']> }
+  private approvalDraft: DraftSnapshot | null = null
+  private editorActive = false
+  private currentTaskTitle = ''
+  private mainTaskStopped = false
+  private mainTaskEnded?: number
+  private mainTaskFailed = false
   /** 空闲期 CPR 探针定时器（2s，unref'd）——idle 无 ticker，靠它检出外来写入污染。 */
   private cprProbeTimer: ReturnType<typeof setInterval> | null = null
   /** TUI 存活期 stderr 护栏（游离 stderr 文本走 commit 通道，防污染 live region）。 */
@@ -432,6 +463,7 @@ export class TuiApp {
    * 收尾在 handleTurnComplete 里 flush。
    */
   private screenReader = false
+  private verboseToolOutput = false
 
 
   // State
@@ -855,6 +887,8 @@ export class TuiApp {
   /** 原始 stdout（用于直接写 DEC 私有模式如 bracketed paste 开关） */
   private stdout: WriteStream
   private terminalRestored = false
+  private historyOpenGeneration = 0
+  private historyOpening = false
   private riskExplainer?: RiskExplainer
   private sideQuestionAsker?: SideQuestionAsker
   /** `/btw` 浮层状态。**只活在这里**——一个字节都不进 session.messages。 */
@@ -917,7 +951,8 @@ export class TuiApp {
       // commit（deactivateInternal 先置 active=null 再退 alt screen，同步条目
       // 在 pump 同步段内排空，不会递归入队；异步条目后续微任务续跑）。
       onExitAltScreen: () => {
-        this.live.resumeProbe()
+        if (this.frontend?.isFullscreen) this.frontend.invalidate()
+        if (!this.frontend?.isFullscreen) this.live.resumeProbe()
         this.requestPump()
       },
     })
@@ -995,7 +1030,7 @@ export class TuiApp {
       thinkingText: '',
       isStreaming: false,
       isThinking: false,
-      thinkingExpanded: true,
+      thinkingExpanded: false,
       phase: 'idle',
       turnStartMs: Date.now(),
       thinkStartMs: 0,
@@ -1009,6 +1044,36 @@ export class TuiApp {
     }
 
     // Wire resize
+    this.frontend = new FrontendSession(options.stdout, () => this.getSize(), () => {
+      if (this.editorActive || this.outputFrozen || this.terminalRestored) return
+      if (this.overlay.activeId() === 'ui-history') this.overlay.rerender()
+      else this.writeBatcher.schedule()
+    }, text => this.commitStatic(text))
+    this.workflow = new FrontendWorkflow(this.inputLine, {
+      action: action => this.performFrontendAction(action), renderer: mode => {
+        const settings = this.overlay.activeId() === 'settings'
+        if (settings) this.overlay.deactivate()
+        const applied = this.switchFrontendRenderer(mode)
+        if (settings) this.overlay.activate('settings')
+        return applied
+      },
+      message: text => { this.commitStatic(text); this.renderLive() },
+      mode: () => this.activateOverlay('terminal-mode'),
+      detail: (title, text) => this.openTextDetail(title, text), rendererStatus: () => this.frontend.isFullscreen ? '全屏' : '经典',
+      register: command => this.registerSlashCommand(command),
+    })
+    this.modePanel = new ModePanel(() => ({ actual: this.frontend.isFullscreen ? '全屏' : '经典', preference: this.workflow.preferences.renderer }), () => this.theme, () => this.deactivateOverlay(), mode => this.workflow.selectRenderer(mode))
+    this.overlay.register('terminal-mode', this.modePanel)
+    this.helpPanel = new HelpPanel(() => this.workflow.preferences, () => this.theme, () => this.deactivateOverlay(), text => { this.inputLine.setValue(text); this.renderLive() })
+    this.overlay.register('help', this.helpPanel)
+    this.overlay.register('ui-history', { render: (width, height) => this.frontend.renderHistory(width, height) })
+    const mouse = new FrontendMouse()
+    this.input.onMouse(event => {
+      if (!this.frontend.isFullscreen || !this.workflow.preferences.mouse || this.editorActive) return
+      mouse.handle(event, { session: this.frontend, line: this.inputLine, overlay: this.overlay, controller: this.overlayController,
+        columns: this.columns, render: () => this.renderLive(), key: name => this.handleOverlayKey({ char: '', name }),
+        copy: () => this.copyFrontendSelection(), copyOnSelect: this.workflow.preferences.copyOnSelect, message: text => this.commitStatic(text) })
+    })
     this.resize.onResize((cols, rows) => {
       this.columns = cols
       this.rows = rows
@@ -1065,6 +1130,8 @@ export class TuiApp {
         return
       }
       // Other overlays active → don't paste into main input
+      if (this.overlay.activeId() === 'help') { this.helpPanel.paste(text); this.overlay.rerender(); return }
+      if (this.overlay.activeId() === 'permissions' && this.permissionPanel) { this.permissionPanel.paste(text); this.overlay.rerender(); return }
       if (this.overlay.isActive()) return
       // 确认窗口内粘贴 = 继续对话：取消 pending-exit 再插入文本
       // （与打字路径的取消同一状态位，见 handleKey 的 Normal input processing）。
@@ -1127,9 +1194,15 @@ export class TuiApp {
 
     // Wire input: character input → inputLine → live region update
     this.input.onAnyKey((key) => {
+      if (this.editorActive) return
+      if (key.name === 'ctrl_c' && !this.approvalIntentController.approvalPending && !this.pendingPlanApproval && !this.pendingAskFlow && this.copyFrontendSelection()) return
+      if (this.overlay.activeId() === 'ui-history') {
+        if (!this.frontend.handleHistoryKey(key)) this.deactivateOverlay()
+        return
+      }
       // ── Approval mode short-circuit (顶部，先于一切普通输入) ──
       // 审批态只解析审批动作，绝不落入 slash / inputLine —— 杜绝 Enter 双触发
-      if (this.input.getMode() === 'approval' && this.approvalIntentController.approvalPending) {
+      if (!this.overlay.isActive() && this.input.getMode() === 'approval' && this.approvalIntentController.approvalPending) {
         const c = key.char.toLowerCase()
         if (key.name === 'ctrl_c') {
           this.resolveApproval(false)
@@ -1152,6 +1225,8 @@ export class TuiApp {
             else if (ctrl.showRememberOption && ctrl.approvalOptionIndex === 3) this.resolveApproval({ approved: true, remember: true })
             else if (ctrl.showRememberOption && ctrl.approvalOptionIndex === 4) this.requestRiskExplanation()
             else this.requestRiskExplanation()
+          } else if (c === 'v') {
+            this.openTextDetail(`等待审批 · ${ctrl.approvalPending!.name} · 只读全文`, formatApprovalFacts(ctrl.approvalPending!.name, ctrl.approvalPending!.input, this.columns, this.theme).join('\n'))
           } else if (c === 'y') this.resolveApproval({ approved: true })
           else if (key.name === 'escape' || c === 'n') this.resolveApproval(false)
           else if (key.name === 'ctrl_e') this.requestRiskExplanation()
@@ -1167,6 +1242,8 @@ export class TuiApp {
       // Esc 回到审批 y/n 提示。其余键落入 InputLine 正常编辑。
       if (this.approvalIntentController.approvalEditMode && this.approvalIntentController.approvalPending) {
         if (key.name === 'ctrl_c') {
+          if (this.approvalDraft) this.inputLine.restore(this.approvalDraft)
+          this.approvalDraft = null
           this.resolveApproval(false)
           this.approvalIntentController.approvalEditMode = false
           this.approvalIntentController.approvalEditError = ''
@@ -1175,7 +1252,8 @@ export class TuiApp {
           // Back to approval mode
           this.approvalIntentController.approvalEditMode = false
           this.approvalIntentController.approvalEditError = ''
-          this.inputLine.setValue('')
+          if (this.approvalDraft) this.inputLine.restore(this.approvalDraft)
+          this.approvalDraft = null
           this.input.setMode('approval')
           this.renderLive()
           return
@@ -1183,10 +1261,17 @@ export class TuiApp {
           // Try to parse edited JSON
           try {
             const edited = JSON.parse(this.inputLine.value)
+            if (!edited || typeof edited !== 'object' || Array.isArray(edited)) throw new Error('参数必须是JSON对象')
             this.approvalIntentController.approvalEditMode = false
             this.approvalIntentController.approvalEditError = ''
-            this.inputLine.setValue('')
-            this.resolveApproval({ approved: true, editedInput: edited })
+            this.approvalIntentController.approvalPending!.input = edited
+            this.approvalIntentController.editedInput = edited
+            this.approvalIntentController.resetRiskExplanation()
+            this.approvalIntentController.showRememberOption = this.sessionCwd !== undefined && this.approvalTargetsOutOfWorkspace(this.sessionCwd, this.approvalIntentController.approvalPending!.name, edited)
+            if (this.approvalDraft) this.inputLine.restore(this.approvalDraft)
+            this.approvalDraft = null
+            this.input.setMode('approval')
+            this.renderLive()
           } catch (err) {
             this.approvalIntentController.approvalEditError = `Invalid JSON: ${(err as Error).message}`
             this.renderLive()
@@ -1211,6 +1296,7 @@ export class TuiApp {
 
       // 计划审阅卡钉在 chrome：overlay 未开时先吃按键，避免漏进 slash / 输入框。
       if (this.pendingPlanApproval && !this.overlay.isActive() && this.handlePlanReviewKey(key)) return
+      if (!this.overlay.isActive() && this.frontend.handleKey(key)) return
 
       // ── Global shortcuts (before input line processing) ──────
       if (key.name === 'shift_tab') {
@@ -1305,11 +1391,7 @@ export class TuiApp {
             // 键盘直连退出也走统一收口：suppress 窗口包住回放，避免叠影；
             // detail 指针必清——否则看过一次的 job/worker 日志把后续 pager
             // 内容永久劫持（pagerContent 把 detail 排在最前）。
-            this.exitOverlayCore()
-            this.workerDetailWorkerId = null
-            this.jobDetailId = null
-            // 计划预览返回时 core 已重开面板，renderLive 会写坏 alt screen。
-            if (!this.overlay.isActive()) this.renderLive()
+            this.deactivateOverlay()
             return
           }
           // worker 视图优先于中断：Esc 先退出视图，不 abort 主 agent
@@ -1325,10 +1407,7 @@ export class TuiApp {
         } else {
           if (this.overlay.isActive()) {
             // 键盘直连退出走统一收口，理由同上（vim 分支注释）。
-            this.exitOverlayCore()
-            this.workerDetailWorkerId = null
-            this.jobDetailId = null
-            if (!this.overlay.isActive()) this.renderLive()
+            this.deactivateOverlay()
           } else if (this.viewingWorkerId) {
             // worker 视图优先于中断：Esc 先退出视图，不 abort 主 agent
             this.exitWorkerView()
@@ -1338,8 +1417,8 @@ export class TuiApp {
             // Idle: double-ESC within 400ms on empty input → rewind overlay
             const now = Date.now()
             if (this.inputLine.value.trim()) {
-              // Has text: ESC clears input (like Claude Code)
-              this.inputLine.setValue('')
+              if (this.workflow.preferences.keymap === 'legacy' || now - this.inputController.lastEscAt < 400) this.inputLine.clearAll()
+              this.inputController.lastEscAt = now
               this.renderLive()
             } else if (now - this.inputController.lastEscAt < 400) {
               // Double-ESC → rewind. Default-select the most recent message
@@ -1358,47 +1437,7 @@ export class TuiApp {
           return
         }
       }
-      if (key.name === 'ctrl_o') {
-        this.expandLastTruncatedTool()
-        return
-      }
-      // 输出冻结（Ctrl+S）/ 解冻（Ctrl+Q 别名）——触摸终端滚动回看的根治：
-      // 冻结期 stdout 零写入，终端视口停在用户翻到的位置，解冻后按序补放。
-      if (key.name === 'ctrl_s') {
-        this.setOutputFrozen(!this.outputFrozen)
-        return
-      }
-      if (key.name === 'ctrl_q') {
-        if (this.outputFrozen) this.setOutputFrozen(false)
-        return
-      }
-      if (key.name === 'ctrl_t') {
-        if (this.state.isThinking) {
-          this.state.thinkingExpanded = !this.state.thinkingExpanded
-          this.renderLive()
-        } else if (!this.isAgentActive()) {
-          // 真空闲才回看最近一次 thinking：正文完整重印进 scrollback（诚实重印——
-          // scrollback 只追加不改写，重印本即持久记录；take() 防空按重复重印）。
-          // 工具执行期间 isThinking 已为 false 但 agent 仍忙（agentBusy / phase）——
-          // 此时重印会一次刷进最多 400 逻辑行，take() 之后不可撤回，故与 ctrl_r
-          // 分支同法加 isAgentActive 守卫。
-          const review = this.thinkingReview.take()
-          if (review) {
-            const reviewLines = formatThinkingReview(review, this.theme)
-            if (reviewLines.length > 0) {
-              this.commitBlock(reviewLines.join('\n'))
-            }
-          }
-        }
-        return
-      }
-      if (key.name === 'ctrl_r') {
-        if (!this.isAgentActive()) {
-          this.overlayController.resetNav()
-          this.overlay.activate('history-search')
-        }
-        return
-      }
+      if (this.workflow.handleKey(key)) return
       // ── Side panel shortcuts ────────────────────────────────
       // Ctrl+X leader key: wait for 'r' to open the right panel (OpenCode-style).
       if (key.name === 'ctrl_x') {
@@ -1410,6 +1449,14 @@ export class TuiApp {
       if (this.sidePanelLeaderPending) {
         this.sidePanelLeaderPending = false
         if (this.sidePanelLeaderTimer) { clearTimeout(this.sidePanelLeaderTimer); this.sidePanelLeaderTimer = null }
+        if (key.name === 'return') {
+          const multiline = this.inputLine.newlineMode
+          this.inputLine.setNewlineMode(false)
+          this.inputLine.handleKey('return', '', false, false)
+          this.inputLine.setNewlineMode(multiline)
+          this.renderLive()
+          return
+        }
         if (key.char.toLowerCase() === 'r') {
           this.setSidePanelOpen(true)
           return
@@ -1469,7 +1516,8 @@ export class TuiApp {
       // Shift+Enter 翻转粘滞换行模式（对齐公开仓 newlineMode）：开启后 Enter=换行，
       // 再按 Shift+Enter 退出。任何状态下生效（slash 块之外，同公开仓 app.ts:4582）。
       if (key.name === 'return' && key.shift) {
-        this.inputLine.setNewlineMode(!this.inputLine.newlineMode)
+        if (this.workflow.preferences.keymap === 'standard') this.inputLine.handleKey('ctrl_j', '', true, false)
+        else this.inputLine.setNewlineMode(!this.inputLine.newlineMode)
         this.renderLive()
         return
       }
@@ -1514,6 +1562,7 @@ export class TuiApp {
     // Build AgentCallbacks (aligned to loop-types.ts AgentCallbacks)
     this.callbacks = {
       onTextDelta: (text) => {
+        this.frontend.textDelta(text)
         if (this.perfMonitor?.enabled) this.perfMonitor.measure('delta', () => this.handleTextDelta(text))
         else this.handleTextDelta(text)
       },
@@ -1521,13 +1570,18 @@ export class TuiApp {
         if (this.perfMonitor?.enabled) this.perfMonitor.measure('delta', () => this.handleThinkingDelta(thinking))
         else this.handleThinkingDelta(thinking)
       },
-      onToolUse: (id, name, input) => this.handleToolUse(id, name, input),
-      onToolResult: (id, name, result, isError, rawPath, uiContent) =>
-        this.handleToolResult(id, name, result, isError, rawPath, uiContent),
-      onTurnComplete: (usage, turnNumber, isFinal) => { void this.handleTurnComplete(usage, turnNumber, isFinal ?? true) },
-      onError: (error) => this.handleError(error),
+      onToolUse: (id, name, input) => { this.frontend.toolUse(id, name, input); this.handleToolUse(id, name, input) },
+      onToolResult: (id, name, result, isError, rawPath, uiContent) => {
+        if (isError === false && result.startsWith('Sensitive-area preflight required.')) {
+          this.frontend.record({ kind: 'notice', toolId: id, name, text: result }); this.commitStatic(color(result, this.theme.warning)); return
+        }
+        if (isError !== undefined) this.frontend.toolResult(id, name, result, isError, rawPath, uiContent)
+        this.handleToolResult(id, name, result, isError, rawPath, uiContent)
+      },
+      onTurnComplete: (usage, turnNumber, isFinal) => { this.frontend.flushText(); void this.handleTurnComplete(usage, turnNumber, isFinal ?? true) },
+      onError: (error) => { this.mainTaskFailed = true; this.mainTaskEnded = Date.now(); this.frontend.flushText(); this.frontend.record({ kind: 'error', text: error.message, isError: true }); this.handleError(error) },
       onAbort: (reason) => this.handleAbort(reason),
-      onApprovalRequired: async (id, name, input) => this.handleApprovalRequired(id, name, input),
+      onApprovalRequired: async (id, name, input) => { this.frontend.flushText(); this.frontend.record({ kind: 'approval', toolId: id, name, input, text: `等待审批 · ${name}` }); return this.handleApprovalRequired(id, name, input) },
       onCheckpoint: (hash) => this.handleCheckpoint(hash),
       onPhaseChange: (phase, detail) => {
         // stop-reason: surface guard-forced stops (max-turns / wedged-loop /
@@ -1594,6 +1648,8 @@ export class TuiApp {
   private resolveApproval(result: ApprovalResult | boolean): void {
     if (!this.approvalIntentController.approvalPending) return
     const approved = typeof result === 'boolean' ? result : result.approved
+    if (approved && this.approvalIntentController.editedInput) result = { ...(typeof result === 'object' ? result : { approved }), editedInput: this.approvalIntentController.editedInput }
+    this.approvalIntentController.editedInput = undefined
     if (!approved) this._lastApprovalDeniedAt = Date.now()
     this.approvalIntentController.approvalPending.resolve(result)
     this.approvalIntentController.approvalPending = null
@@ -1604,6 +1660,7 @@ export class TuiApp {
   /** 进入审批编辑模式：把工具入参 JSON 放进输入行（e 键 / 光标第 3 项共用）。 */
   private enterApprovalEditMode(): void {
     if (!this.approvalIntentController.approvalPending) return
+    this.approvalDraft = this.inputLine.snapshot()
     this.approvalIntentController.approvalEditMode = true
     this.approvalIntentController.approvalEditError = ''
     this.inputLine.setValue(JSON.stringify(this.approvalIntentController.approvalPending.input, null, 2))
@@ -1612,6 +1669,152 @@ export class TuiApp {
   }
 
   // ── Public API ───────────────────────────────────────────────
+
+  setFrontendPreferences(preferences: FrontendPreferences): boolean { const applied = this.workflow.apply(preferences); if (applied) this.frontend.setMouse(preferences.mouse); return applied }
+  openPermissionPanel(view: () => PermissionView, execute: (command: string) => void, grant: (path: string, mode: 'read' | 'write') => void): void {
+    this.permissionPanel = new PermissionPanel(view, () => this.theme, () => this.deactivateOverlay(), execute, grant)
+    this.overlay.register('permissions', this.permissionPanel)
+    this.activateOverlay('permissions')
+  }
+  getFrontendPreferences(): FrontendPreferences { return this.workflow.preferences }
+  setWorkspaceWelcome(content: string[] | ((columns: number, availableRows: number) => string[]), full = false): void {
+    const normalize = (lines: string[], branded: boolean) => branded ? lines : lines.slice(1).filter((line, i, rows) => line || i > 0 && i < rows.length - 1)
+    if (typeof content === 'function') {
+      this.frontend.welcomeLines = []
+      this.frontend.welcomeRenderer = (columns, availableRows) => {
+        const lines = content(columns, availableRows)
+        return normalize(lines, lines[0] === '')
+      }
+    } else {
+      this.frontend.welcomeRenderer = undefined
+      this.frontend.welcomeLines = normalize(content, full)
+    }
+    this.renderLive()
+  }
+  openUIHistory(): void { this.performFrontendAction('history') }
+  private copyFrontendSelection(): boolean {
+    const selection = this.frontend.copySelection()
+    if (!selection) return false
+    this.stdout.write(osc52Clipboard(selection))
+    this.frontend.clearSelection()
+    this.commitStatic(`已发送复制请求（${selection.length}字符）`)
+    if (this.overlay.isActive()) this.overlay.rerender()
+    else this.renderLive()
+    return true
+  }
+  async setUIHistorySession(path: string, priorMessages = false): Promise<void> {
+    this.historyOpenGeneration++
+    this.historyOpening = false
+    if (await this.frontend.setSession(path) && priorMessages && !this.frontend.existingCount) this.frontend.boundary('部分升级前阅读历史不可用；当前模型上下文保持原样', 'resume')
+  }
+  markUIHistoryBoundary(text: string, kind: 'compact' | 'resume' | 'rewind' | 'fork'): void { this.frontend.boundary(text, kind) }
+
+  private openTextDetail(title: string, content: string): void {
+    this.detailReturn = this.overlay.activeId() === 'chronicle' ? { id: 'chronicle', nav: { ...this.overlayController.nav() } } : undefined
+    this.detailPager = { title, content, page: 0, footerHints: [['↑↓', '逐行'], ['PgUp/PgDn', '半屏'], ['Esc', '返回']] }
+    this.overlayController.resetNav()
+    this.activateOverlay('pager')
+  }
+
+  private performFrontendAction(action: FrontendAction): void {
+    if (action === 'history') {
+      const generation = ++this.historyOpenGeneration
+      this.historyOpening = true
+      const current = () => generation === this.historyOpenGeneration && !this.terminalRestored
+      void this.frontend.showHistory(current).then(() => {
+        if (!current()) return
+        this.historyOpening = false
+        this.activateOverlay('ui-history')
+      }, error => {
+        if (!current()) return
+        this.historyOpening = false
+        this.frontend.closeHistory()
+        this.commitStatic(`阅读历史读取失败：${String(error)}`, { isError: true })
+      })
+      return
+    }
+    if (action === 'tasks') { this.activateOverlay('tasks'); return }
+    if (action === 'lastTool') { this.expandLastTruncatedTool(); return }
+    if (action === 'freeze' || action === 'resume') { this.setOutputFrozen(action === 'freeze' ? !this.outputFrozen : false); return }
+    if (action === 'imagePaste') { void this.handleCtrlV(); return }
+    if (action === 'inputHistory') { if (!this.isAgentActive()) this.activateOverlay('history-search'); return }
+    if (action === 'thinking') {
+      const review = this.state.thinkingText || this.thinkingReview.peek()?.text
+      this.openTextDetail('思考详情 · 仅已有内容', review || '当前没有可用的思考内容')
+      return
+    }
+    if (action === 'editor') void this.openDraftEditor()
+  }
+
+  private switchFrontendRenderer(mode: FrontendPreferences['renderer']): boolean {
+    if (this.isAgentActive() || this.approvalIntentController.approvalPending || this.pendingPlanApproval || this.pendingAskFlow || this.editorActive || this.overlay.isActive()) {
+      this.commitStatic('当前执行结束且审批/问答/面板关闭后可切换显示；会话未改变')
+      return false
+    }
+    const full = resolveFrontendRenderer(mode, this.stdout.isTTY, this.screenReader) === 'fullscreen'
+    if (full === this.frontend.isFullscreen) return true
+    try {
+      if (full) {
+        if (this.stdout.isTTY === false) throw new Error('此输出不是交互终端')
+        this.live.clearForCommit()
+        this.live.suppressProbe()
+        this.commit.setOutputEnabled(false)
+        this.frontend.startFullscreen(this.workflow.preferences.mouse)
+        this.overlay.setBorrowed(true)
+      } else {
+        this.frontend.stopFullscreen()
+        this.overlay.setBorrowed(false)
+        this.commit.setOutputEnabled(true)
+        this.live.reset()
+        this.live.resumeProbe()
+      }
+      this.renderLive()
+      return true
+    } catch (error) {
+      this.restoreClassicRenderer()
+      this.commitStatic(`显示切换失败，已恢复经典模式：${(error as Error).message}`)
+      return false
+    }
+  }
+
+  private restoreClassicRenderer(): void {
+    this.frontend.stopFullscreen()
+    this.overlay.setBorrowed(false)
+    this.commit.setOutputEnabled(true)
+    this.live.reset()
+    this.live.resumeProbe()
+  }
+
+  private async openDraftEditor(): Promise<void> {
+    if (this.editorActive || this.overlay.isActive()) return
+    const draft = this.inputLine.snapshot()
+    const full = this.frontend.isFullscreen
+    this.editorActive = true
+    try {
+      this.live.suppressProbe()
+      if (full) this.frontend.stopFullscreen()
+      else this.live.clearForCommit()
+      this.input.setSuspended(true)
+      this.stdout.write(ANSI.KITTY_KEYBOARD_OFF + '\x1B[?2004l' + ANSI.SHOW_CURSOR)
+      const text = await editDraftInEditor(this.inputLine.expandPastes(draft.value))
+      this.inputLine.restore(draft)
+      if (text !== null) this.inputLine.setValue(text)
+      this.commitStatic(text === null ? '编辑器失败，已恢复原草稿' : '已返回编辑器，尚未发送')
+    } catch (error) {
+      this.inputLine.restore(draft)
+      this.commitStatic(`编辑器交接失败，已恢复草稿：${(error as Error).message}`)
+    } finally {
+      this.input.setSuspended(false)
+      this.editorActive = false
+      try { this.stdout.write('\x1B[?2004h' + ANSI.KITTY_KEYBOARD_DISAMBIGUATE_ON) } catch { this.restoreClassicRenderer() }
+      if (full) {
+        try { this.frontend.startFullscreen(this.workflow.preferences.mouse) }
+        catch (error) { this.restoreClassicRenderer(); this.commitStatic(`编辑器返回后全屏恢复失败，已切经典模式：${(error as Error).message}`) }
+      }
+      else { this.live.reset(); this.live.resumeProbe() }
+      this.requestPump(); this.renderLive()
+    }
+  }
 
   /**
    * 首屏渲染：启动后立即绘制底部 chrome（GlanceBar + 输入框），
@@ -1654,6 +1857,7 @@ export class TuiApp {
     // 空闲期 CPR 探针：idle 无 ticker，2s 轮询光标驻停位置，检出外来写入后自愈。
     this.cprProbeTimer = setInterval(() => this.live.requestProbe(), 2000)
     this.cprProbeTimer.unref?.()
+    this.switchFrontendRenderer(this.workflow.preferences.renderer)
     this.renderLive()
   }
 
@@ -2016,6 +2220,8 @@ export class TuiApp {
    */
   notifyRunRejected(): void {
     this.agentBusy = false
+    this.currentTaskTitle = ''
+    this.frontend.record({ kind: 'error', text: '上一轮尚未收尾，这条没有发出 — 请重新发送' })
     this.setPhase('idle')
     this.commitAbove(() => {
       this.commit.write({
@@ -2129,6 +2335,9 @@ export class TuiApp {
 
   /** 激活 overlay */
   activateOverlay(id: string): boolean {
+    if (this.terminalRestored) return false
+    this.historyOpenGeneration++
+    if (this.historyOpening) { this.historyOpening = false; this.frontend.closeHistory() }
     // overlay 内 ESC 应即时响应，关闭输入处理器的 lone-ESC 超时。
     this.input.setEscapeImmediate(true)
     // 在激活任何全屏覆盖层之前，必须先干净地清除主屏幕底部的 live region（输入框和 GlanceBar），
@@ -2142,6 +2351,10 @@ export class TuiApp {
     if (id !== 'pager') this.planPreview = null
 
     switch (id) {
+      case 'help':
+      case 'ui-history':
+      case 'permissions':
+      case 'terminal-mode':
       case 'pager':
       case 'starmap':
       case 'command-palette':
@@ -2162,11 +2375,11 @@ export class TuiApp {
       case 'tasks': {
         this.overlayController.resetNav()
         // 单任务直进 detail（CC 对标）：只有一个 worker 时列表页没有信息增量
-        const data = this.getTasksData('running')
+        const data = this.getTasksData('all')
         const only = data.groups.length === 1 && data.groups[0]!.workers.length === 1
           ? data.groups[0]!.workers[0]
           : undefined
-        if (only) {
+        if (only?.owner === 'worker') {
           this.openWorkerDetail(only.workerId)
           return true
         }
@@ -2239,7 +2452,9 @@ export class TuiApp {
     const wasActive = this.overlay.isActive()
     if (!wasActive) return
     const closingId = this.overlay.activeId()
+    if (closingId === 'ui-history') this.frontend.closeHistory()
     const preview = this.planPreview
+    if (closingId === 'pager') this.detailPager = null
     this.suppressCommitRender = true
     try {
       this.overlay.deactivate()
@@ -2277,9 +2492,14 @@ export class TuiApp {
 
   /** 停用 overlay */
   deactivateOverlay(): void {
+    this.historyOpenGeneration++
+    if (this.historyOpening) { this.historyOpening = false; this.frontend.closeHistory() }
+    const returnTo = this.overlay.activeId() === 'pager' ? this.detailReturn : undefined
+    this.detailReturn = undefined
     // 统一收口：suppress 窗口让回放只写 scrollback，最后由本方法
     // 统一 renderLive 画唯一帧，避免两层框体叠影。
     this.exitOverlayCore()
+    if (returnTo) { Object.assign(this.overlayController.nav(), returnTo.nav); this.overlay.activate(returnTo.id); return }
     // 计划预览返回路径：exitOverlayCore 已按 returnTo 重开面板（choice-panel /
     // plan-picker），此处不得再做主屏恢复——写主屏会污染 alt screen。
     if (this.overlay.isActive()) return
@@ -2881,12 +3101,17 @@ export class TuiApp {
       this.overlay.rerender()
       return
     }
-    const result = this.settingsSave
-      ? this.settingsSave(request)
-      : { saved: [], errors: ['设置落盘通道未接线'] }
+    const suspend = request.blocks.includes('frontend') && request.draft.frontend?.renderer !== this.workflow.preferences.renderer
+    if (suspend) this.deactivateOverlay()
+    let result: SettingsSaveResult
+    try {
+      result = this.settingsSave ? this.settingsSave(request) : { saved: [], errors: ['设置落盘通道未接线'] }
+    } finally {
+      if (suspend) this.activateOverlay('settings')
+    }
     flow.commitSaved(result)
     const parts: string[] = []
-    if (result.saved.length > 0) parts.push(`✓ 设置已保存：${result.saved.join(', ')}（除审批模式外均下次会话生效）`)
+    if (result.saved.length > 0) parts.push(`✓ 设置已保存：${result.saved.join(', ')}（生效时机见字段说明）`)
     if (result.errors.length > 0) parts.push(`⚠ 设置保存失败：${result.errors.join('；')}`)
     this.settingsNotice = parts.join('\n')
     this.overlay.rerender()
@@ -3002,13 +3227,9 @@ export class TuiApp {
    * delegation is in flight.
    */
   getTasksData(filter?: TasksFilter): TasksData {
-    const activeFilter = filter ?? this.overlayController.nav().tasksFilter ?? 'running'
+    const activeFilter = filter ?? this.overlayController.nav().tasksFilter ?? 'all'
     const now = Date.now()
-    const source = activeFilter === 'running'
-      ? this.fleet.getActiveWorkers(now)
-      : activeFilter === 'completed'
-        ? this.fleet.getCompletedWorkers(now)
-        : this.fleet.getAllWorkers(now, 'all')
+    const source = this.fleet.getAllWorkers(now, 'all')
     const byParent = new Map<string, TasksWorkerRow[]>()
     for (const w of source) {
       const arr = byParent.get(w.parentToolId) ?? []
@@ -3036,7 +3257,10 @@ export class TuiApp {
         : this.fleet.getGroupProgress(parentToolId)
       groups.push({ parentToolId, total: p.total, done: p.done, failed: p.failed, running: p.running, workers })
     }
-    return { groups, filter: activeFilter, completedCount: this.fleet.completedSize() }
+    return projectUnifiedTasks({ groups, filter: activeFilter, completedCount: this.fleet.completedSize() }, {
+      main: this.currentTaskTitle ? { active: this.isAgentActive(), title: this.currentTaskTitle, status: this.isAgentRunSettling() ? 'stopping' : this.approvalIntentController.approvalPending || this.pendingPlanApproval ? 'awaiting-approval' : this.pendingAskFlow ? 'awaiting-input' : this.isAgentActive() ? 'running' : this.mainTaskFailed ? 'failed' : this.mainTaskStopped ? 'stopped' : 'completed', elapsedMs: Math.max(0, (this.mainTaskEnded ?? now) - this.state.turnStartMs) } : undefined,
+      jobs: this.jobsModel.rows(), now,
+    })
   }
 
   private deriveGroupProgress(parentToolId: string, workers: TasksWorkerRow[]): import('../fleet-registry.js').FleetGroupProgress {
@@ -3190,8 +3414,11 @@ export class TuiApp {
    */
   private handleOverlayKey(key: { name: string; char: string; ctrl?: boolean; meta?: boolean; shift?: boolean }): boolean {
     const id = this.overlay.activeId()
+    if (id === 'terminal-mode') { this.modePanel.handleKey(key as KeyPress); this.overlay.rerender(); return true }
+    if (id === 'permissions' && this.permissionPanel) { this.permissionPanel.handleKey(key as KeyPress); this.overlay.rerender(); return true }
+    if (id === 'help') { this.helpPanel.handleKey(key as KeyPress); this.overlay.rerender(); return true }
     const c = key.char.toLowerCase()
-    const isSearch = id === 'command-palette' || id === 'history-search'
+    const isSearch = id === 'command-palette' || id === 'history-search' || id === 'pager' && this.overlayController.nav().pagerMode === 'search'
 
     // Dedicated vision bridge wizard. It has no provider probe or config write path:
     // injected executor calls the same discovery/onboarding service boundary as Desktop.
@@ -3432,6 +3659,8 @@ export class TuiApp {
     if (id === 'settings' && this.settingsFlow) {
       const flow = this.settingsFlow
       const editing = flow.isTextEditing()
+      if (key.name === 'ctrl_s') { if (editing) flow.activate(); this.commitSettingsSave(); return true }
+      if (!editing && c === '/') { flow.startSearch(); this.overlay.rerender(); return true }
       if (key.name === 'escape') {
         if (flow.cancel() === 'closed') this.closeSettings()
         else this.overlay.rerender()
@@ -3580,64 +3809,22 @@ export class TuiApp {
 
     if (id === 'tasks') {
       const nav = this.overlayController.nav()
-      const data = this.getTasksData(nav.tasksFilter)
-      const selectable = data.groups.flatMap(g => g.workers.map(w => w.workerId))
-      const count = selectable.length
-
-      // filter 循环（与 cockpit/picker 同键位语义）：→/Tab 正向，←/Shift+Tab 反向
-      const cycleFilter = (dir: 1 | -1): boolean => {
-        const filters: TasksFilter[] = ['running', 'completed', 'all']
-        const next = (filters.indexOf(nav.tasksFilter) + dir + filters.length) % filters.length
-        nav.tasksFilter = filters[next]!
-        nav.tasksIndex = 0
-        this.overlay.rerender()
-        return true
-      }
-      if (key.name === 'right' || (key.name === 'tab' && !key.shift)) return cycleFilter(1)
-      if (key.name === 'left' || (key.name === 'tab' && key.shift)) return cycleFilter(-1)
-      if (key.name === 'down' || c === 'j') {
-        if (count > 0) {
-          nav.tasksIndex = (nav.tasksIndex + 1) % count
+      return handleTasksKey(key, this.getTasksData(nav.tasksFilter), nav, {
+        render: () => this.overlay.rerender(),
+        open: row => {
+          if (row.workerId === 'main') this.performFrontendAction('history')
+          else if (row.workerId.startsWith('job:')) this.openJobDetail(row.workerId.slice(4))
+          else this.openWorkerDetail(row.workerId)
+        },
+        foreground: id => { this.deactivateOverlay(); this.enterWorkerView(id) },
+        stop: row => {
+          const id = row.workerId
+          if (id === 'main') this.handleAbort()
+          else if (id.startsWith('job:')) this.jobKill?.(id.slice(4))
+          else if (this.workerKill?.(id)) this.commitStatic(color(`⊗ 已发送停止信号: ${shortOrderLabel(id)}`, this.theme.warning))
           this.overlay.rerender()
-        }
-        return true
-      }
-      if (key.name === 'up' || c === 'k') {
-        if (count > 0) {
-          nav.tasksIndex = (nav.tasksIndex - 1 + count) % count
-          this.overlay.rerender()
-        }
-        return true
-      }
-      if (key.name === 'return' && count > 0) {
-        const workerId = selectable[nav.tasksIndex]
-        if (workerId) {
-          this.openWorkerDetail(workerId)
-        }
-        return true
-      }
-      // f：切入选中 worker 的实时视图（foreground，CC teammate 视图对标）
-      if (c === 'f' && count > 0) {
-        const workerId = selectable[nav.tasksIndex]
-        if (workerId) {
-          this.deactivateOverlay()
-          this.enterWorkerView(workerId)
-        }
-        return true
-      }
-      // x：停止选中的 worker（per-worker AbortController，由 main.ts 接线）
-      if (c === 'x' && count > 0) {
-        const workerId = selectable[nav.tasksIndex]
-        if (workerId && this.workerKill) {
-          const killed = this.workerKill(workerId)
-          if (killed) {
-            this.commitStatic(color(`⊗ 已发送停止信号: ${shortOrderLabel(workerId)}`, this.theme.warning))
-            this.overlay.rerender()
-          }
-        }
-        return true
-      }
-      return false
+        },
+      })
     }
 
     if (id === 'jobs') {
@@ -3687,10 +3874,7 @@ export class TuiApp {
         if (row && this.jobKill) {
           const ok = this.jobKill(row.id)
           if (ok) {
-            this.jobsModel.apply({
-              kind: 'exit',
-              job: { id: row.id, command: row.command, status: 'killed', startedAt: row.startedAt, endedAt: Date.now(), lastLine: 'stopped by user' }
-            })
+            this.commitStatic('已发送停止信号；等待后台任务实际退出')
             this.overlay.rerender()
           }
         }
@@ -3704,126 +3888,9 @@ export class TuiApp {
     }
 
     if (id === 'pager') {
-      const nav = this.overlayController.nav()
-      const total = this.pagerTotalPages()
-      const mode = nav.pagerMode
-      const messages = this.overlayController.getData()?.pagerContent?.().messages ?? []
-
-      // Search mode: character input
-      if (mode === 'search') {
-        if (key.name === 'escape') {
-          nav.pagerMode = 'page'
-          nav.pagerSearchQuery = ''
-          nav.pagerSearchCurrent = 0
-          this.overlay.rerender()
-          return true
-        }
-        if (key.name === 'backspace') {
-          this.editOverlayQuery(null)
-          this.updatePagerSearch(messages)
-          this.overlay.rerender()
-          return true
-        }
-        if (key.name === 'return') {
-          // Confirm search and jump to first match
-          this.updatePagerSearch(messages)
-          this.overlay.rerender()
-          return true
-        }
-        if (key.name === 'down' || c === 'j' || key.name === 'pagedown') {
-          const next = findNextMatch(messages, nav.pagerSearchCurrent - 1, nav.pagerSearchQuery)
-          nav.pagerSearchCurrent = next + 1
-          this.overlay.rerender()
-          return true
-        }
-        if (key.name === 'up' || c === 'k' || key.name === 'pageup') {
-          const next = findPrevMatch(messages, nav.pagerSearchCurrent - 1, nav.pagerSearchQuery)
-          nav.pagerSearchCurrent = next + 1
-          this.overlay.rerender()
-          return true
-        }
-        if (this.isPrintableKey(key)) {
-          this.editOverlayQuery(key.char)
-          this.updatePagerSearch(messages)
-          this.overlay.rerender()
-          return true
-        }
-        return false
-      }
-
-      // Message mode: navigate by message
-      if (mode === 'message') {
-        if (key.name === 'escape') {
-          nav.pagerMode = 'page'
-          this.overlay.rerender()
-          return true
-        }
-        const count = messages.length
-        let idx = nav.pagerSelectedMessage
-        if (key.name === 'down' || c === 'j') idx = Math.min(idx + 1, count - 1)
-        else if (key.name === 'up' || c === 'k') idx = Math.max(idx - 1, 0)
-        else if (key.name === 'home') idx = 0
-        else if (key.name === 'end') idx = count - 1
-        else return false
-        nav.pagerSelectedMessage = idx
-        this.overlay.rerender()
-        return true
-      }
-
-      // Page mode
-      if (c === '/') {
-        nav.pagerMode = 'search'
-        nav.pagerSearchQuery = ''
-        nav.pagerSearchCurrent = 0
-        this.overlay.rerender()
-        return true
-      }
-      if (c === 'm' && messages.length > 0 && !this.planPreview) {
-        nav.pagerMode = 'message'
-        // Select the message nearest to the current page start
-        const pageSize = Math.max(1, this.rows - 4)
-        nav.pagerSelectedMessage = Math.min(nav.pagerPage * pageSize, messages.length - 1)
-        this.overlay.rerender()
-        return true
-      }
-      if (c === 'n' && nav.pagerSearchQuery) {
-        nav.pagerMode = 'search'
-        const next = findNextMatch(messages, nav.pagerSearchCurrent - 1, nav.pagerSearchQuery)
-        nav.pagerSearchCurrent = next + 1
-        this.overlay.rerender()
-        return true
-      }
-      if (c === 'N' && nav.pagerSearchQuery) {
-        nav.pagerMode = 'search'
-        const next = findPrevMatch(messages, nav.pagerSearchCurrent - 1, nav.pagerSearchQuery)
-        nav.pagerSearchCurrent = next + 1
-        this.overlay.rerender()
-        return true
-      }
-      // verbose 层：切换完整工具输出视图（内容源改变 → 回到首页）。
-      // 计划预览态无 verbose/message 可切（内容是纯 markdown，provider 的
-      // plan 分支排最前，翻了状态也只污染 nav）——吞掉按键防困惑。
-      if (c === 'v') {
-        if (this.planPreview) return true
-        nav.pagerVerbose = !nav.pagerVerbose
-        nav.pagerPage = 0
-        nav.pagerSelectedMessage = 0
-        this.overlay.rerender()
-        return true
-      }
-      const cur = nav.pagerPage
-      let next = cur
-      if (key.name === 'down' || key.name === 'pagedown' || c === 'j') next = cur + 1
-      else if (key.name === 'up' || key.name === 'pageup' || c === 'k') next = cur - 1
-      else if (key.name === 'home') next = 0
-      else if (key.name === 'end') next = total - 1
-      else return false
-      next = Math.max(0, Math.min(total - 1, next))
-      if (next !== cur) {
-        nav.pagerPage = next
-        this.overlay.rerender()
-      }
-      return true
+      return handlePagerKey(key, { nav: this.overlayController.nav(), rows: this.rows,
+        data: this.detailPager ?? this.overlayController.getData()?.pagerContent?.() ?? {content: '', page: 0},
+        preview: !!(this.planPreview || this.detailPager), rerender: () => this.overlay.rerender() })
     }
 
     if (id === 'command-palette') {
@@ -3942,6 +4009,11 @@ export class TuiApp {
     if (id === 'chronicle') {
       const count = this.overlayController.getData()?.chronicleEntries?.().entries.length ?? 0
       const cur = this.overlayController.nav().chronicleIndex
+      if (key.name === 'space' || key.char === ' ') {
+        const entry = this.overlayController.getData()?.chronicleEntries?.().entries[cur]
+        if (entry?.id) void previewFrontendSession(this.sessionCwd ?? process.cwd(), entry.id).then(text => { if (this.overlay.activeId() === 'chronicle' && this.overlayController.nav().chronicleIndex === cur) this.openTextDetail(`会话预览 · ${entry.summary}`, text) })
+        return true
+      }
       if (key.name === 'down') {
         if (count > 0) { this.overlayController.nav().chronicleIndex = Math.min(cur + 1, count - 1); this.overlay.rerender() }
         return true
@@ -4052,16 +4124,16 @@ export class TuiApp {
         : undefined
       if (key.name === 'return') {
         const entry = count > 0 ? data?.entries[cur] : undefined
-        if (entry && this.overlayController.getModelPickerSaveDefaultExec()) {
-          this.overlayController.getModelPickerSaveDefaultExec()?.(entry.provider, entry.id, effortChange)
+        if (entry && this.overlayController.getModelPickerExec()) {
+          this.overlayController.getModelPickerExec()?.(entry.provider, entry.id, effortChange)
         }
         this.deactivateOverlay()
         return true
       }
       if (c === 's') {
         const entry = count > 0 ? data?.entries[cur] : undefined
-        if (entry && this.overlayController.getModelPickerExec()) {
-          this.overlayController.getModelPickerExec()?.(entry.provider, entry.id, effortChange)
+        if (entry && this.overlayController.getModelPickerSaveDefaultExec()) {
+          this.overlayController.getModelPickerSaveDefaultExec()?.(entry.provider, entry.id, effortChange)
         }
         this.deactivateOverlay()
         return true
@@ -4388,23 +4460,6 @@ export class TuiApp {
     this.overlay.rerender()
   }
 
-  /** 同步 pager 搜索 query 与匹配状态。 */
-  private updatePagerSearch(messages: readonly import('../scrollback-transcript.js').TranscriptMessage[]): void {
-    const nav = this.overlayController.nav()
-    const query = this.overlayController.getQuery()
-    nav.pagerSearchQuery = query
-    const matches = searchTranscript(messages, query)
-    nav.pagerSearchCurrent = matches.length > 0 ? matches[0]! + 1 : 0
-  }
-
-  /** pager 总页数（与 renderPager 同口径：pageSize = rows - 4）。 */
-  private pagerTotalPages(): number {
-    const content = this.overlayController.getData()?.pagerContent?.().content ?? ''
-    const lines = content.split('\n').length
-    const pageSize = Math.max(1, this.rows - 4)
-    return Math.max(1, Math.ceil(lines / pageSize))
-  }
-
   /** 获取终端尺寸 */
   getSize(): { cols: number; rows: number } {
     return { cols: this.columns, rows: this.rows }
@@ -4419,10 +4474,13 @@ export class TuiApp {
   restoreTerminalSync(): void {
     if (this.terminalRestored) return
     this.terminalRestored = true
+    this.historyOpenGeneration++
+    if (this.historyOpening) { this.historyOpening = false; this.frontend.closeHistory() }
     try {
       // 备用屏只在确实处于激活态时才退出：无条件发 ?1049l 会让部分终端跳到
       // 一个陈旧的保存光标位置。
-      if (this.overlay.isActive()) this.stdout.write(ANSI.ALT_SCREEN_OFF)
+      if (this.frontend.isFullscreen) this.frontend.stopFullscreen()
+      else if (this.overlay.isActive()) this.stdout.write(ANSI.ALT_SCREEN_OFF)
       this.stdout.write('\x1B[?2004l')
       // 弹出 Kitty keyboard protocol（与 start() 的 DISAMBIGUATE_ON 成对），
       // 避免把增强键盘状态遗留给 shell/后续程序。
@@ -4467,9 +4525,16 @@ export class TuiApp {
   setScreenReader(enabled: boolean): void {
     if (this.screenReader === enabled) return
     this.screenReader = enabled
+    if (enabled && this.frontend.isFullscreen) { this.frontend.stopFullscreen(); this.overlay.setBorrowed(false); this.commit.setOutputEnabled(true); this.live.reset() }
     // 立刻收敛：开启时要把已经画在屏上的动态段擦掉，关闭时要让 ticker 重新起转。
     this.updateTicker()
     this.forceRedraw()
+  }
+
+  setVerbose(enabled: boolean): void {
+    this.flushToolGroup()
+    this.flushBashGroup()
+    this.verboseToolOutput = enabled
   }
 
   /** 当前是否处于读屏档。 */
@@ -4479,6 +4544,7 @@ export class TuiApp {
 
   /** 将静态文本提交到 scrollback（slash command 输出等） */
   commitStatic(text: string, opts?: { isError?: boolean }): void {
+    this.frontend.record({ kind: opts?.isError ? 'error' : 'boundary', text, isError: opts?.isError })
     // isError：错误类系统消息以 ✗ + error 色高亮，避免与普通输出混为一谈。
     const out = opts?.isError
       ? text.split('\n').map((l, i) => color(i === 0 ? `✗ ${l}` : l, this.theme.error)).join('\n')
@@ -4645,6 +4711,7 @@ export class TuiApp {
       && !this.mainCommitPumping
       && !this.overlay.isActive()
       && !this.outputFrozen
+      && !this.editorActive
     ) {
       try {
         this.atomicCommitNow(ready)
@@ -4671,7 +4738,7 @@ export class TuiApp {
     const canCork = typeof s.cork === 'function' && typeof s.uncork === 'function'
     if (canCork) s.cork()
     try {
-      this.live.clearForCommit()
+      if (!this.frontend.isFullscreen) this.live.clearForCommit()
       write()
       if (!this.suppressCommitRender) this.writeBatcher.flushNow()
     } finally {
@@ -4692,6 +4759,7 @@ export class TuiApp {
       || this.mainCommitQueue.length === 0
       || this.overlay.isActive()
       || this.outputFrozen
+      || this.editorActive
     ) return
     this.mainCommitPumping = true
     const pump = this.drainMainCommits()
@@ -4727,7 +4795,7 @@ export class TuiApp {
       }
       // await 期间 overlay 可能（重）激活——主屏内容绝不可写进 alt screen。
       // 输出冻结期同理：主屏写入排队，解冻后由 requestPump 续排。
-      if (this.overlay.isActive() || this.outputFrozen) return
+      if (this.editorActive || this.overlay.isActive() || this.outputFrozen) return
       this.mainCommitQueue.shift()
       let written = true
       try {
@@ -4759,8 +4827,10 @@ export class TuiApp {
    * 表示写入是否成功。
    */
   private commitUserPrompt(content: string, images?: string[]): Promise<boolean> | null {
+    if (!this.isAgentActive()) { this.currentTaskTitle = content.split('\n')[0]!.slice(0, 80); this.mainTaskFailed = false; this.mainTaskStopped = false; this.mainTaskEnded = undefined }
+    this.frontend.record({ kind: 'user', text: content + (images?.length ? `\n[${images.length}张图片附件]` : '') })
     const protocol = imageProtocol()
-    const withImages = images && images.length > 0 && protocol !== 'none'
+    const withImages = !this.frontend.isFullscreen && images && images.length > 0 && protocol !== 'none'
     if (!withImages) {
       return this.enqueueMainCommit(() => this.writeUserBubbleLines(content, images))
     }
@@ -5022,7 +5092,8 @@ export class TuiApp {
    * 直写 stdout 在 /tui/engine/ 白名单内（见 architecture-guards）。
    */
   clearScreen(): void {
-    process.stdout.write('\x1B[2J\x1B[H')
+    this.stdout.write('\x1B[2J\x1B[H')
+    this.frontend.clearDisplay()
     this.live.reset()
     this.resetLiveHighWater()
     this.renderLive()
@@ -5322,10 +5393,10 @@ export class TuiApp {
 
     // 工具折叠组：read/search 与可折叠 bash 各走各的 buffer，互相打断。
     // non-collapsible（含变更型 bash）到达时 flush 两个组。
-    if (isCollapsibleTool(name)) {
+    if (!this.verboseToolOutput && isCollapsibleTool(name)) {
       if (this.toolGroupController.isActiveBashGroup()) this.flushBashGroup()
       this.toolGroupController.pushUse(id, name, input)
-    } else if (name === 'bash' && isCollapsibleBashCommand(input.command as string)) {
+    } else if (!this.verboseToolOutput && name === 'bash' && isCollapsibleBashCommand(input.command as string)) {
       if (this.toolGroupController.isActiveGroup()) this.flushToolGroup()
       this.toolGroupController.pushBashUse(id, input.command as string, Date.now())
     } else {
@@ -5345,7 +5416,7 @@ export class TuiApp {
     const group = this.toolGroupController.flushGroup()
     if (!group || group.entries.length === 0) return
     flushPendingAssistantText(this.blockWriter, this.streamRenderer)
-    const formatted = formatCollapsedGroup({ group, theme: this.theme })
+    const formatted = formatCollapsedGroup({ group, columns: this.columns, theme: this.theme, expandHint: toolExpandHint(this.workflow.preferences) })
     this.commitBlock(formatted.join('\n'))
   }
 
@@ -5354,7 +5425,7 @@ export class TuiApp {
     const group = this.toolGroupController.flushBashGroup()
     if (!group || group.entries.length === 0) return
     flushPendingAssistantText(this.blockWriter, this.streamRenderer)
-    const formatted = formatCollapsedBashGroup({ group, theme: this.theme })
+    const formatted = formatCollapsedBashGroup({ group, columns: this.columns, theme: this.theme, expandHint: toolExpandHint(this.workflow.preferences) })
     this.commitBlock(formatted.join('\n'))
   }
 
@@ -5635,7 +5706,7 @@ export class TuiApp {
     const finalContent = toolAcc ? toolAcc + displayContent : displayContent
 
     // 可折叠 tool（read/grep/glob/repo_map 等探索型）：按 toolUseId 绑定结果到折叠组
-    if (isCollapsibleTool(name)) {
+    if (!this.verboseToolOutput && isCollapsibleTool(name)) {
       // G4 修复：buffer 已被 flush（如 write 打断），迟到 result 自动开新组
       if (!this.toolGroupController.isActiveGroup()) {
         this.toolGroupController.pushUse(id, name, meta?.input ?? {})
@@ -5647,7 +5718,7 @@ export class TuiApp {
     }
 
     // 可折叠 bash：成功则绑定到组延迟渲染；错误则把前面成功命令摘要后单独渲染错误卡片
-    if (name === 'bash' && this.toolGroupController.hasBashEntry(id)) {
+    if (!this.verboseToolOutput && name === 'bash' && this.toolGroupController.hasBashEntry(id)) {
       if (isError) {
         this.toolGroupController.detachBashEntry(id)
         this.flushBashGroup()
@@ -5693,17 +5764,21 @@ export class TuiApp {
     }
 
     const cardInput = {
+      expandHint: toolExpandHint(this.workflow.preferences),
       toolName: name,
+      columns: this.columns,
       content: finalContent,
       isError,
       rawPath,
       toolInput: meta?.input,
       elapsedMs: meta ? Date.now() - meta.startMs : undefined,
+      expanded: this.verboseToolOutput,
+      showParameters: this.verboseToolOutput,
     }
     const formatted = formatToolCard(cardInput, this.theme)
 
     // 记录截断结果供 ctrl+o 展开
-    if (isToolCardTruncated(cardInput)) {
+    if (!this.verboseToolOutput && isToolCardTruncated(cardInput)) {
       this.toolGroupController.setLastTruncatedTool({
         toolName: name,
         content: finalContent,
@@ -5732,7 +5807,7 @@ export class TuiApp {
     if (collapsed) {
       const g = collapsed
       this.toolGroupController.clearLastCollapsedGroup()
-      const formatted = formatCollapsedGroup({ group: g, expanded: true, theme: this.theme })
+      const formatted = formatCollapsedGroup({ group: g, columns: this.columns, expanded: true, theme: this.theme })
       this.commitBlock(formatted.join('\n'))
       return
     }
@@ -5742,7 +5817,7 @@ export class TuiApp {
       const g = this.toolGroupController.flushGroup()
       if (g) {
         this.toolGroupController.clearLastCollapsedGroup()
-        const formatted = formatCollapsedGroup({ group: g, expanded: true, theme: this.theme })
+        const formatted = formatCollapsedGroup({ group: g, columns: this.columns, expanded: true, theme: this.theme })
         this.commitBlock(formatted.join('\n'))
         return
       }
@@ -5752,7 +5827,7 @@ export class TuiApp {
     if (collapsedBash) {
       const g = collapsedBash
       this.toolGroupController.clearLastCollapsedBashGroup()
-      const formatted = formatCollapsedBashGroup({ group: g, expanded: true, theme: this.theme })
+      const formatted = formatCollapsedBashGroup({ group: g, columns: this.columns, expanded: true, theme: this.theme })
       this.commitBlock(formatted.join('\n'))
       return
     }
@@ -5762,6 +5837,7 @@ export class TuiApp {
     this.toolGroupController.clearLastTruncatedTool()
     const formatted = formatToolCard({
       toolName: t.toolName,
+      columns: this.columns,
       content: t.content,
       isError: t.isError,
       rawPath: t.rawPath,
@@ -5807,10 +5883,12 @@ export class TuiApp {
 
     if (isFinal) {
       // Reset state
+      this.mainTaskEnded = Date.now()
       this.agentBusy = false
       this.lastSubmittedText = null // 回合成功 settle——错误回填底料作废
       // 收尾段 thinking 不落 scrollback（正文答案即收尾），但留存供 ctrl+t 回看。
       if (this.state.thinkingText) {
+        this.frontend.record({ kind: 'thinking', text: this.state.thinkingText })
         this.thinkingReview.save({
           text: this.state.thinkingText,
           elapsedMs: Date.now() - this.state.thinkStartMs,
@@ -5828,10 +5906,11 @@ export class TuiApp {
       const elapsed = Date.now() - this.state.turnStartMs
       const summary = formatTurnWorkSummary({
         elapsedMs: elapsed,
-        inputTokens: usage.input_tokens ?? 0,
-        outputTokens: usage.output_tokens ?? 0,
+        inputTokens: usage.input_tokens,
+        outputTokens: usage.output_tokens,
       }, this.theme)
       this.commitBlock(summary)
+      this.frontend.record({ kind: 'notice', name: 'turn-complete', text: summary })
 
       // /handoff 归档：交接 turn 产出项目内文档后，拷贝到会话目录 <id>.handoff.md
       // （loadPrevHandoff 注入管线认的位置）。注入默认关闭（并行会话安全，
@@ -6082,6 +6161,10 @@ export class TuiApp {
   }
 
   private handleAbort(reason?: string): void {
+    this.frontend.flushText()
+    this.frontend.record({ kind: 'error', text: reason ?? '已中止当前执行' })
+    this.mainTaskStopped = true
+    this.mainTaskEnded = Date.now()
     // 用户主动 abort（非 watchdog 守护）= 参与——取消倒计时自动批准
     if (!reason?.startsWith('watchdog')) this.cancelPlanAutoApprove()
     // 中断走自有回填路径（abortSettling backfill）——错误回填底料作废，防双份回填
@@ -6233,9 +6316,9 @@ export class TuiApp {
     const key = `${separator}|${innerWidth}|${borderColor}`
     if (this.inputChromeMemo?.key === key) return this.inputChromeMemo
     const chars = boxCharsFor(separator)
-    const leftBar = color(chars.v + ' ', borderColor)
-    const rightBar = color(' ' + chars.v, borderColor)
-    const botBorder = color(`${chars.bl}${chars.h.repeat(innerWidth + 2)}${chars.br}`, borderColor)
+    const leftBar = '  '
+    const rightBar = '  '
+    const botBorder = color(chars.h.repeat(Math.floor((innerWidth + 4) / displayWidth(chars.h, { ambiguousAsWide: ambiguousWideEnabled() }))), borderColor)
     this.inputChromeMemo = { key, leftBar, rightBar, botBorder }
     return { leftBar, rightBar, botBorder }
   }
@@ -6292,39 +6375,7 @@ export class TuiApp {
     return Math.ceil(dw / width)
   }
 
-  /**
-   * 动态区高度预算（display rows）。renderLive 把动态段垫高/截断到恰好该值。
-   *
-   * 高水位记的是 **live region 总高度**（动态 + chrome），不是只记动态段。
-   * slash 提示、权限行、todo 面板都在 chrome：只钉动态段时，chrome 一关总高度
-   * 就掉，输入框上跳——用户看到「有时贴底、有时又浮起来」。chrome 关掉后用
-   * 动态垫行补差额，总高度只涨不缩，输入框屏幕坐标才稳。
-   *
-   * 封顶 `liveMaxRowsFor`（与 LiveEngine.maxRows 同口径）。不再额外减 2：
-   * 那 2 行会在 visor 贴满时变成输入框底下的黑洞。
-   *
-   * 高度一旦缩小，相对定位下就是输入框上跳——`clearForCommit` 按旧高度擦到屏末，
-   * 写回的 commit 正文 + 新 region 填不满，差额留成屏底黑洞。而空闲期动态内容
-   * 本就归零（thinking / 工具卡 / 子代理面板全部退场），预算若跟着归零，落差就
-   * 等于本轮动态内容的峰值：实测 40 行终端达 20+ 行，输入框每轮在屏底与屏幕中部
-   * 之间往返一次。反过来空闲期按 ceiling 恒垫满（更早的实现）也只是把这一跳挪到
-   * 下一轮提交时刻，同样弹，且把刚提交的正文顶出可视区。
-   *
-   * 代价：稳态下输入框上方保留「本会话用过的最大 live 高度」那么多空白，它是下一轮
-   * 的预留位——内容到来时原地填入、输入框不动，正是定高视口要买的东西。不跳与
-   * 空白是同一件事的两面：高度恒定 ⟺ 空白 = 峰值 − 当前内容，两者都要就只能把
-   * 峰值本身压小（进行中工具卡每个占「标题 + 末 3 行输出」，并发几个就二十行）。
-   *
-   * 曾试过给垫高加一道小上限（8 行）以省空白，超限内容按实际高度走：常规轮次确实
-   * 稳，但工具密集时峰值 20+ 行远超上限，每次工具起落照样弹一次。上限对不上峰值
-   * 就等于没有，故取消——压峰值的活见
-   * docs/plans/2026-08-03-tui-subagent-workflow-display-cc-parity.md。
-   *
-   * turn 0 欢迎首帧仍返回 0：尚未开过 slash、高水位也是 0 时不垫——欢迎屏与
-   * 输入框之间凭空空白比自然流难看。一旦 slash 菜单/提示入场（或高水位已抬），
-   * 与 tianshu-public 同口径：抬高水位并用垫行吸收开合差额，输入框下落一次后
-   * 钉住，取消命令不再弹回。
-   */
+  /** Classic live chrome keeps a bounded high-water height; fullscreen owns its fixed grid. */
   private getDynamicBudget(chromeRows: number, dynamicRows: number): number {
     const welcomeIdle = this.state.phase === 'idle' && this.state.turnNumber === 0
     const slashOverlay = this.inputController.slashMenu.open || this.inputLine.value.startsWith('/')
@@ -6341,7 +6392,7 @@ export class TuiApp {
     // 状态行恰在段首，会被 cap 截掉——那是 2d8b67ca 事故要防的观感（明明在等
     // 用户按 y/n，界面却不说在等什么）。审批期间用引擎上限兜底，审批结束后
     // 高水位回落半屏 cap，输入框一次性小幅上跳，可接受。
-    const effectiveCap = this.approvalIntentController.approvalPending ? liveMaxRowsFor(rows) : cap
+    const effectiveCap = this.approvalIntentController.approvalPending || this.pendingPlanApproval || slashOverlay || this.liveRowsHighWater > cap ? liveMaxRowsFor(rows) : cap
     this.liveRowsHighWater = Math.min(effectiveCap, Math.max(this.liveRowsHighWater, total))
     return Math.max(0, this.liveRowsHighWater - chromeRows)
   }
@@ -6386,20 +6437,18 @@ export class TuiApp {
   private clampLine(text: string, maxWidth = this.columns): string {
     // 留 1 列余量：吸收 get-east-asian-width 判为 neutral、但个别 CJK 终端仍按 2 列
     // 渲染的几何符（如 ◧）带来的 +1 残余误差。
-    return truncateToDisplayWidth(text, Math.max(1, maxWidth - 1), { ambiguousAsWide: true })
+    return truncateToDisplayWidth(text, Math.max(1, maxWidth - 1), { ambiguousAsWide: ambiguousWideEnabled() })
   }
 
   /**
    * 构造输入框的一行（左右竖边框 + 内容 + padding 到 innerWidth）。
    *
-   * 与 clampLine 同口径（wide 上界）：截断与 padding 都按 ambiguousAsWide 度量，
-   * 保证含 `— … · → ↑ ↓` 等 East-Asian Ambiguous 符号的输入行在 CJK 终端
-   * （这些符号按 2 列渲染）也严格 ≤ columns → 不折行 → rowsForLine 计数正确，
-   * 避免 fullRewrite 回顶欠擦导致的输入框重影（paste / 历史导航）。
+   * 截断、padding 和光标按当前终端的 ambiguous 字宽统一度量，
+   * 保证含 `— … · → ↑ ↓` 的输入行边框对齐且不意外折行。
    * box-drawing（│）恒按 1 列（width.ts isBoxOrBlock），不受影响。
    */
   private renderInputRow(content: string, innerWidth: number, leftBar: string, rightBar: string): string {
-    const opts = { ambiguousAsWide: true }
+    const opts = { ambiguousAsWide: ambiguousWideEnabled() }
     const truncated = truncateToDisplayWidth(content, innerWidth, opts)
     const pad = Math.max(0, innerWidth - displayWidth(truncated, opts))
     return `${leftBar}${truncated}${' '.repeat(pad)}${rightBar}`
@@ -6420,11 +6469,11 @@ export class TuiApp {
     const RESET = '\x1B[0m'
     for (let i = 0; i < totalRows; i++) {
       const mainRaw = lines[i]?.text ?? ''
-      const mainTrunc = truncateToDisplayWidth(mainRaw, contentCols, { ambiguousAsWide: true })
-      const mainPad = Math.max(0, contentCols - displayWidth(mainTrunc, { ambiguousAsWide: true }))
+      const mainTrunc = truncateToDisplayWidth(mainRaw, contentCols, { ambiguousAsWide: ambiguousWideEnabled() })
+      const mainPad = Math.max(0, contentCols - displayWidth(mainTrunc, { ambiguousAsWide: ambiguousWideEnabled() }))
       const panelRaw = panelLines[i] ?? ''
       const panelPad = panelRaw ? '' : ' '.repeat(panelWidth)
-      merged.push({ text: `${mainTrunc}${RESET}${' '.repeat(mainPad)}${panelRaw}${panelPad}` })
+      merged.push({ ...lines[i], text: `${mainTrunc}${RESET}${' '.repeat(mainPad)}${panelRaw}${panelPad}` })
     }
     return merged
   }
@@ -6440,7 +6489,7 @@ export class TuiApp {
     // start() 之前所有 setter / 用户输入回调都不应触发真正的 stdout 输出。
     // 构造后到 main.ts 清屏写欢迎屏之间若渲染一版输入框，旧帧可能残留在
     // 欢迎屏上方形成重影；统一在 start() 置 started=true 后才开始绘制。
-    if (!this.started) return
+    if (!this.started || this.editorActive || this.terminalRestored) return
     // 同步终端实际尺寸：ResizeHandler 的 resize 回调有 150ms debounce，
     // 在 debounce 窗口内 stdout.columns/rows 已变而 this.columns/rows 仍是旧值。
     // 若此时触发渲染，renderLiveImpl 按旧宽布局而 LiveEngine 按 stdout 新宽估算
@@ -6492,25 +6541,16 @@ export class TuiApp {
     // Metrics 供 side panel 与 GlanceBar 共享，提前计算。
     const metrics = this.metricsGlanceController.metricsProvider?.() ?? null
     let glanceCacheHitRate: number | undefined
-    let glanceCacheStatus: CacheStatus | undefined
-    let glanceContextRatio: number | undefined
     let glanceCost: number
     let glanceEstimatedTokens: number | undefined
-    let glanceConversationTokens: number | undefined
     let glanceMaxTokens: number | undefined
-    let glancePricingPhase: 'peak' | 'offpeak' | undefined
     if (metrics) {
       glanceCacheHitRate = metrics.cacheHitRate ?? undefined
-      glanceCacheStatus = metrics.cacheStatus
-      glanceContextRatio = metrics.maxTokens > 0 ? Math.min(1, metrics.estimatedTokens / metrics.maxTokens) : undefined
       glanceCost = metrics.cost
       glanceEstimatedTokens = metrics.estimatedTokens
-      glanceConversationTokens = metrics.conversationTokens
       glanceMaxTokens = metrics.maxTokens
-      glancePricingPhase = metrics.pricingPhase
     } else {
       glanceCacheHitRate = this.metricsGlanceController.lastCacheHitRate
-      glanceContextRatio = this.metricsGlanceController.lastContextRatio
       glanceCost = this.estimateSessionCost()
     }
 
@@ -6564,9 +6604,18 @@ export class TuiApp {
     let lines: LiveRegionLine[] = []
     lines = []
 
-    // 子代理舰队带（紧凑档，每 worker 1 行），在动态段计算、在 chrome 段落位——
-    // 放 chrome 才不吃动态段预算、不撑高水位（见 2b2 与 chromeStart 之后的 push）。
-    let fleetStatusLines: string[] = []
+    const identity = formatWorkspaceIdentity({ width: cols, rows: this.rows || 24,
+      modelName: this.state.modelName, domainName: this.state.domainName, domainGlyph: this.state.domainGlyph,
+      cwd: this.sessionCwd, worker: this.viewingWorkerId ? shortOrderLabel(this.viewingWorkerId) : undefined,
+    }, this.theme)
+    if (!this.frontend.isFullscreen && !this.streamRenderer.hasCommitted) {
+      for (const text of identity) lines.push({ text, region: 'identity' })
+      if (identity.length) lines.push({ text: '', region: 'identity' })
+      const welcomeBudget = this.approvalIntentController.approvalPending || this.pendingPlanApproval || this.pendingAskFlow ? 0 : Math.max(0, (this.rows || 24) - identity.length - 9)
+      const welcome = this.frontend.renderWelcome(cols, welcomeBudget)
+      for (const text of welcome) lines.push({ text })
+      if (welcome.length) lines.push({ text: '' })
+    }
 
     // 1. Spinner 状态行（⠋ Thinking… (12s · esc to interrupt)），10s 无 token 变琥珀。
     //    审批挂起时如实显示「等待审批 <tool> · Ns」——等待的是用户决定，不是模型。
@@ -6603,7 +6652,7 @@ export class TuiApp {
       const view = formatJobAwaitWait(jobAwaiting, row, Date.now())
       lines.push({ text: this.clampLine(color(view.line, this.theme.warning)) })
       if (view.detail) lines.push({ text: this.clampLine(color(`  ${view.detail}`, this.theme.muted)) })
-    } else if (spinnerLine) {
+    } else if (spinnerLine && !approvalWaiting) {
       // spinner 行含 …/·（East-Asian Ambiguous），CJK 终端按 2 列渲染 → 长行会折行而
       // rowsForLine 低估 → 重影。clampLine 用 wide 上界截断到 columns-1，保证不折行。
       lines.push({ text: this.clampLine(spinnerLine) })
@@ -6611,15 +6660,7 @@ export class TuiApp {
       // 审批挂起时必须换成审批专属口径——原分档到 action 档会说「No response —
       // Ctrl+C to interrupt」，明明在等用户按 y/n 却引导用户杀会话（2d8b67ca 事故
       // 的观感来源：审批 await 无超时 + 看门狗 disarm，卡住的表象=失去响应）。
-      if (approvalWaiting) {
-        const waitMs = Date.now() - approvalWaiting.startMs
-        if (waitMs >= 60_000) {
-          lines.push({ text: this.clampLine(color(
-            `  审批等待不会超时 — 会话已暂停，等你决定（Enter/y 批准 · Esc/n 拒绝）`,
-            this.theme.muted,
-          )) })
-        }
-      } else {
+      {
         const silentMs = this.streamRenderController.lastActivityMs > 0
           ? Date.now() - this.streamRenderController.lastActivityMs
           : 0
@@ -6654,59 +6695,18 @@ export class TuiApp {
 
     // 2. Streaming tail (尾部不完整 markdown block，display-width aware 截断)
     //    额外拼接 blockWriter.peek()——尚未吐块的最新 token，逐字可见（打字机节奏）。
-    for (const line of this.streamRenderer.getLiveTailLines(6, this.blockWriter.peek())) {
+    for (const line of this.streamRenderer.getLiveTailView(6, this.blockWriter.peek())) {
       lines.push({ text: line })
     }
 
     // 2b. 队列预览已下移到输入框 chrome（贴底，不夹在 thinking/工具卡之间）。
 
-    // 2b2. 活动源归一：fleet / council / team / todo 四源 + jobs 投影到
-    //      ActivityStore，经 formatActivityBand 输出 chrome 段统一活动带
-    //      （running 扁平行 / 最新 ⎿ / /tasks 尾行；对标 dsh-tui）。
-    // 宽屏时这些汇总信息已移到右侧 side panel，避免主区重复。
-    // jobs 快照每帧刷新（elapsed 现算）；窄屏并进 band，宽屏退回 jobs 单行条。
+    // Keep the real activity projection available to the task panel, without a second persistent task list.
     this.activityStore.setJobs(this.jobsModel.rows(), Date.now())
-    if (!showSidePanel) {
-      // todo 刻意不进 band：chrome 段下方的 formatTaskList 常驻任务面板已经承载
-      // 它们（带进度条 / completed 折叠 / ctrl+x t 展开），band 再画一遍就是同一
-      // 批待办显示两次。模型层的 projectTodo 保留，供别的消费方按需归一。
-      // 走 fleetFrame（wantLines=false）而非直接 getActiveWorkers：前者有
-      // version/second/cols/theme 四维缓存，后者每帧重做一遍 toView 投影。
-      this.activityStore.setFleet(this.fleetFrame(cols, false).activeWorkers)
-      this.activityStore.setCouncil(this.liveCouncilModel)
-      this.activityStore.setTeam(this.liveTeamModel ? this.teamModelWithLiveStatus(this.liveTeamModel) : null)
-      this.activityStore.setTodo([])
-      const bandItems = [
-        ...this.activityStore.project(),
-        ...this.activityStore.projectJobs(),
-      ]
-      // width 必须传实际列数：默认 80 会在窄终端上折行，而 rowsForLine 按未折算，
-      // 欠擦的旧帧顶部会被后续 commit 顶进 scrollback（输入框重影）。
-      fleetStatusLines = formatActivityBand(bandItems, this.theme, {
-        maxRows: LIVE_FLEET_MAX,
-        width: cols,
-        tick: this.streamRenderController.tick,
-        ascii: useAsciiGlyphs(),
-      })
-      if (fleetStatusLines.length === 0) {
-        // 回退：派发已发出但首条 worker activity 未上行的窗口期，band 还是空的，
-        // 而工具确实在跑——不给 pill 会是一片空白。
-        const delegationTools = [...this.toolGroupController.getPendingEntries()]
-          .filter(([, meta]) => isDelegationTool(meta.name))
-        if (delegationTools.length > 0) {
-          const pills = delegationTools.map(([, meta]) => {
-            const elapsed = Date.now() - meta.startMs
-            const elapsedStr = elapsed > 1000 ? `${(elapsed / 1000).toFixed(0)}s` : `${elapsed}ms`
-            const approvalBadge = meta._approvalMode === 'dangerously-skip-permissions'
-              ? color('[auto]', this.theme.success)
-              : color('[ask]', this.theme.warning)
-            const profile = delegationProfileFromInput(meta.name, meta.input)
-            return `${domainBadge(meta.name)?.glyph ?? '◆'} ${profile} ${color(elapsedStr, this.theme.muted)} ${approvalBadge}`
-          })
-          fleetStatusLines = [this.clampLine(` ${pills.join('  ')}`)]
-        }
-      }
-    }
+    this.activityStore.setFleet(this.fleetFrame(cols, false).activeWorkers)
+    this.activityStore.setCouncil(this.liveCouncilModel)
+    this.activityStore.setTeam(this.liveTeamModel ? this.teamModelWithLiveStatus(this.liveTeamModel) : null)
+    this.activityStore.setTodo([])
 
     // 2c. Collapsible 探索工具聚合行（避免 read×5 + grep×3 刷屏 live 区）
     if (this.toolGroupController.isActiveGroup()) {
@@ -6739,8 +6739,9 @@ export class TuiApp {
     if (this.toolGroupController.getPendingSize() > 0) {
       const visible: Array<[string, PendingToolMeta]> = []
       for (const [id, meta] of this.toolGroupController.getPendingEntries()) {
+        if (id === this.approvalIntentController.approvalPending?.id) continue
         // 跳过已归入折叠组的 collapsible 工具（它们在 2c 聚合行中显示）
-        if (isCollapsibleTool(meta.name)) continue
+        if (!this.verboseToolOutput && isCollapsibleTool(meta.name)) continue
         // 跳过已归入 bash 折叠组的 bash 工具
         if (meta.name === 'bash' && this.toolGroupController.hasBashEntry(id)) continue
         visible.push([id, meta])
@@ -6780,20 +6781,22 @@ export class TuiApp {
     const gateStart = lines.length
     if (this.approvalIntentController.approvalPending) {
       const p = this.approvalIntentController.approvalPending
-      const keyHint = (key: string, label: string) =>
-        `${color('[', this.theme.secondary)}${color(key, this.theme.secondary, { bold: true })}${color(`] ${label}`, this.theme.secondary)}`
       if (this.approvalIntentController.approvalEditMode) {
-        // Edit mode: show edit header, InputLine contains the JSON
         lines.push({ text: '' })
-        lines.push({ text: this.clampLine(this.renderBanner('EDIT TOOL INPUT', this.theme.warning)) })
-        lines.push({ text: this.clampLine(` │ Tool: ${p.name}`) })
+        lines.push({ text: this.clampLine(color(`编辑工具参数 · ${p.name}`, this.theme.warning, { bold: true })), decisionPart: 'title' })
         if (this.approvalIntentController.approvalEditError) {
-          lines.push({ text: this.clampLine(` │ ${color(`⚠ ${this.approvalIntentController.approvalEditError}`, this.theme.warning)}`) })
+          lines.push({ text: this.clampLine(color(this.approvalIntentController.approvalEditError, this.theme.warning)), decisionPart: 'fact' })
         }
-        lines.push({ text: this.clampLine(` │ Edit the JSON below, then Enter to confirm:`) })
-        lines.push({ text: this.clampLine(` ╰─ ${keyHint('Enter', 'confirm')}  ${keyHint('Esc', 'back')}  ${keyHint('Ctrl+C', 'deny')} ─────────`) })
+        let actions = ''
+        for (const action of ['Enter 保存并返回审批', 'Esc 返回', 'Ctrl+C 拒绝']) {
+          const candidate = actions ? `${actions} · ${action}` : action
+          if (actions && displayWidth(candidate, { ambiguousAsWide: ambiguousWideEnabled() }) > cols - 1) {
+            lines.push({ text: color(actions, this.theme.muted), decisionPart: 'footer' }); actions = action
+          } else actions = candidate
+        }
+        lines.push({ text: color(actions, this.theme.muted), decisionPart: 'footer' })
       } else {
-        const promptLines = formatApprovalPrompt({
+        const prompt = formatApprovalPromptLayout({
           toolName: p.name,
           input: p.input,
           columns: cols,
@@ -6802,10 +6805,20 @@ export class TuiApp {
           riskPending: this.approvalIntentController.riskExplainPending,
           riskError: this.approvalIntentController.riskExplainError,
           rememberOption: this.approvalIntentController.showRememberOption,
+          pathGrant: this.sessionCwd ? outOfWorkspaceFilePaths(this.sessionCwd, p.name, p.input) ?? undefined : undefined,
+          rows: Math.max(1, (this.rows || 24) - (this.rows >= 14 ? identity.length + 1 : 0) - 4),
         }, this.theme)
+        const promptLines = prompt.lines
+        promptLines[0] = spinnerLine ?? promptLines[0]!
+        if (Date.now() - p.startMs >= 60_000) promptLines.push(color('  审批等待不会超时 · 会话已暂停，等你决定', this.theme.muted))
         lines.push({ text: '' })
-        for (const promptLine of promptLines) {
-          lines.push({ text: this.clampLine(promptLine) })
+        const selectedStart = prompt.choiceRows[this.approvalIntentController.approvalOptionIndex] ?? -1
+        const selectedEnd = prompt.choiceRows[this.approvalIntentController.approvalOptionIndex + 1] ?? prompt.footerRow ?? promptLines.length
+        for (const [index, promptLine] of promptLines.entries()) {
+          const decisionPart: LiveRegionLine['decisionPart'] = index === prompt.titleRow ? 'title' : index === prompt.firstFactRow ? 'fact'
+            : index >= selectedStart && index < selectedEnd && promptLine.trim() ? 'action'
+            : prompt.footerRow !== null && index >= prompt.footerRow ? 'footer' : undefined
+          lines.push({ text: this.clampLine(promptLine), decisionPart })
         }
       }
     }
@@ -6826,57 +6839,12 @@ export class TuiApp {
       }
     }
 
-    // ── 底部 chrome 起点：从此往后（任务面板 + GlanceBar + 输入框 + 提示）是
-    //    恒可见的保留区，内容超屏时 LiveEngine 截断的是上方 dynamic 段，
-    //    不会裁掉任务面板与输入框。读屏档把门禁段（审批 + Mission Contract）
-    //    一并并入 chrome——否则动态段出局时这两块纯本地 UI 被静默切掉。
-    let chromeStart = this.screenReader ? gateStart : lines.length
-
-    // 3a2. 子代理带（dsh activity-band：running 扁平行 + 最新 ⎿ + /tasks 尾行）。
-    //     放在 chrome 段而非动态段——舰队规模不该转化成输入框上方的常驻空白。
-    if (fleetStatusLines.length > 0) {
-      const bandHasEntry = fleetStatusLines.some(line => line.includes('/tasks'))
-      for (const [i, line] of fleetStatusLines.entries()) {
-        const extra = !bandHasEntry && i === 0 ? color('  · /tasks 管理', this.theme.dim) : ''
-        lines.push({ text: this.clampLine(`${line}${extra}`) })
-      }
-    }
-
-    // 3a3. 后台任务：窄屏已并进活动带（与子代理同一计数头）。宽屏侧栏不画
-    //     band，退回单行 `⚙ N 后台任务 · 首个命令 · 最长已跑`。
-    const jobsInBand = !showSidePanel && this.activityStore.projectJobs().length > 0
-    const jobsBar = jobsInBand ? null : formatJobsBar(this.activityStore.projectJobs(), this.theme)
-    if (jobsBar) {
-      lines.push({ text: this.clampLine(jobsBar) })
-    }
-
-    // 3b. 常驻任务面板（todo 列表）——空列表不渲染；run 空闲且全部完成时隐藏
-    //    （shouldShowTaskPanel；todoExpanded 展开态强制显示以回看 completed）。
-    //    宽屏时已由 side panel 承载。
-    if (!showSidePanel && this.state.todos.length > 0 && (this.state.todoExpanded || shouldShowTaskPanel(this.state.todos, this.state.phase, !this.todosWrittenThisRun))) {
-      const taskLines = formatTaskList(this.state.todos, this.theme, {
-        width: cols,
-        maxRows: this.state.todoExpanded ? 15 : 6,
-        showProgressBar: false,
-        expanded: this.state.todoExpanded,
-        expandHint: this.state.todoExpanded ? 'ctrl+x t 收起' : undefined,
-        tick: this.streamRenderController.tick,
-        ascii: useAsciiGlyphs(),
-      })
-      if (taskLines.length > 0) {
-        // 面板行走 clampLine（与其余 chrome 同口径）：满列行会在 CJK 终端折行，
-        // rowsForLine 少算导致旧帧残留被提交进 scrollback。上下不夹空行
-        //（对齐 tianshu-public——空行只会被定高视口的垫行吸收，徒增 chrome 高度）。
-        for (const taskLine of taskLines) lines.push({ text: this.clampLine(taskLine) })
-      }
-    }
-
     // 3c. 计划审阅卡钉在输入框上方（对标 public plan-review chrome，不进 overlay）。
     if (this.pendingPlanApproval && !this.overlay.isActive()) {
       const countdown = this.planAutoApproveRemainSec
       // 审批卡边框与输入框同族——同一 separator 风格，两个框上下叠放才成一套 chrome
       const activeDomainId2 = this.state.domainName ? Object.keys(STAR_DOMAINS).find(k => (STAR_DOMAINS as any)[k].name === this.state.domainName) : null
-      const reviewLines = formatPlanReview({
+      const review = formatPlanReviewLayout({
         title: this.pendingPlanApproval.title,
         ...(this.planApprovalDate ? { date: this.planApprovalDate } : {}),
         separator: (activeDomainId2 ? (STAR_DOMAINS as any)[activeDomainId2]?.uiPersona?.separator : undefined) ?? 'thin',
@@ -6884,21 +6852,30 @@ export class TuiApp {
         scroll: this.planReviewScroll,
         width: cols,
         bodyRows: planReviewBodyRows(this.rows || 24),
+        compact: this.rows < 14,
         ...(countdown !== undefined
-          ? { countdown: `Goal 模式：${countdown}s 后自动批准（批准/驳回即取消；Esc 收起不取消）` }
+          ? { countdown: this.rows < 14 ? `自动批准：${countdown}s\n批准/驳回取消 · Esc 收起不取消` : `Goal 模式：${countdown}s 后自动批准（批准/驳回即取消；Esc 收起不取消）` }
           : {}),
         actions: buildPlanReviewActions(this.pendingPlanApproval),
         feedbackMode: this.planReviewFeedbackMode,
       }, this.theme)
-      if (reviewLines.length > 0) {
+      if (review.lines.length > 0) {
         lines.push({ text: '' })
-        for (const line of reviewLines) lines.push({ text: this.clampLine(line) })
+        for (const [row, text] of review.lines.entries()) {
+          const decisionPart = row === review.titleRow ? 'title' : (this.rows >= 14 && row === review.firstFactRow) || review.countdownRows.includes(row) ? 'fact'
+            : review.actionRows.includes(row) || row === review.recommendedActionRow ? 'action' : review.footerRows.includes(row) ? 'footer' : undefined
+          lines.push({ text: this.clampLine(text), decisionPart })
+        }
         lines.push({ text: '' })
       }
     }
-
-    // 4. GlanceBar（context% / cache / cost / git branch） metrics 已在顶部计算，
-    //    与 side panel 共享同一份 glanceCacheHitRate / glanceEstimatedTokens / glanceCost。
+    let chromeStart = this.screenReader ? gateStart : lines.length
+    if (!showSidePanel && this.state.todoExpanded && this.state.todos.length) {
+      for (const text of formatTaskList(this.state.todos, this.theme, { width: cols, maxRows: 15, showProgressBar: false,
+        expanded: true, expandHint: 'Ctrl+X T 收起', tick: this.streamRenderController.tick, ascii: useAsciiGlyphs() })) {
+        lines.push({ text: this.clampLine(text) })
+      }
+    }
 
     // 4b. 可脚本化 statusline（ui.statusLine.command）——输入框上方独立行。
     if (this.statusLineText) {
@@ -6917,7 +6894,7 @@ export class TuiApp {
     // 5. Input line / Ctrl+C 退出确认提示（对齐 Claude Code）：提示行叠加在
     // 输入框上方，输入框与内容始终渲染——不存在「输入框消失」的困惑。
     if (this.inputController.ctrlCPendingSince > 0) {
-      lines.push({ text: color('再次按 Ctrl+C 退出 · Esc 或输入即取消', this.theme.muted) })
+      lines.push({ text: color(`再次按 Ctrl+C 退出 · Esc 或输入即取消${this.workflow.stash.occupied ? ' · 暂存草稿尚未发送，退出会丢失' : ''}`, this.theme.muted) })
       lines.push({ text: '' })
     }
     { // 输入框渲染（原 else 主体；提示行在场时与其并存）
@@ -6944,85 +6921,7 @@ export class TuiApp {
       // 缓存复用，避免每帧 repeat(innerWidth) 重建。
       const { leftBar, rightBar, botBorder } = this.getInputChrome(uiSep, innerWidth, borderColor)
 
-      // 3. 构建高保真左右指标 Segment
-      const leftStr = formatGlanceLeft({
-        width: cols,
-        domainGlyph: this.state.domainGlyph,
-        domainName: this.state.domainName,
-        branch: this.metricsGlanceController.gitBranch,
-        cwd: this.sessionCwd,
-        // Zen 相位徽章：读面收窄期间常驻「禅」，晋升后消失（探针未注入 = 无）
-        zenBadge: this.zenBadgeProvider?.() ?? (Date.now() < this.zenUnlockNoticeUntil ? '禅已解除' : undefined),
-        // worker 视图徽章：提示当前输入路由目标（◐ = 在跑，✓/✗ = 已终态）
-        workerBadge: this.viewingWorkerId
-          ? `→ ${shortOrderLabel(this.viewingWorkerId)}`
-          : undefined,
-      }, this.theme)
-
-      const rightStr = formatGlanceRight({
-        width: cols,
-        modelName: this.state.modelName,
-        reasoningEffort: this.metricsGlanceController.reasoningEffortProvider?.(),
-        cacheHitRate: glanceCacheHitRate,
-        cacheStatus: glanceCacheStatus,
-        pricingPhase: glancePricingPhase,
-        estimatedTokens: glanceEstimatedTokens,
-        conversationTokens: glanceConversationTokens,
-        maxTokens: glanceMaxTokens,
-        cost: glanceCost,
-        elapsedMs: Date.now() - this.state.turnStartMs,
-        turnCount: this.state.turnNumber,
-        approvalMode: this._approvalMode,
-        planMode: planModeActive,
-        goal: goalSnapshot,
-        planAutoApproveSec: this.planAutoApproveRemainSec,
-        todoSummary,
-        todoFlash: !isReducedMotion() && this.state.todoFlashUntil > Date.now(),
-        density: this.glanceDensity,
-        // 编排徽章：team 波次 / 在跑子代理 / 终态未读（glance-bar 内按优先级取一）
-        // currentWave 是 0-based 活动波索引（team-panel.ts 同款 +1 显示）。
-        teamWave: this.liveTeamModel
-          ? { current: Math.min(this.liveTeamModel.currentWave + 1, this.liveTeamModel.totalWaves), total: this.liveTeamModel.totalWaves }
-          : undefined,
-        fleetRunning: this.fleetFrame(cols, false).running,
-        fleetUnread: this.fleetFrame(cols, false).unread,
-        jobsRunning: this.jobsModel.runningCount(),
-      }, this.theme)
-
-      // 用 wide 上界度量标签串宽度：CJK/Windows 终端把 East-Asian Ambiguous 符号
-      // （↑↓ · — … 等）按 2 列渲染。若按 narrow(string-width) 计算填充量，顶边框实际
-      // 渲染宽度会超过 cols → 终端折行成 2 显示行，而 LiveEngine.rowsForLine 按 narrow
-      // 数成 1 行 → 回顶欠擦（moveToTop/ERASE 少擦一行）→ 输入框重影/逐帧堆叠重复。
-      // 按 wide 定尺后顶边框恒 ≤ cols，任何终端都占 1 显示行，行数估算与实际一致。
-      const plainLeft = displayWidth(leftStr, { ambiguousAsWide: true })
-
-      // 4. 顶边框：╭─ leftStr ─────╮ —— 无 ┬ 交汇、无右侧 metrics（下移底部状态行）。
-      //    宽度恒 = innerWidth + 4，与输入行/底边框精确对齐（修复右角 1 列残缺）。
-      const chars = boxCharsFor(uiSep)
-      const labelFill = innerWidth - plainLeft - 1
-      const topBorder = (() => {
-        if (labelFill < 2) {
-          return color(`${chars.tl}${chars.h.repeat(innerWidth + 2)}${chars.tr}`, borderColor)
-        }
-        // Kimi 模式：leftStr 后内嵌模型名标签（╭─ leftStr ─ model ──╮）
-        if (uiSep === 'kimi') {
-          const modelLabel = ` ${this.state.modelName} `
-          const modelWidth = displayWidth(modelLabel, { ambiguousAsWide: true })
-          const fillAfter = innerWidth - plainLeft - 1 - modelWidth
-          if (fillAfter < 1) {
-            // 空间不够，回退到标准 thin 渲染
-            return color(`${chars.tl}${chars.h} `, borderColor)
-              + leftStr
-              + color(` ${chars.h.repeat(labelFill)}${chars.tr}`, borderColor)
-          }
-          return color(`${chars.tl}${chars.h} `, borderColor)
-            + leftStr
-            + color(` ${chars.h}${modelLabel}${chars.h.repeat(Math.max(0, fillAfter))}${chars.tr}`, borderColor)
-        }
-        return color(`${chars.tl}${chars.h} `, borderColor)
-          + leftStr
-          + color(` ${chars.h.repeat(labelFill)}${chars.tr}`, borderColor)
-      })()
+      const topBorder = botBorder
 
       const MAX_INPUT_DISPLAY_LINES = 12
       // 暗绿 + bold：用户验收过的提示符质感，与 primary 色光标块 █ 形成前后层次——
@@ -7085,14 +6984,15 @@ export class TuiApp {
         fenceTinted.has(lineIdx) ? color(raw, this.theme.dim) : raw
       // 0-based cell（相对行首）= 左边框宽 + 行内 caret 列；
       // vim 模式标签（-- NORMAL/VISUAL/VISUAL LINE --）只加在首行——caret 在首行时才计入其宽度。
-      const leftBarW = displayWidth(leftBar, { ambiguousAsWide: true })
-      const vimPrefixW = vimNormalMode ? displayWidth(vimModeLabel!, { ambiguousAsWide: true }) : 0
+      const leftBarW = displayWidth(leftBar, { ambiguousAsWide: ambiguousWideEnabled() })
+      const vimPrefixW = vimNormalMode ? displayWidth(vimModeLabel!, { ambiguousAsWide: ambiguousWideEnabled() }) : 0
       const caretColFor = (lineIdx: number): number =>
         leftBarW + (lineIdx === 0 ? vimPrefixW : 0) + inputDisplay.caret.col
       /** 输入行 → LiveRegionLine；光标行携带 caretCol（IME 硬件光标归位标记）。 */
       const pushInputRow = (raw: string, lineIdx: number): void => {
         lines.push({
           text: this.renderInputRow(colorizeInputLine(withPastePills(withGhost(withFenceTint(raw, lineIdx), lineIdx))), innerWidth, leftBar, rightBar),
+          region: 'composer', inputLine: lineIdx, inputStartCol: leftBarW + displayWidth('❯ ', { ambiguousAsWide: ambiguousWideEnabled() }),
           ...(inputDisplay.caret.line === lineIdx ? { caretCol: caretColFor(lineIdx) } : {}),
         })
       }
@@ -7109,27 +7009,12 @@ export class TuiApp {
         lines.push({ text: this.clampLine(color(imageLabel, this.theme.muted)) })
       }
 
-      // 5b. 状态行：左 metrics（模型/effort/cache/ctx/耗时）+ 右权限模式（右对齐）——
-      //     顶框不再承载指标，收敛到输入框上方这一行（权限行仍是单一事实来源）。
-      //     slash 提示打开时权限让位；整行放不下时权限独占下一行。矮屏整块让位。
-      const permLine = formatPermissionModeLine({ approvalMode: this._approvalMode, planMode: planModeActive, askMode: askModeActive }, this.theme)
-      const permTrim = permLine.trimStart()
-      const metricsW = displayWidth(rightStr, { ambiguousAsWide: true })
-      const permW = displayWidth(permTrim, { ambiguousAsWide: true })
-      if (shortScreen) {
-        // 矮屏：只保留权限提示的核心片段（审批/计划态），压成一行
-        if (planModeActive || askModeActive) lines.push({ text: this.clampLine(permTrim) })
-      } else if (!isSlash) {
-        const pad = cols - 1 - 2 - metricsW - permW
-        if (metricsW > 0 && pad >= 2) {
-          lines.push({ text: `  ${rightStr}${' '.repeat(pad)}${permTrim}` })
-        } else {
-          if (metricsW > 0) lines.push({ text: this.clampLine(`  ${rightStr}`) })
-          lines.push({ text: this.clampLine(permLine) })
-        }
-      } else if (metricsW > 0) {
-        lines.push({ text: this.clampLine(`  ${rightStr}`) })
-      }
+      lines.push({ text: formatWorkspaceMode({ width: cols, approvalMode: this._approvalMode,
+        planMode: planModeActive, askMode: askModeActive, stashed: this.workflow.stash.occupied,
+        tasks: this.activityStore.project().filter(task => task.status === 'running' || task.status === 'pending').length
+          + this.jobsModel.runningCount(), steps: todoSummary ? todoSummary.total - todoSummary.done : 0,
+        zenBadge: this.zenBadgeProvider?.() ?? (Date.now() < this.zenUnlockNoticeUntil ? '禅已解除' : undefined),
+      }, this.theme), region: 'mode' })
 
       // 5a3. @file 节点诊断（节点化 v1）：解析出的 @file:/@folder: 在 cwd 下
       //      不存在时给一行轻提示。existsSync 按输入值缓存（同值不重复 stat，
@@ -7213,10 +7098,12 @@ export class TuiApp {
       }
 
       // 输入框：chrome 段最后一行（滚动到底时贴屏幕底部，Claude Code 风格）。
-      lines.push({ text: topBorder })
+      if (!shortScreen) lines.push({ text: formatWorkspacePath(this.sessionCwd ?? process.cwd(), cols, this.theme) })
+      lines.push({ text: topBorder, region: 'composer' })
       if (vimNormalMode) {
         lines.push({
           text: this.renderInputRow(`${vimModeLabel}${colorizeInputLine(withPastePills(withGhost(withFenceTint(inputLines[0] ?? '', 0), 0)))}`, innerWidth, leftBar, rightBar),
+          region: 'composer', inputLine: 0, inputStartCol: leftBarW + vimPrefixW + displayWidth('❯ ', { ambiguousAsWide: ambiguousWideEnabled() }),
           ...(inputDisplay.caret.line === 0 ? { caretCol: caretColFor(0) } : {}),
         })
         for (let i = 1; i < inputLines.length; i++) {
@@ -7227,7 +7114,7 @@ export class TuiApp {
           pushInputRow(inputLines[i]!, i)
         }
       }
-      lines.push({ text: botBorder })
+      lines.push({ text: botBorder, region: 'composer' })
 
       // prompt footer：输入框下方键位提示行（对齐公开仓）——换行模式/打断/
       // 审批态提示。审批态的 JSON 编辑分支在 renderLive 更早处 return，不重叠。
@@ -7236,19 +7123,26 @@ export class TuiApp {
           width: cols,
           newlineMode: this.inputLine.newlineMode,
           agentBusy: this.agentBusy && !this.isAgentRunSettling(),
-          approvalPending: this.approvalIntentController.approvalPending != null,
+          approvalPending: this.approvalIntentController.approvalPending != null || this.pendingPlanApproval != null,
           shiftEnterAvailable: this.kittyKeyboard,
+          keymap: this.workflow.preferences.keymap, bindings: this.workflow.preferences.bindings,
+          renderer: this.frontend.isFullscreen ? 'fullscreen' : 'classic', stashedDraft: this.workflow.stash.occupied,
         }, this.theme)
         for (const line of footerLines) lines.push({ text: this.clampLine(line) })
       }
     }
 
+    const decisionRows = lines.slice(0, chromeStart).filter(line => line.decisionPart).length
+    if (decisionRows && this.rows < 14 && !this.screenReader && !this.frontend.isFullscreen) {
+      const chrome = lines.slice(chromeStart), keep = Math.max(1, this.rows - 1 - decisionRows)
+      lines = [...lines.slice(0, chromeStart), ...budgetInputChrome(chrome, keep)]
+    }
     if (this.screenReader) {
       // 整个动态段出局，只留输入框 chrome。定高视口那套也一并跳过——它存在的
       // 意义是让输入框在动态段涨落时钉住不动，而这里根本没有动态段。
       lines = lines.slice(chromeStart)
       chromeStart = 0
-    } else {
+    } else if (!this.frontend.isFullscreen) {
       // ── 定高视口：动态段垫到「总高度高水位 − chrome」，slash/todo 等 chrome
       //    关掉后垫行补上，输入框不上跳。欢迎首帧（未开 slash、水位 0）仍不垫。
       //    度量与 LiveEngine.rowsForLine 同口径。
@@ -7271,7 +7165,7 @@ export class TuiApp {
     if (showSidePanel) {
       const currentTool = (() => {
         for (const [id, meta] of this.toolGroupController.getPendingEntries()) {
-          if (isCollapsibleTool(meta.name)) continue
+          if (!this.verboseToolOutput && isCollapsibleTool(meta.name)) continue
           if (meta.name === 'bash' && this.toolGroupController.hasBashEntry(id)) continue
           return { name: meta.name, elapsedMs: Date.now() - meta.startMs }
         }
@@ -7305,6 +7199,7 @@ export class TuiApp {
         maxTokens: glanceMaxTokens,
         cacheHitRate: glanceCacheHitRate,
         cost: glanceCost,
+        costSource: metrics ? metrics.costSource ?? 'estimate' : 'unknown',
         activePlan,
         planDraft: planDraft ?? null,
         planTrace,
@@ -7314,7 +7209,10 @@ export class TuiApp {
       lines = this.mergeSidePanel(lines, panelLines, contentCols, sidePanelWidth)
     }
 
-    this.live.render(lines, { reservedTail: lines.length - chromeStart })
+    if (this.frontend.isFullscreen) {
+      try { this.frontend.render(lines, chromeStart, identity) }
+      catch (error) { this.restoreClassicRenderer(); this.commitStatic(`全屏绘制失败，已恢复经典模式：${(error as Error).message}`) }
+    } else this.live.render(lines, { reservedTail: lines.length - chromeStart })
   }
 
   /** 强制重绘（resize 后） */
@@ -7339,13 +7237,14 @@ export class TuiApp {
     const domainId = this.getActiveDomainId()
     // 留存正文供 ctrl+t 回看——scrollback 只有一行头部，正文是唯一可重印来源。
     this.thinkingReview.save({ text: this.state.thinkingText, elapsedMs, domainId })
+    this.frontend.record({ kind: 'thinking', text: this.state.thinkingText })
     const formatted = formatThinking({
       text: this.state.thinkingText,
       elapsedMs,
       done: true,
       expanded: false,
       domainId,
-      reviewHint: 'ctrl+t 回看',
+      reviewHint: this.workflow.preferences.keymap === 'standard' ? '/thinking 回看' : 'ctrl+t 回看',
     }, this.theme)
     if (formatted.length === 0) return
     this.commit.write({ text: formatted.join('\n'), trailingNewline: true })
@@ -7380,18 +7279,9 @@ export class TuiApp {
 
   /** 审批处理器 — 交互式 y/n/e/r */
   private handleApprovalRequired(id: string, name: string, input: Record<string, unknown>): Promise<ApprovalResult | boolean> {
-    // 权限 diff 预览：write/edit 审批前渲染变更块
-    const diffPreview = formatPermissionDiff({ toolName: name, input, theme: this.theme })
-    if (diffPreview) {
-      this.commitAbove(() => {
-        for (const line of diffPreview) {
-          this.commit.write({ text: line, trailingNewline: line === diffPreview[diffPreview.length - 1] })
-        }
-        this.state.committedCount++
-      })
-    }
     return new Promise((resolve) => {
       this.approvalIntentController.approvalPending = { id, name, input, resolve, startMs: Date.now() }
+      this.approvalIntentController.editedInput = undefined
       // 上一条待批项的风险结论绝不能留给下一条——那是最危险的一类误导。
       this.approvalIntentController.resetRiskExplanation()
       this.approvalIntentController.showRememberOption =
@@ -7482,17 +7372,18 @@ export class TuiApp {
     this.renderLive()
 
     const requestedFor = pending.id
-    void this.riskExplainer(pending.name, pending.input).then(
+    const requestedInput = pending.input
+    void this.riskExplainer(pending.name, requestedInput).then(
       result => {
         // 用户可能已经批完并进入下一条——迟到的结果不得盖到新的待批项上。
-        if (ctrl.approvalPending?.id !== requestedFor) return
+        if (ctrl.approvalPending?.id !== requestedFor || ctrl.approvalPending.input !== requestedInput) return
         ctrl.riskExplainPending = false
         if (result) ctrl.riskExplanation = result
         else ctrl.riskExplainError = '模型未返回可用结果'
         this.renderLive()
       },
       err => {
-        if (ctrl.approvalPending?.id !== requestedFor) return
+        if (ctrl.approvalPending?.id !== requestedFor || ctrl.approvalPending.input !== requestedInput) return
         ctrl.riskExplainPending = false
         ctrl.riskExplainError = (err as Error).message
         this.renderLive()
@@ -7640,15 +7531,15 @@ export class TuiApp {
     // Pager — page / mode / search / message 由 overlayNav 注入（覆盖 provider 的静态值）
     this.overlay.register('pager', {
       render: (_w, _h) => {
-        const data = overlayData?.pagerContent?.() ?? { content: '(no content)', page: 0 }
+        const data = this.detailPager ?? overlayData?.pagerContent?.() ?? { content: '(no content)', page: 0 }
         const nav = this.overlayController.nav()
-        const messages = data.messages ?? []
-        const searchMatches = nav.pagerMode === 'search' && nav.pagerSearchQuery
-          ? searchTranscript(messages, nav.pagerSearchQuery).length
+        const searchMatches = nav.pagerMode === 'search' || nav.pagerMode === 'results'
+          ? pagerSearchLines(data.content, nav.pagerSearchQuery).length
           : 0
         return renderPager({
           ...data,
           page: nav.pagerPage,
+          lineOffset: nav.pagerLineOffset,
           mode: nav.pagerMode,
           searchQuery: nav.pagerSearchQuery,
           searchMatches,
@@ -7749,6 +7640,7 @@ export class TuiApp {
     this.overlay.register('tasks', {
       render: (_w, _h) => {
         const data = overlayData?.tasksData?.() ?? { groups: [], filter: 'running' as const, completedCount: 0 }
+        selectedTask(data, this.overlayController.nav())
         return renderTasks(data, this.columns, this.rows, this.theme, this.overlayController.nav().tasksIndex)
       },
     })

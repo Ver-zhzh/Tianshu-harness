@@ -14,7 +14,7 @@ describe('renderPager', () => {
   it('renders border and title', () => {
     const lines = renderPager({ content: 'hello', page: 0, title: 'Test' }, 60, 20, theme)
     assert.ok(lines.length > 0)
-    assert.ok(stripAnsi(lines[0]!).includes('│'))
+    assert.ok(!stripAnsi(lines[0]!).includes('│'))
     assert.ok(stripAnsi(lines[0]!).includes('─'))
     assert.ok(lines.some(l => stripAnsi(l).includes('Test')))
   })
@@ -230,9 +230,12 @@ describe('renderChronicle', () => {
     assert.ok(firstLine && !stripAnsi(firstLine).includes('>'), '未选中行无游标')
   })
 
-  it('footer 不展示恢复提示（2026-07-25 降可见性：功能保留，文案退场）', () => {
+  it('footer 明示恢复、只读预览与返回动作', () => {
     const data: ChronicleData = { entries: [{ index: 1, time: 'a', summary: 's', current: false, id: 'x' }] }
     const lines = renderChronicle(data, 80, 20, theme)
-    assert.ok(!lines.some(l => stripAnsi(l).includes('恢复')), 'footer 不含恢复会话提示')
+    const footer = stripAnsi(lines[lines.length - 2]!)
+    assert.match(footer, /Enter:恢复/)
+    assert.match(footer, /Space:预览/)
+    assert.match(footer, /Esc:返回/)
   })
 })

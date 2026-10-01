@@ -5,7 +5,7 @@
  * overlay 形同只读弹窗。
  *
  * 契约（经真实 stdin 序列 + 渲染输出验证）：
- *  - pager：j/↓/PgDn 下翻，k/↑ 上翻，Home/End 首末页，越界 clamp，q 关闭
+ *  - pager：j/↓ 逐行，PgDn 半屏，k/↑ 上翻，Home/End 当前消息，越界 clamp，q 关闭
  *  - command-palette：↑/↓ 循环移动选中，Enter 执行回调并关闭，q 关闭
  */
 
@@ -98,19 +98,20 @@ test('pager: ↓/j/PgDn 下翻，k 上翻，越界 clamp', () => {
   const press = (k: string) => { out.clear(); stdin.dataHandler!(SEQ[k] ?? k) }
   const visible = () => stripAnsi(out.chunks.join(''))
 
-  press('down'); assert.ok(visible().includes('LN20'), '↓ → 第 1 页含 LN20')
-  press('j'); assert.ok(visible().includes('LN40'), 'j → 第 2 页含 LN40')
-  press('pagedown'); assert.ok(visible().includes('LN60'), 'PgDn → 第 3 页含 LN60')
-  press('k'); assert.ok(visible().includes('LN40'), 'k → 回第 2 页含 LN40')
+  press('down'); assert.equal(app['overlayController'].nav().pagerLineOffset, 1, '↓ 逐行移动'); assert.ok(visible().includes('LN20'), '↓ 后末行 LN20 可见')
+  press('j'); assert.equal(app['overlayController'].nav().pagerLineOffset, 2, 'j 逐行移动'); assert.ok(visible().includes('LN21'), 'j 后末行 LN21 可见')
+  press('pagedown'); assert.equal(app['overlayController'].nav().pagerLineOffset, 12, 'PgDn 移动半屏 10 行'); assert.ok(visible().includes('LN31'), '半屏翻页后末行 LN31 可见')
+  press('k'); assert.equal(app['overlayController'].nav().pagerLineOffset, 11, 'k 上移一行'); assert.ok(visible().includes('LN11'), 'k 后首行 LN11 可见')
   press('end'); assert.ok(visible().includes('LN80'), 'End → 末页含 LN80')
-  // 末页再下翻 = no-op（不 rerender，输出为空）；随后 up 应回到第 3 页(LN60)，
-  // 证明 down 没把 page 推过 4。
+  // 边界重复按键不改变 offset；行级 diff 不重写相同屏幕。
   press('down'); assert.equal(visible().trim(), '', '末页再下翻 no-op（不 rerender）')
-  press('up'); assert.ok(visible().includes('LN60'), 'clamp 生效：末页 down 后 up 回第 3 页(LN60)')
+  assert.equal(app['overlayController'].nav().pagerLineOffset, 80)
+  press('up'); assert.equal(app['overlayController'].nav().pagerLineOffset, 79); assert.ok(visible().includes('LN79'), '末页上移一行')
   press('home'); assert.ok(visible().includes('LN0') && visible().includes('LN19'), 'Home → 首页含 LN0..LN19')
-  // 首页再上翻 = no-op；随后 down 应到第 1 页(LN20)，证明 up 没把 page 推到负。
+  // 首页再上翻 = no-op；随后 down 应仅移一行，证明 up 没把 offset 推到负。
   press('up'); assert.equal(visible().trim(), '', '首页再上翻 no-op（不 rerender）')
-  press('down'); assert.ok(visible().includes('LN20'), 'clamp 生效：首页 up 后 down 到第 1 页(LN20)')
+  assert.equal(app['overlayController'].nav().pagerLineOffset, 0)
+  press('down'); assert.equal(app['overlayController'].nav().pagerLineOffset, 1); assert.ok(visible().includes('LN20'), '首页上翻后 down 仍移动一行')
 })
 
 test('pager: / 进入搜索，n/N 跳转匹配，Esc 清除', () => {
@@ -134,11 +135,12 @@ test('pager: / 进入搜索，n/N 跳转匹配，Esc 清除', () => {
 
   press('/'); assert.ok(visible().includes('搜索'))
   press('a'); assert.ok(visible().includes('"a"'))
-  // beta 与 delta 都含 'a'；首次匹配 beta（索引 1）
-  press('n'); assert.ok(visible().includes('beta'), 'n 跳转到下一处匹配')
-  press('n'); assert.ok(visible().includes('delta'), 'n 循环到 delta')
-  press('N'); assert.ok(visible().includes('beta'), 'N 回退到 beta')
-  press('escape'); assert.ok(visible().includes('查看'), 'Esc 清除搜索回到 page 模式')
+  press('enter'); assert.equal(app['overlayController'].nav().pagerMode, 'results'); assert.equal(app['overlayController'].nav().pagerSearchCurrent, 1)
+  // 四行都含 a；Enter 定位 alpha，n 到 beta/gamma，N 回 beta。
+  press('n'); assert.equal(app['overlayController'].nav().pagerSearchCurrent, 2); assert.ok(visible().includes('beta'), 'n 跳转到第二处匹配')
+  press('n'); assert.equal(app['overlayController'].nav().pagerSearchCurrent, 3); assert.ok(visible().includes('gamma'), 'n 跳转到第三处匹配')
+  press('N'); assert.equal(app['overlayController'].nav().pagerSearchCurrent, 2); assert.ok(visible().includes('beta'), 'N 回退到 beta')
+  press('escape'); assert.equal(app['overlayController'].nav().pagerSearchQuery, ''); assert.ok(visible().includes('查看'), 'Esc 从结果返回阅读')
 })
 
 test('pager: m 进入消息视图，j/k 切换消息', () => {
@@ -418,7 +420,7 @@ test('tasks overlay: register + activate 渲染 per-worker 舰队', () => {
   })
   assert.equal(app.activateOverlay('tasks'), true, 'tasks overlay 应成功激活')
   const visible = stripAnsi(out.chunks.join(''))
-  assert.ok(visible.includes('子代理任务'), '应显示 tasks 标题')
+  assert.ok(visible.includes('任务   '), '应显示统一任务标题')
   assert.ok(visible.includes('侦察代码'), '应显示 worker 中文身份（短标签 + 紧凑职能）')
   assert.ok(visible.includes('T1'), '应显示 worker 短标签')
   assert.ok(visible.includes('1/2 完成'), '应显示组进度')

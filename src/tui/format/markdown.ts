@@ -13,6 +13,8 @@ import type { RivetTheme } from '../theme.js'
 import { hiddenLinesMarker } from './hidden-lines.js'
 import { latexToBlock } from '../pi/latex-block.js'
 import { renderMathInText, latexToUnicode } from '../pi/latex-to-unicode.js'
+import { proseColumns, wrapReadingText } from './reading-layout.js'
+import { renderTable } from './table.js'
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -148,9 +150,9 @@ function getSynColors(theme?: RivetTheme) {
   return {
     keyword: theme?.primary ?? '#d7dce3',
     type: theme?.secondary ?? '#b0b8c4',
-    func: theme?.secondary ?? '#b0b8c4',
-    string: theme?.muted ?? '#9aa2b1',
-    number: theme?.muted ?? '#9aa2b1',
+    func: theme?.warning ?? '#b0b8c4',
+    string: theme?.success ?? '#9aa2b1',
+    number: theme?.warning ?? '#9aa2b1',
     punct: theme?.dim ?? '#6e7681',
     comment: theme?.dim ?? '#6e7681',
   }
@@ -371,6 +373,7 @@ export function hasMarkdown(text: string): boolean {
     || /\$[^\s$]/.test(text) || text.includes('$') || text.includes('\\[') || text.includes('\\(')
     // Markdown links [text](url) — 触发行内解析以渲染 OSC 8 超链接。
     || /\[[^\]]+\]\([^)]+\)/.test(text)
+    || /^\s*\|?\s*:?-{3,}:?\s*\|[\s|:-]*$/m.test(text)
 }
 
 const NUMBERED_LINE_RE = /^\s*\d+│/
@@ -461,15 +464,7 @@ function formatCodeBlock(language: string | undefined, content: string, columns:
 
   const result: string[] = []
 
-  // 醒目 Code 标题行（带 💻 ‹/› 标识与主题二次亮色）
-  const label = language || 'code'
-  let labelDisplay = label
-  if (label === 'code' || label === '- code -' || label === 'bash') {
-    labelDisplay = `‹/› ${label.replace(/^-?\s*code\s*-?$/i, 'CODE')}`
-  } else {
-    labelDisplay = `‹/› ${label.toUpperCase()}`
-  }
-  result.push(color(`╴ ${labelDisplay} ╴`, theme.secondary, { bold: true }))
+  result.push(color(language || 'code', theme.muted))
 
   // 代码行直接渲染
   for (const line of visible) {
@@ -497,11 +492,8 @@ function formatBlock(block: Block, columns: number, theme: RivetTheme): string[]
     case 'header': {
       const level = block.level ?? 1
       const colors = [theme.primary, undefined, undefined, theme.secondary, theme.secondary, theme.secondary]
-      const glyphs = ['▌', '▌', '', '', '', '']
-      const glyph = glyphs[level - 1] ?? ''
       const headerColor = colors[level - 1]
-      const text = glyph ? `${glyph} ${block.content}` : block.content
-      result.push(headerColor ? color(text, headerColor, { bold: true }) : color(text, theme.assistantColor, { bold: true }))
+      result.push(color(block.content, headerColor ?? theme.assistantColor, { bold: true }))
       break
     }
     case 'code':
@@ -521,8 +513,6 @@ function formatBlock(block: Block, columns: number, theme: RivetTheme): string[]
     case 'list': {
       const items = block.items ?? block.content.split('\n')
       items.forEach((item, idx) => {
-        // 项间留白：终端没有字号层级，行距是唯一能穿过整屏文字的结构信号。
-        if (idx > 0) result.push('')
         const itemAnsi = formatInlineToAnsi(parseInline(item), theme)
         // 有序列表还原序号（parse 阶段连标记一起剥掉了）。高亮口径沿用行首
         // 数字那一套（warning + bold），与纯文本路径的 `1.` 视觉一致。
@@ -542,10 +532,8 @@ function formatBlock(block: Block, columns: number, theme: RivetTheme): string[]
     case 'table': {
       const tableLines = block.content.split('\n')
       const dataLines = tableLines.filter(l => !/^\|?[\s-:|]+\|?$/.test(l.trim()))
-      for (let i = 0; i < dataLines.length; i++) {
-        const line = dataLines[i]!
-        result.push(i === 0 ? color(line, theme.secondary, { bold: true }) : line)
-      }
+      const cells = dataLines.map(line => line.trim().replace(/^\||\|$/g, '').split(/(?<!\\)\|/).map(cell => formatInlineToAnsi(parseInline(cell.trim().replace(/\\\|/g, '|')), theme)))
+      result.push(...renderTable(cells, columns, theme))
       break
     }
     case 'paragraph':
@@ -564,7 +552,9 @@ function formatBlock(block: Block, columns: number, theme: RivetTheme): string[]
     }
   }
 
-  return result
+  return ['paragraph', 'list', 'blockquote'].includes(block.type)
+    ? result.flatMap(line => wrapReadingText(line, proseColumns(columns, 0), block.type === 'list' ? '  ' : ''))
+    : result
 }
 
 // ── Public API ─────────────────────────────────────────────────
@@ -611,9 +601,9 @@ export function formatMarkdown(input: FormatMarkdownInput, theme: RivetTheme): s
     for (const line of input.text.split('\n')) {
       const gitFormatted = tryFormatGitCommitLine(line, theme)
       if (gitFormatted) {
-        result.push(gitFormatted)
+        result.push(...wrapReadingText(gitFormatted, proseColumns(input.columns, 0)))
       } else {
-        result.push(highlightCodeLineNumber(line, theme))
+        result.push(...wrapReadingText(highlightCodeLineNumber(line, theme), proseColumns(input.columns, 0)))
       }
     }
   } else {

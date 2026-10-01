@@ -1,15 +1,15 @@
 /**
- * T9 格式化函数 — 用户消息（强调导轨，正文保持中性）。
+ * 用户消息：首行识别说话人，续行对齐正文，长文本按终端字宽换行。
  *
  * 渲染结构：
- * ▌ 消息首行             (userColor + bold 导轨；regular 中性正文)
- * ▌ 消息后续行           (同一导轨；regular 中性正文)
- * ▌
+ * ❯ 消息首行
+ *   消息后续行
  */
 
-import chalk from 'chalk'
 import { color } from '../engine/ansi.js'
 import type { RivetTheme } from '../theme.js'
+import { useAsciiGlyphs } from '../term-caps.js'
+import { ambiguousWideEnabled, displayWidth, hardWrapToDisplayWidth } from '../width.js'
 
 export interface FormatUserMessageInput {
   /** 消息文本内容 */
@@ -21,24 +21,15 @@ export interface FormatUserMessageInput {
 export function formatUserMessage(input: FormatUserMessageInput, theme: RivetTheme): string[] {
   const lines: string[] = []
 
-  const contentLines = input.content.split('\n')
-  const useAscii = chalk.level < 3
-  const marker = useAscii ? '❯' : '▌'
+  const marker = useAsciiGlyphs() ? '>' : '❯'
   const prefix = color(marker, theme.userColor, { bold: true })
-
-  if (contentLines.length > 0) {
-    // Accent 只承担说话人识别；正文回归中性色，避免长消息整段发亮。
-    lines.push(`${prefix} ${color(contentLines[0]!, theme.assistantColor)}`)
-    
-    // 后续行维持相同正文层级，空行只保留导轨。
-    for (let i = 1; i < contentLines.length; i++) {
-      const lineText = contentLines[i]!
-      if (lineText.trim().length === 0) {
-        lines.push(`${prefix}`)
-      } else {
-        lines.push(`${prefix} ${color(lineText, theme.assistantColor)}`)
-      }
-    }
+  const widthOptions = { ambiguousAsWide: ambiguousWideEnabled() }
+  const indent = ' '.repeat(displayWidth(`${marker} `, widthOptions))
+  const width = Math.max(2, input.width - 1 - indent.length)
+  const contentLines = input.content.split('\n').flatMap(line => hardWrapToDisplayWidth(line, width, widthOptions))
+  for (let i = 0; i < contentLines.length; i++) {
+    const text = contentLines[i]!
+    lines.push(i === 0 ? `${prefix} ${color(text, theme.assistantColor)}` : text ? `${indent}${color(text, theme.assistantColor)}` : '')
   }
 
   return lines

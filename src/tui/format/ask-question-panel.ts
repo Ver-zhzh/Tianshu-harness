@@ -14,15 +14,16 @@
 
 import { color } from '../engine/ansi.js'
 import type { RivetTheme } from '../theme.js'
-import { displayWidth, truncateToDisplayWidth } from '../width.js'
+import { ambiguousWideEnabled, displayWidth, hardWrapToDisplayWidth, truncateToDisplayWidth } from '../width.js'
 import {
   frameTop,
   frameBottom,
   frameLine,
   frameDivider,
-  frameFooter,
+  frameHintRows,
   CURSOR,
 } from './overlay-frame.js'
+import { followListWindow } from './overlay.js'
 
 /** 题页末尾两个固定功能行的文案（行序与 app.ts 键分发一致，改动需同步）。 */
 export const ASK_OTHER_ROW_LABEL = '输入自定义回答…'
@@ -76,33 +77,12 @@ export function askQuestionRowCount(data: Pick<AskQuestionPanelData, 'options'>)
 }
 
 function wrapText(text: string, width: number): string[] {
-  const out: string[] = []
-  for (const rawLine of text.split('\n')) {
-    if (displayWidth(rawLine) <= width) {
-      out.push(rawLine)
-      continue
-    }
-    let current = ''
-    let currentWidth = 0
-    for (const ch of rawLine) {
-      const w = displayWidth(ch)
-      if (currentWidth + w > width && current.length > 0) {
-        out.push(current)
-        current = ch
-        currentWidth = w
-      } else {
-        current += ch
-        currentWidth += w
-      }
-    }
-    if (current.length > 0) out.push(current)
-  }
+  const out = text.split('\n').flatMap(line => hardWrapToDisplayWidth(line, Math.max(1, width), { ambiguousAsWide: ambiguousWideEnabled() }))
   return out.length > 0 ? out : ['']
 }
 
-/** Tab 条：`← 题1  ✓ 题2  提交 →`，活动 Tab 高亮、已答题带 ✓；超宽时按均分截断标签。 */
+/** Tab 条跟随活动题，已答题带 ✓；窄屏保留当前题与位置。 */
 function renderTabBar(data: AskQuestionPanelData, width: number, theme: RivetTheme): string {
-  const innerWidth = width - 8 // 边框 + 「← 」「 →」
   const segments: { label: string; active: boolean; answered: boolean }[] = data.tabs.map((t, i) => ({
     label: t.label,
     active: i === data.activeTab,
@@ -110,14 +90,28 @@ function renderTabBar(data: AskQuestionPanelData, width: number, theme: RivetThe
   }))
   segments.push({ label: '提交', active: data.activeTab === data.tabs.length, answered: false })
 
-  const perTab = Math.max(4, Math.floor((innerWidth - segments.length * 2) / segments.length))
-  const parts: string[] = []
-  for (const seg of segments) {
+  const labelBudget = Math.max(12, Math.floor((width - 9 - segments.length * 2) / segments.length))
+  const labels = segments.map(seg => {
     const mark = seg.answered ? '✓ ' : ''
-    const plain = `${mark}${truncateToDisplayWidth(seg.label, Math.max(4, perTab - (mark ? 2 : 0)))}`
-    parts.push(seg.active ? color(plain, theme.primary, { bold: true }) : color(plain, theme.dim))
+    return `${mark}${truncateToDisplayWidth(seg.label, labelBudget - displayWidth(mark))}`
+  })
+  const active = Math.min(Math.max(data.activeTab, 0), segments.length - 1)
+  let start = 0
+  let end = segments.length
+  let position = ''
+  if (displayWidth(labels.join('  ')) > width - 9) {
+    position = ` ${active + 1}/${segments.length}`
+    const budget = Math.max(4, width - 13 - displayWidth(position))
+    start = active
+    end = active + 1
+    while (start > 0 || end < segments.length) {
+      if (start > 0 && displayWidth(labels.slice(start - 1, end).join('  ')) <= budget) start--
+      else if (end < segments.length && displayWidth(labels.slice(start, end + 1).join('  ')) <= budget) end++
+      else break
+    }
   }
-  const bar = `${color('← ', theme.dim)}${parts.join('  ')}${color(' →', theme.dim)}`
+  const parts = segments.slice(start, end).map((seg, i) => seg.active ? color(labels[start + i]!, theme.primary, { bold: true }) : color(labels[start + i]!, theme.dim))
+  const bar = `${color(`← ${start ? '… ' : ''}`, theme.dim)}${parts.join('  ')}${color(`${end < segments.length ? ' …' : ''} →${position}`, theme.dim)}`
   return frameLine(` ${bar}`, width, theme)
 }
 
@@ -152,31 +146,28 @@ export function renderAskQuestionPanel(data: AskQuestionPanelData, width: number
   lines.push(frameDivider(width, theme))
 
   if (!onSubmitTab) {
-    // ── 题页 ──
-    const promptLines = wrapText(data.prompt, innerWidth).slice(0, 3)
+    const inputSubMode = data.inputSubMode?.active ? data.inputSubMode : undefined
+    const hints: Array<[string, string]> = inputSubMode ? [['Enter', '提交'], ['Esc', '返回选项']] : [['↑↓', '移动']]
+    if (!inputSubMode) {
+      if (data.tabs.length > 1) hints.unshift(['←→', '切换'])
+      if (data.allowMultiple) hints.push(['空格', '多选'])
+      hints.push(['Enter', '确认'], ['Esc', '取消'])
+    }
+    const footer = frameHintRows(hints, width, theme)
+    const promptBudget = Math.max(1, Math.min(3, height - lines.length - footer.length - (inputSubMode ? 2 : 0) - 3))
+    const promptLines = wrapText(data.prompt, innerWidth).slice(0, promptBudget)
     for (const p of promptLines) {
       lines.push(frameLine(`  ${color(p, theme.secondary)}`, width, theme))
     }
     lines.push(frameLine('', width, theme))
 
-    const inputSubMode = data.inputSubMode?.active ? data.inputSubMode : undefined
-    const contentBudget = Math.max(3, height - 9 - (inputSubMode ? 2 : 0) - promptLines.length)
+    const contentBudget = Math.max(1, height - lines.length - footer.length - (inputSubMode ? 2 : 0) - 1)
+    const labels = [...data.options, ASK_OTHER_ROW_LABEL, ASK_CHAT_ROW_LABEL]
+    const start = followListWindow(data.cursor, labels.length, contentBudget)
     let rows = 0
-    for (let i = 0; i < data.options.length && rows < contentBudget; i++) {
-      const checked = data.allowMultiple ? data.selected.includes(i) : null
-      lines.push(renderOptionRow(i, data.options[i]!, checked, data.cursor === i, width, theme))
-      rows++
-    }
-    // 功能行：Other（输入自定义回答）/ 在输入框中讨论——均无 checkbox
-    const otherIdx = data.options.length
-    const chatIdx = data.options.length + 1
-    if (rows < contentBudget) {
-      lines.push(renderOptionRow(otherIdx, ASK_OTHER_ROW_LABEL, null, data.cursor === otherIdx, width, theme))
-      rows++
-    }
-    if (rows < contentBudget) {
-      lines.push(renderOptionRow(chatIdx, ASK_CHAT_ROW_LABEL, null, data.cursor === chatIdx, width, theme))
-      rows++
+    for (let i = start; i < labels.length && rows < contentBudget; i++, rows++) {
+      const checked = i < data.options.length && data.allowMultiple ? data.selected.includes(i) : null
+      lines.push(renderOptionRow(i, labels[i]!, checked, data.cursor === i, width, theme))
     }
     while (rows < contentBudget) {
       lines.push(frameLine('', width, theme))
@@ -184,7 +175,6 @@ export function renderAskQuestionPanel(data: AskQuestionPanelData, width: number
     }
 
     if (inputSubMode) {
-      lines.push(frameDivider(width, theme))
       lines.push(frameLine(` ${color(inputSubMode.label, theme.muted)}`, width, theme))
       // 光标是硬件 caret（格边界、零占位），与 connect/choice-panel 同款——行内不画字形。
       // 超宽窗口化：光标前缀超出可视宽时从行首丢弃（尾部锚定），保光标可见。
@@ -202,23 +192,18 @@ export function renderAskQuestionPanel(data: AskQuestionPanelData, width: number
         : color(inputSubMode.placeholder, theme.dim)
       data.caret = { row: lines.length + 1, col: 5 + displayWidth(value.slice(start, pos)) }
       lines.push(frameLine(` ${color(CURSOR, theme.primary, { bold: true })} ${shown}`, width, theme))
-      lines.push(frameFooter('↵:提交, Esc:返回选项', width, theme, 'subtle'))
-    } else {
-      const hints: Array<[string, string]> = data.tabs.length > 1
-        ? [['←→', '切换'], ['↑↓', '移动']]
-        : [['↑↓', '移动']]
-      if (data.allowMultiple) hints.push(['空格', '多选'])
-      hints.push(['Enter', '确认'], ['Esc', '取消'])
-      lines.push(frameFooter(hints.map(([k, a]) => `${k}:${a}`).join(', '), width, theme, 'subtle'))
     }
+    lines.push(...footer)
     lines.push(frameBottom(width, theme))
     return lines
   }
 
-  // ── 提交页（Review your answers） ──
+  const footer = frameHintRows([['←→', '切换'], ['↑↓', '移动'], ['Enter', '确认'], ['Esc', '取消']], width, theme)
   lines.push(frameLine(`  ${color('确认你的回答', theme.warning, { bold: true })}`, width, theme))
-  lines.push(frameLine('', width, theme))
-  const reviewBudget = Math.max(2, height - 12)
+  const answered = data.review.filter(entry => entry.answer).length
+  const unanswered = data.review.length - answered
+  lines.push(frameLine(`  ${color(`已答 ${answered}/${data.review.length}${unanswered ? ` · 未答 ${unanswered} 题将跳过` : ''}`, theme.muted)}`, width, theme))
+  const reviewBudget = Math.max(0, height - lines.length - footer.length - 3)
   let used = 0
   data.review.forEach((entry, i) => {
     if (used + 2 > reviewBudget) return
@@ -230,8 +215,6 @@ export function renderAskQuestionPanel(data: AskQuestionPanelData, width: number
     lines.push(frameLine(`    ${answerLine}`, width, theme))
     used += 2
   })
-  lines.push(frameLine('', width, theme))
-  lines.push(frameLine(`  ${color('准备好提交了吗？', theme.secondary)}`, width, theme))
   const actions = [ASK_SUBMIT_ROW_LABEL, ASK_CANCEL_ROW_LABEL]
   actions.forEach((label, i) => {
     const cursor = data.cursor === i
@@ -241,7 +224,7 @@ export function renderAskQuestionPanel(data: AskQuestionPanelData, width: number
       : color(`${i + 1}. ${label}`, theme.secondary)
     lines.push(frameLine(` ${cursorGlyph} ${text}`, width, theme))
   })
-  lines.push(frameFooter('↑↓:移动, Enter:确认, Esc:取消', width, theme, 'subtle'))
+  lines.push(...footer)
   lines.push(frameBottom(width, theme))
   return lines
 }

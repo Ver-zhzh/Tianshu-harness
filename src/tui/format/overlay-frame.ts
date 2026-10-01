@@ -2,13 +2,13 @@
  * 共享 overlay 面板骨架 — 所有全屏 overlay 渲染器统一复用。
  *
  * 两套风格：
- * - `subtle`（默认）：左对齐标题、紧凑快捷键提示、细边框
+ * - `subtle`（默认）：单条顶线、左对齐标题、开放正文与操作提示
  * - `full`：传统框线 + 居中标题（向后兼容，可选）
  *
- * 宽度对齐一律用 `stringWidth`（CJK/emoji 占 2 格），避免 `.length` 低估导致边框右移。
+ * 宽度对齐用显示列宽，遵守终端歧义字符宽度配置。
  */
 
-import stringWidth from 'string-width'
+import { displayWidth, ambiguousWideEnabled, truncateToDisplayWidth } from '../width.js'
 import { color } from '../engine/ansi.js'
 import type { RivetTheme } from '../theme.js'
 
@@ -23,29 +23,37 @@ export type BorderStyle = 'subtle' | 'full'
 /** 默认边框风格。 */
 export const DEFAULT_BORDER: BorderStyle = 'subtle'
 
+const textWidth = (text: string): number => displayWidth(text, { ambiguousAsWide: ambiguousWideEnabled() })
+const innerWidth = (width: number): number => Math.max(0, width - 2)
+export const frameInset = (width: number): number => width >= 60 ? 2 : width >= 4 ? 1 : 0
+const boxedWidth = (width: number): number => Math.max(0, width - textWidth('│') * 2)
+function horizontal(width: number): string {
+  const cellWidth = textWidth('─')
+  return '─'.repeat(Math.floor(Math.max(0, width) / cellWidth)) + ' '.repeat(Math.max(0, width) % cellWidth)
+}
+
 /** 顶边框（subtle 风格：细顶线；full 风格：┌─┐）。 */
 export function frameTop(width: number, theme: RivetTheme, style?: BorderStyle): string {
   const s = style ?? DEFAULT_BORDER
   if (s === 'full') {
-    return color('┌' + '─'.repeat(Math.max(0, width - 2)) + '┐', theme.dim)
+    return color('┌' + horizontal(width - textWidth('┌┐')) + '┐', theme.dim)
   }
-  // subtle: 细顶线，但仍占满 width 列（用 │ 占位左右）
-  return color('│' + '─'.repeat(Math.max(0, width - 2)) + '│', theme.dim)
+  return color(horizontal(width), theme.dim)
 }
 
-/** 底边框（subtle 风格：细底线；full 风格：└─┘）。 */
+/** 底边框（subtle 风格：留白；full 风格：└─┘）。 */
 export function frameBottom(width: number, theme: RivetTheme, style?: BorderStyle): string {
   const s = style ?? DEFAULT_BORDER
   if (s === 'full') {
-    return color('└' + '─'.repeat(Math.max(0, width - 2)) + '┘', theme.dim)
+    return color('└' + horizontal(width - textWidth('└┘')) + '┘', theme.dim)
   }
-  // subtle: 细底线，但仍占满 width 列
-  return color('│' + '─'.repeat(Math.max(0, width - 2)) + '│', theme.dim)
+  return ' '.repeat(Math.max(0, width))
 }
 
 /** 居中标题栏（full 风格用）。 */
 export function frameTitleCenter(title: string, width: number, theme: RivetTheme): string {
-  const remaining = Math.max(0, width - 4 - stringWidth(title))
+  title = truncateToDisplayWidth(title, Math.max(0, boxedWidth(width) - 2), { ambiguousAsWide: ambiguousWideEnabled() })
+  const remaining = Math.max(0, boxedWidth(width) - 2 - textWidth(title))
   const left = Math.floor(remaining / 2)
   const right = remaining - left
   // title 允许自带 ANSI。边框分段着色，避免 title 内部 RESET 把右侧填充和边框
@@ -57,10 +65,11 @@ export function frameTitleCenter(title: string, width: number, theme: RivetTheme
 
 /** 左对齐标题栏（subtle 风格用）。 */
 export function frameTitleLeft(title: string, width: number, theme: RivetTheme): string {
-  const remaining = Math.max(0, width - 4 - stringWidth(title))
-  return color('│ ', theme.dim)
-    + title
-    + color(' ' + ' '.repeat(remaining) + '│', theme.dim)
+  title = truncateToDisplayWidth(title, Math.max(0, innerWidth(width) - 2), { ambiguousAsWide: ambiguousWideEnabled() })
+  const remaining = Math.max(0, innerWidth(width) - 2 - textWidth(title))
+  return color('  ', theme.dim)
+    + (title.includes('\x1b') ? title : color(title, theme.secondary, { bold: true }))
+    + color(' '.repeat(remaining + 2), theme.dim)
 }
 
 /** @deprecated Use frameTitleLeft or frameTitleCenter explicitly. */
@@ -69,16 +78,15 @@ export const frameTitle = frameTitleLeft
 /** 底部快捷键提示行。 */
 export function frameFooter(hint: string, width: number, theme: RivetTheme, style?: BorderStyle): string {
   const s = style ?? DEFAULT_BORDER
-  // subtle 风格下括号占 2 display columns，故可用 hint 宽度少 2
-  const hintBudget = s === 'subtle' ? Math.max(0, width - 6) : Math.max(0, width - 4)
+  const hintBudget = Math.max(0, innerWidth(width) - 2)
   let visibleHint = hint
-  if (stringWidth(visibleHint) > hintBudget) {
+  if (textWidth(visibleHint) > hintBudget) {
     let suffix = ''
     let suffixWidth = 0
-    const chars = Array.from(hint)
+    const chars = Array.from(new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(hint), part => part.segment)
     for (let i = chars.length - 1; i >= 0; i--) {
-      const cw = stringWidth(chars[i]!)
-      if (suffixWidth + cw + 1 > hintBudget) break // +1 for leading ellipsis
+      const cw = textWidth(chars[i]!)
+      if (suffixWidth + cw + textWidth('…') > hintBudget) break
       suffix = chars[i]! + suffix
       suffixWidth += cw
     }
@@ -86,26 +94,36 @@ export function frameFooter(hint: string, width: number, theme: RivetTheme, styl
   }
   if (s === 'full') {
     const padded = ` ${visibleHint} `
-    const remaining = width - 2 - stringWidth(padded)
+    const remaining = boxedWidth(width) - textWidth(padded)
     return color('│' + padded + ' '.repeat(Math.max(0, remaining)) + '│', theme.dim)
   }
-  // subtle: 紧凑括号格式
-  const compact = `(${visibleHint})`
-  const padded = ` ${compact} `
-  const hintPaddedWidth = stringWidth(padded)
-  const remaining = width - 2 - hintPaddedWidth
-  return color('│' + padded + ' '.repeat(Math.max(0, remaining)) + '│', theme.dim)
+  return frameLine(` ${color(visibleHint, theme.muted)}`, width, theme)
 }
 
-/** 内容行：左右加竖边框并右填充到框宽（内容自带的 ANSI 会被 stringWidth 剥离）。 */
+/** 开放内容行：左右留一列空白，正文按显示列宽补齐。 */
 export function frameLine(text: string, width: number, theme: RivetTheme): string {
-  const padding = Math.max(0, width - 2 - stringWidth(text))
-  return color('│', theme.dim) + text + ' '.repeat(padding) + color('│', theme.dim)
+  const inset = frameInset(width), contentWidth = Math.max(0, width - inset * 2)
+  text = truncateToDisplayWidth(text, contentWidth, { ambiguousAsWide: ambiguousWideEnabled() })
+  const padding = Math.max(0, contentWidth - textWidth(text))
+  return color(' '.repeat(inset), theme.dim) + text + ' '.repeat(padding) + color(' '.repeat(inset), theme.dim)
 }
 
-/** 框内整宽分隔线（dim）。 */
+/** 组间留白。 */
 export function frameDivider(width: number, theme: RivetTheme): string {
-  return frameLine(color('─'.repeat(Math.max(0, width - 4)), theme.dim), width, theme)
+  return frameLine('', width, theme)
+}
+
+/** Keep every action intact; narrow panels reserve additional footer rows. */
+export function frameHintRows(pairs: [key: string, action: string][], width: number, theme: RivetTheme): string[] {
+  const budget = Math.max(1, width - 4)
+  const rows: string[] = []
+  for (const [key, action] of pairs) {
+    const item = `${key}:${action}`
+    const last = rows.length - 1
+    if (last >= 0 && textWidth(`${rows[last]} · ${item}`) <= budget) rows[last] += ` · ${item}`
+    else rows.push(item)
+  }
+  return rows.map(row => frameFooter(row, width, theme))
 }
 
 /**

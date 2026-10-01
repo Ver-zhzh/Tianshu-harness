@@ -554,6 +554,9 @@ export const THEME_PALETTES = {
   gemini: GEMINI,
   paper: PAPER,
   'light-ansi': LIGHT_ANSI,
+  'graphite-accessible': { ...GRAPHITE, description: '深色蓝黄配色，以蓝色和黄色区分新增与删除。', truecolor: { ...GRAPHITE.truecolor, success: '#79c0ff', error: '#e3b341' }, fallback: { ...GRAPHITE.fallback, success: 'cyanBright', error: 'yellowBright' } },
+  'paper-accessible': { ...PAPER, description: '亮色蓝黄配色，以蓝色和棕色区分新增与删除。', truecolor: { ...PAPER.truecolor, success: '#0550ae', error: '#825500' }, fallback: { ...PAPER.fallback, success: 'blueBright', error: 'yellowBright' } },
+  'dark-ansi': { ...GRAPHITE, description: '深色基础 ANSI 配色，使用终端自身的 16 色。' },
 } as const
 
 export type ThemeName = keyof typeof THEME_PALETTES

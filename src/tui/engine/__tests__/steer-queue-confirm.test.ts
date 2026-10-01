@@ -275,12 +275,12 @@ test('⏳ 已排队条贴在输入框上方，不夹在 thinking 与工具卡之
   // 只有在两者同帧时才可判读
   const lines = await waitForFrame(
     out,
-    l => l.some(x => x.includes('已排队')) && l.some(x => /^[╭┌]/.test(x)),
+    l => l.some(x => x.includes('已排队')) && l.some(x => /^[─━┄-]{3,}/.test(x)),
   )
   const bannerIdx = lines.findIndex(l => l.includes('已排队'))
   // 工具卡样式随主题/版本有 `- Tool` 与 `Tool | ⎿` 两种头，这里只锚定「卡存在」。
   const toolIdx = lines.findIndex(l => /(?:^|\s)-?\s*Tool\b|apply_edit|src\/a\.ts/.test(l))
-  const topIdx = lines.findIndex(l => /^[╭┌]/.test(l))
+  const topIdx = lines.findIndex(l => /^[─━┄-]{3,}/.test(l))
   assert.ok(bannerIdx >= 0, `应渲染已排队条，帧: ${lines.join(' | ')}`)
   assert.ok(toolIdx >= 0, `应渲染工具卡，帧: ${lines.join(' | ')}`)
   assert.ok(topIdx >= 0, `应有输入框顶边，帧: ${lines.join(' | ')}`)

@@ -43,9 +43,13 @@ import { splitModelRef } from './settings-model.js'
 import type { SettingsSaveResult } from './settings-flow.js'
 import { resolveLeanDefaults } from '../config/runtime-lean.js'
 import { contractModels } from '../config/contract-models.js'
+import { DEFAULT_FRONTEND_PREFERENCES, hasExistingFrontendConfig, loadFrontendPreferences, saveFrontendPreferences, validateFrontendPreferences, type FrontendPreferences } from './frontend-preferences.js'
 
 /** Runtime side-effects the panel cannot do by itself. */
 export interface SettingsHooks {
+  onFrontendChange?: (prefs: FrontendPreferences) => boolean | (() => void)
+  /** Injected storage for isolated tests. Defaults to rivetHome()/frontend.json. */
+  frontendPath?: string
   /**
    * Approval mode is the one field that must also land on the *running* session,
    * so it is routed through the TUI's existing approval persistence instead of
@@ -55,7 +59,7 @@ export interface SettingsHooks {
 }
 
 /** Read the current effective config into a panel draft. */
-export function loadSettingsDraft(): SettingsDraft {
+export function loadSettingsDraft(options?: { frontendPath?: string; existingConfig?: boolean }): SettingsDraft {
   const routing = getRoutingConfig()
   const cfg = loadConfig()
   const mirrors = getMirrorConfig()
@@ -64,6 +68,7 @@ export function loadSettingsDraft(): SettingsDraft {
   const fetchCfg = getFetchConfig()
   const vision = getVisionModelConfig()
   return {
+    frontend: loadFrontendPreferences({ path: options?.frontendPath, existingConfig: options?.existingConfig ?? hasExistingFrontendConfig() }),
     workers: routing.workers,
     review: routing.review,
     vision: vision
@@ -150,7 +155,7 @@ function inferDomainBind(): string {
  * cannot silently swallow a valid routing change.
  */
 export function saveSettings(
-  request: { draft: SettingsDraft; blocks: SettingsBlockId[] },
+  request: { baseline?: SettingsDraft; draft: SettingsDraft; blocks: SettingsBlockId[] },
   hooks?: SettingsHooks,
 ): SettingsSaveResult {
   const { draft, blocks } = request
@@ -168,6 +173,27 @@ export function saveSettings(
 
   for (const block of blocks) {
     switch (block) {
+      case 'frontend':
+        attempt(block, () => {
+          if (!draft.frontend) throw new Error('缺少前端偏好')
+          let frontend = draft.frontend
+          const baseline = request.baseline?.frontend
+          if (baseline) {
+            frontend = loadFrontendPreferences({ path: hooks?.frontendPath, existingConfig: baseline.keymap === 'legacy' })
+            for (const key of Object.keys(DEFAULT_FRONTEND_PREFERENCES) as (keyof FrontendPreferences)[]) {
+              const oldValue = key === 'bindings' ? Object.entries(baseline.bindings).sort() : baseline[key]
+              const nextValue = key === 'bindings' ? Object.entries(draft.frontend.bindings).sort() : draft.frontend[key]
+              if (JSON.stringify(oldValue) !== JSON.stringify(nextValue)) frontend = { ...frontend, [key]: draft.frontend[key] }
+            }
+          }
+          const errors = validateFrontendPreferences(frontend)
+          if (errors.length > 0) throw new Error(errors.join('；'))
+          const applied = hooks?.onFrontendChange?.(frontend)
+          if (applied === false) throw new Error('当前会话未接受前端偏好；未保存')
+          try { saveFrontendPreferences(frontend, hooks?.frontendPath) }
+          catch (error) { if (typeof applied === 'function') applied(); throw error }
+        })
+        break
       case 'workers':
         attempt(block, () => setRoutingConfig({ workers: draft.workers }))
         break
@@ -287,5 +313,5 @@ export function saveSettings(
 
   // 重新读盘作为新基线：setter 会规范化（schema 默认值、空串删键），
   // 直接把内存 draft 当基线会让面板显示与磁盘内容悄悄分叉。
-  return { saved, errors, persisted: saved.length > 0 ? loadSettingsDraft() : undefined }
+  return { saved, errors, persisted: saved.length > 0 ? loadSettingsDraft({ frontendPath: hooks?.frontendPath }) : undefined }
 }

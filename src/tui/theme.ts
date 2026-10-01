@@ -26,6 +26,7 @@ import {
 export type { ThemeName, ColorSet, ThemeOverrides, ThemeVoice }
 
 export interface RivetTheme {
+  background?: 'dark' | 'light'
   primary: string
   secondary: string
   success: string
@@ -109,10 +110,10 @@ export interface ThemeEntry {
 
 function buildEntry(def: ThemePaletteDef): ThemeEntry {
   return {
-    truecolor: buildTheme(def.truecolor, def.overrides, undefined, def.voice ?? 'default'),
+    truecolor: { ...buildTheme(def.truecolor, def.overrides, undefined, def.voice ?? 'default'), background: def.background },
     // fallback 轨必须保持纯 ANSI 命名色。复用 truecolor 的 hex 默认值会让
     // level 0/1 终端重新收到 38;2 序列，等于悄悄绕过能力降级。
-    fallback: buildTheme(def.fallback, def.fallbackOverrides, def.fallback.dim, def.voice ?? 'default'),
+    fallback: { ...buildTheme(def.fallback, def.fallbackOverrides, def.fallback.dim, def.voice ?? 'default'), background: def.background },
     background: def.background,
     description: def.description,
   }
@@ -150,11 +151,11 @@ export function registerCustomTheme(name: string, input: CustomThemeInput): void
   // voice 继承 base(风格化跟随基底皮肤;custom 不单独标 voice)
   const voice = baseDef.voice ?? 'default'
   customThemes.set(name, {
-    truecolor: buildTheme(colors, overrides, undefined, voice),
+    truecolor: { ...buildTheme(colors, overrides, undefined, voice), background },
     // 16 色轨没有 hex 可映射，继承 base 的 fallback（自定义 hex 只在 truecolor 生效）。
     // 第三个参数锁死辅助色默认值 = base fallback 的命名色，避免 muted/systemColor
     // 落回 truecolor 轨的 hex 默认值，让 level 0/1 终端收到 38;2 序列。
-    fallback: buildTheme(baseDef.fallback, baseDef.fallbackOverrides, baseDef.fallback.dim, voice),
+    fallback: { ...buildTheme(baseDef.fallback, baseDef.fallbackOverrides, baseDef.fallback.dim, voice), background },
     background,
     description: input.description ?? `Custom theme (base: ${baseName})`,
   })
@@ -203,5 +204,5 @@ export function getTheme(colorLevel?: number): RivetTheme {
   const level = colorLevel ?? chalk.level
   const entry = resolveThemeEntry(activeTheme) ?? THEMES.cobalt
   // level 2（256 色）走 truecolor 轨：ansi.ts fg() 会现场量化为 38;5。
-  return level >= 2 ? entry.truecolor : entry.fallback
+  return level >= 2 && !activeTheme.endsWith('-ansi') ? entry.truecolor : entry.fallback
 }

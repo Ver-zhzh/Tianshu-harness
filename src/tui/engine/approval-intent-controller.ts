@@ -20,6 +20,7 @@ export class ApprovalIntentController {
   approvalPending: PendingApproval | null = null
   approvalEditMode = false
   approvalEditError = ''
+  editedInput?: Record<string, unknown>
   /**
    * 审批选项列表的光标行。0 批准 / 1 拒绝 / 2 编辑 JSON；`showRememberOption`
    * 时 3 为「批准并记住此目录」；无风险解释行时末项为「解释风险」。

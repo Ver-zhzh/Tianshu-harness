@@ -82,7 +82,7 @@ test('passthrough 后 scrollback 包含用户气泡', async () => {
   assert.equal(passed, '/team plan.md', '应透传给 agent')
   const scrollback = app.getScrollbackContent()
   // ANSI 转义码穿插，无法做字面匹配，仅断言用户气泡标记（❯/▌）与原文存在
-  assert.ok(/[❯▌]/.test(scrollback), 'scrollback 应包含用户气泡标记（❯/▌）')
+  assert.ok(/[>❯▌]/.test(scrollback), 'scrollback 应包含用户气泡标记（❯/▌）')
   assert.ok(scrollback.includes('/team plan.md'), 'scrollback 应包含用户原始输入')
 })
 

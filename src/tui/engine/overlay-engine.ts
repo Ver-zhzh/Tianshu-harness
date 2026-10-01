@@ -19,12 +19,16 @@
 
 import type { WriteStream } from 'node:tty'
 import { ANSI, cursorTo } from './ansi.js'
+import stripAnsi from 'strip-ansi'
 
 export type OverlayId = 'starmap' | 'cockpit' | 'chronicle' | 'pager' | 'command-palette' | string
+export interface OverlayMenuHit { index: number; workerId?: string }
+export type OverlayMenuLines = string[] & { menuRows: Map<number, OverlayMenuHit> }
+export function createMenuLines(): OverlayMenuLines { return Object.assign([] as string[], { menuRows: new Map<number, OverlayMenuHit>() }) }
 
 export interface OverlayRenderer {
   /** 渲染 overlay 内容。返回 ANSI 格式化后的行数组。 */
-  render(width: number, height: number): string[]
+  render(width: number, height: number): string[] & { menuRows?: Map<number, OverlayMenuHit> }
   /**
    * 本帧硬件光标的落点（1-based 行/列）；null = 隐藏硬件光标。
    * 输入类 overlay 用它呈现"格子边界"光标——终端原生光标不占字符格、
@@ -56,10 +60,12 @@ export class OverlayEngine {
   private active: OverlayId | null = null
   private renderers = new Map<OverlayId, OverlayRenderer>()
   private inAltScreen = false
+  private borrowed = false
   /** 上一帧屏上每行内容（权威缓存），用于行级 diff。空 = 需全量重绘。 */
   private lastFrame: string[] = []
   private lastCols = 0
   private lastRows = 0
+  private menuRows = new Map<number, OverlayMenuHit>()
 
   constructor(options: OverlayEngineOptions) {
     this.stdout = options.stdout
@@ -67,6 +73,9 @@ export class OverlayEngine {
     this.onEnterAltScreen = options.onEnterAltScreen
     this.onExitAltScreen = options.onExitAltScreen
   }
+
+  /** The main fullscreen renderer owns 1049; overlays borrow its grid. */
+  setBorrowed(borrowed: boolean): void { this.borrowed = borrowed }
 
   /**
    * 注册一个 overlay 渲染器。
@@ -129,11 +138,16 @@ export class OverlayEngine {
     return this.active
   }
 
+  rowText(row: number): string { return stripAnsi(this.lastFrame[row - 1] ?? '') }
+  menuHit(x: number, y: number): OverlayMenuHit | undefined {
+    return x >= 1 && x <= this.lastCols && y >= 1 && y <= this.lastRows ? this.menuRows.get(y) : undefined
+  }
+
   // ── internal ─────────────────────────────────────────────────
 
   private enterAltScreen(): void {
     if (this.inAltScreen) return
-    this.stdout.write(ANSI.ALT_SCREEN_ON)
+    if (!this.borrowed) this.stdout.write(ANSI.ALT_SCREEN_ON)
     this.stdout.write(ANSI.HIDE_CURSOR)
     this.inAltScreen = true
     // 通知调用方：已进入 alt screen，主屏 live region 的光标位置/污染检测应暂停，
@@ -147,7 +161,7 @@ export class OverlayEngine {
     // 恢复终端默认光标形状（overlay 期间曾切稳态竖条抑制原生闪烁）。
     this.stdout.write(ANSI.CURSOR_SHAPE_DEFAULT)
     this.stdout.write(ANSI.SHOW_CURSOR)
-    this.stdout.write(ANSI.ALT_SCREEN_OFF)
+    if (!this.borrowed) this.stdout.write(ANSI.ALT_SCREEN_OFF)
     this.inAltScreen = false
     // 通知调用方：已退出 alt screen 回到主屏，恢复污染检测。
     this.onExitAltScreen?.()
@@ -166,6 +180,7 @@ export class OverlayEngine {
     this.lastFrame = []
     this.lastCols = 0
     this.lastRows = 0
+    this.menuRows.clear()
   }
 
   private render(): void {
@@ -206,6 +221,7 @@ export class OverlayEngine {
     this.lastFrame = desired
     this.lastCols = cols
     this.lastRows = rows
+    this.menuRows = new Map([...lines.menuRows ?? []].filter(([row]) => row >= 1 && row <= rows))
 
     // 闪烁帧只改光标可见性、行内容不变——caret 处理必须在"空 diff 短路"
     // 之外执行，否则硬件光标不翻转。

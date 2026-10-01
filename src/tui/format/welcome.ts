@@ -38,7 +38,7 @@
 
 import { homedir } from 'node:os'
 import { color } from '../engine/ansi.js'
-import { displayWidth, truncateToDisplayWidth } from '../width.js'
+import { displayWidth, truncateToDisplayWidth, ambiguousWideEnabled } from '../width.js'
 import { boxCharsFor } from '../box-chars.js'
 import { useAsciiBorders } from '../term-caps.js'
 import type { RivetTheme, ThemeVoice } from '../theme.js'
@@ -51,10 +51,12 @@ export interface FormatWelcomeInput {
   columns: number
   /** Ephemeral per-session numeric id (e.g. 7281)。compact 行优先展示。 */
   numericId?: number
-  /** 折叠为单行极简版(用于非首次启动/恢复会话)。 */
+  /** true=日常单行；false=用户显式选择完整欢迎；未提供时首启使用紧凑引导。 */
   compact?: boolean
   /** 终端可视高度(行)。低于 FULL_MIN_ROWS 降级 compact。 */
   rows?: number
+  /** 工作区实际分配给欢迎内容的行数；不占用身份、权限或输入区。 */
+  availableRows?: number
   /** 版本号(安装根 package.json),无则不显示。 */
   version?: string | null
   /** 权限模式(compact 行不再展示,保留入参兼容)。 */
@@ -109,7 +111,7 @@ const GUIDE_INTRO = '终端里的 AI 工程师 —— 直接说你要做什么�
 const GUIDE_INTRO_SHORT = '终端里的 AI 工程师 —— 直接说你要做什么'
 const GUIDE_INTRO_TINY = '直接说你要做什么，我来干活'
 /** 可直接照抄的示例输入(@ 文件引用是天枢核心能力,值得在首屏教学)。 */
-const GUIDE_EXAMPLES = ['看看这个项目的结构', '帮我跑一下测试，把失败的修掉', '@src/main.ts 这段代码在做什么'] as const
+const GUIDE_EXAMPLES = ['看看这个项目的结构', '帮我跑一下测试，把失败的修掉', '@file:src/main.ts 这段代码在做什么'] as const
 /** 基础操作提示(full/short 两档)。/theme 提示放在此处——默认主题之外的换肤入口
  *  要能被首启用户看见。宽度实测：full 含前缀 58 列起、short 35 列起（比原 short
  *  的 36 列还短一格，故窄终端不会因此丢提示）。 */
@@ -278,6 +280,12 @@ export function smallWordmark(theme: RivetTheme, ascii: boolean): string {
   return `${color(star, theme.brandColor, { bold: true })}  ${brandWord('天枢', theme.brandColor)}  ${color(WORDMARK_PINYIN, theme.muted)}`
 }
 
+export function formatWelcomeBrand(columns: number, theme: RivetTheme): string[] {
+  if (columns < SHADOW_MIN_COLS) return [smallWordmark(theme, false)]
+  const mission = missionLine(theme, columns)
+  return [...logoRows(theme, columns, undefined, logoSpec('shadow')), ...(mission ? [mission] : [])]
+}
+
 /** 使命行(静态终态):整行装不下就整体消失,绝不腰斩 slogan。
  *  宽度按 ambiguous=2 上界判定(CJK 终端不折行)。R11 澄清:此行不做字距扩张——
  *  「离太近」指的是字标与右侧品牌段,见 logoRows 的 TAG_GAP。 */
@@ -443,6 +451,47 @@ function compactLine(input: FormatWelcomeInput, theme: RivetTheme, ascii: boolea
 
 // ── 入口 ─────────────────────────────────────────────────────────────
 
+function brandedWelcome(input: FormatWelcomeInput, theme: RivetTheme, cols: number, budget: number, ascii: boolean): string[] {
+  const policy = { ambiguousAsWide: ambiguousWideEnabled() }
+  const width = Math.max(1, cols - 1), proseWidth = Math.min(width, CONTENT_MAX)
+  const star = ascii ? '*' : '✦'
+  const tagline = `   ${MISSION_ZH} · ${MISSION_EN}`
+  const mission = displayWidth(tagline, policy) <= proseWidth
+    ? [color(`   ${MISSION_ZH}`, theme.muted) + color(` · ${MISSION_EN}`, theme.dim)]
+    : [MISSION_ZH, MISSION_EN].filter(text => displayWidth(text, policy) + 3 <= proseWidth)
+      .map(text => color(`   ${text}`, theme.muted))
+  const spec = logoSpec(resolveLogoStyle(input.logoStyle))
+  const glyphs = [...spec.word].map(ch => spec.font[ch]!)
+  const art = Array.from({ length: spec.rows }, (_, r) => glyphs.map(g => g[r]!).join(spec.gap))
+  const artWidth = Math.max(...art.map(row => displayWidth(row, policy)))
+  const full = artWidth <= width && budget >= spec.rows + mission.length + 3 + (input.guide ? 2 : 0)
+  const smallLogo = color(`${star} TIANSHU`, theme.brandColor, { bold: true })
+  if (displayWidth(smallLogo, policy) > width) return [compactLine({ ...input, columns: width }, theme, ascii)]
+  const logo = full ? art.map(row => color(row, theme.brandColor, { bold: true })) : [smallLogo]
+  if (full) {
+    const tag = `${star}${input.version ? ` v${input.version}` : ''}`
+    const right = displayWidth(tag, policy) + artWidth + TAG_GAP <= width ? tag : star
+    if (displayWidth(right, policy) + artWidth + TAG_GAP <= width) logo[1] += ' '.repeat(TAG_GAP) + color(right, theme.brandColor)
+  }
+  const railWidth = Math.min(width, Math.max(CONTENT_MAX, full ? artWidth : 0))
+  const h = ascii ? '-' : boxCharsFor(input.separator ?? 'thin').h
+  const cell = Math.max(1, displayWidth(h, policy)), starWidth = displayWidth(star, policy)
+  const left = Math.floor(railWidth * 0.72 / cell)
+  const right = Math.max(0, Math.floor((railWidth - left * cell - starWidth) / cell))
+  const rail = color(h.repeat(left), theme.muted) + color(star, theme.brandColor) + color(h.repeat(right), theme.muted)
+  let lines = ['', ...logo, ...mission, rail, '']
+  if (lines.length > budget) lines = budget >= 2 ? ['', smallLogo] : [compactLine({ ...input, columns: width }, theme, ascii)]
+  const tips = input.guide ? guideLines(theme, ascii, proseWidth) : []
+  const remaining = Math.max(0, budget - lines.length)
+  if (tips.length <= remaining) lines.push(...tips)
+  else if (remaining >= 2) {
+    const examples = tips.slice(1, -1)
+    const kept = remaining >= 4 ? [examples[0], examples.at(-1)] : remaining === 3 ? [examples.at(-1)] : []
+    lines.push(tips[0]!, ...kept.filter((line): line is string => !!line), tips.at(-1)!)
+  } else if (remaining) lines.push(tips[0]!)
+  return lines.slice(0, budget)
+}
+
 export function formatWelcome(input: FormatWelcomeInput, theme: RivetTheme): string[] {
   const cols = input.columns > 0 ? input.columns : 80
   const ascii = useAsciiBorders()
@@ -451,11 +500,25 @@ export function formatWelcome(input: FormatWelcomeInput, theme: RivetTheme): str
 
   const compactLine0 = (): string[] => [compactLine(input, theme, ascii)]
 
-  if (input.compact) return compactLine0()
+  if (input.availableRows !== undefined && input.availableRows <= 0) return []
+  if (input.compact || input.priorMsgCount > 0) return compactLine0()
+  const explicitFull = input.compact === false || input.logoStyle !== undefined || process.env['RIVET_WELCOME_LOGO'] !== undefined
+  if (input.availableRows !== undefined && explicitFull) return brandedWelcome(input, theme, cols, Math.floor(input.availableRows), ascii)
   const rows = input.rows && input.rows > 0 ? input.rows : Number.POSITIVE_INFINITY
+  if (!explicitFull) {
+    const lines = [compactLine(input, theme, ascii)]
+    if (!input.guide) return lines
+    const budget = Math.max(1, input.availableRows ?? rows - RESERVED_ROWS)
+    if (budget >= 7) lines.push('', ...guideLines(theme, ascii, cols))
+    else if (budget >= 3) {
+      lines.push(color(`  ${GUIDE_EXAMPLES[0]}`, theme.muted))
+      lines.push(color('  /help 帮助 · /theme 换肤', theme.muted))
+    }
+    return lines.slice(0, budget).map(line => truncateWide(line, cols))
+  }
   /* guide 引导块比提示区多 1 行内容,全妆门槛相应 +1——矮屏宁退单行不画半套引导。 */
   const guideExtra = input.guide ? 1 : 0
-  if (rows < logoRowCount + FULL_FIXED_ROWS + RESERVED_ROWS + guideExtra) return compactLine0()
+  if (rows < Math.max(24, logoRowCount + FULL_FIXED_ROWS + RESERVED_ROWS + guideExtra)) return compactLine0()
   if (cols < MIN_COLS) return compactLine0()
 
   const mission = missionLine(theme, cols)

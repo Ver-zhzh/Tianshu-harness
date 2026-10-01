@@ -6,6 +6,8 @@
 
 import { color } from '../engine/ansi.js'
 import type { RivetTheme } from '../theme.js'
+import { truncateToDisplayWidth } from '../width.js'
+import { followListWindow } from './overlay.js'
 import {
   frameTop,
   frameBottom,
@@ -32,7 +34,7 @@ export function renderHistorySearch(data: HistorySearchData, width: number, heig
 
   const lines: string[] = [
     frameTop(width, theme, 'subtle'),
-    frameTitle('历史搜索 · Ctrl+R', width, theme),
+    frameTitle('输入历史 · Ctrl+R', width, theme),
   ]
 
   const body: string[] = []
@@ -44,18 +46,19 @@ export function renderHistorySearch(data: HistorySearchData, width: number, heig
   } else {
     const maxVisible = Math.max(1, contentRows - body.length)
     const selected = Math.max(0, Math.min(data.selectedIndex, data.entries.length - 1))
-    for (let i = 0; i < Math.min(data.entries.length, maxVisible); i++) {
+    const start = followListWindow(selected, data.entries.length, maxVisible)
+    for (let i = start; i < Math.min(data.entries.length, start + maxVisible); i++) {
       const entry = data.entries[i]!
       const isSelected = i === selected
       const prefix = isSelected ? color(CURSOR, theme.primary, { bold: true }) : ' '
-      const preview = entry.length > w - 4 ? entry.slice(0, w - 7) + '…' : entry
+      const preview = truncateToDisplayWidth(entry, Math.max(0, w - 4))
       const text = isSelected ? color(preview, theme.primary, { bold: true }) : color(preview, theme.muted)
       body.push(` ${prefix} ${text}`)
     }
   }
 
   for (let i = 0; i < contentRows; i++) lines.push(frameLine(body[i] ?? '', width, theme))
-  lines.push(frameFooter(keyHints([['↑↓', '选择'], ['Enter', '粘贴'], ['Esc', '取消']]), width, theme, 'subtle'))
+  lines.push(frameFooter(keyHints([['↑↓', '选择'], ['Enter', '放回草稿'], ['Esc', '取消']]), width, theme, 'subtle'))
   lines.push(frameBottom(width, theme, 'subtle'))
   return lines
 }

@@ -1,64 +1,47 @@
 /**
  * T9 格式化函数 — 输入框下方键位提示行（prompt footer）。
  *
- * 对齐公开仓 prompt-footer 语义：左 mode 段恒保留，右 hints 段从后往前丢
- * 直到放得下。只列真的能按的键（同 command-palette.ts hotkey 字段裁决）：
- * 公开仓的 `pgup 翻页` 在本仓输入框无对应行为，不放。
+ * 至多三个当前可执行的动作；窄屏逐项收起，审批由决策区显示自己的提示。
  */
 
 import { color } from '../engine/ansi.js'
-import { displayWidth } from '../width.js'
+import { displayWidth, ambiguousWideEnabled } from '../width.js'
+import { getKeybindingRows } from '../keybindings.js'
+import type { FrontendPreferences } from '../frontend-preferences.js'
 import type { RivetTheme } from '../theme.js'
 
 export interface PromptFooterInput {
   /** 终端宽度 */
   width: number
-  /** 粘滞换行模式：Enter=换行、Shift+Enter 退出（对齐公开仓 newlineMode） */
+  /** 粘滞换行模式：Enter 换行，Ctrl+X Enter 发送。 */
   newlineMode?: boolean
   /** agent 运行中：提示打断键 */
   agentBusy?: boolean
   /** 审批挂起：提示审批动作 */
   approvalPending?: boolean
-  /** 终端支持 kitty keyboard protocol（能力探测回包确认）。Shift+Enter
-   *  只在支持的终端上与 Enter 可区分——不支持时提示该键即谎言，裁掉。 */
+  /** kitty keyboard protocol 能力回包确认后，可以提示 Ctrl+Enter 发送。 */
   shiftEnterAvailable?: boolean
+  keymap?: 'standard' | 'legacy'
+  renderer?: 'classic' | 'fullscreen'
+  stashedDraft?: boolean
+  bindings?: FrontendPreferences['bindings']
 }
 
-const CHROME_INACTIVE_SHIMMER = '#8a8a8a'
-
 /**
- * 单行 footer：`normal · / 命令 · ctrl+j 换行 · ctrl+p 面板`。
- * hints 从后往前丢段直到放得下；mode 恒保留。
+ * 提示从后往前逐项收起；权限与模式由独立工作区行负责。
  */
 export function formatPromptFooter(input: PromptFooterInput, theme: RivetTheme): string[] {
-  const { width } = input
-  /* R23 mode 段写实:vi 语义——粘滞换行开启即「insert」(输入即入文),
-     Shift+Enter 退出回「normal」。此前恒显 normal 是无信息量的死占位。 */
-  const mode = input.newlineMode === true ? 'insert' : 'normal'
-  const modeColor = theme.dim
-  // shift+enter 段只在能力探测通过的终端显示——非 kitty 终端上该键与
-  // Enter 同码（裸 \r），按提示操作只会触发提交/继续换行，提示即误导。
-  const shiftEnterSegs = input.shiftEnterAvailable === true ? ['shift+enter 换行模式'] : []
-  const shiftEnterExitSegs = input.shiftEnterAvailable === true ? ['shift+enter 退出'] : []
-  const hints: string[] = input.approvalPending === true
-    ? ['y 允许', 'n 拒绝', 'a 放行', 'esc 取消']
-    : input.newlineMode === true
-      ? ['换行中', 'enter 换行', ...shiftEnterExitSegs]
-      : input.agentBusy === true
-        ? ['ctrl+j 换行', ...shiftEnterSegs]
-        : ['/ 命令', 'ctrl+j 换行', 'ctrl+p 面板']
-
-  let segs = hints
-  for (;;) {
-    const text = [mode, ...segs].join(' · ')
-    if (displayWidth(text) <= width) break
-    if (segs.length === 0) break
-    segs = segs.slice(0, -1)
+  if (input.approvalPending) return []
+  const prefs = { keymap: input.keymap ?? 'legacy', bindings: input.bindings ?? {} } as FrontendPreferences
+  const key = (action: 'history' | 'stash') => {
+    const row = getKeybindingRows(prefs).find(row => row.action === action)!
+    return row.key?.replace(/^ctrl_/, 'Ctrl+').replace(/^alt_/, 'Alt+').replace(/[a-z]$/, letter => letter.toUpperCase()) ?? row.command
   }
-
-  const parts = [color(mode, modeColor)]
-  for (const seg of segs) {
-    parts.push(color(seg, CHROME_INACTIVE_SHIMMER))
-  }
-  return [parts.join(' · ')]
+  const hints = input.newlineMode
+    ? ['Enter 换行', input.shiftEnterAvailable ? 'Ctrl+Enter 发送' : 'Ctrl+X Enter 发送', `${key('history')} 历史`]
+    : input.agentBusy
+      ? ['Esc 停止', 'Enter 补充', 'Ctrl+J 换行']
+      : [input.stashedDraft ? `${key('stash')} 恢复草稿` : 'Enter 发送', 'Ctrl+J 换行', `${key('history')} 历史`]
+  while (hints.length > 1 && displayWidth(hints.join(' · '), { ambiguousAsWide: ambiguousWideEnabled() }) > input.width - 1) hints.pop()
+  return displayWidth(hints[0] ?? '', { ambiguousAsWide: ambiguousWideEnabled() }) > input.width - 1 ? [] : [color(hints.join(' · '), theme.muted)]
 }

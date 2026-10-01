@@ -3,8 +3,8 @@
  *
  * name/defaultHint/files 由 scripts/gen-env-registry.ts 生成，勿手改；
  * description 字段人工维护，重新生成时按 name 保留。
- * 最后生成：2026-09-27T06:37:54.663Z
- * 共 227 个变量。
+ * 最后生成：2026-10-01T21:12:56.293Z
+ * 共 226 个变量。
  *
  * 每个条目含：名称 / 默认值提示 / 引用文件 / 简要说明。
  * 当源码中新增 RIVET_* 引用但注册表未同步时，
@@ -1287,12 +1287,6 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
     name: 'RIVET_WEB_MAP',
     defaultHint: '',
     files: ['tools/default-registry.ts'],
-    description: '',
-  },
-  {
-    name: 'RIVET_WELCOME_ANIM',
-    defaultHint: '',
-    files: ['main.ts'],
     description: '',
   },
   {

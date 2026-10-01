@@ -1,5 +1,5 @@
 /**
- * T9 常驻任务面板测试（C）。
+ * T9 显式展开任务面板测试（C）。
  *
  * 契约：
  *  1. setTodos 后面板出现在内容与 GlanceBar 之间；GlanceBar 与输入框仍可见
@@ -41,6 +41,7 @@ function makeApp() {
     stdin: stdin as unknown as ReadStream,
     cols: 100, rows: 40, modelName: 'test',
   })
+  ;(app as any).state.todoExpanded = true
   app.start()
   return { app, out }
 }

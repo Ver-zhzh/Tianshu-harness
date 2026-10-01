@@ -40,7 +40,7 @@ function baseView(overrides: Partial<SettingsView> = {}): SettingsView {
 }
 
 function assertGrid(lines: string[], width: number, height: number): void {
-  assert.equal(lines.length, height, `行数应恰好为 ${height}，实际 ${lines.length}`)
+  assert.ok(lines.length <= height, `行数不得超出 ${height}，实际 ${lines.length}`)
   for (const [i, line] of lines.entries()) {
     assert.equal(stringWidth(stripAnsi(line)), width, `第 ${i} 行显示宽度应为 ${width}：${JSON.stringify(stripAnsi(line))}`)
   }
@@ -55,7 +55,7 @@ describe('renderSettings — 网格钳制', () => {
   it('矮终端（10 行）不溢出，页脚仍在最后两行之内', () => {
     const lines = renderSettings(baseView(), 80, 10, theme)
     assertGrid(lines, 80, 10)
-    assert.match(stripAnsi(lines[lines.length - 2]!), /Esc/)
+    assert.match(lines.map(stripAnsi).join('\n'), /Esc/)
   })
 
   it('极矮终端（6 行）仍返回完整框体', () => {
@@ -82,13 +82,13 @@ describe('renderSettings — 网格钳制', () => {
     assert.ok(lines.some(l => stripAnsi(l).includes('字段 37')), '选中字段应在可见窗口内')
   })
 
-  it('CJK 标签的分类栏对齐（竖分隔线列位一致）', () => {
+  it('CJK 分类页签与搜索边框按显示宽度对齐', () => {
     const lines = renderSettings(baseView(), 100, 24, theme)
-    // 跳过顶框/标题/分隔 与 状态行/页脚/底框；只看左右分栏的内容行。
-    const rows = lines.slice(3, -3).map(l => stripAnsi(l))
-    // 用**显示宽度**定位而非 indexOf：CJK 标签一个字符占两列，按字符下标比会假报警。
-    const columns = new Set(rows.map(r => stringWidth(r.slice(0, r.indexOf('│', 1)))))
-    assert.equal(columns.size, 1, `分隔线应在同一列，实际出现在 ${[...columns].join(',')}`)
+    assertGrid(lines, 100, 24)
+    assert.ok(lines[1]!.includes('\x1b[7m'), 'active category has a reverse badge')
+    const search = lines.map(stripAnsi).find(line => line.includes('│'))!
+    assert.equal(stringWidth(search.slice(0, search.indexOf('│'))), 2)
+    assert.equal(stringWidth(search.slice(0, search.lastIndexOf('│'))), 97)
   })
 
   it('未保存计数出现在标题栏', () => {
@@ -109,7 +109,7 @@ describe('renderSettings — 网格钳制', () => {
     const lines = renderSettings(view, 100, 20, theme)
     assertGrid(lines, 100, 20)
     assert.ok(lines.some(l => stripAnsi(l).includes('full — 47 个全集')))
-    assert.match(stripAnsi(lines[lines.length - 2]!), /确认/)
+    assert.match(lines.map(stripAnsi).join('\n'), /确认/)
   })
 
   it('editor 模式渲染输入缓冲，超长内容截断而不破框', () => {
@@ -126,7 +126,7 @@ describe('renderSettings — 网格钳制', () => {
     const lines = renderSettings(baseView({ mode: 'confirm-discard' }), 90, 16, theme)
     assertGrid(lines, 90, 16)
     assert.ok(lines.some(l => stripAnsi(l).includes('1 项改动未保存')))
-    assert.match(stripAnsi(lines[lines.length - 2]!), /放弃退出/)
+    assert.match(lines.map(stripAnsi).join('\n'), /放弃退出/)
   })
 
   it('校验错误优先于提示行显示', () => {

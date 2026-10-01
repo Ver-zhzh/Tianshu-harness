@@ -66,7 +66,7 @@ import { resolveMaxTurns } from './agent/turn-budget-policy.js'
 import { TIER_HINT, TIER_TO_WIRE, formatPermissionLabel, formatTierLabel } from './agent/approval-vocabulary.js'
 import { readFileSync, statSync } from 'node:fs'
 import { join as pathJoin } from 'node:path'
-import { formatWelcome, isMissionLine, missionShimmer, MISSION_SHIMMER_FRAME_MS } from './tui/format/welcome.js'
+import { formatWelcome } from './tui/format/welcome.js'
 import { settleWelcomeGreeting } from './tui/welcome-greeting.js'
 import { commitWelcomeStellarIdentityLine } from './tui/account-status.js'
 import { resolveOrchestrationHintEnabled } from './tui/engine/orchestration-hint.js'
@@ -84,6 +84,8 @@ import { buildWorkerDetailContent } from './tui/worker-detail.js'
 import { killAllSync } from './tools/process-tracker.js'
 import { registerExitCleanup } from './tui/engine/exit-cleanup.js'
 import { getTheme, getActiveThemeName, setTheme, THEMES, listCustomThemes, resolveThemeEntry, type ThemeName } from './tui/theme.js'
+import { AppearanceSetupCancelled, promptAppearanceSetup, shouldOfferAppearanceSetup } from './cli/appearance-onboarding.js'
+import { hasExistingFrontendConfig, loadFrontendPreferences, saveFrontendPreferences } from './tui/frontend-preferences.js'
 import { loadCustomThemes } from './tui/theme-custom.js'
 import { detectTerminalBackground, autoThemeFor } from './tui/theme-detect.js'
 import { configureSpinnerVerbs, setReducedMotion } from './tui/format/spinner-status.js'
@@ -110,14 +112,12 @@ import { applyInitCommit, formatInitApplyReport } from './bootstrap/init-scaffol
 import { checkForUpdate, formatUpdateBanner, detectInstallRoot, getCurrentVersion } from './tui/updater.js'
 import { detectEnv, formatGitMissingBanner } from './tools/env-check.js'
 import { computeUsageCost, findModelPricing } from './utils/pricing.js'
-import { deepseekPricingPhase } from './utils/pricing-phase.js'
-import { projectCacheTelemetry } from './tui/cache-telemetry.js'
+import { initializeFrontendHistory, createFrontendMetricsProvider, executeFrontendRewind, syncFrontendCompaction, resolveFrontendWelcomeCompact } from './tui/frontend-session-provider.js'
 import { CachePanelSource } from './tui/cache-panel-source.js'
 import { sessionsDir } from './config/paths.js'
 import { trustProject, isProjectTrusted, isTrustPromptDismissed, detectProjectTrustStakes, dismissProjectTrustPrompt } from './config/project-trust.js'
 import { promptProjectTrust } from './cli/project-trust-prompt.js'
 import { fetchOfficialUsage } from './cache/deepseek-official-usage.js'
-import type { CacheStatus } from './tui/status-types.js'
 import { TuiPerfMonitor, isTuiPerfEnabled } from './tui/engine/perf-monitor.js'
 import { runTuiShutdownSequence } from './tui/engine/shutdown-sequence.js'
 import { contractModels } from './config/contract-models.js'
@@ -659,6 +659,18 @@ async function main() {
     process.exit(1)
   }
 
+  const existingAppearanceConfig = hasExistingFrontendConfig()
+  const appearancePrefs = loadFrontendPreferences({ existingConfig: existingAppearanceConfig })
+  let appearanceChoice: string | undefined
+  if (shouldOfferAppearanceSetup({ existingConfig: existingAppearanceConfig, completed: appearancePrefs.appearanceSetup === 'done', tty: !!stdout.isTTY && !!stdin.isTTY, screenReader: wantScreenReader, recovery: forceRecoveryCli })) {
+    try {
+      appearanceChoice = (await promptAppearanceSetup({ stdin, stdout, defaultTheme: 'cobalt' })).themeName
+    } catch (error) {
+      if (error instanceof AppearanceSetupCancelled) { process.exitCode = 130; return }
+      throw error
+    }
+  }
+
   // ── Bootstrap agent runtime ──────────────────────────────────
   process.stderr.write('[T9] Initializing agent runtime...\n')
   maybePrintStaticPromptCacheWarning()
@@ -719,7 +731,15 @@ async function main() {
   //    （2026-09 用户指定；2026-07-07~07-17 本就是默认），与 theme.ts 内存默认对齐。
   // 3. 已持久化的 ui.theme（含旧默认 tianshu）照旧尊重，不改写磁盘。
   loadCustomThemes()
-  const configuredTheme = ctx.config.ui?.theme ?? 'cobalt'
+  if (appearanceChoice) {
+    try {
+      setUiConfig({ theme: appearanceChoice })
+      saveFrontendPreferences({ ...appearancePrefs, appearanceSetup: 'done' })
+    } catch (error) {
+      process.stderr.write(`外观已用于本会话，保存默认失败：${(error as Error).message}\n`)
+    }
+  }
+  const configuredTheme = appearanceChoice ?? ctx.config.ui?.theme ?? 'cobalt'
   let themeName: string = configuredTheme
   if (configuredTheme === 'auto') {
     // 必须在 TUI 接管 stdin 前查询——此处 raw-mode 探测后即恢复。
@@ -743,7 +763,6 @@ async function main() {
   screenReaderMode = wantScreenReader || ctx.config.ui?.screenReader === true
   if (screenReaderMode) {
     setReducedMotion(true)
-    app?.setScreenReader(true)
   }
 
   // Provider/Model/Session 已在欢迎屏头部展示，常规启动不再重复打印。
@@ -815,6 +834,8 @@ async function main() {
   // Register overlays with real data
   // app 在此处必定非 null（前有 app = new TuiApp 赋值，无重赋 null 路径）
   const tuiApp = app!
+  await initializeFrontendHistory(tuiApp, ctx)
+  tuiApp.setScreenReader(screenReaderMode)
   tuiApp.setApprovalMode(ctx!.config.agent.approval ?? 'auto-safe')
   // routing nudge 数据源：workers.profiles 或 review.profiles 任一非空 = 已配置。
   tuiApp.setRoutingConfiguredProvider(() => {
@@ -1120,7 +1141,7 @@ async function main() {
       return buildCockpitSnapshot({
         agent: ctx.agent,
         session: ctx.session,
-        model: contractModels(ctx.provider)[0]?.id ?? 'unknown',
+        model: ctx.agent.config.promptEngine.getModel(),
         cacheHitRate: ctx.session.getRecentTurnHitRate(3) ?? ctx.session.getCacheHitRate(),
         cost: metrics?.cost ?? 0,
         mcpManager: ctx.refs.mcpManager,
@@ -1381,59 +1402,7 @@ async function main() {
       }
     }
   }, /* rewindExec: */ (messageIndex: number, mode: RewindMode) => {
-    // Rewind Enter 回调：按选择的粒度恢复（仅对话 / 仅代码 / 对话+代码），
-    // 或对选定区段做定点摘要（/compact 压全部，这里只压用户圈定的一段）。
-    const messages = ctx?.session.getMessages() ?? []
-    const target = messages[messageIndex]
-    const content = target && typeof target.content === 'string' ? target.content : ''
-
-    if (mode === 'summarize-from' || mode === 'summarize-to') {
-      const scope = mode === 'summarize-from' ? 'from' : 'to'
-      tuiApp.commitStatic(`⏳ 正在摘要${scope === 'from' ? '此消息之后' : '此消息之前'}的对话…`)
-      void ctx?.agent.compaction.summarizeRange({ scope, messageIndex }).then(
-        result => {
-          if (!result.ok) {
-            tuiApp.commitStatic(`摘要失败：${result.reason}`, { isError: true })
-            return
-          }
-          const saved = result.beforeTokens - result.afterTokens
-          tuiApp.commitStatic(
-            `⏪ 已把 ${result.replaced} 条消息压成摘要 — ${result.beforeTokens} → ${result.afterTokens} tokens（省 ${saved}）`,
-          )
-        },
-        err => tuiApp.commitStatic(`摘要失败：${(err as Error).message}`, { isError: true }),
-      )
-      return
-    }
-
-    const doCode = mode === 'code' || mode === 'both'
-    const doConvo = mode === 'convo' || mode === 'both'
-
-    if (doCode) {
-      const fh = ctx?.agent.getFileHistory()
-      if (fh) {
-        const ids = collectPostBoundaryEditIds(messages, messageIndex)
-        fh.rewindToBoundary(ids).then(
-          changed => {
-            const skipped = changed.skipped
-            const skippedNote = skipped.length > 0
-              ? `；跳过 ${skipped.length} 个被其他会话编辑中的文件（${skipped.slice(0, 3).join('、')}${skipped.length > 3 ? '…' : ''}）`
-              : ''
-            tuiApp.commitStatic(`⏪ 已把 ${changed.length} 个文件恢复到此消息${changed.length ? '' : '（无可恢复的编辑）'}${skippedNote}`)
-          },
-          err => tuiApp.commitStatic(`回滚代码失败：${(err as Error).message}`),
-        )
-      } else {
-        tuiApp.commitStatic('无文件历史，无法恢复代码。')
-      }
-    }
-
-    if (doConvo && messageIndex >= 0) {
-      ctx!.session.rewindToMessages(messages.slice(0, messageIndex))
-      ctx!.agent.config.promptEngine.resetAppendixBaseline()
-      tuiApp.commitStatic('⏪ 已截断对话到此消息 — 已回填输入框。')
-      tuiApp.setInput(content)
-    }
+    if (ctx) executeFrontendRewind(tuiApp, ctx, messageIndex, mode)
   }, /* chronicleExec: */ (id: string) => {
     // Chronicle Enter 回调：直接切换到所选会话（对齐 Claude Code 选择器一步到位）。
     // 经 /resume slash 命令派发,复用同一条恢复链路(onSessionSwitch:
@@ -1850,37 +1819,7 @@ async function main() {
   // ── 真实指标 provider（GlanceBar cache/ctx/cost）─────────────
   // 闭包动态读 module-level ctx：/model 切换时 switchAgentRuntime 原地改 ctx.agent，
   // ctx.session 不变，因此读取始终命中当前 runtime（天然 /model 切换安全）。
-  let prevCacheStatus: CacheStatus = 'healthy'
-  app.setMetricsProvider(() => {
-    if (!ctx) return null
-    const session = ctx.session
-    const total = session.getTotalUsage()
-    // 真实定价：从 provider config 查当前模型的 pricing（CNY per 1M tokens），
-    // 按 input/output/cacheRead/cacheWrite/reasoning 五档精确计算。无 pricing 时回退 0。
-    const providers = ctx.agent.config.allProviders ?? {}
-    const providerName = ctx.agent.config.providerName
-    const modelId = ctx ? contractModels(ctx.provider)[0]?.id : undefined
-    const pricing = findModelPricing(providers, providerName, modelId)
-    const cost = pricing ? computeUsageCost(total, pricing).total : 0
-    const maxTokens = ctx.agent.config.contextWindow ?? currentModel?.contextWindow ?? 0
-    const turnNumber = session.getTurnCount()
-    const cacheProjection = projectCacheTelemetry(session, turnNumber, prevCacheStatus)
-    prevCacheStatus = cacheProjection.status
-    return {
-      estimatedTokens: session.getRealOccupancy(),
-      conversationTokens: session.getConversationTokens(),
-      maxTokens,
-      cacheHitRate: session.getRecentTurnHitRate(3) ?? session.getCacheHitRate(),
-      cacheStatus: cacheProjection.status,
-      cost,
-      inputTokens: total.input_tokens,
-      outputTokens: total.output_tokens,
-      lastRealPromptTokens: session.getLastRealPromptTokens(),
-      // DeepSeek 峰时/闲时计价提醒：仅官方 deepseek provider 给值，其余缺省不渲染。
-      // 闭包动态读当前 providerName，/model 切走/切回自动显隐。
-      pricingPhase: providerName === 'deepseek' ? deepseekPricingPhase(Date.now()) : undefined,
-    }
-  })
+  app.setMetricsProvider(createFrontendMetricsProvider(tuiApp, () => ctx, currentModel?.contextWindow))
 
   // ── 计价时段准点翻转刷新 ─────────────────────────────────────
   // GlanceBar idle 不周期刷新，峰/闲切换最多滞后到下次渲染。仿 StatusLineRunner
@@ -2044,6 +1983,7 @@ async function main() {
         // 以 rejection 收场时可能一个终结回调都没触发，压着的尾段文本会连同
         // --stream-events 的审计面一起丢掉——恰是排障最需要那一段的时候。
         tapped?.flush()
+        if (ctx) syncFrontendCompaction(tuiApp, ctx)
         app!.notifyRunSettled()
       })
   })
@@ -2210,65 +2150,41 @@ async function main() {
   // ── Clear screen ─────────────────────────────────────────────
   stdout.write('\x1B[2J\x1B[H')
 
-  // ── Welcome message（CC 头式 3 行紧凑头） ─────────────────────
+  // ── Welcome message（与工作区共用渲染所有权） ────────────────
   const existingMsgCount = ctx.session.getMessages().length
   if (!skipWelcome) {
     const installRoot = detectInstallRoot()
+    const welcomeVersion = installRoot ? getCurrentVersion(installRoot) : null
     // P1-1 首启引导版:仅 TTY 且哨兵未写(新装首次启动)展示一次,渲染后 mark。
     const guideShow = existingMsgCount === 0 && stdout.isTTY === true && shouldShowWelcomeGuide()
     // 首屏框与输入框的线框同源——否则 thick/dots 星域下刊头是 thin、输入框
     // 是域个性，两个框并排时风格断裂。（提前取 id：let  narrowing 不进闭包）
     const sessionDomainId = ctx.agent.getSessionDomain()?.id
-    const welcomeLines = formatWelcome({
+    const welcomeContext = ctx
+    tuiApp.setWorkspaceWelcome((columns, availableRows) => formatWelcome({
       modelName,
       cwd: process.cwd(),
-      sessionId: ctx.sessionId,
+      sessionId: welcomeContext.sessionId,
       priorMsgCount: existingMsgCount,
-      columns: stdout.columns || 80,
-      rows: stdout.rows || 24,
-      numericId: ctx.agent.sessionNumericId,
-      compact: existingMsgCount > 0,
+      columns,
+      availableRows,
+      numericId: welcomeContext.agent.sessionNumericId,
+      compact: screenReaderMode ? true : resolveFrontendWelcomeCompact(tuiApp.getFrontendPreferences().welcome, guideShow),
       guide: guideShow,
-      version: installRoot ? getCurrentVersion(installRoot) : null,
-      approvalMode: ctx.config.agent.approval ?? 'auto-safe',
-      reasoningEffort: (ctx.agent.planModeState === 'planning')
+      version: welcomeVersion,
+      approvalMode: welcomeContext.config.agent.approval ?? 'auto-safe',
+      reasoningEffort: (welcomeContext.agent.planModeState === 'planning')
         ? 'max'
-        : (ctx.agent.config.autoReasoning && !ctx.agent.userReasoningOverride)
+        : (welcomeContext.agent.config.autoReasoning && !welcomeContext.agent.userReasoningOverride)
           ? 'auto'
-          : (ctx.agent.getReasoningEffort() ?? ctx.agent.config.reasoningEffort),
+          : (welcomeContext.agent.getReasoningEffort() ?? welcomeContext.agent.config.reasoningEffort),
       separator: starDomainRegistry.list().find(d => d.id === sessionDomainId)?.uiPersona?.separator,
-    }, theme)
-    // R12 欢迎块渲染纪律:整块单次 flush——逐行 write 每次都是一次独立重绘,
-    // 是「一卡一卡」的第二个来源。扫光帧用 Atomics.wait 阻塞式微休眠播放:
-    // 禁抖动(setTimeout 有钳制与毛刺)、禁事件循环让出(启动期其他任务插队输出会打断光带)。
-    // TTY + RIVET_WELCOME_ANIM=0 可关;非 TTY(管道/CI)自动跳过,不污染管道输出。
-    const shimmer = missionShimmer(theme, stdout.columns || 80)
-    const animateMission = stdout.isTTY === true
-      && process.env.RIVET_WELCOME_ANIM !== '0'
-      && shimmer !== null
-    const missionIdx = animateMission ? welcomeLines.findIndex(l => isMissionLine(l)) : -1
-    const sleepSync = (ms: number): void => {
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
-    }
-    if (animateMission && shimmer && missionIdx >= 0) {
-      const before = welcomeLines.slice(0, missionIdx)
-      const after = welcomeLines.slice(missionIdx + 1)
-      if (before.length > 0) stdout.write(before.join('\n') + '\n')
-      for (const frame of shimmer.frames) {
-        stdout.write(`\r\x1B[2K${frame}`)
-        sleepSync(MISSION_SHIMMER_FRAME_MS)
-      }
-      stdout.write(`\r\x1B[2K${shimmer.final}\n`)
-      if (after.length > 0) stdout.write(after.join('\n') + '\n')
-    } else {
-      stdout.write(welcomeLines.join('\n') + '\n')
-    }
+    }, theme))
     // 展示即写(P1-1):无论是否交互,引导版只出现一次;幂等。
     if (guideShow) markWelcomeGuideShown()
   }
 
-  // 自然流：欢迎页写完后直接渲染底部 chrome（GlanceBar + 输入框），输入框以 append
-  // 模式落在欢迎页正下方，随交互增长由终端原生滚动保持在视口底部。
+  // 经典模式保留原生 scrollback；全屏模式将同一欢迎内容放入稳定阅读区。
   //
   // 不补空行撑底 —— 试过两种补法都不成立：补在欢迎屏之后，欢迎屏钉在顶部、输入框沉到
   // 底，中间撑开一大片空白（Claude Code v2.1.168 的 #66191 形态）；补在欢迎屏之前，
@@ -2301,7 +2217,7 @@ async function main() {
   }
 
   // 首屏交接提醒（resume 场景）：上下文占用 ≥60% 的会话，建议先 /handoff 再开新会话——
-  // 交接自动注入新会话，比整段回连省前缀重建成本。
+  // 新会话默认不自动注入交接文档，用户可让 agent 读取归档。
   if (existingMsgCount > 0) {
     try {
       const est = ctx.session.getEstimatedTokens()

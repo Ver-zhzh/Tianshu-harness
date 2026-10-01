@@ -134,6 +134,7 @@ export interface GlanceBarInput {
   maxTokens?: number
   /** 本轮费用（美元） */
   cost?: number
+  costSource?: 'api' | 'estimate' | 'unknown'
   /** 已用时间（毫秒） */
   elapsedMs?: number
   /** 是否窄终端（< 60 列） */
@@ -274,6 +275,7 @@ export function formatGlanceRight(input: GlanceBarInput, theme: RivetTheme): str
       const tokenColor = cRatio >= 0.9 ? theme.error : cRatio >= 0.75 ? theme.warning : theme.muted
       parts.push(color(`◧${(cRatio * 100).toFixed(0)}%`, tokenColor) + contextNewSessionHint(cRatio, theme, true))
     }
+    if (input.costSource === 'unknown') parts.push(color('暂无计价', theme.muted))
     const zone = parts.join('  ')
     const elapsedStr = input.elapsedMs !== undefined ? formatElapsed(input.elapsedMs) : ''
     const elapsedColored = color(elapsedStr, input.stalled ? theme.warning : theme.muted)
@@ -331,9 +333,12 @@ export function formatGlanceRight(input: GlanceBarInput, theme: RivetTheme): str
     const pct = `${(ratio * 100).toFixed(0)}%`
     parts.push(color(`◧${formatTokensK(displayTokens)}/${formatTokensK(input.maxTokens)} ${pct}`, tokenColor) + contextNewSessionHint(ratio, theme, false))
   }
-  if (input.cost !== undefined && input.cost > 0) {
+  if (input.costSource === 'unknown') {
+    parts.push(color('暂无计价', theme.muted))
+  } else if (input.cost !== undefined && (input.cost > 0 || input.costSource !== undefined)) {
     // cost > 0 用 secondary 高亮，让用户感知到花费
-    parts.push(color(`¥${input.cost.toFixed(2)}`, theme.secondary))
+    const source = input.costSource === 'api' ? 'API ' : input.costSource === 'estimate' ? '估算 ' : ''
+    parts.push(color(`${source}¥${input.cost.toFixed(2)}`, theme.secondary))
   }
   const zone3 = parts.join('  ')
 

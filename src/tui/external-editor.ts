@@ -1,8 +1,9 @@
-import { writeFileSync, readFileSync, unlinkSync, mkdtempSync } from 'node:fs'
+import { writeFileSync, readFileSync, unlinkSync, mkdtempSync, mkdirSync, rmdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { spawnSync } from 'node:child_process'
+import { spawnSync, spawn } from 'node:child_process'
 import { getDefaultEditor } from '../platform.js'
+import { rivetHome } from '../config/paths.js'
 
 export function getEditorCommand(): string {
   return process.env['VISUAL'] || process.env['EDITOR'] || getDefaultEditor()
@@ -28,4 +29,24 @@ export function openInEditor(initialContent: string): string | null {
   if (result.status !== 0 && result.error) return null
   // status may be non-zero if editor was terminated but file was saved
   return readAndCleanup(path)
+}
+
+export async function editDraftInEditor(initialContent: string, options: { directory?: string; command?: string[] } = {}): Promise<string | null> {
+  const root = options.directory ?? join(rivetHome(), 'tmp')
+  mkdirSync(root, { recursive: true })
+  const directory = mkdtempSync(join(root, 'draft-'))
+  const file = join(directory, 'INPUT.md')
+  writeFileSync(file, initialContent, { mode: 0o600 })
+  // Respect quoted executable paths and editor arguments without invoking a shell.
+  const command = options.command ?? (getEditorCommand().match(/"[^"]*"|'[^']*'|[^\s]+/g) ?? []).map(part => part.replace(/^(["'])(.*)\1$/, '$2'))
+  try {
+    if (!command.length) return null
+    const status = await new Promise<number | null>(resolve => {
+      const child = spawn(command[0]!, [...command.slice(1), file], { stdio: 'inherit', windowsHide: true })
+      child.once('error', () => resolve(null))
+      child.once('exit', code => resolve(code))
+    })
+    return status === 0 ? readFileSync(file, 'utf8') : null
+  } catch { return null }
+  finally { try { unlinkSync(file); rmdirSync(directory) } catch { /* Editor may have moved the file. */ } }
 }

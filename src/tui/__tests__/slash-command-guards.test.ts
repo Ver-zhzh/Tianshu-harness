@@ -43,13 +43,18 @@ const collect = (src: string, rx: RegExp): string[] => {
  *  新增命令模块必须登记在这里——漏登记 = 该模块的命令声明不受守卫覆盖
  *（守卫静默失效比不守卫更坏：它给人"已检查"的错觉）。 */
 function scanDeclarations() {
-  const sources = ['src/tui/slash-commands.ts', 'src/tui/engine/app.ts', 'src/tui/new-session.ts'].map(read)
+  const sources = ['src/tui/slash-commands.ts', 'src/tui/engine/app.ts', 'src/tui/new-session.ts', 'src/tui/engine/frontend-workflow.ts'].map(read)
   const canonical = new Set<string>()
   const aliases = new Set<string>()
 
   for (const src of sources) {
     for (const n of collect(src, NAME_RX)) canonical.add(n)
     for (const n of collect(src, REGISTER_RX)) canonical.add(n)
+    const frontendCommands = /export const FRONTEND_COMMAND_NAMES\s*=\s*\[([^\]]*)\]/.exec(src)
+    if (frontendCommands) {
+      for (const n of collect(frontendCommands[1]!, /['"](\/[a-z0-9-]+)['"]/g)) canonical.add(n)
+      assert.match(src, /for\s*\(const name of FRONTEND_COMMAND_NAMES\)\s*\{\s*host\.register\(\{ name[,\s]/, '前端命令常量必须直接用于真实注册')
+    }
     for (const m of src.matchAll(new RegExp(ALIASES_RX.source, ALIASES_RX.flags))) {
       for (const a of collect(m[1]!, /['"](\/[a-z0-9-]+)['"]/g)) aliases.add(a)
     }

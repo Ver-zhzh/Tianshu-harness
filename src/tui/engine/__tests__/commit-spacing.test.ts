@@ -44,7 +44,7 @@ test('user 消息块尾有空行分隔（trailing blank）', () => {
   assert.ok(stdin.dataHandler, 'stdin data handler 已注册')
   stdin.dataHandler!('\r') // 模拟回车提交
   // 提交块带 ❯/▌ 用户标记（区别于 setInput 的 live 输入回显，后者用 〉）
-  const chunk = out.chunks.find(c => c.includes('USER_MSG_ABC') && /[❯▌]/.test(c))
+  const chunk = out.chunks.find(c => c.includes('USER_MSG_ABC') && /^[>❯] /m.test(c.replace(/\x1b\[[\d;]*m/g, '')))
   assert.ok(chunk, 'user 消息应被提交到 scrollback')
   assert.ok(chunk!.endsWith('\n\n'), 'user 消息块应以空行结尾（与 assistant 留白）')
 })
@@ -54,6 +54,6 @@ test('user 消息块整体为单次写入（便于稳定的间距契约）', () 
   app.setInput('SINGLE_WRITE_CHECK')
   stdin.dataHandler!('\r')
   // 仅统计提交块（带 ❯/▌ 用户标记），不含 live 输入回显（后者用 〉）
-  const matching = out.chunks.filter(c => c.includes('SINGLE_WRITE_CHECK') && /[❯▌]/.test(c))
+  const matching = out.chunks.filter(c => c.includes('SINGLE_WRITE_CHECK') && /^[>❯] /m.test(c.replace(/\x1b\[[\d;]*m/g, '')))
   assert.equal(matching.length, 1, 'user 消息应作为单个 chunk 提交，而非逐行写入')
 })

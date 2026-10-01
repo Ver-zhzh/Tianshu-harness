@@ -117,8 +117,9 @@ describe('renderTasks: per-worker 舰队', () => {
       filter: 'running',
       completedCount: 0,
     }
-    const text = stripAnsi(renderTasks(data, 60, 12, theme).join('\n'))
-    assert.ok(text.includes('子代理任务'))
+    const text = stripAnsi(renderTasks(data, 80, 12, theme).join('\n'))
+    assert.ok(text.includes('任务   '), '统一任务标题')
+    assert.ok(text.includes('Worker'), '真实归属类型')
     assert.ok(text.includes('运行中'), '标题栏 filter tab 高亮运行中')
     assert.ok(text.includes('任务组'), '单组用「任务组」标题')
     assert.ok(text.includes('1/3 完成'))
@@ -146,8 +147,8 @@ describe('renderTasks: per-worker 舰队', () => {
 
   it('空舰队：显示空态提示', () => {
     const text = stripAnsi(renderTasks({ groups: [], filter: 'running', completedCount: 0 }, 50, 10, theme).join('\n'))
-    assert.ok(text.includes('暂无运行中的子代理'))
-    assert.ok(text.includes('q/Esc:关闭'))
+    assert.ok(text.includes('暂无运行中任务'))
+    assert.ok(text.includes('Esc:返回'))
   })
 
   it('completed filter：显示标题与 completed 计数', () => {
@@ -165,7 +166,7 @@ describe('renderTasks: per-worker 舰队', () => {
     }
     const text = stripAnsi(renderTasks(data, 80, 12, theme).join('\n'))
     assert.ok(text.includes('已完成'), '标题栏 filter tab 高亮已完成')
-    assert.ok(text.includes('1 已完成'), 'footer 显示已完成计数')
+    assert.ok(text.includes('1 已结束'), 'footer 显示终态总计数')
   })
 
   it('选中态渲染光标', () => {
@@ -254,8 +255,8 @@ describe('renderTasks: objective 子行', () => {
   })
 
   it('纵向装不下时整体降级：宁可不显示 objective，也不能让 worker 掉出列表', () => {
-    // 1 组 + 3 worker × 2 行 = 7 行需求；height 12 → maxEntries 6，装不下。
-    const text = stripAnsi(renderTasks(dataWith(3, '这是一个目标'), 70, 12, theme).join('\n'))
+    // 1 组 + 3 worker × 2 行 = 7 行需求；height 11 → maxEntries 6，装不下。
+    const text = stripAnsi(renderTasks(dataWith(3, '这是一个目标'), 70, 11, theme).join('\n'))
     assert.ok(!text.includes('这是一个目标'), 'objective 子行被整体省略')
     for (const label of ['T1 侦', 'T2 侦', 'T3 侦']) {
       assert.ok(text.includes(label), `${label} 仍在列表内`)

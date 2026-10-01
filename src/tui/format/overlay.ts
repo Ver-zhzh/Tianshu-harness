@@ -11,10 +11,12 @@
  * - Chronicle — 会话历史
  */
 
-import stringWidth from 'string-width'
-import { truncateToDisplayWidth } from '../width.js'
+import { displayWidth, ambiguousWideEnabled, hardWrapToDisplayWidth, truncateToDisplayWidth } from '../width.js'
 import { color } from '../engine/ansi.js'
+import { createMenuLines, type OverlayMenuLines } from '../engine/overlay-engine.js'
 import { resolveThemeEntry, type RivetTheme } from '../theme.js'
+import { numberedChoice } from './panel-layout.js'
+import { renderThemePreview } from './theme-preview.js'
 import { formatElapsed } from '../tool-elapsed.js'
 import { formatTokenCount } from './spinner-status.js'
 import { formatAuthorityLabel, formatWorkerIdentity } from './profile-labels.js'
@@ -28,34 +30,52 @@ import {
   frameTop as formatBorder,
   frameBottom as formatBottomBorder,
   frameTitleCenter as formatTitleBar,
-  frameTitleLeft as formatTitleLeft,
+  frameTitleLeft as frameTitleLeftUnsafe,
   frameFooter as formatFooter,
-  frameLine as padLine,
+  frameLine as frameLineUnsafe,
   frameDivider,
+  frameHintRows,
+  frameInset,
   CURSOR,
-  CURRENT_MARK,
   keyHints,
   type BorderStyle,
 } from './overlay-frame.js'
 
+const widthOptions = () => ({ ambiguousAsWide: ambiguousWideEnabled() })
+const stringWidth = (text: string): number => displayWidth(text, widthOptions())
+
+function visibleLine(text: string, width: number): string {
+  const budget = Math.max(0, width)
+  return stringWidth(text) <= budget ? text : `${truncateToDisplayWidth(text, Math.max(0, budget - stringWidth('…')), widthOptions())}${budget > 0 ? '…' : ''}`
+}
+
+function padLine(text: string, width: number, theme: RivetTheme): string {
+  return frameLineUnsafe(visibleLine(text, width - frameInset(width) * 2), width, theme)
+}
+
+function formatTitleLeft(text: string, width: number, theme: RivetTheme): string {
+  return frameTitleLeftUnsafe(visibleLine(text, width - stringWidth('│') * 2 - 2), width, theme)
+}
 
 /** 紧凑快捷键提示（逗号分隔，类似 fzf 风格）。 */
 export function compactHints(pairs: [key: string, action: string][]): string {
   return pairs.map(([k, a]) => `${k}:${a}`).join(', ')
 }
 
-export function renderTabBar(activeTab: 'domain' | 'model' | 'theme', width: number, theme: RivetTheme): string {
-  const tabDomain = activeTab === 'domain' ? color('Domain', theme.primary, { bold: true }) : color(' Domain ', theme.dim)
-  const tabModel = activeTab === 'model' ? color('Model', theme.primary, { bold: true }) : color(' Model ', theme.dim)
-  const tabTheme = activeTab === 'theme' ? color('Theme', theme.primary, { bold: true }) : color(' Theme ', theme.dim)
+function hintRows(pairs: [key: string, action: string][], width: number, theme: RivetTheme): string[] {
+  return frameHintRows(pairs, width, theme)
+}
 
-  const separator = color('│', theme.dim)
+export function renderTabBar(activeTab: 'domain' | 'model' | 'theme', width: number, theme: RivetTheme): string {
+  if (width < 32) return formatTitleLeft(activeTab === 'domain' ? '星域' : activeTab === 'model' ? '模型' : '主题', width, theme)
+  const tabDomain = activeTab === 'domain' ? color('星域', theme.primary, { bold: true }) : color('星域', theme.dim)
+  const tabModel = activeTab === 'model' ? color('模型', theme.primary, { bold: true }) : color('模型', theme.dim)
+  const tabTheme = activeTab === 'theme' ? color('主题', theme.primary, { bold: true }) : color('主题', theme.dim)
+
+  const separator = color('   ', theme.dim)
   const tabs = `${tabDomain}${separator}${tabModel}${separator}${tabTheme}`
-  const tabsPlain = 'Domain  │  Model  │  Theme'
-  const remaining = Math.max(0, width - 2 - stringWidth(tabsPlain))
-  const left = Math.floor(remaining / 2)
-  const right = remaining - left
-  return color('│', theme.dim) + ' '.repeat(left) + tabs + ' '.repeat(right) + color('│', theme.dim)
+  const left = Math.max(0, Math.floor((width - frameInset(width) * 2 - stringWidth(tabs)) / 2))
+  return frameLineUnsafe(`${' '.repeat(left)}${tabs}`, width, theme)
 }
 
 // ── Pager ─────────────────────────────────────────────────────
@@ -65,16 +85,20 @@ export interface PagerData {
   content: string
   /** 当前页码（0-based） */
   page: number
+  /** Exact rendered row offset; when supplied it takes precedence over page. */
+  lineOffset?: number
   /** 标题 */
   title?: string
   /** 当前模式 */
-  mode?: 'page' | 'search' | 'message'
+  mode?: 'page' | 'search' | 'results' | 'message'
   /** 搜索 query */
   searchQuery?: string
   /** 搜索总匹配数 */
   searchMatches?: number
   /** 当前匹配序号（1-based） */
   searchCurrent?: number
+  /** Search result ordinal to original message index, for message-based callers. */
+  searchMessageIndices?: number[]
   /** 消息列表（用于搜索/消息视图） */
   messages?: TranscriptMessage[]
   /** 当前选中的消息索引（message 模式） */
@@ -105,20 +129,11 @@ function highlightMatch(line: string, query: string, width: number, theme: Rivet
   const before = plain.slice(0, idx)
   const match = plain.slice(idx, idx + q.length)
   const after = plain.slice(idx + q.length)
-  const highlighted = `${before}${color(match, theme.primary, { bold: true })}${after}`
+  const highlighted = visibleLine(`${before}${color(match, theme.primary, { bold: true })}${after}`, width - 2)
   // Re-pad to width; highlighted line may have different display width due to ANSI,
   // but padLine uses stringWidth which strips ANSI, so it's safe.
   const padding = Math.max(0, width - 2 - stringWidth(highlighted))
-  return color('│', theme.dim) + highlighted + ' '.repeat(padding) + color('│', theme.dim)
-}
-
-function pageForMessage(messages: readonly TranscriptMessage[], messageIndex: number, pageSize: number): number {
-  if (messageIndex < 0 || messageIndex >= messages.length || pageSize <= 0) return 0
-  let rows = 0
-  for (let i = 0; i < messageIndex; i++) {
-    rows += messages[i]!.lines.length
-  }
-  return Math.floor(rows / pageSize)
+  return frameLineUnsafe(highlighted + ' '.repeat(padding), width, theme)
 }
 
 /**
@@ -132,40 +147,42 @@ function pageForMessage(messages: readonly TranscriptMessage[], messageIndex: nu
 export function renderPager(data: PagerData, width: number, height: number, theme: RivetTheme): string[] {
   const lines: string[] = []
   const contentLines = data.content.split('\n')
-  const pageSize = height - 4 // 1 border top + 1 title + 1 footer + 1 border bottom = 4
+  const pageSize = Math.max(1, height - 4) // border + title + footer + border
   const totalPages = Math.max(1, Math.ceil(contentLines.length / pageSize))
   const mode = data.mode ?? 'page'
   const messages = data.messages ?? []
 
-  let effectivePage = Math.min(data.page, totalPages - 1)
+  let effectivePage = Math.max(0, Math.min(data.page, totalPages - 1))
+  let start = data.lineOffset === undefined ? effectivePage * pageSize : Math.max(0, Math.min(data.lineOffset, contentLines.length - 1))
   let title: string
   const verboseHint: [string, string] = data.verbose ? ['v', '简略'] : ['v', '详细']
-  let footer = compactHints(data.footerHints ?? [['↑↓/j/k', '滚动'], ['PgUp/PgDn', '翻页'], ['/', '搜索'], verboseHint, ['q', '关闭']])
+  let footerPairs: [string, string][] = data.footerHints ?? [['↑↓/j/k', '滚动'], ['PgUp/PgDn', '翻页'], ['/', '搜索'], verboseHint, ['q', '关闭']]
 
-  if (mode === 'search') {
+  if (mode === 'search' || mode === 'results') {
     const current = data.searchCurrent ?? 0
     const total = data.searchMatches ?? 0
     const query = data.searchQuery ?? ''
     title = data.title
       ? `${data.title} — 搜索 "${query}" (${current}/${total})`
       : `搜索 "${query}" (${current}/${total})`
-    footer = compactHints([['n/N', '匹配'], ['Esc', '清除'], ['q', '关闭']])
-    if (messages.length > 0 && current > 0) {
-      const msgIdx = current - 1 < messages.length ? current - 1 : 0
-      effectivePage = pageForMessage(messages, msgIdx, pageSize)
-      effectivePage = Math.min(effectivePage, totalPages - 1)
+    footerPairs = mode === 'search'
+      ? [['Enter', '查看结果'], ['Esc', '返回结果']]
+      : [['n/N', '匹配'], ['/', '编辑查询'], ['Esc', '返回阅读']]
+    if (data.lineOffset === undefined && mode === 'results' && messages.length > 0 && current > 0) {
+      const msgIdx = data.searchMessageIndices?.[current - 1] ?? Math.min(current - 1, messages.length - 1)
+      start = messages[msgIdx]?.startLine ?? 0
     }
   } else if (mode === 'message' && messages.length > 0) {
     const idx = Math.min(Math.max(0, data.selectedMessageIndex ?? 0), messages.length - 1)
     title = data.title
       ? `${data.title} — 消息 ${idx + 1}/${messages.length}`
       : `消息 ${idx + 1}/${messages.length}`
-    footer = compactHints([['↑↓/j/k', '切换'], ['Esc', '返回'], ['q', '关闭']])
-    effectivePage = pageForMessage(messages, idx, pageSize)
-    effectivePage = Math.min(effectivePage, totalPages - 1)
+    footerPairs = [['↑↓/j/k', '切换'], ['Esc', '返回'], ['q', '关闭']]
   } else {
-    const verboseTag = data.verbose ? ' [verbose]' : ''
-    title = data.title ? `${data.title}${verboseTag} (${effectivePage + 1}/${totalPages})` : `查看${verboseTag} (${effectivePage + 1}/${totalPages})`
+    const verboseTag = data.verbose ? ' · 详细' : ''
+    effectivePage = Math.floor(start / pageSize)
+    const range = data.lineOffset === undefined ? `${effectivePage + 1}/${totalPages}` : `${start + 1}-${Math.min(start + pageSize, contentLines.length)} / ${contentLines.length} 行`
+    title = data.title ? `${data.title}${verboseTag} (${range})` : `查看${verboseTag} (${range})`
   }
 
   // Top border + title
@@ -173,23 +190,24 @@ export function renderPager(data: PagerData, width: number, height: number, them
   lines.push(formatTitleLeft(title, width, theme))
 
   // Content
-  const start = effectivePage * pageSize
   const pageLines = contentLines.slice(start, start + pageSize)
 
   if (mode === 'message' && messages.length > 0) {
     const idx = Math.min(Math.max(0, data.selectedMessageIndex ?? 0), messages.length - 1)
     const msg = messages[idx]!
     const header = msg.isTruncated
-      ? color(`〔message ${idx + 1}/${messages.length} — truncated in scrollback〕`, theme.warning)
-      : color(`〔message ${idx + 1}/${messages.length}〕`, theme.dim)
+      ? color(`消息 ${idx + 1}/${messages.length} · 部分历史不可用`, theme.warning)
+      : color(`消息 ${idx + 1}/${messages.length}`, theme.dim)
     lines.push(padLine(header, width, theme))
-    for (const line of msg.lines.slice(0, pageSize - 1)) {
+    const messageOffset = Math.max(0, Math.min((data.lineOffset ?? msg.startLine) - msg.startLine, msg.lines.length - 1))
+    const shown = msg.lines.slice(messageOffset, messageOffset + pageSize - 1)
+    for (const line of shown) {
       lines.push(padLine(line, width, theme))
     }
-    for (let i = msg.lines.length + 1; i < pageSize; i++) {
+    for (let i = shown.length + 1; i < pageSize; i++) {
       lines.push(padLine('', width, theme))
     }
-  } else if (mode === 'search') {
+  } else if (mode === 'search' || mode === 'results') {
     for (let i = 0; i < pageLines.length; i++) {
       const line = pageLines[i]!
       if (data.searchQuery && lineMatchesQuery(line, data.searchQuery)) {
@@ -211,8 +229,9 @@ export function renderPager(data: PagerData, width: number, height: number, them
   }
 
   // Footer + bottom border
-  lines.push(formatFooter(footer, width, theme, 'subtle'))
-  lines.push(formatBottomBorder(width, theme, 'subtle'))
+  const footer = hintRows(footerPairs, width, theme)
+  lines.push(...footer)
+  if (footer.length === 1) lines.push(formatBottomBorder(width, theme, 'subtle'))
 
   return lines
 }
@@ -425,36 +444,40 @@ export interface ChronicleData {
   title?: string
   /** 选中游标（↑↓ 导航高亮） */
   selectedIndex?: number
+  scrollOffset?: number
 }
 
 /**
  * 渲染 Chronicle overlay（会话编年史）。
  */
-export function renderChronicle(data: ChronicleData, width: number, height: number, theme: RivetTheme): string[] {
-  const lines: string[] = []
+export function renderChronicle(data: ChronicleData, width: number, height: number, theme: RivetTheme): OverlayMenuLines {
+  const lines = createMenuLines()
 
   lines.push(formatBorder(width, theme, 'subtle'))
-  lines.push(formatTitleLeft(data.title ?? '会话编年史', width, theme))
+  lines.push(formatTitleLeft(data.title ?? '会话', width, theme))
 
   const idxWidth = 6
   const timeWidth = Math.min(14, Math.floor(width * 0.18))
-  const summaryWidth = width - 2 - idxWidth - timeWidth - 5
+  const summaryWidth = Math.max(0, width - 2 - idxWidth - timeWidth - 5)
 
-  const maxEntries = height - 5
-  const visible = data.entries.slice(0, maxEntries)
-  const sel = data.selectedIndex ?? -1
+  const footer = hintRows([['↑↓', '选择'], ['Enter', '恢复'], ['Space', '预览'], ['Esc', '返回']], width, theme)
+  const maxEntries = Math.max(1, height - 3 - footer.length)
+  const sel = data.entries.length ? Math.max(0, Math.min(data.selectedIndex ?? 0, data.entries.length - 1)) : -1
+  const start = followListWindow(sel, data.entries.length, maxEntries, data.scrollOffset)
+  const visible = data.entries.slice(start, start + maxEntries)
 
   for (let i = 0; i < visible.length; i++) {
     const entry = visible[i]!
-    const selected = i === sel
+    const selected = start + i === sel
     // 选中游标；当前会话用 primary 高亮（与选中区分：选中靠游标，当前靠色）。
     const cursor = selected ? color(CURSOR, theme.primary, { bold: true }) : ' '
     const idxColor = entry.current ? theme.primary : theme.dim
     const idx = color(`#${String(entry.index)}`.padEnd(idxWidth - 1), idxColor, entry.current ? { bold: true } : undefined)
-    const time = color(entry.time.padEnd(timeWidth), entry.current ? theme.primary : theme.dim)
-    const summaryText = entry.summary.slice(0, summaryWidth).padEnd(summaryWidth)
+    const time = color(visibleLine(entry.time, timeWidth).padEnd(timeWidth), entry.current ? theme.primary : theme.dim)
+    const summaryText = visibleLine(entry.summary, summaryWidth)
     const summary = selected || entry.current ? summaryText : color(summaryText, theme.muted)
 
+    lines.menuRows.set(lines.length + 1, { index: start + i })
     lines.push(padLine(`${cursor}${idx}${time}${summary}`, width, theme))
   }
 
@@ -462,9 +485,7 @@ export function renderChronicle(data: ChronicleData, width: number, height: numb
     lines.push(padLine('', width, theme))
   }
 
-  // footer 不再展示 Enter=恢复会话（2026-07-25）：恢复功能保留但不主动
-  // 展示——降低顺手回连带来的碎缓存风险。
-  lines.push(formatFooter(compactHints([['↑↓', '选择'], ['Esc', '关闭']]), width, theme, 'subtle'))
+  lines.push(...footer)
   lines.push(formatBottomBorder(width, theme, 'subtle'))
 
   return lines
@@ -472,11 +493,17 @@ export function renderChronicle(data: ChronicleData, width: number, height: numb
 
 // ── Tasks ──────────────────────────────────────────────────────
 
-export type TasksWorkerStatus = 'running' | 'completed' | 'failed' | 'blocked' | 'escalated'
+export type TasksWorkerStatus = 'queued' | 'running' | 'awaiting-input' | 'awaiting-approval' | 'completed' | 'failed' | 'stopping' | 'stopped' | 'blocked' | 'escalated' | 'exited' | 'unknown'
 
 export interface TasksWorkerRow {
   /** 稳定的 per-worker id（work order id），用于进入 detail pager。 */
   workerId: string
+  owner?: 'main' | 'worker' | 'job'
+  terminal?: boolean
+  rawStatus?: string
+  exitCode?: number
+  /** Supplied availability only; absence must not invent a log link. */
+  logAvailable?: boolean
   /** 短标签，例如 "wo_team:T1" → "T1"。 */
   shortLabel: string
   profile: string
@@ -487,6 +514,7 @@ export interface TasksWorkerRow {
    *  与 activity 不同：activity 是「此刻在干什么」，objective 是「派他去干什么」。 */
   objective?: string
   elapsedMs: number
+  elapsedKnown?: boolean
   /** 累计工具调用次数（计数列；0 时省略）。 */
   toolUseCount?: number
   /** 累计 token 总数（计数列；0 时省略）。 */
@@ -499,9 +527,10 @@ export interface TasksWorkerRow {
   authority?: string
 }
 
-export type TasksFilter = 'running' | 'completed' | 'all'
+export type TasksFilter = 'running' | 'needs-me' | 'completed' | 'all'
 
 export interface TasksGroup {
+  title?: string
   /** 派生这组 worker 的委派工具调用 id（不直接展示，仅用于分组/序号）。 */
   parentToolId: string
   total: number
@@ -521,11 +550,24 @@ export interface TasksData {
 }
 
 const TASK_STATUS_GLYPH: Record<TasksWorkerStatus, string> = {
+  queued: '○',
   running: '◐',
+  'awaiting-input': '?',
+  'awaiting-approval': '!',
   completed: '✓',
   failed: '✗',
+  stopping: '…',
+  stopped: '⊗',
   blocked: '⊘',
   escalated: '↑',
+  exited: '·',
+  unknown: '?',
+}
+
+const TASK_STATUS_LABEL: Record<TasksWorkerStatus, string> = {
+  queued: '排队', running: '运行中', 'awaiting-input': '等输入', 'awaiting-approval': '等审批',
+  completed: '已完成', failed: '失败', stopping: '停止中', stopped: '已停止',
+  blocked: '受阻', escalated: '已升级', exited: '已结束（结果未知）', unknown: '状态未知',
 }
 
 /** 状态 → 语义色（running 主色、passed 成功、failed 错误、blocked/escalated 警告）。
@@ -550,19 +592,8 @@ function tasksProgressBar(done: number, total: number, width = 10): string {
 /** stringWidth 感知的 padEnd/截断：CJK/emoji 占 2 格也能对齐。 */
 function fitDisplay(text: string, width: number): string {
   if (width <= 0) return ''
-  let out = ''
-  let w = 0
-  for (const ch of text) {
-    const cw = stringWidth(ch)
-    if (w + cw > width) {
-      // 溢出：末位补省略号（若有空间）
-      if (w < width) { out += '…'; w += 1 }
-      break
-    }
-    out += ch
-    w += cw
-  }
-  return out + ' '.repeat(Math.max(0, width - w))
+  const out = visibleLine(text, width)
+  return out + ' '.repeat(Math.max(0, width - stringWidth(out)))
 }
 
 // ── Model Picker ───────────────────────────────────────────────
@@ -621,27 +652,9 @@ export type { DomainPickerEntry, DomainPickerData } from './domain-picker.js'
 
 /** 按显示宽度（CJK 感知）软换行为多行，最多 maxLines 行。 */
 export function wrapToWidth(text: string, width: number, maxLines: number): string[] {
-  if (width <= 0 || maxLines <= 0) return []
-  const out: string[] = []
-  let line = ''
-  let w = 0
-  for (const ch of text.replace(/\s+/g, ' ').trim()) {
-    const cw = stringWidth(ch)
-    if (w + cw > width) {
-      out.push(line)
-      if (out.length >= maxLines) {
-        // 末行加省略号标记溢出
-        const last = out[maxLines - 1]!
-        out[maxLines - 1] = last.length > 1 ? last.slice(0, -1) + '…' : '…'
-        return out.slice(0, maxLines)
-      }
-      line = ''
-      w = 0
-    }
-    line += ch
-    w += cw
-  }
-  if (line) out.push(line)
+  if (width <= 0 || maxLines <= 0 || !text.trim()) return []
+  const out = hardWrapToDisplayWidth(text.replace(/\s+/g, ' ').trim(), width, widthOptions())
+  if (out.length > maxLines) out[maxLines - 1] = `${truncateToDisplayWidth(out[maxLines - 1]!, Math.max(0, width - stringWidth('…')), widthOptions())}…`
   return out.slice(0, maxLines)
 }
 
@@ -789,7 +802,7 @@ export function renderDomainGenesisCard(data: DomainGenesisCardData, width: numb
 
 /** filter 切换指示（标题栏内联 tab）：当前项高亮，其余 dim。 */
 function tasksFilterTabs(filter: TasksFilter, theme: RivetTheme): string {
-  const tabs: [TasksFilter, string][] = [['running', '运行中'], ['completed', '已完成'], ['all', '全部']]
+  const tabs: [TasksFilter, string][] = [['all', '全部'], ['running', '运行中'], ['needs-me', '等待我'], ['completed', '已完成']]
   return tabs
     .map(([key, label]) => key === filter
       ? color(label, theme.primary, { bold: true })
@@ -802,26 +815,35 @@ export function renderTasks(
   width: number,
   height: number,
   theme: RivetTheme,
-  selectedIndex = -1,
-): string[] {
-  const lines: string[] = []
+  selectedIndex = 0,
+): OverlayMenuLines {
+  const lines = createMenuLines()
   lines.push(formatBorder(width, theme, 'subtle'))
-  lines.push(formatTitleLeft(`${color('子代理任务', theme.secondary, { bold: true })}   ${tasksFilterTabs(data.filter, theme)}`, width, theme))
+  const filterTitle = width < 48 ? { all: '全部', running: '运行中', 'needs-me': '等待我', completed: '已完成' }[data.filter] : tasksFilterTabs(data.filter, theme)
+  const ended = data.filter === 'completed' ? ` · ${data.completedCount} 已结束` : ''
+  lines.push(formatTitleLeft(`${color('任务', theme.secondary, { bold: true })}   ${filterTitle}${ended}`, width, theme))
   lines.push(frameDivider(width, theme))
 
-  const maxEntries = Math.max(1, height - 6) // top + title + divider + footer + bottom = 5, -1 安全余量
+  const selectedWorker = data.groups.flatMap(group => group.workers)[selectedIndex]
+  const actions: [string, string][] = [['↑↓', '选择'], ['←/→/Tab', '筛选']]
+  if (selectedWorker) actions.push(['Enter', '详情'])
+  if (selectedWorker && (selectedWorker.owner ?? 'worker') === 'worker') actions.push(['f', '切入Worker'])
+  if (selectedWorker && !selectedWorker.terminal && ['queued', 'running', 'awaiting-input', 'awaiting-approval'].includes(selectedWorker.status)) {
+    actions.push(['x', `停止选中${selectedWorker.owner === 'main' ? '主任务' : selectedWorker.owner === 'job' ? 'Job' : 'Worker'}`])
+  }
+  actions.push(['Esc', '返回'])
+  const footer = hintRows(actions, width, theme)
+  const maxEntries = Math.max(1, height - 4 - footer.length)
 
   // 逐组渲染：组头（进度条 + 语义色计数）后跟 worker 行。多组时以
   // 序号区分（parentToolId 是不透明的 tool id，不直接展示）。
   const body: string[] = []
-  const selectable: { workerId: string; bodyIndex: number }[] = []
+  const selectable: { row: TasksWorkerRow; bodyIndex: number; bodyEnd: number }[] = []
   const multiGroup = data.groups.length > 1
-  const inner = width - 2
+  const inner = width - stringWidth('│') * 2
+  const narrow = inner < 60
 
-  // objective 子行的纵向预算。body 在下方是 `slice(0, maxEntries)` 硬截断、
-  // 没有滚动——子行让每个 worker 占两行，屏幕矮时会把列表底部的 worker 整个
-  // 挤出可视区。宁可不显示 objective，也不能让 worker 消失，所以先按最坏情况
-  // （每个 worker 都有 objective）算总需求，装不下就整体降级回单行。
+  // When the full list fits, show objectives; shorter screens prioritize rows.
   const workerTotal = data.groups.reduce((n, g) => n + g.workers.length, 0)
   const totalRowsNeeded = data.groups.length + workerTotal * 2 + Math.max(0, data.groups.length - 1)
   const showObjective = totalRowsNeeded <= maxEntries
@@ -831,60 +853,60 @@ export function renderTasks(
     const barColor = g.total > 0 && g.done === g.total ? theme.success
       : g.failed > 0 ? theme.warning
         : theme.primary
-    const barW = 10
-    const filledN = g.total > 0 ? Math.min(barW, Math.round((g.done / g.total) * barW)) : 0
-    const bar = color('█'.repeat(filledN), barColor) + color('░'.repeat(barW - filledN), theme.dim)
     const countParts: string[] = [color(`${g.done}/${g.total} 完成`, theme.muted)]
     if (g.running > 0) countParts.push(color(`◐${g.running} 运行`, theme.primary))
     if (g.failed > 0) countParts.push(color(`✗${g.failed} 失败`, theme.warning))
-    const groupTitle = multiGroup ? `批次 ${gi + 1}` : '任务组'
-    body.push(` ${color('◆', theme.primary)} ${color(groupTitle, theme.secondary)}  ${bar}  ${countParts.join(color(' · ', theme.dim))}`)
+    const groupTitle = g.title ?? (multiGroup ? `批次 ${gi + 1}` : '任务组')
+    body.push(` ${color(groupTitle, barColor, { bold: true })}  ${countParts.join(color(' · ', theme.dim))}`)
 
     for (const w of g.workers) {
-      selectable.push({ workerId: w.workerId, bodyIndex: body.length })
+      const selected = selectable.length === selectedIndex
+      const item = { row: w, bodyIndex: body.length, bodyEnd: 0 }
+      selectable.push(item)
       const glyph = TASK_STATUS_GLYPH[w.status] ?? '·'
       const glyphColored = color(glyph, taskStatusColor(w.status, theme, w.failureReason))
-      // unread：终态但用户还没打开 detail —— 行首圆点提示（CC 未读结果对标）。
-      // 无色纯字符：选中行会被 slice(3) 替换为光标前缀，带 ANSI 会被切坏。
       const unreadMark = w.unread ? '●' : ' '
-
-      // 三段式：`  ●◐ label(固定列)  activity(弹性)  stats(右对齐)`
-      const labelW = Math.min(22, Math.max(12, Math.floor(inner * 0.28)))
-      const label = fitDisplay(`${w.shortLabel} ${formatWorkerIdentity({ profile: w.profile, authority: w.authority })}`, labelW)
-
+      const owner = w.owner === 'main' ? '主任务' : w.owner === 'job' ? 'Job' : 'Worker'
+      const statusLabel = w.status === 'unknown' && w.rawStatus ? `状态: ${w.rawStatus}` : TASK_STATUS_LABEL[w.status]
+      const state = w.exitCode !== undefined ? `${statusLabel} · 退出码${w.exitCode}` : statusLabel
       const statParts: string[] = []
       if (w.toolUseCount && w.toolUseCount > 0) statParts.push(`⚙${w.toolUseCount}`)
       if (w.tokenCount && w.tokenCount > 0) statParts.push(`${formatTokenCount(w.tokenCount)}tok`)
-      statParts.push(formatElapsed(w.elapsedMs))
+      statParts.push(w.elapsedKnown === false ? '耗时未知' : formatElapsed(w.elapsedMs))
       let statsPlain = statParts.join(' · ')
 
-      // prefix(2sp+unread+glyph+1sp=5) + label + 2 gap + activity + 2 gap + stats + 1 右边距
-      let activityW = inner - 5 - labelW - 2 - stringWidth(statsPlain) - 3
-      if (activityW < 4 && statParts.length > 1) {
-        // 窄屏降级：只留耗时列
+      if (inner < 60 && statParts.length > 1) {
         statsPlain = statParts[statParts.length - 1]!
-        activityW = inner - 5 - labelW - 2 - stringWidth(statsPlain) - 3
       }
-      const activity = fitDisplay(w.activity ?? '', Math.max(0, activityW))
-      const stats = color(statsPlain, theme.muted)
-      const labelColored = w.status === 'running' ? label : color(label, theme.muted)
-      body.push(`  ${unreadMark}${glyphColored} ${labelColored}  ${activity}  ${stats}`)
-
-      // objective 子行：缩进到 label 列下方。追加在主行**之后**，selectable
-      // 记录的 bodyIndex 仍指向主行，光标的 slice(3) 前缀替换不受影响。
-      if (showObjective && w.objective) {
+      const prefix = `${selected ? color(CURSOR, theme.primary, { bold: true }) : ' '} ${unreadMark}${glyphColored} `
+      const identity = w.owner === 'main' || w.owner === 'job' ? '' : ` ${formatWorkerIdentity({ profile: w.profile, authority: w.authority })}`
+      if (narrow) {
+        body.push(`${prefix}${color(fitDisplay(`${owner} ${w.shortLabel}${identity}`, inner - stringWidth(prefix)), selected ? theme.primary : theme.muted)}`)
+        body.push(`     ${color(state, taskStatusColor(w.status, theme, w.failureReason))}  ${color(statsPlain, theme.muted)}`)
+        item.bodyEnd = body.length
+        continue
+      }
+      const labelW = Math.max(2, Math.min(32, inner - stringWidth(prefix) - stringWidth(state) - stringWidth(statsPlain) - 5))
+      const label = fitDisplay(`${owner} ${w.shortLabel}${identity}`, labelW)
+      const fixed = `${prefix}${color(label, selected ? theme.primary : theme.muted)} ${color(state, taskStatusColor(w.status, theme, w.failureReason))} ${color(statsPlain, theme.muted)}`
+      const details = [w.activity, w.failureReason, w.logAvailable === true ? '可查看日志' : w.logAvailable === false ? '日志不可用' : undefined].filter(Boolean).join(' · ')
+      const detailW = inner - stringWidth(fixed) - 2
+      body.push(`${fixed}${details && detailW > 0 ? `  ${color(fitDisplay(details, detailW), theme.muted)}` : ''}`)
+      if (showObjective && w.objective && w.objective.trim() !== w.shortLabel.trim()) {
         const objText = w.objective.replace(/\s+/g, ' ').trim()
         if (objText) body.push(`     ${color(fitDisplay(objText, Math.max(0, inner - 6)), theme.dim)}`)
       }
+      item.bodyEnd = body.length
     }
     // 组间空行（最后一组后不加）
     if (gi < data.groups.length - 1) body.push('')
   })
 
   if (selectable.length === 0) {
-    const emptyText = data.filter === 'completed' ? '（暂无已完成的子代理）'
-      : data.filter === 'all' ? '（暂无子代理）'
-        : '（暂无运行中的子代理 · ←/→ 切换筛选）'
+    const emptyText = data.filter === 'completed' ? '（暂无已结束任务）'
+      : data.filter === 'all' ? '（暂无任务）'
+        : data.filter === 'needs-me' ? '（暂无需要你处理的任务）'
+          : '（暂无运行中任务 · ←/→ 切换筛选）'
     body.push('')
     body.push(color(`  ${emptyText}`, theme.muted))
   }
@@ -893,31 +915,23 @@ export function renderTasks(
     ? selectable[selectedIndex]!.bodyIndex
     : -1
 
-  const visible = body.slice(0, maxEntries)
+  const selectedEnd = selectedBodyIndex + (narrow ? 1 : 0)
+  let start = selectedBodyIndex < 0 ? 0 : Math.min(selectedBodyIndex, followListWindow(selectedEnd, body.length, maxEntries))
+  if (narrow && selectable.some(item => item.bodyIndex + 1 === start)) start++
+  const visible = body.slice(start, start + maxEntries)
   for (let i = 0; i < visible.length; i++) {
-    let line = visible[i]!
-    if (i === selectedBodyIndex) {
-      // 把前导三个空格替换为光标 + 两个空格，保持宽度一致
-      line = `${color(CURSOR, theme.primary, { bold: true })}  ${line.slice(3)}`
+    const index = selectable.findIndex(item => item.bodyIndex <= start + i && start + i < item.bodyEnd)
+    const item = selectable[index]
+    if (item) {
+      lines.menuRows.set(lines.length + 1, { index, workerId: item.row.workerId })
     }
-    lines.push(padLine(line, width, theme))
+    lines.push(padLine(visible[i]!, width, theme))
   }
   for (let i = visible.length; i < maxEntries; i++) {
     lines.push(padLine('', width, theme))
   }
 
-  const runningCount = data.groups.reduce((n, g) => n + g.workers.filter(w => w.status === 'running').length, 0)
-  const summaryParts: string[] = []
-  if (data.filter === 'running' || data.filter === 'all') {
-    summaryParts.push(`${runningCount} 运行中`)
-  }
-  if (data.filter === 'completed' || data.filter === 'all') {
-    summaryParts.push(`${data.completedCount} 已完成`)
-  }
-  const summary = summaryParts.join(' · ')
-  // 分隔符收紧为 " · "：frameFooter 溢出时从前截断，summary 在最前面，
-  // f/x 键位加入后 80 列下过长会把计数吃掉。
-  lines.push(formatFooter(`${summary} · ${compactHints([['↑↓', '选择'], ['Enter', '详情'], ['f', '切入'], ['x', '停止'], ['←/→/Tab', '筛选'], ['q/Esc', '关闭']])}`, width, theme))
+  lines.push(...footer)
   lines.push(formatBottomBorder(width, theme, 'subtle'))
 
   return lines
@@ -925,149 +939,67 @@ export function renderTasks(
 
 // ── Model Picker ───────────────────────────────────────────────
 
-export function renderModelPicker(data: ModelPickerData, width: number, height: number, theme: RivetTheme): string[] {
-  const lines: string[] = []
-  lines.push(formatBorder(width, theme, 'subtle'))
-  lines.push(renderTabBar('model', width, theme))
-
-  const innerWidth = width - 4
-  const contentRows = Math.max(3, height - 4)
-  const effortRows = data.effort ? 1 : 0
-  const previewRows = Math.min(4, Math.max(2, contentRows - data.entries.length - 1 - effortRows))
-  const listRows = Math.max(1, contentRows - previewRows - 1 - effortRows)
-
-  const sel = data.selectedIndex
-  const visible = data.entries.slice(0, listRows)
-  if (data.entries.length === 0) {
-    lines.push(padLine(color('  尚无已保存的 provider——运行 /connect 接入后模型会出现在这里', theme.muted), width, theme))
-  }
-  for (let i = 0; i < visible.length; i++) {
-    const e = visible[i]!
-    const selected = i === sel
-    const cursor = selected ? color(CURSOR, theme.primary, { bold: true }) : ' '
-    const mark = e.current ? color(CURRENT_MARK, theme.primary) : ' '
-    // 模型一律按原 ID 展示（alias 短名体系 2026-09 废弃——glm-53/k27-code 这类
-    // 短名与真实 id 的错位曾让用户认不出自己保存的模型）。
-    const idColor = selected ? color(e.id, theme.primary, { bold: true }) : color(e.id, theme.secondary)
-    const providerColor = selected ? color(`[${e.provider}] `, theme.dim) : color(`[${e.provider}] `, theme.dim)
-    const tokensText = e.contextWindow ? `  ${(e.contextWindow / 1000).toFixed(0)}k ctx` : ''
-    const head = `${cursor} ${mark} ${providerColor}${idColor}`
-
-    const plainHead = `  ${e.current ? '●' : ' '} [${e.provider}] ${e.id}`
-    const metaRoom = Math.max(0, innerWidth - stringWidth(plainHead) - 2)
-    const metaText = tokensText && metaRoom > 6 ? tokensText.slice(0, metaRoom) : ''
-    lines.push(padLine(`${head}${color(metaText, theme.dim)}`, width, theme))
-  }
-  for (let i = visible.length; i < listRows; i++) {
-    lines.push(padLine('', width, theme))
-  }
-
-  // Divider
-  lines.push(padLine(` ${color('─'.repeat(Math.max(0, innerWidth - 1)), theme.dim)}`, width, theme))
-  const current = data.entries[sel]
-  const previewLines: string[] = []
-  if (current) {
-    const modelDesc = current.id.includes('pro') || current.id.includes('reasoning') || current.id.includes('o1') || current.id.includes('5.5')
-      ? '性能旗舰：支持长考与高级推理，完美攻克超复杂重构与深层 Debug 任务。'
-      : '极速先锋：响应灵敏、前缀缓存友好度极高，适合日常代码编写与文件级小修补。'
-    const ctxText = current.contextWindow 
-      ? `上下文配额: ${current.contextWindow.toLocaleString()} tokens` 
-      : '上下文配额: 128k tokens'
-    const features = `标识: ${current.id}`
-    const wrappedDesc = wrapToWidth(modelDesc, innerWidth - 1, previewRows - 2)
-    previewLines.push(color(`  ${ctxText}`, theme.primary))
-    previewLines.push(color(`  ${features}`, theme.dim))
-    for (const d of wrappedDesc) {
-      if (previewLines.length < previewRows) {
-        previewLines.push(` ${color(d, theme.muted)}`)
-      }
-    }
-  }
-
-  for (let i = 0; i < previewRows; i++) {
-    lines.push(padLine(previewLines[i] ?? '', width, theme))
-  }
-
-  // effort 行（CC 对标）：`● high effort </> 调整`。档位着色分三层——
-  // off=muted（关）、low/medium=text（常规）、high/max=primary（重档）、auto=dim；
-  // 选中模型不支持时整行灰化并明说，</> 在按键层不响应。
-  if (data.effort) {
-    if (data.effort.supported) {
-      const v = data.effort.value
-      const dotColor = v === 'off' ? theme.muted : v === 'auto' ? theme.dim : (v === 'high' || v === 'max') ? theme.primary : theme.secondary
-      const label = v === 'auto' ? 'auto（按任务自动）' : `${v} effort`
-      lines.push(padLine(` ${color('●', dotColor)} ${color(label, v === 'off' ? theme.muted : theme.secondary)} ${color('</> 调整', theme.dim)}`, width, theme))
-    } else {
-      lines.push(padLine(` ${color('○ 此模型不支持推理等级调节', theme.muted)}`, width, theme))
-    }
-  }
-
-  // footer：effort 行存在时才带 </> 提示（提示与可做的动作恒一致）
-  const hints: Array<[string, string]> = [['←/→', '切换'], ['↑↓', '选择'], ['Enter', '设为默认'], ['s', '仅本会话']]
-  if (data.effort) hints.push(['</>', '推理等级'])
+export function renderModelPicker(data: ModelPickerData, width: number, height: number, theme: RivetTheme): OverlayMenuLines {
+  const lines = createMenuLines()
+  lines.push(formatBorder(width, theme, 'subtle'), renderTabBar('model', width, theme))
+  const hints: Array<[string, string]> = [['←/→', '切换'], ['↑↓', '选择'], ['Enter', '本会话'], ['s', '设为默认']]
+  if (data.effort?.supported) hints.push(['</>', '推理等级'])
   hints.push(['Esc', '取消'])
-  lines.push(formatFooter(compactHints(hints), width, theme, 'subtle'))
-  lines.push(formatBottomBorder(width, theme, 'subtle'))
+  const footer = hintRows(hints, width, theme)
+  if (height < lines.length + footer.length + 1) lines.shift()
+  const roomy = height >= Math.max(14, footer.length + 13)
+  if (roomy) lines.push(padLine('', width, theme), padLine(color('选择模型', theme.secondary, { bold: true }), width, theme), padLine(color('Enter 仅应用本会话；s 保存为用户默认。', theme.muted), width, theme), padLine('', width, theme))
+  const detailRows = roomy ? 4 + (data.effort ? 2 : 0) : 0
+  const listRows = Math.max(1, height - lines.length - footer.length - detailRows - 1)
+  const sel = Math.max(0, Math.min(data.selectedIndex, data.entries.length - 1))
+  const start = followListWindow(sel, data.entries.length, listRows)
+  const innerWidth = Math.max(1, width - frameInset(width) * 2)
+  const nameWidth = Math.min(44, Math.max(12, innerWidth - 29))
+  if (!data.entries.length) lines.push(padLine(color('/connect 接入后选择模型', theme.muted), width, theme))
+  for (let i = start; i < Math.min(data.entries.length, start + listRows); i++) {
+    const entry = data.entries[i]!, selected = i === sel
+    const label = entry.id + (entry.current ? ' ✓' : '')
+    const name = width >= 72 ? visibleLine(label, nameWidth) : label
+    const meta = width >= 72 ? ' '.repeat(Math.max(2, nameWidth - stringWidth(name) + 2)) + entry.provider + (entry.contextWindow ? ` · ${Math.round(entry.contextWindow / 1000)}k` : '') : ''
+    lines.menuRows.set(lines.length + 1, { index: i })
+    lines.push(padLine(numberedChoice(name + meta, i, selected, theme), width, theme))
+  }
+  const current = data.entries[sel]
+  if (roomy && current) {
+    lines.push(padLine('', width, theme), padLine(color(`上下文：${current.contextWindow ? current.contextWindow.toLocaleString() + ' tokens' : '未知'}`, theme.muted), width, theme), padLine(color(`当前选择：${current.id}`, theme.secondary), width, theme), padLine(color(`连接：${current.provider}`, theme.muted), width, theme))
+    if (data.effort) lines.push(padLine('', width, theme), padLine(color(data.effort.supported ? `● ${data.effort.value === 'auto' ? 'auto（按任务自动）' : data.effort.value + ' effort'}  </> 调整` : '○ 此模型不支持推理等级调节', theme.muted), width, theme))
+  }
+  if (lines.length + footer.length < height) lines.push(padLine('', width, theme))
+  lines.push(...footer)
   return lines
 }
 
 // ── Theme Picker ───────────────────────────────────────────────
 
-export function renderThemePicker(data: ThemePickerData, width: number, height: number, theme: RivetTheme): string[] {
-  const lines: string[] = []
-  lines.push(formatBorder(width, theme, 'subtle'))
-  lines.push(renderTabBar('theme', width, theme))
-
-  const innerWidth = width - 4
-  const contentRows = Math.max(3, height - 4)
-  const previewRows = Math.min(6, Math.max(4, contentRows - data.entries.length - 1))
-  const listRows = Math.max(1, contentRows - previewRows - 1)
-
-  const sel = data.selectedIndex
-  const visible = data.entries.slice(0, listRows)
-  for (let i = 0; i < visible.length; i++) {
-    const e = visible[i]!
-    const selected = i === sel
-    const cursor = selected ? color(CURSOR, theme.primary, { bold: true }) : ' '
-    const mark = e.current ? color(CURRENT_MARK, theme.primary) : ' '
-    const defaultMark = e.isDefault ? color('★', theme.warning, { bold: true }) : ' '
-    const nameColor = selected ? color(e.name, theme.primary, { bold: true }) : color(e.name, theme.secondary)
-    lines.push(padLine(`${cursor} ${mark} ${defaultMark} ${nameColor}`, width, theme))
+export function renderThemePicker(data: ThemePickerData, width: number, height: number, theme: RivetTheme): OverlayMenuLines {
+  const lines = createMenuLines()
+  lines.push(formatBorder(width, theme, 'subtle'), renderTabBar('theme', width, theme))
+  const footer = hintRows([['←/→', '切换'], ['↑↓', '选择'], ['Enter', '本会话'], ['s', '设为默认'], ['Esc', '取消']], width, theme)
+  const roomy = height >= Math.max(18, footer.length + 16)
+  if (roomy) lines.push(padLine('', width, theme), padLine(color('选择终端外观', theme.secondary, { bold: true }), width, theme), padLine(color('Enter 仅应用本会话；s 保存为用户默认。', theme.muted), width, theme), padLine('', width, theme))
+  const previewRows = roomy ? 8 : 0
+  const listRows = Math.max(1, height - lines.length - footer.length - previewRows - 2)
+  const sel = Math.max(0, Math.min(data.selectedIndex, data.entries.length - 1))
+  const start = followListWindow(sel, data.entries.length, listRows)
+  for (let i = start; i < Math.min(data.entries.length, start + listRows); i++) {
+    const entry = data.entries[i]!
+    const label = `${entry.name}${entry.current ? ' ✓' : ''}${entry.isDefault ? ' ★ 默认' : ''}`
+    lines.menuRows.set(lines.length + 1, { index: i })
+    lines.push(padLine(numberedChoice(label, i, i === sel, theme), width, theme))
   }
-  for (let i = visible.length; i < listRows; i++) {
-    lines.push(padLine('', width, theme))
+  const current = data.entries[sel], palette = current && resolveThemeEntry(current.name)
+  if (roomy && palette) {
+    lines.push(padLine('', width, theme), padLine(color(current.description, theme.muted), width, theme))
+    const previewTheme = current.name.endsWith('-ansi') ? palette.fallback : palette.truecolor
+    lines.push(...renderThemePreview(previewTheme, Math.max(1, width - frameInset(width) * 2), previewRows - 1, palette.background).map(row => padLine(row, width, theme)))
   }
-
-  // Divider
-  lines.push(padLine(` ${color('─'.repeat(Math.max(0, innerWidth - 1)), theme.dim)}`, width, theme))
-  const current = data.entries[sel]
-  const previewLines: string[] = []
-  if (current) {
-    // 1. Description
-    const wrappedDesc = wrapToWidth(current.description, innerWidth - 1, 2)
-    for (const d of wrappedDesc) {
-      previewLines.push(` ${color(d, theme.muted)}`)
-    }
-    
-    // 2. Swatch Preview!（resolveThemeEntry 同时覆盖内置与 custom: 主题）
-    const targetThemeInfo = resolveThemeEntry(current.name)
-    if (targetThemeInfo) {
-      const tc = targetThemeInfo.truecolor
-      const primarySwatch = color('● Accent', tc.primary)
-      const secondarySwatch = color('● Secondary', tc.secondary)
-      const successSwatch = color('✓ Success', tc.success)
-      const errorSwatch = color('✗ Error', tc.error)
-      const swatchLine = `  ${primarySwatch}  ${secondarySwatch}  ${successSwatch}  ${errorSwatch}`
-      previewLines.push(swatchLine)
-    }
-  }
-  
-  for (let i = 0; i < previewRows; i++) {
-    lines.push(padLine(previewLines[i] ?? '', width, theme))
-  }
-
-  lines.push(formatFooter(compactHints([['←/→', '切换'], ['↑↓', '选择'], ['Enter', '应用'], ['S', '设为默认'], ['Esc', '取消']]), width, theme, 'subtle'))
-  lines.push(formatBottomBorder(width, theme, 'subtle'))
+  if (lines.length + footer.length < height) lines.push(padLine('', width, theme))
+  lines.push(...footer)
   return lines
 }
 
@@ -1346,7 +1278,17 @@ export function renderConnect(data: ConnectOverlayData, width: number, height: n
   lines.push(frameDivider(width, theme))
 
   const innerWidth = width - 6
-  const contentRows = Math.max(1, height - 5)
+  const footerPairs: [string, string][] = view.kind === 'choice'
+    ? [['↑↓', '选择'], ['Enter', '确认'], ['Esc', '取消']]
+    : view.kind === 'multi-choice'
+      ? [['↑↓', '移动'], ['空格', '勾选'], ['输入', '搜索'], ['Ctrl+A', '全选'], ['Enter', '确认'], ['Esc', '取消']]
+      : view.kind === 'busy'
+        ? [['Esc', '取消']]
+        : view.kind === 'form'
+          ? [['↑↓', '选字段'], ['←→', '移光标'], ['空格', '切换'], ['Enter', '确认'], ['Esc', '返回']]
+          : [['←→', '移动'], ['Enter', '提交'], ['Esc', '取消']]
+  const footer = hintRows(footerPairs, width, theme)
+  const contentRows = Math.max(1, height - 4 - footer.length)
   let rowsUsed = 0
   const push = (s: string): void => { lines.push(padLine(s, width, theme)); rowsUsed++ }
 
@@ -1397,7 +1339,7 @@ export function renderConnect(data: ConnectOverlayData, width: number, height: n
     // 19-item provider list) instead of silently truncating beyond viewport.
     const optionHeights = options.map(o => 1 + (o.description ? wrapToWidth(o.description, innerWidth, 2).length : 0))
     const win = scrollWindowWithIndicators(optionHeights, data.selectedIndex, contentRows - rowsUsed)
-    if (win.start > 0) push(`   ${color(`↑ 以上还有 ${win.start} 项`, theme.muted)}`)
+    if (win.start > 0 && contentRows - rowsUsed > win.end - win.start) push(`   ${color(`↑ 以上还有 ${win.start} 项`, theme.muted)}`)
     for (let i = win.start; i < win.end && rowsUsed < contentRows; i++) {
       const opt = options[i]!
       const selected = i === data.selectedIndex
@@ -1471,16 +1413,7 @@ export function renderConnect(data: ConnectOverlayData, width: number, height: n
 
   while (rowsUsed < contentRows) push('')
 
-  const footer = view.kind === 'choice'
-    ? compactHints([['↑↓', '选择'], ['Enter', '确认'], ['Esc', '取消']])
-    : view.kind === 'multi-choice'
-      ? compactHints([['↑↓', '移动'], ['空格', '勾选'], ['输入', '搜索'], ['Ctrl+A', '全选'], ['Enter', '确认'], ['Esc', '取消']])
-      : view.kind === 'busy'
-        ? compactHints([['Esc', '取消']])
-        : view.kind === 'form'
-          ? compactHints([['↑↓', '选字段'], ['←→', '移光标'], ['空格', '切换'], ['Enter', '确认'], ['Esc', '返回']])
-          : compactHints([['←→', '移动'], ['Enter', '提交'], ['Esc', '取消']])
-  lines.push(formatFooter(footer, width, theme, 'subtle'))
+  lines.push(...footer)
   lines.push(formatBottomBorder(width, theme, 'subtle'))
   return lines
 }
@@ -1506,7 +1439,10 @@ export function renderInitFlow(data: InitOverlayData, width: number, height: num
   lines.push(frameDivider(width, theme))
 
   const innerWidth = width - 6
-  const contentRows = Math.max(1, height - 5)
+  const footer = hintRows(view.kind === 'multi-choice'
+    ? [['↑↓', '移动'], ['空格', '勾选'], ['Enter', '继续'], ['Esc', '取消']]
+    : [['Enter', '执行'], ['Esc', '取消']], width, theme)
+  const contentRows = Math.max(1, height - 4 - footer.length)
   let rowsUsed = 0
   const push = (s: string): void => { lines.push(padLine(s, width, theme)); rowsUsed++ }
 
@@ -1530,7 +1466,7 @@ export function renderInitFlow(data: InitOverlayData, width: number, height: num
     const options = view.options ?? []
     const optionHeights = options.map(o => 1 + (o.description ? wrapToWidth(o.description, innerWidth, 2).length : 0))
     const win = scrollWindowWithIndicators(optionHeights, data.selectedIndex, contentRows - rowsUsed)
-    if (win.start > 0) push(`   ${color(`↑ 以上还有 ${win.start} 项`, theme.muted)}`)
+    if (win.start > 0 && contentRows - rowsUsed > win.end - win.start) push(`   ${color(`↑ 以上还有 ${win.start} 项`, theme.muted)}`)
     for (let i = win.start; i < win.end && rowsUsed < contentRows; i++) {
       const opt = options[i]!
       const selected = i === data.selectedIndex
@@ -1571,10 +1507,7 @@ export function renderInitFlow(data: InitOverlayData, width: number, height: num
 
   while (rowsUsed < contentRows) push('')
 
-  const footer = view.kind === 'multi-choice'
-    ? compactHints([['↑↓', '移动'], ['空格', '勾选'], ['Enter', '继续'], ['Esc', '取消']])
-    : compactHints([['Enter', '执行'], ['Esc', '取消']])
-  lines.push(formatFooter(footer, width, theme, 'subtle'))
+  lines.push(...footer)
   lines.push(formatBottomBorder(width, theme, 'subtle'))
   return lines
 }

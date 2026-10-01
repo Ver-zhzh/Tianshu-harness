@@ -7,17 +7,18 @@
  * 应用后只写单行确认，完整方法论照常由引擎注入（UI 不转储 volatileBlock）。
  */
 import { color } from '../engine/ansi.js'
+import { createMenuLines, type OverlayMenuLines } from '../engine/overlay-engine.js'
 import type { RivetTheme } from '../theme.js'
+import { boxCharsFor } from '../box-chars.js'
 import { DOMAIN_SWITCH_CACHE_NOTE } from '../../agent/domain-picker-entries.js'
 import {
   frameTop as formatBorder,
   frameBottom as formatBottomBorder,
-  frameFooter as formatFooter,
   frameLine as padLine,
+  frameHintRows,
   CURSOR,
 } from './overlay-frame.js'
 import {
-  compactHints,
   renderTabBar,
   wrapToWidth,
   scrollWindowWithIndicators,
@@ -59,13 +60,16 @@ export interface DomainPickerData {
 /**
  * 渲染 Domain Picker overlay（CC 风星域选择器）。
  */
-export function renderDomainPicker(data: DomainPickerData, width: number, height: number, theme: RivetTheme): string[] {
-  const lines: string[] = []
-  lines.push(formatBorder(width, theme, 'subtle'))
+export function renderDomainPicker(data: DomainPickerData, width: number, height: number, theme: RivetTheme): OverlayMenuLines {
+  const lines = createMenuLines()
+  const topRule = boxCharsFor(data.entries[data.selectedIndex]?.uiPersona?.separator ?? 'thin').h
+  lines.push(formatBorder(width, theme, 'subtle').replace(/─/g, topRule))
   lines.push(renderTabBar('domain', width, theme))
 
+  const footer = frameHintRows([['←/→', '切换'], ['↑↓', '选择'], ['Enter', '本会话'], ['g', '碑文'], ['S', '设为默认'], ['Esc', '取消']], width, theme)
+
   const innerWidth = width - 4 // padLine 占 2，左右各留 1 空隙
-  const contentRows = Math.max(3, height - 4) // border + title + footer + bottom
+  const contentRows = Math.max(3, height - 3 - footer.length)
   // 详情区（提示词精华）上限 8 行，随 contentRows 收缩（下限 1：徽章行）——
   // 保证 listRows + detailRows + 固定 6 行 ≤ height，矮终端不超屏（2026-08 回归）。
   const detailRows = Math.min(8, Math.max(1, contentRows - 6))
@@ -99,6 +103,7 @@ export function renderDomainPicker(data: DomainPickerData, width: number, height
     const alias = e.alias ? color(` · ${e.alias}`, theme.muted) : ''
     const tagline = e.tagline ? color(`  ${e.tagline}`, theme.dim) : ''
     const head = `${cursor} ${mark} ${name}${alias}${tagline}`
+    lines.menuRows.set(lines.length + 1, { index: i })
     lines.push(padLine(head, width, theme))
     row++
   }
@@ -110,13 +115,7 @@ export function renderDomainPicker(data: DomainPickerData, width: number, height
     lines.push(padLine('', width, theme))
   }
 
-  // 分隔线自适应强调色与样式
-  const sepChar = current?.uiPersona?.separator === 'dots'
-    ? '·'
-    : current?.uiPersona?.separator === 'thick'
-      ? '━'
-      : '─'
-  lines.push(padLine(` ${color(sepChar.repeat(Math.max(0, innerWidth - 1)), currentAccent)}`, width, theme))
+  lines.push(padLine('', width, theme))
 
   // 详情区：别名徽章 → 职责标语 + 创始星 → motto → 提示词精华（essence 多行）
   const previewLines: string[] = []
@@ -130,7 +129,7 @@ export function renderDomainPicker(data: DomainPickerData, width: number, height
     previewLines.push(` ${color(taglineText, theme.muted)}`)
 
     previewLines.push(` ${color(`「${current.motto}」`, theme.dim)}`)
-    previewLines.push(` ${color('─'.repeat(Math.max(0, innerWidth - 2)), theme.dim)}`)
+    previewLines.push('')
 
     // 提示词精华：motto + volatileBlock 首行（entry.essence），按宽折行填满剩余详情区
     const desc = current.essence || current.expertise || ''
@@ -149,7 +148,7 @@ export function renderDomainPicker(data: DomainPickerData, width: number, height
   // 常驻备注：切换星域的缓存代价（预防性提示，切换后的忠告见 slash-commands）。
   lines.push(padLine(` ${color(DOMAIN_SWITCH_CACHE_NOTE, theme.dim)}`, width, theme))
 
-  lines.push(formatFooter(compactHints([['←/→', '切换'], ['↑↓', '选择'], ['Enter', '应用'], ['g', '碑文'], ['S', '设为默认'], ['Esc', '取消']]), width, theme, 'subtle'))
+  lines.push(...footer)
   lines.push(formatBottomBorder(width, theme, 'subtle'))
   return lines
 }

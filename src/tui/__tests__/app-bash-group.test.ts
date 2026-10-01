@@ -118,11 +118,13 @@ test('read 工具打断 bash 组，bash 工具打断 read 组', () => {
   tr(app, 'r1', 'read_file', 'content a')
   app.callbacks.onToolUse('b2', 'bash', { command: 'ls' })
   tr(app, 'b2', 'bash', 'b.txt')
+  app.callbacks.onTurnComplete({ input_tokens: 100, output_tokens: 50 }, 1, true)
 
   const text = scrollbackPlain(app)
-  assert.ok(text.includes('Ran 1 shell command'), 'first bash should be flushed as group')
-  assert.ok(text.includes('Read 1 file'), 'read should be flushed as group')
-  assert.ok(text.includes('Ran 1 shell command'), 'second bash should be its own group')
+  assert.match(text, /Run\s+pwd · 完成/, 'first bash should be flushed as a completed command')
+  assert.match(text, /Read\s+a\.ts · 完成/, 'read should be flushed as a completed file')
+  assert.match(text, /Run\s+ls · 完成/, 'second bash should be its own completed command')
+  assert.equal([...text.matchAll(/^[+✓] Run\s+.* · 完成/gm)].length, 2, 'both bash groups should be flushed once')
 })
 
 // ── turn 边界 flush ────────────────────────────────────────────
@@ -135,7 +137,8 @@ test('turnComplete 时 flush 残余 bash 折叠组', () => {
   app.callbacks.onTurnComplete({ input_tokens: 100, output_tokens: 50 }, 1, true)
 
   const text = scrollbackPlain(app)
-  assert.ok(text.includes('Ran 1 shell command'), 'group should be flushed on turnComplete')
+  assert.match(text, /Run\s+pwd · 完成/, 'command should be flushed on turnComplete')
+  assert.ok(text.includes('/home/user'), 'completed output should be preserved')
 })
 
 // ── abort flush ───────────────────────────────────────────────

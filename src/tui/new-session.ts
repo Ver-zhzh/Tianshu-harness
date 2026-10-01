@@ -21,6 +21,7 @@ import { restoreGoalTracker } from '../agent/goal-persist.js'
 import { loadTodos, setTodoSession } from '../tools/todo.js'
 import { setPlanSession } from '../agent/plan-store.js'
 import { catalogMetaFor } from './command-catalog.js'
+import { initializeFrontendHistory } from './frontend-session-provider.js'
 
 /**
  * 会话切换成功后的 UI / 状态复原——/resume、/fork、/branch back 与 /new 共用
@@ -30,6 +31,7 @@ import { catalogMetaFor } from './command-catalog.js'
  * 正是重置语义；侧栏按新 meta 关闭。一份代码覆盖两种切换。
  */
 export function applySessionSwitch(app: TuiApp, ctx: BootstrapContext, targetId: string): void {
+  void initializeFrontendHistory(app, ctx, targetId).catch(error => app.commitStatic(`阅读历史切换失败：${(error as Error).message}`, { isError: true }))
   app.setStreamingState(false)
   // 会话边界重置定高视口高水位——旧会话的峰值空白不带进新会话
   //（对齐 tianshu-public switchSession）。

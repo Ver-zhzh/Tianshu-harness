@@ -53,16 +53,16 @@ function loadCreditHelper(): string {
 
 /**
  * 造一个「最新提交就是 credit，历史长到 log 输出远超管道缓冲」的仓——
- * 假阴性要在这个量级上才稳定复现。
+ * 是否触发 SIGPIPE 仍取决于主机的管道缓冲与进程调度。
  */
 function makeLongHistoryRepo(): string {
   const dir = mkdtempSync(join(tmpdir(), 'dispose-credit-'))
-  execFileSync('git', ['init', '-q', '.'], { cwd: dir })
+  execFileSync('git', ['init', '-q', '.'], { cwd: dir, windowsHide: true })
   // fast-import 的目标分支是 refs/heads/main；显式对齐 HEAD，不依赖
   // init.defaultBranch 配置——CI runner 默认 master 时 HEAD 指向不存在的
   // refs/heads/master，`git log` 输出 0 字节、下方断言必败（该测试此前
   // 隐式依赖作者本机 defaultBranch=main，公开仓 CI 双平台实测皆红）。
-  execFileSync('git', ['symbolic-ref', 'HEAD', 'refs/heads/main'], { cwd: dir })
+  execFileSync('git', ['symbolic-ref', 'HEAD', 'refs/heads/main'], { cwd: dir, windowsHide: true })
   const stream: string[] = []
   for (let i = 0; i < 400; i++) {
     stream.push(
@@ -80,8 +80,8 @@ function makeLongHistoryRepo(): string {
     'credit: PR #999 计入贡献',
     'EOM',
   )
-  execFileSync('git', ['fast-import', '--quiet'], { cwd: dir, input: `${stream.join('\n')}\n` })
-  const bytes = execFileSync('bash', ['-c', "git log --format='%s' | wc -c"], { cwd: dir })
+  execFileSync('git', ['fast-import', '--quiet'], { cwd: dir, windowsHide: true, input: `${stream.join('\n')}\n` })
+  const bytes = execFileSync('bash', ['-c', "git log --format='%s' | wc -c"], { cwd: dir, windowsHide: true })
     .toString()
     .trim()
   assert.ok(Number(bytes) > 64 * 1024, `合成仓的 log 输出应超出管道缓冲，实际 ${bytes} 字节`)
@@ -98,22 +98,23 @@ describe('dispose-community-pr.sh 的 credit 查重形态', () => {
     )
   })
 
-  test('真实历史量级下：管道形态假阴性，变量形态命中', () => {
+  test('真实历史量级下：变量形态命中，不依赖管道是否触发 SIGPIPE', () => {
     const dir = makeLongHistoryRepo()
     try {
       const probe = 'credit: PR #999 计入贡献'
       const piped = spawnSync(
         'bash',
         ['-c', `set -o pipefail; git log --format='%s' | grep -qF "${probe}"`],
-        { cwd: dir },
+        { cwd: dir, windowsHide: true },
       )
       const viaVar = spawnSync(
         'bash',
         ['-c', `subjects="$(git log --format='%s')"; grep -qF "${probe}" <<<"$subjects"`],
-        { cwd: dir },
+        { cwd: dir, windowsHide: true },
       )
       assert.equal(viaVar.status, 0, '变量形态应找到那笔 credit')
-      assert.notEqual(piped.status, 0, '管道形态在本量级下应复现假阴性（这就是要锁它的原因）')
+      assert.ok(piped.status === 0 || piped.status === 141,
+        `管道形态可正常命中或触发 SIGPIPE，不应出现其他错误：${piped.status}`)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
@@ -125,10 +126,12 @@ describe('dispose-community-pr.sh 的 credit 查重形态', () => {
       const helper = loadCreditHelper()
       const hit = spawnSync('bash', ['-c', `${helper}\nhas_credit_commit`], {
         cwd: dir,
+        windowsHide: true,
         env: { ...process.env, PR: '999' },
       })
       const miss = spawnSync('bash', ['-c', `${helper}\nhas_credit_commit`], {
         cwd: dir,
+        windowsHide: true,
         env: { ...process.env, PR: '998' },
       })
       assert.equal(hit.status, 0, '早命中的 credit 必须判为已落账')

@@ -82,9 +82,11 @@ import { formatPermissionLabel, parsePermissionAlias, tierToMode } from '../agen
 import { isToolAllowed, isToolDenied, isBashCommandAllowlisted, isBashCommandDenied } from '../agent/permissions.js'
 import { getMirrorConfig, setMirrorConfig, setCheckpointConfig, setApprovalMode as persistApprovalDefault } from '../config/manager.js'
 import { grantPath, listPersistedGrants } from '../tools/path-grants.js'
+import { buildPermissionView } from './permission-view.js'
 import { SettingsFlow } from './settings-flow.js'
 import { runZenSlash } from './zen-command.js'
 import { loadSettingsDraft, loadSettingsEnv, saveSettings } from './settings-persist.js'
+import { applyFrontendSettings } from './frontend-session-provider.js'
 import { formatMirrorStatus } from '../tools/mirror-env.js'
 import { detectEnv, formatEnvGuidance, recommendUvSetup, isPythonProject } from '../tools/env-check.js'
 import { getResolvedEnv, getResolvedPathDiff } from '../tools/resolved-env.js'
@@ -134,6 +136,8 @@ export interface SlashHandlerContext {
   /** Open the interactive /init scaffolding wizard (verify / skills / hooks).
    *  Wired by the TUI; undefined → /init prints a hint to use /init verify. */
   openInitFlow?: () => void
+  openHelp?: () => void
+  openPermissions?: () => void
   /** Runtime cwd switch for /cd <path>. Rebuilds the agent runtime against the
    *  new working directory with frozen-snapshot inheritance (prefix cache only
    *  tail-cuts at the next user boundary). Async: drains pending persist writes
@@ -613,9 +617,9 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
     name: '/help',
     immediate: true,
     handler(ctx) {
-      const { parts, pushStatic, setIsStreaming } = ctx
-      const cmd = parts[0]!.toLowerCase()
-      pushStatic(createLogEntry({ type: 'system', content: HELP_TEXT }))
+      const { pushStatic, setIsStreaming } = ctx
+      if (ctx.openHelp) ctx.openHelp()
+      else pushStatic(createLogEntry({ type: 'system', content: HELP_TEXT }))
       setIsStreaming(false)
       return true
 
@@ -1653,7 +1657,7 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
       const cmd = parts[0]!.toLowerCase()
       const nextVerbose = !ctx.verboseRef.current
       ctx.setVerbose(nextVerbose)
-      pushStatic(createLogEntry({ type: 'system', content: nextVerbose ? 'Verbose mode: on (show 200 lines)' : 'Verbose mode: off (show 20 lines)' }))
+      pushStatic(createLogEntry({ type: 'system', content: nextVerbose ? '详细输出已开启：后续工具卡片完整展开并显示参数。' : '详细输出已关闭：后续工具输出恢复默认折叠，Ctrl+O 可展开。' }))
       setIsStreaming(false)
       return true
     },
@@ -1768,8 +1772,8 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
 
       if (!sub) {
         // 无参数 → 弹出交互式权限选择面板（上下选 + 回车确认，同 /effort 风格，kimi-code 对标）
-        ctx.setChoicePanelKind?.('permission')
-        ctx.surfacePush?.('choice-panel')
+        if (ctx.openPermissions) ctx.openPermissions()
+        else { ctx.setChoicePanelKind?.('permission'); ctx.surfacePush?.('choice-panel') }
         setIsStreaming(false)
         return true
       }
@@ -1907,7 +1911,7 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
           setIsStreaming(false)
           return true
         }
-        const kind = kindRaw as 'allow' | 'deny' | 'bashAllow' | 'bashDeny'
+        const kind = kindRaw === 'bashallow' ? 'bashAllow' : kindRaw === 'bashdeny' ? 'bashDeny' : kindRaw as 'allow' | 'deny'
         const idx = parseInt(target, 10)
         const key = Number.isNaN(idx) ? target : idx
         const ok = agent.removePermissionRule(kind, key)
@@ -3951,6 +3955,8 @@ export function registerTuiSlashCommands(app: TuiApp, ctx: BootstrapContext): vo
         if (res.ok) applySessionSwitch(app, ctx, targetId)
         return res
       },
+      openPermissions: () => app.openPermissionPanel(() => buildPermissionView({ cwd: ctx.agent.cwd, trusted: isProjectTrusted(ctx.agent.cwd), mode: ctx.agent.config.approvalMode ?? 'manual', config: ctx.agent.config.permissions, overlay: ctx.agent.config.permissionsOverlay, grants: listPersistedGrants(ctx.agent.cwd) }), command => { void app.tryDispatchSlash(command).catch(error => app.commitStatic(String(error))) }, (path, mode) => { try { grantPath(path, mode, { persist: true, cwd: ctx.agent.cwd }); app.commitStatic(`已授权并记住 ${mode === 'write' ? '读写' : '只读'}访问 ${path}`) } catch (error) { app.commitStatic(`目录授权失败：${String(error)}`) } }),
+      openHelp: () => { app.activateOverlay('help') },
       openSessionPicker: () => { app.activateOverlay('chronicle') },
       openInitFlow: () => { app.openInitFlow(ctx.agent.cwd) },
       onCwdSwitch: async (target: string) => {
@@ -3976,7 +3982,7 @@ export function registerTuiSlashCommands(app: TuiApp, ctx: BootstrapContext): vo
       cacheHitRate: metrics?.cacheHitRate ?? cacheHitRate,
       autoSafeRef,
       verboseRef,
-      setVerbose: (v: boolean) => { verboseRef.current = v },
+      setVerbose: (v: boolean) => { verboseRef.current = v; app.setVerbose(v) },
       setAutoSafe: (v: boolean) => { autoSafeRef.current = v },
       persistApprovalMode: (mode: string) => { try { persistApprovalDefault(mode) } catch { /* best-effort persist */ } },
       rollbackTokenRef,
@@ -4198,10 +4204,9 @@ export function registerTuiSlashCommands(app: TuiApp, ctx: BootstrapContext): vo
   })
 
   register("/pager", {
-    description: "Open scrollback pager",
+    description: "浏览完整会话阅读历史",
     immediate: true,
-    overlay: "pager",
-    handler: () => true,
+    handler: () => { app.openUIHistory(); return true },
   })
 
   register("/rewind", {
@@ -4359,6 +4364,7 @@ export function registerTuiSlashCommands(app: TuiApp, ctx: BootstrapContext): vo
   const openSettingsPanel = (): boolean => {
     const flow = new SettingsFlow(loadSettingsDraft(), loadSettingsEnv())
     app.startSettings(flow, request => saveSettings(request, {
+      onFrontendChange: prefs => applyFrontendSettings(app, prefs),
       // 审批模式是唯一要同步到「正在跑的会话」的字段：落盘之外还得改 agent
       // 与 badge，否则用户看着面板改了、当前会话仍按旧模式放行。
       onApprovalChange: (mode: string) => {

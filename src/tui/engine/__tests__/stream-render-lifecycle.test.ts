@@ -32,7 +32,7 @@ const tick = () => new Promise(r => setTimeout(r, 10))
 const microtask = () => Promise.resolve().then(() => {})
 
 interface AppState {
-  state: { phase: string; isStreaming: boolean; isThinking: boolean }
+  state: { phase: string; isStreaming: boolean; isThinking: boolean; thinkingText: string; thinkingExpanded: boolean }
 }
 
 test('text delta → streaming 激活', async () => {
@@ -94,20 +94,21 @@ test('abort → idle 复位 + streaming 残留清除', async () => {
   assert.equal(s.isStreaming, false, 'abort 后 isStreaming 应回 false')
 })
 
-test('thinking delta 默认显示推理正文（无需 Ctrl+T 展开）', async () => {
-  // 回归守卫：thinkingExpanded 默认 true + 渲染门槛不再要求展开。
-  // 若有人把默认改回折叠（如 bug 9755c29a 之前），此测试拦截。
+test('thinking delta 默认折叠为存在与耗时提示，正文仍保留供详情查看', async () => {
   const { app, out } = makeApp()
   out.clear()
   app.callbacks.onThinkingDelta('推理甲行\n推理乙行')
   await microtask()
   await tick()
   const rendered = stripAnsi(out.chunks.join(''))
-  assert.ok(rendered.includes('推理甲行'), `默认应渲染推理正文，实际: ${rendered.slice(0, 200)}`)
+  assert.match(rendered, /thinking.*0s/, '默认存在与耗时提示')
+  assert.ok(!rendered.includes('推理甲行'), '默认不重印思考正文')
+  assert.equal((app as unknown as AppState).state.thinkingExpanded, false)
+  assert.equal((app as unknown as AppState).state.thinkingText, '推理甲行\n推理乙行', '已有正文保留供详情查看')
 })
 
 test('thinking → tool use 时 commit 折叠为「已推理」摘要', async () => {
-  // collapse-on-commit：流式期显示全文，提交到 scrollback 只留一行过去式摘要。
+  // collapse-on-commit：提交到 scrollback 只留一行过去式摘要。
   const { app, out } = makeApp()
   const body = Array.from({ length: 12 }, (_, i) => `推理行${i}`).join('\n')
   app.callbacks.onThinkingDelta(body)

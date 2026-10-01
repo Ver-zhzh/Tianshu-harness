@@ -39,6 +39,7 @@ export interface CommitEngineOptions {
 export class CommitEngine {
   private stdout: WriteStream
   private flush: boolean
+  private outputEnabled = true
   /**
    * Scrollback buffer: 累积所有已提交文本，供 pager overlay 读取。
    * 使用 RingBuffer 封顶——长会话下无界 string[] 会持续增长，
@@ -57,6 +58,8 @@ export class CommitEngine {
   getContent(): string {
     return this.buffer.items().join('\n')
   }
+
+  setOutputEnabled(enabled: boolean): void { this.outputEnabled = enabled }
 
   /**
    * 将一条已提交条目写入终端 scrollback。
@@ -77,7 +80,7 @@ export class CommitEngine {
     if (!content.endsWith('\n')) content += '\n'
     if (entry.trailingNewline) content += '\n'
     this.buffer.push(content.trimEnd())
-    this.stdout.write(content)
+    if (this.outputEnabled) this.stdout.write(content)
   }
 
   /**
@@ -94,7 +97,7 @@ export class CommitEngine {
       this.buffer.push(line.trimEnd())
       buf += line
     }
-    this.stdout.write(buf)
+    if (this.outputEnabled) this.stdout.write(buf)
   }
 
   /**
@@ -102,7 +105,7 @@ export class CommitEngine {
    * 用于需要精确控制格式的场景（如分隔线、缩进）。
    */
   writeRaw(ansi: string): void {
-    this.stdout.write(ansi)
+    if (this.outputEnabled) this.stdout.write(ansi)
   }
 
   /**
@@ -111,7 +114,7 @@ export class CommitEngine {
    */
   writeSeparator(width?: number): void {
     const w = width ?? this.stdout.columns
-    this.stdout.write(`${ANSI.DIM}${'─'.repeat(w)}${ANSI.RESET}\n`)
+    if (this.outputEnabled) this.stdout.write(`${ANSI.DIM}${'─'.repeat(w)}${ANSI.RESET}\n`)
   }
 
   /**

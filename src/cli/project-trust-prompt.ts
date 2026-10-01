@@ -10,6 +10,7 @@
  * RIVET_TRUST_PROJECT env 覆盖、已授信、已选"不再提示"时完全跳过。
  */
 
+import { wrapReadingText } from '../tui/format/reading-layout.js'
 import { type ProjectTrustStakes } from '../config/project-trust.js'
 
 export type TrustPromptDecision = 'trust' | 'skip' | 'dismiss'
@@ -23,29 +24,34 @@ export function interpretTrustKey(ch: string): TrustPromptDecision | null {
 }
 
 /** 提示正文（纯函数，便于测试）。 */
-export function buildTrustPromptText(stakes: ProjectTrustStakes): string {
+export function buildTrustPromptText(stakes: ProjectTrustStakes, options: { cwd?: string; columns?: number } = {}): string {
   const lines: string[] = [
     '',
-    '┌ 项目授信 — 检测到本项目带有需要信任才能生效的设置',
-    '│',
+    '是否信任这个项目的配置与 hooks？',
+    '',
+    `工作区：${options.cwd ?? process.cwd()}`,
+    '',
   ]
   if (stakes.sensitiveKeys.length > 0) {
-    lines.push(`│ .rivet-config.json 含安全敏感键：${stakes.sensitiveKeys.join('、')}`)
+    lines.push(`项目配置会改变安全设置：${stakes.sensitiveKeys.join('、')}`)
   }
   if (stakes.hasHooks) {
-    lines.push('│ .rivet/hooks.json 存在（项目级 hooks）')
+    lines.push('项目 .rivet/hooks.json 可在工具执行前后运行进程。')
   }
   lines.push(
-    '│',
-    '│ 这些键可以更改审批模式、预授权命令、拉起进程、改写出方向——',
-    '│ 按信任边界（SECURITY.md），仓库内容不能自我授权，需你显式授信。',
-    '│ 授信记录存本机 ~/.rivet/project-trust.json，绝不写回仓库。',
-    '│',
-    '│ [y] 授信（当次会话生效）  [n] 暂不（下次启动再问）  [d] 本项目不再提示',
-    '└',
+    '',
+    '请确认这是你创建或信任的项目；不确定时，先检查项目配置。',
+    '授信可更改审批模式、预授权命令和出方向；记录仅保存在本机，绝不写回仓库。',
+    '暂不授信仍可继续，项目安全敏感配置和 hooks 将被忽略。',
+    '',
+    '  [y] 信任此项目（当次会话生效）',
+    '  [n] 暂不信任（下次启动再问）',
+    '  [d] 暂不信任，并不再提示本项目',
+    '',
+    'y / n / d 选择 · Esc 暂不信任',
     '',
   )
-  return lines.join('\n')
+  return lines.flatMap(line => wrapReadingText(line, Math.max(1, (options.columns ?? 80) - 4))).map(line => '  ' + line).join('\n')
 }
 
 /**
@@ -53,7 +59,7 @@ export function buildTrustPromptText(stakes: ProjectTrustStakes): string {
  * 结束后恢复 rawMode(false) + pause，不影响后续 bootstrap/TUI 接管。
  */
 export async function promptProjectTrust(stakes: ProjectTrustStakes): Promise<TrustPromptDecision> {
-  process.stderr.write(buildTrustPromptText(stakes))
+  process.stderr.write(buildTrustPromptText(stakes, { cwd: process.cwd(), columns: process.stderr.columns ?? process.stdout.columns ?? 80 }))
   if (!process.stdin.isTTY) return 'skip'
 
   process.stdin.setRawMode(true)

@@ -8,7 +8,9 @@ import type { CachePanelData, CachePeriod } from '../format/cache-panel.js'
 
 export interface OverlayNavState {
   pagerPage: number
-  pagerMode: 'page' | 'search' | 'message'
+  pagerMode: 'page' | 'search' | 'results' | 'message'
+  pagerLineOffset?: number
+  pagerBeforeSearch?: number
   pagerSearchQuery: string
   pagerSearchCurrent: number
   pagerSelectedMessage: number
@@ -24,6 +26,7 @@ export interface OverlayNavState {
   historySearchIndex: number
   chronicleIndex: number
   tasksIndex: number
+  tasksSelectedId?: string
   tasksFilter: import('../format/overlay.js').TasksFilter
   jobsIndex: number
   /** jobs overlay 的稳定选中——行按 running 优先/startedAt 倒序重排，index 会
@@ -66,7 +69,7 @@ export interface OverlayDataProviders {
  * TuiApp; this class only manages nav state / data providers / exec callbacks.
  */
 export class OverlayController {
-  private overlayNav: OverlayNavState = { pagerPage: 0, pagerMode: 'page', pagerSearchQuery: '', pagerSearchCurrent: 0, pagerSelectedMessage: 0, pagerVerbose: false, paletteIndex: 0, paletteScroll: 0, rewindIndex: 0, rewindPhase: 'list', rewindActionIndex: 0, historySearchIndex: 0, chronicleIndex: 0, tasksIndex: 0, tasksFilter: 'running', jobsIndex: 0, domainPickerIndex: 0, modelPickerIndex: 0, themePickerIndex: 0, choicePanelIndex: 0, planPickerIndex: 0, connectIndex: 0, initIndex: 0, cachePeriod: 'today', query: '' }
+  private overlayNav: OverlayNavState = { pagerPage: 0, pagerMode: 'page', pagerSearchQuery: '', pagerSearchCurrent: 0, pagerSelectedMessage: 0, pagerVerbose: false, paletteIndex: 0, paletteScroll: 0, rewindIndex: 0, rewindPhase: 'list', rewindActionIndex: 0, historySearchIndex: 0, chronicleIndex: 0, tasksIndex: 0, tasksFilter: 'all', jobsIndex: 0, domainPickerIndex: 0, modelPickerIndex: 0, themePickerIndex: 0, choicePanelIndex: 0, planPickerIndex: 0, connectIndex: 0, initIndex: 0, cachePeriod: 'today', query: '' }
   private overlayData?: OverlayDataProviders
   private paletteExec?: (index: number) => void
   private rewindExec?: (messageIndex: number, mode: RewindMode) => void
@@ -87,13 +90,13 @@ export class OverlayController {
   /** Direct mutable access to nav state object */
   nav(): OverlayNavState { return this.overlayNav }
   resetNav(): void {
-    this.overlayNav = { pagerPage: 0, pagerMode: 'page' as const, pagerSearchQuery: '', pagerSearchCurrent: 0, pagerSelectedMessage: 0, pagerVerbose: false, paletteIndex: 0, paletteScroll: 0, rewindIndex: 0, rewindPhase: 'list' as const, rewindActionIndex: 0, historySearchIndex: 0, chronicleIndex: 0, tasksIndex: 0, tasksFilter: 'running' as const, jobsIndex: 0, domainPickerIndex: 0, modelPickerIndex: 0, themePickerIndex: 0, choicePanelIndex: 0, planPickerIndex: 0, connectIndex: 0, initIndex: 0, cachePeriod: 'today' as const, query: '' }
+    this.overlayNav = { pagerPage: 0, pagerMode: 'page' as const, pagerSearchQuery: '', pagerSearchCurrent: 0, pagerSelectedMessage: 0, pagerVerbose: false, paletteIndex: 0, paletteScroll: 0, rewindIndex: 0, rewindPhase: 'list' as const, rewindActionIndex: 0, historySearchIndex: 0, chronicleIndex: 0, tasksIndex: 0, tasksFilter: 'all' as const, jobsIndex: 0, domainPickerIndex: 0, modelPickerIndex: 0, themePickerIndex: 0, choicePanelIndex: 0, planPickerIndex: 0, connectIndex: 0, initIndex: 0, cachePeriod: 'today' as const, query: '' }
   }
 
   get pagerPage(): number { return this.overlayNav.pagerPage }
   setPagerPage(v: number): void { this.overlayNav.pagerPage = v }
-  get pagerMode(): 'page' | 'search' | 'message' { return this.overlayNav.pagerMode }
-  setPagerMode(v: 'page' | 'search' | 'message'): void { this.overlayNav.pagerMode = v }
+  get pagerMode(): 'page' | 'search' | 'results' | 'message' { return this.overlayNav.pagerMode }
+  setPagerMode(v: 'page' | 'search' | 'results' | 'message'): void { this.overlayNav.pagerMode = v }
   get pagerSearchQuery(): string { return this.overlayNav.pagerSearchQuery }
   setPagerSearchQuery(v: string): void { this.overlayNav.pagerSearchQuery = v }
   get pagerSearchCurrent(): number { return this.overlayNav.pagerSearchCurrent }

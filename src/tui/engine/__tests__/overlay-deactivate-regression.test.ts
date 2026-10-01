@@ -40,8 +40,8 @@ describe('Overlay deactivate · picker exit regression', () => {
 
     // After deactivate, screen should have exactly one input box border (╭)
     const allOutput = out.chunks.join('')
-    const topBorders = allOutput.match(/╭/g) ?? []
-    assert.equal(topBorders.length, 1, `Expected 1 top border after deactivate, got ${topBorders.length}`)
+    const topBorders = stripAnsi(allOutput).match(/^[─━┄-]{3,}\s*$/gm) ?? []
+    assert.equal(topBorders.length, 2, `Expected 2 writing rules in one composer after deactivate, got ${topBorders.length}`)
   })
 
   it('deactivateOverlay does not use cursorUp(999) which moves input to screen top', () => {
@@ -83,8 +83,8 @@ describe('Overlay deactivate · picker exit regression', () => {
     }
 
     const output = out.chunks.join('')
-    const topBorders = output.match(/╭/g) ?? []
-    assert.equal(topBorders.length, 1, `Expected 1 top border after 3 cycles, got ${topBorders.length} — ghost accumulation`)
+    const topBorders = stripAnsi(output).match(/^[─━┄-]{3,}\s*$/gm) ?? []
+    assert.equal(topBorders.length, 2, `Expected 2 writing rules in one composer after 3 cycles, got ${topBorders.length} — ghost accumulation`)
   })
 
   it('connect overlay: activate → deactivate leaves exactly one clean live frame', () => {
@@ -95,8 +95,8 @@ describe('Overlay deactivate · picker exit regression', () => {
     app.deactivateOverlay()
 
     const output = out.chunks.join('')
-    const topBorders = output.match(/╭/g) ?? []
-    assert.equal(topBorders.length, 1, `Expected 1 top border after connect exit, got ${topBorders.length}`)
+    const topBorders = stripAnsi(output).match(/^[─━┄-]{3,}\s*$/gm) ?? []
+    assert.equal(topBorders.length, 2, `Expected 2 writing rules in one composer after connect exit, got ${topBorders.length}`)
     const plain = stripAnsi(output)
     assert.ok(plain.includes('❯'), 'Input prompt symbol ❯ must be present after connect overlay exit')
   })

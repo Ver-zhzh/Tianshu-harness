@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { formatToolCard, formatToolCardLive, isToolCardTruncated, toolCardTitle } from '../format/tool-card.js'
 import { formatDiff, isDiffContent } from '../format/diff.js'
 import { formatThinking } from '../format/thinking.js'
-import { displayWidth } from '../width.js'
+import { ambiguousWideEnabled, displayWidth } from '../width.js'
 import { isKnownTool } from '../tool-family.js'
 import { getTheme } from '../theme.js'
 
@@ -13,7 +13,7 @@ function stripAnsi(s: string): string {
 }
 
 describe('formatToolCard (Claude Code ●/⎿ style)', () => {
-  it('renders ● header with capitalized verb and arg summary', () => {
+  it('renders action, object and completed status in the header', () => {
     const lines = formatToolCard({
       toolName: 'bash',
       content: 'output',
@@ -21,8 +21,7 @@ describe('formatToolCard (Claude Code ●/⎿ style)', () => {
     }, theme)
     assert.ok(lines.length >= 2)
     const header = stripAnsi(lines[0]!)
-    assert.ok(header.includes('›'), 'has bullet')
-    assert.ok(header.includes('Run(npm test)'), `header: ${header}`)
+    assert.match(header, /^[+✓] Run\s+npm test.*完成$/, `header: ${header}`)
   })
 
   it('renders body with ⎿ first-line prefix', () => {
@@ -102,12 +101,12 @@ describe('formatToolCard (Claude Code ●/⎿ style)', () => {
 
   it('shows elapsed when provided', () => {
     const lines = formatToolCard({ toolName: 'bash', content: 'done', elapsedMs: 1500 }, theme)
-    assert.ok(stripAnsi(lines[0]!).includes('(1.5s)'))
+    assert.match(stripAnsi(lines[0]!), /完成 1\.5s$/)
   })
 
   it('shows streaming indicator', () => {
     const lines = formatToolCard({ toolName: 'bash', content: '...', streaming: true }, theme)
-    assert.ok(stripAnsi(lines[0]!).includes('…'))
+    assert.ok(stripAnsi(lines[0]!).includes('运行中'))
   })
 
   it('shows rawPath when not truncated', () => {
@@ -187,7 +186,7 @@ describe('formatToolCardLive', () => {
       columns: 80,
     }, theme)
     const plain = lines.map(stripAnsi)
-    assert.ok(plain[0]!.includes('● Run(npm test)'))
+    assert.ok(plain[0]!.includes('● Run  npm test'))
     assert.ok(plain[0]!.includes('3.2s'))
     assert.equal(plain.length, 4)
     assert.ok(plain[1]!.includes('⎿'))
@@ -554,7 +553,7 @@ describe('formatThinking：显示层 emphasis 剥离', () => {
 
 describe('formatToolCardLive：窄终端不溢出（rowsForLine 记账纪律）', () => {
   const widths = (lines: readonly string[]) =>
-    lines.map(l => displayWidth(stripAnsi(l), { ambiguousAsWide: true }))
+    lines.map(l => displayWidth(stripAnsi(l), { ambiguousAsWide: ambiguousWideEnabled() }))
   const longTool = 'mcp__verylongserver__some_tool'
 
   it('窄终端下长跑占位退回短占位——每行 ≤ columns-1', () => {
@@ -582,7 +581,7 @@ describe('formatToolCardLive：窄终端不溢出（rowsForLine 记账纪律）'
       theme,
     )
     const header = stripAnsi(lines[0]!)
-    const w = displayWidth(header, { ambiguousAsWide: true })
+    const w = displayWidth(header, { ambiguousAsWide: ambiguousWideEnabled() })
     assert.ok(w <= 59, `header 宽 ${w}: ${header}`)
     assert.ok(header.includes('1m01s'), `耗时被挤掉: ${header}`)
   })

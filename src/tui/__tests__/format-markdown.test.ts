@@ -139,9 +139,10 @@ describe('formatMarkdown', () => {
     assert.ok(!plain.some(l => l.startsWith('│')), 'no left vertical bar on code lines')
   })
 
-  it('renders headers with glyphs', () => {
+  it('renders bold headers without a duplicate role rail', () => {
     const lines = formatMarkdown({ text: '# Title', columns: 80 }, theme)
-    assert.ok(stripAnsi(lines[0]!).includes('▌'))
+    assert.ok(!stripAnsi(lines[0]!).includes('▌'))
+    assert.ok(lines[0]!.includes('\x1B[1m'))
     assert.ok(stripAnsi(lines[0]!).includes('Title'))
   })
 
@@ -247,11 +248,11 @@ describe('结构感：块留白与有序列表（2026-09-26）', () => {
     assert.ok(plain.some(l => l.includes('◇')), '无序列表保持 ◇')
   })
 
-  it('列表项之间留白——分开每个分点', () => {
+  it('同组短列表连续显示', () => {
     const plain = formatMarkdown({ text: '1. alpha\n2. beta', columns: 80 }, theme).map(stripAnsi)
     const i1 = plain.findIndex(l => l.includes('alpha'))
     const i2 = plain.findIndex(l => l.includes('beta'))
-    assert.ok(i2 - i1 >= 2, `项间应有空行，实际行距 ${i2 - i1}：${JSON.stringify(plain)}`)
+    assert.equal(i2 - i1, 1, `短列表不插空行：${JSON.stringify(plain)}`)
   })
 
   it('块之间留白——标题/段落/列表互不粘连', () => {

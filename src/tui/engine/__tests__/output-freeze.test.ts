@@ -10,6 +10,7 @@ import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
 import type { ReadStream, WriteStream } from 'node:tty'
 import { TuiApp } from '../app.js'
+import { DEFAULT_FRONTEND_PREFERENCES } from '../../frontend-preferences.js'
 import { MockOut, MockIn, stripAnsi } from './_harness.js'
 
 interface AppInternals {
@@ -26,6 +27,7 @@ function makeApp(rows = 24) {
     stdin: stdin as unknown as ReadStream,
     cols: 100, rows, modelName: 'test', contextWindow: 200_000,
   })
+  app.setFrontendPreferences({ ...DEFAULT_FRONTEND_PREFERENCES, renderer: 'classic', keymap: 'legacy', bindings: {} })
   app.start()
   return {
     app,
@@ -53,7 +55,7 @@ describe('输出冻结（Ctrl+S）', () => {
 
   test('冻结期流式 delta 不产生任何 stdout 写入；解冻后补上', async () => {
     const { app, out, feed, stdin } = makeApp()
-    app.callbacks.onThinkingDelta('第一段')
+    app.callbacks.onTextDelta('第一段')
     await tick()
     expectRendered(out, '第一段')
 
@@ -62,7 +64,7 @@ describe('输出冻结（Ctrl+S）', () => {
     assert.ok(stripAnsi(out.chunks.join('')).includes('输出已冻结'), '冻结标记行要写进 scrollback')
 
     out.chunks.length = 0
-    app.callbacks.onThinkingDelta('第二段被缓冲')
+    app.callbacks.onTextDelta('第二段被缓冲')
     await tick()
     await tick()
     assert.equal(out.chunks.filter(c => stripAnsi(c).includes('第二段')).length, 0, '冻结期不得有流式内容写出')

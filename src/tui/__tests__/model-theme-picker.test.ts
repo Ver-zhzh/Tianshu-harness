@@ -21,7 +21,7 @@ describe('renderModelPicker', () => {
     }
     const lines = renderModelPicker(data, 80, 20, theme)
     assert.ok(lines.length > 0)
-    assert.ok(stripAnsi(lines[0]!).includes('│'))
+    assert.match(stripAnsi(lines[0]!), /^─+$/)
     // alias 废弃后模型一律按原 ID 展示——不再有 alias (id) 双段
     assert.ok(lines.some(l => stripAnsi(l).includes('deepseek-chat')))
     assert.ok(lines.some(l => stripAnsi(l).includes('gpt-5.5')))
@@ -39,9 +39,9 @@ describe('renderModelPicker', () => {
     // SelectedIndex = 0 (model-a) -> should have > cursor（id-only 展示，按 id 找行）
     const modelALine = lines.find(l => stripAnsi(l).includes('model-a'))
     const modelBLine = lines.find(l => stripAnsi(l).includes('model-b'))
-    assert.ok(modelALine && stripAnsi(modelALine).includes('>'))
+    assert.ok(modelALine && stripAnsi(modelALine).includes('❯'))
     // Current = true (model-b) -> should have ● current mark
-    assert.ok(modelBLine && stripAnsi(modelBLine).includes('●'))
+    assert.ok(modelBLine && stripAnsi(modelBLine).includes('✓'))
   })
 
   it('shows model specs in bottom preview region', () => {
@@ -52,8 +52,8 @@ describe('renderModelPicker', () => {
       selectedIndex: 0,
     }
     const lines = renderModelPicker(data, 80, 15, theme)
-    assert.ok(lines.some(l => stripAnsi(l).includes('上下文配额: 64,000 tokens')))
-    assert.ok(lines.some(l => stripAnsi(l).includes('极速先锋')))
+    assert.ok(lines.some(l => stripAnsi(l).includes('上下文：64,000 tokens')))
+    assert.ok(lines.some(l => stripAnsi(l).includes('连接：deepseek')))
   })
 })
 
@@ -72,22 +72,23 @@ describe('renderThemePicker', () => {
     assert.ok(lines.some(l => stripAnsi(l).includes('gemini')))
     // selectedIndex = 1 (gemini) -> has > cursor
     const geminiLine = lines.find(l => stripAnsi(l).includes('gemini'))
-    assert.ok(geminiLine && stripAnsi(geminiLine).includes('>'))
+    assert.ok(geminiLine && stripAnsi(geminiLine).includes('❯'))
   })
 
-  it('renders theme details and primary/secondary color swatches', () => {
+  it('renders a contextual syntax and diff sample', () => {
     const data: ThemePickerData = {
       entries: [
         { name: 'gemini', current: true, isDefault: false, description: '双子星独特微光渐变' },
       ],
       selectedIndex: 0,
     }
-    const lines = renderThemePicker(data, 80, 15, theme)
+    const lines = renderThemePicker(data, 80, 24, theme)
     assert.ok(lines.some(l => stripAnsi(l).includes('双子星独特微光渐变')))
-    // Test ANSI color swatch preview
-    const swatchLine = lines.find(l => stripAnsi(l).includes('Accent') && stripAnsi(l).includes('Success'))
-    assert.ok(swatchLine)
-    assert.ok(/\x1B\[/.test(swatchLine), 'swatch preview row has ANSI color sequences')
+    const swatchLine = lines.find(l => stripAnsi(l).includes('2 -'))
+    assert.ok(swatchLine && /\x1B\[48;/.test(swatchLine), 'deletion preview has a full-row semantic backdrop')
+    assert.ok(lines.some(l => stripAnsi(l).includes('2 +')))
+    assert.ok(lines.some(l => stripAnsi(l).includes('function greet()')))
+
   })
 })
 
@@ -132,11 +133,11 @@ describe('renderModelPicker effort row', () => {
     assert.doesNotMatch(text, /<\/> 调整/)
   })
 
-  it('flips footer semantics to CC style: Enter=set default, s=session only', () => {
+  it('states the scope of model application: Enter=session, s=default', () => {
     const data: ModelPickerData = { entries: baseEntries, selectedIndex: 0 }
     const text = lines0(renderModelPicker(data, 80, 20, theme))
-    assert.match(text, /Enter:设为默认/)
-    assert.match(text, /s:仅本会话/)
+    assert.match(text, /Enter:本会话/)
+    assert.match(text, /s:设为默认/)
   })
 
   it('omits the effort row entirely when data.effort is absent', () => {

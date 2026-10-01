@@ -96,8 +96,15 @@ test('#2 read(id=A)+read(id=B) 并行，result(B) 先到 → 按 id 正确绑定
   assert.ok(text.includes('Read 2 files'), '2 read files in group')
   assert.ok(text.includes('a.ts'), 'a.ts should be listed')
   assert.ok(text.includes('b.ts'), 'b.ts should be listed')
-  assert.ok(text.includes('content A'), 'content A should be attached to a.ts')
-  assert.ok(text.includes('content B'), 'content B should be attached to b.ts')
+  const group = (app as any).toolGroupController.getLastCollapsedGroup()
+  assert.deepEqual(group.entries.map((entry: any) => [entry.id, entry.input.file_path, entry.content, entry.completed]), [
+    ['id-A', 'a.ts', 'content A', true],
+    ['id-B', 'b.ts', 'content B', true],
+  ], 'out-of-order results must retain their tool id and file identity')
+  ;(app as any).expandLastTruncatedTool()
+  const details = scrollbackPlain(app).slice(text.length)
+  assert.match(details, /Read\s+a\.ts[^\n]*完成\n[^\n]*content A/, 'content A should be attached to a.ts when expanded')
+  assert.match(details, /Read\s+b\.ts[^\n]*完成\n[^\n]*content B/, 'content B should be attached to b.ts when expanded')
 })
 
 // ── #3: read+grep+read 统一组 ─────────────────────────────────
@@ -130,7 +137,9 @@ test('#4 collapsible terminal result 后 pendingTools 不残留', () => {
   tr(app, 'w1', 'write_file', 'ok')
 
   const text = scrollbackPlain(app)
-  assert.ok(text.includes('Read 1 file'), 'should be grouped, not orphan card')
+  assert.match(text, /Read\s+a\.ts · 完成/, 'completed read should be flushed')
+  assert.equal((app as any).toolGroupController.getPendingSize(), 0, 'terminal tools must not leave pending cards')
+  assert.equal((app as any).toolGroupController.isActiveGroup(), false, 'completed group must be flushed')
 })
 
 // ── G4: flush 后迟到 result → 自动开新组 ──────────────────────
@@ -153,7 +162,7 @@ test('G4 flush 后迟到 collapsible result → 自动开新组', () => {
   assert.ok(text.includes('Read 1 file'), 'first group should have 1 read')
   assert.ok(text.includes('content a'), 'r1 content should be present')
   assert.ok(text.includes('content b late'), 'late r2 content should be present')
-  const readCount = [...text.matchAll(/▶ (?:Read|Searched)/g)].length // 折叠组头 ●→▶
+  const readCount = [...text.matchAll(/^[+✓] Read\s+[ab]\.ts · 完成/gm)].length
   assert.equal(readCount, 2, 'should have 2 groups (flush + late reopen)')
 })
 
@@ -167,7 +176,8 @@ test('turnComplete 时 flush 残余折叠组', () => {
   app.callbacks.onTurnComplete({ input_tokens: 100, output_tokens: 50 }, 1, true)
 
   const text = scrollbackPlain(app)
-  assert.ok(text.includes('Read 1 file'), 'group should be flushed on turnComplete')
+  assert.match(text, /Read\s+a\.ts · 完成/, 'read should be flushed on turnComplete')
+  assert.ok(text.includes('content'), 'completed output should be preserved')
 })
 
 // ── abort 后 flush ────────────────────────────────────────────
@@ -184,14 +194,19 @@ test('abort 时 flush 残余折叠组', () => {
 
   const text = scrollbackPlain(app)
   assert.ok(text.includes('Read 2 files'), 'group should be flushed on abort')
-  assert.ok(text.includes('content a'), 'r1 content should be present')
-  assert.ok(text.includes('content b'), 'r2 content should be present')
+  assert.match(text, /Read\s+a\.ts · 完成/, 'r1 completion should be present')
+  assert.match(text, /Read\s+b\.ts · 完成/, 'r2 completion should be present')
+  ;(app as any).expandLastTruncatedTool()
+  const details = scrollbackPlain(app).slice(text.length)
+  assert.match(details, /Read\s+a\.ts[^\n]*完成\n[^\n]*content a/, 'r1 content should be preserved after abort')
+  assert.match(details, /Read\s+b\.ts[^\n]*完成\n[^\n]*content b/, 'r2 content should be preserved after abort')
 })
 
 // ── ctrl+o 展开 lastCollapsedGroup ────────────────────────────
 
 test('flush 后 scrollback 中折叠组渲染正确，含 ctrl+o 提示', () => {
   const { app } = makeApp()
+  app.setFrontendPreferences({ ...app.getFrontendPreferences(), keymap: 'legacy', bindings: {} })
 
   // read×4（超过 3 条）→ group flushed by write
   app.callbacks.onToolUse('r1', 'read_file', { file_path: 'a.ts' })

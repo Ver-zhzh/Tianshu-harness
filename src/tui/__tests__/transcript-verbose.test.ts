@@ -59,17 +59,17 @@ describe('buildVerboseTranscript', () => {
 })
 
 describe('renderPager verbose 层 UI', () => {
-  it('verbose 时标题带 [verbose]，footer 提示切回简略', () => {
+  it('verbose 时标题带「详细」，footer 提示切回简略', () => {
     const lines = renderPager({ content: 'hello', page: 0, title: 'Transcript', verbose: true }, 80, 20, theme)
     const joined = stripAnsi(lines.join('\n'))
-    assert.ok(joined.includes('[verbose]'), `标题带 verbose 标记: ${joined.split('\n')[1]}`)
+    assert.ok(joined.split('\n')[1]!.includes('详细'), `标题带详细标记: ${joined.split('\n')[1]}`)
     assert.ok(joined.includes('简略'), 'footer 提示 v 切回简略')
   })
 
   it('非 verbose 时 footer 提示 v 进详细', () => {
     const lines = renderPager({ content: 'hello', page: 0, title: 'Scrollback' }, 80, 20, theme)
     const joined = stripAnsi(lines.join('\n'))
-    assert.ok(!joined.includes('[verbose]'))
+    assert.ok(!joined.split('\n')[1]!.includes('详细'))
     assert.ok(joined.includes('详细'), 'footer 提示 v 进详细')
   })
 })

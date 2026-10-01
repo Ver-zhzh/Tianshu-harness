@@ -21,6 +21,7 @@ const base = {
   rows: 40,
   version: '2.15.1',
   approvalMode: 'auto-safe',
+  compact: false,
 }
 
 const render = (
@@ -280,11 +281,11 @@ test('effort 徽章档位色:high→primary / auto→secondary', () => {
 
 // ── 降级 ────────────────────────────────────────────────────────────
 
-test('矮终端:shadow rows≥19 全妆;cols 50 自动降档 pixel 时 rows≥18 即全妆', () => {
-  assert.equal(render({ columns: 100, rows: 18 }).length, 1)
-  assert.equal(render({ columns: 100, rows: 19 }).length, FULL_LINES)
-  assert.equal(render({ columns: 50, rows: 18 }).length, 12, '50 列自动 pixel 且使命行让位(5 行字标)')
-  assert.equal(render({ columns: 50, rows: 17 }).length, 1)
+test('矮终端:低于24行紧凑；24行起按宽度显示完整首启字标', () => {
+  assert.equal(render({ columns: 100, rows: 23 }).length, 1)
+  assert.equal(render({ columns: 100, rows: 24 }).length, FULL_LINES)
+  assert.equal(render({ columns: 50, rows: 24 }).length, 12, '50 列自动 pixel 且使命行让位(5 行字标)')
+  assert.equal(render({ columns: 50, rows: 23 }).length, 1)
 })
 
 test('字标风格可调:logoStyle / RIVET_WELCOME_LOGO 环境变量', () => {
@@ -311,9 +312,9 @@ test('窄终端(cols<44)退单行;44 列起立体字标(使命行与原生词标
   assert.ok(!strip(c44.join('\n')).includes('把星辰'), '44 列无使命句')
 })
 
-test('未提供 rows 时按全妆渲染(向后兼容)', () => {
+test('显式完整欢迎未提供 rows 时按全妆渲染', () => {
   const lines = formatWelcome({
-    modelName: 'm', cwd: '/x', sessionId: 'abcdefgh', priorMsgCount: 0, columns: 100,
+    modelName: 'm', cwd: '/x', sessionId: 'abcdefgh', priorMsgCount: 0, columns: 100, compact: false,
   }, theme)
   assert.equal(lines.length, FULL_LINES)
 })

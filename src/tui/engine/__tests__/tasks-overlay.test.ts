@@ -89,16 +89,18 @@ test('/tasks Tab cycles filter', () => {
   ;(app.callbacks as any).onToolResult('d1', 'delegate_batch', JSON.stringify({ status: 'passed' }), false)
 
   app.activateOverlay('tasks')
-  assert.equal(app['overlayController'].nav().tasksFilter, 'running')
-
-  sendOverlayKey(app, { name: 'tab', char: '' })
-  assert.equal(app['overlayController'].nav().tasksFilter, 'completed')
-
-  sendOverlayKey(app, { name: 'tab', char: '' })
   assert.equal(app['overlayController'].nav().tasksFilter, 'all')
 
   sendOverlayKey(app, { name: 'tab', char: '' })
   assert.equal(app['overlayController'].nav().tasksFilter, 'running')
+
+  sendOverlayKey(app, { name: 'tab', char: '' })
+  assert.equal(app['overlayController'].nav().tasksFilter, 'needs-me')
+
+  sendOverlayKey(app, { name: 'tab', char: '' })
+  assert.equal(app['overlayController'].nav().tasksFilter, 'completed')
+  sendOverlayKey(app, { name: 'tab', char: '' })
+  assert.equal(app['overlayController'].nav().tasksFilter, 'all')
 })
 
 test('/tasks 单 worker 时直进 detail pager（列表页无信息增量）', () => {
@@ -251,19 +253,19 @@ test('/tasks ←/→ 与 Shift+Tab 反向循环 filter（统一 tab 键位语义
 
   // → 正向等价 Tab
   sendOverlayKey(app, { name: 'right', char: '' })
-  assert.equal(app['overlayController'].nav().tasksFilter, 'completed')
+  assert.equal(app['overlayController'].nav().tasksFilter, 'running')
 
   // ← 反向
   sendOverlayKey(app, { name: 'left', char: '' })
-  assert.equal(app['overlayController'].nav().tasksFilter, 'running')
-
-  // ← 再反向：环绕到 all
-  sendOverlayKey(app, { name: 'left', char: '' })
   assert.equal(app['overlayController'].nav().tasksFilter, 'all')
+
+  // ← 再反向：环绕到 Done
+  sendOverlayKey(app, { name: 'left', char: '' })
+  assert.equal(app['overlayController'].nav().tasksFilter, 'completed')
 
   // Shift+Tab 反向
   sendOverlayKey(app, { name: 'tab', char: '', shift: true })
-  assert.equal(app['overlayController'].nav().tasksFilter, 'completed')
+  assert.equal(app['overlayController'].nav().tasksFilter, 'needs-me')
 })
 
 test('cockpit ←/→/Tab 循环切换面板（统一 tab 键位语义）', () => {

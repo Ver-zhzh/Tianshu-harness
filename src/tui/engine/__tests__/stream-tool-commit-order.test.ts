@@ -76,7 +76,7 @@ test('文本尾段先于工具组落盘——不得被工具输出劈成两半',
   runOneToolPair(app)
 
   const text = stripAnsi(app.getScrollbackContent())
-  const toolAt = text.indexOf('Read 1 file')
+  const toolAt = text.search(/Read\s+a\.ts · 完成/)
   assert.ok(toolAt >= 0, `工具组应已落盘：${JSON.stringify(text.slice(0, 400))}`)
   const tailAt = text.indexOf(TAIL)
   assert.ok(
@@ -97,7 +97,7 @@ test('前置稳定块也已落盘，且序在工具组之前', () => {
 
   const text = stripAnsi(app.getScrollbackContent())
   const headAt = text.indexOf('提交 abc1234。')
-  const toolAt = text.indexOf('Read 1 file')
+  const toolAt = text.search(/Read\s+a\.ts · 完成/)
   assert.ok(headAt >= 0 && headAt < toolAt, `稳定块应序在工具组之前：${JSON.stringify(text.slice(0, 400))}`)
 })
 

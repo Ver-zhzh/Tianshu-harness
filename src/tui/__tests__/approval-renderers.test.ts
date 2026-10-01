@@ -40,7 +40,9 @@ describe('approval renderers', () => {
     assert.ok(text.includes('Path: src/foo.ts'))
     assert.ok(text.includes('5 lines'))
     assert.ok(text.includes('line1'))
-    assert.ok(text.includes('已隐藏 1 行'), `塌缩标记应为统一格式: ${text}`)
+    assert.ok(text.includes('line5'), '6 行预览预算内的内容完整可见')
+    assert.ok(text.includes('当前显示全部 5 行'), `范围应与实际预览一致: ${text}`)
+    assert.ok(text.includes('v 全文'), '完整事实有只读入口')
   })
 
   it('write_file: handles path alias', () => {
@@ -57,10 +59,12 @@ describe('approval renderers', () => {
     }, 60, theme)
     const text = lines.map(stripAnsi).join('\n')
     assert.ok(text.includes('Path: src/foo.ts'))
-    assert.ok(text.includes('3 lines removed'))
-    assert.ok(text.includes('3 lines added'))
-    assert.ok(text.includes('- a'))
-    assert.ok(text.includes('+ X'))
+    assert.ok(text.includes('替换片段：3 → 3 行'))
+    assert.ok(text.includes('1   a') && text.includes('3   c'))
+    assert.ok(text.includes('2 - b'))
+    assert.ok(text.includes('2 + X'))
+    assert.ok(!text.includes('1 - a'))
+    assert.ok(text.includes('行号相对于替换片段'))
   })
 
   it('edit_file: falls back when strings missing', () => {

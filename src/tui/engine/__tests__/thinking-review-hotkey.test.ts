@@ -1,15 +1,11 @@
 /**
- * ctrl+t 回看的触发条件契约：只在**真空闲**时重印。
- *
- * 背景（审查发现）：thinking 段结束后 isThinking 已为 false，但工具可能仍在跑
- * （agentBusy / phase !== 'idle'）——此时重印会把最多 400 逻辑行一次性写进
- * scrollback，而 take() 已把回看仓清空，误触不可撤回。同文件的 ctrl_r 分支用
- * isAgentActive() 守卫，本用例把同一不变量钉在 ctrl_t 上。
+ * 标准 Ctrl+T 打开任务；/thinking 只读查看已有内容，不 take 或重印主会话。
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import type { ReadStream, WriteStream } from 'node:tty'
 import { TuiApp } from '../app.js'
+import { DEFAULT_FRONTEND_PREFERENCES } from '../../frontend-preferences.js'
 
 class MockOut {
   columns = 80
@@ -39,6 +35,8 @@ function makeApp() {
     stdin: stdin as unknown as ReadStream,
     cols: 80, rows: 24, modelName: 'test',
   })
+  app.setFrontendPreferences({ ...DEFAULT_FRONTEND_PREFERENCES, renderer: 'classic', bindings: {} })
+  app.registerOverlays({})
   return { app, out, stdin }
 }
 
@@ -51,7 +49,7 @@ interface Internals {
   agentBusy: boolean
 }
 
-test('agent 忙时 ctrl+t 不重印回看（工具跑动中误触不刷屏）', async () => {
+test('agent 忙时标准 ctrl+t 打开任务且不取走思考内容', async () => {
   const { app, stdin } = makeApp()
   const internals = app as unknown as Internals
   internals.thinkingReview.save({ text: '一段思考正文', elapsedMs: 3_000 })
@@ -61,16 +59,19 @@ test('agent 忙时 ctrl+t 不重印回看（工具跑动中误触不刷屏）', 
   await tick()
 
   assert.notEqual(internals.thinkingReview.peek(), null, '忙时不得取走回看仓（重印不可撤回）')
+  assert.equal(app.activeOverlayId(), 'tasks')
 })
 
-test('空闲时 ctrl+t 重印并清空回看仓（take 语义不变）', async () => {
-  const { app, stdin } = makeApp()
+test('空闲时 /thinking 打开只读详情并保留回看仓', async () => {
+  const { app, out, stdin } = makeApp()
   const internals = app as unknown as Internals
   internals.thinkingReview.save({ text: '一段思考正文', elapsedMs: 3_000 })
   internals.agentBusy = false
 
-  stdin.dataHandler!(CTRL_T)
+  stdin.dataHandler!('/thinking\r')
   await tick()
 
-  assert.equal(internals.thinkingReview.peek(), null, '空闲时取走并重印进 scrollback')
+  assert.deepEqual(internals.thinkingReview.peek(), { text: '一段思考正文', elapsedMs: 3_000 }, '只读详情不 take')
+  assert.equal(app.activeOverlayId(), 'pager')
+  assert.ok(out.chunks.join('').includes('思考详情') && out.chunks.join('').includes('一段思考正文'), '显示真实已有内容')
 })

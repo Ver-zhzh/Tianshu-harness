@@ -12,6 +12,7 @@
  */
 
 import type { ReviewConfig, WorkersConfig } from '../config/schema.js'
+import { frontendCategories, frontendBlockValue, type FrontendPreferences } from './settings-frontend.js'
 import {
   MIN_MAX_EVENTS_DISK_BYTES,
   MIN_MAX_LOADED_SESSIONS,
@@ -39,9 +40,10 @@ export type SettingsBlockId =
   | 'mirrors'
   | 'network'
   | 'search'
+  | 'frontend'
 
 /** When a saved value starts mattering. Shown next to every field. */
-export type SettingsEffect = 'immediate' | 'next-session'
+export type SettingsEffect = 'immediate' | 'next-session' | 'next-startup'
 
 export type SettingsFieldKind = 'enum' | 'bool' | 'text' | 'int' | 'action'
 
@@ -89,6 +91,7 @@ export interface NetDraft {
 }
 
 export interface SettingsDraft {
+  frontend?: FrontendPreferences
   workers: WorkersConfig
   review: ReviewConfig
   vision: VisionDraft | null
@@ -888,18 +891,20 @@ function netCategory(): SettingsCategory {
  * stable across edits and cursor indices stay meaningful.
  */
 export function buildCategories(draft: SettingsDraft, env: SettingsEnv): SettingsCategory[] {
-  return [
+  const categories = [
     workerCategory(draft, env),
     reviewCategory(draft, env),
     visionCategory(env),
     basicsCategory(),
     netCategory(),
   ]
+  return draft.frontend ? [...frontendCategories().reverse(), categories[3]!, ...categories.filter((_, i) => i !== 3)] : categories
 }
 
 /** The slice of the draft one block owns — the unit of dirty comparison. */
 export function blockValue(draft: SettingsDraft, block: SettingsBlockId): unknown {
   switch (block) {
+    case 'frontend': return frontendBlockValue(draft.frontend)
     case 'workers': return draft.workers
     case 'review': return draft.review
     case 'vision': return draft.vision
@@ -925,7 +930,7 @@ export function blockValue(draft: SettingsDraft, block: SettingsBlockId): unknow
 
 const ALL_BLOCKS: readonly SettingsBlockId[] = [
   'workers', 'review', 'vision', 'visionAuto', 'modelVision', 'toolPreset', 'runtimeLean', 'approval',
-  'checkpoint', 'defaultDomain', 'domainBind', 'defaultModel', 'mirrors', 'network', 'search',
+  'checkpoint', 'defaultDomain', 'domainBind', 'defaultModel', 'mirrors', 'network', 'search', 'frontend',
 ]
 
 /**
@@ -935,7 +940,6 @@ const ALL_BLOCKS: readonly SettingsBlockId[] = [
  * leaves nothing to save, which is what "only write what changed" has to mean.
  */
 export function dirtyBlocks(baseline: SettingsDraft, draft: SettingsDraft): SettingsBlockId[] {
-  return ALL_BLOCKS.filter(
-    block => JSON.stringify(blockValue(baseline, block)) !== JSON.stringify(blockValue(draft, block)),
-  )
+  return ALL_BLOCKS.filter(block => (block !== 'frontend' || draft.frontend !== undefined)
+    && JSON.stringify(blockValue(baseline, block)) !== JSON.stringify(blockValue(draft, block)))
 }

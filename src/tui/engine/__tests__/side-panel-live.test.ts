@@ -10,7 +10,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { displayWidth } from '../../width.js'
+import { displayWidth, ambiguousWideEnabled } from '../../width.js'
 import { makeApp, stripAnsi } from './_harness.js'
 import type { TodoItem } from '../../../tools/todo-store.js'
 
@@ -39,7 +39,7 @@ test('宽屏显式展开后 side panel 展示 todo 与当前工具', () => {
   const lines = lastFrameLines(out)
   const panelLine = lines.find(l => l.includes('≡ 任务'))
   assert.ok(panelLine, 'found merged side-panel line')
-  assert.equal(displayWidth(panelLine, { ambiguousAsWide: true }), 120, 'merged line spans full terminal width')
+  assert.equal(displayWidth(panelLine, { ambiguousAsWide: ambiguousWideEnabled() }), 120, 'merged line spans full terminal width')
 
   // 主区底部 chrome 仍保留
   assert.ok(plain.includes('天枢'), 'GlanceBar domain still visible')
@@ -68,7 +68,8 @@ test('默认折叠状态下宽屏不触发 side panel，主区保留 task 列表
   const plain = lastFramePlain(out)
   // 快捷键提示仅出现在 side panel 中
   assert.ok(!plain.includes('] toggle · ctrl+x r open'), `no side-panel chrome when folded: ${plain}`)
-  assert.ok(plain.includes('default fold task'), 'todo rendered in main area when panel folded')
+  assert.ok(!plain.includes('default fold task'), 'default workspace keeps the full checklist folded')
+  assert.ok(plain.includes('步骤 1') && plain.includes('Ctrl+X T'), 'the checklist has its actual expansion entry')
 })
 
 test('窄屏（<120）不触发 side panel，主区布局不变', () => {
@@ -76,7 +77,8 @@ test('窄屏（<120）不触发 side panel，主区布局不变', () => {
   app.setTodos([mk('1', 'main task', 'in_progress')])
 
   const plain = lastFramePlain(out)
-  assert.ok(plain.includes('main task'), `main-area todo rendered when narrow: ${plain}`)
+  assert.ok(!plain.includes('main task'), `narrow workspace keeps the full checklist folded: ${plain}`)
+  assert.ok(plain.includes('步骤 1'), 'unfinished checklist remains discoverable')
   assert.ok(!plain.includes('] toggle · ctrl+x r open'), `no side-panel chrome when narrow: ${plain}`)
 })
 

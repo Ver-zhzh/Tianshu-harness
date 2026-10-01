@@ -307,7 +307,8 @@ describe('formatCollapsedGroup', () => {
     ])
     const lines = formatCollapsedGroup({ group, theme })
     assert.ok(lines.length >= 1)
-    assert.ok(lines[0]!.includes('▶')) // 折叠组头用 ▶/▼ 展开指示器（原 ●）
+    assert.ok(lines[0]!.includes('Searched 1 pattern') && lines[0]!.includes('Read 1 file'))
+    assert.match(lines[0]!, / · \d+(?:\.\d+)?(?:ms|s)/, 'summary includes elapsed time')
   })
 
   it('expanded mode shows more entries', () => {
@@ -324,12 +325,12 @@ describe('formatCollapsedGroup', () => {
     assert.ok(expanded.length > collapsed.length, 'expanded should have more lines')
   })
 
-  it('shows "(results pending…)" when no completed entries', () => {
+  it('shows 等待结果 when no completed entries', () => {
     const group = makeGroup([
       { id: '1', kind: 'read', displayName: 'a.ts', completed: false },
     ])
     const lines = formatCollapsedGroup({ group, theme })
-    assert.ok(lines.some(l => l.includes('pending')))
+    assert.ok(lines.some(l => l.includes('等待结果')))
   })
 })
 

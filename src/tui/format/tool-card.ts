@@ -2,11 +2,11 @@
  * T9 格式化函数 — 工具卡片（Claude Code 风格）。
  *
  * 渲染结构：
- *   › Run(npm test) (1.2s)
+ *   ✓ Run  npm test · 完成 1.2s
  *     ⎿  前 4 行输出
  *        … +25 行 · ctrl+o 展开
  *
- * - 状态形色双通道：› 成功绿 / ✗ 失败红 / ⠋ 进行中 dim / ? 待答黄
+ * - 状态形色双通道：✓ 完成 / ✗ 失败 / ⠋ 运行中 / ? 等待回答
  * - 参数摘要：复用 tool-label.ts 的 toolArgSummary + tool-family.ts 动词体系
  * - 截断：默认头 N 行 + `… +N lines` 尾注；read 族用头+尾预览
  * - diff 检测：write/edit 族结果经 isDiffContent() 检测后走红绿渲染
@@ -21,14 +21,12 @@ import { isDelegationTool } from './tool-domain.js'
 import { formatElapsed } from '../tool-elapsed.js'
 import { formatDiff, isDiffContent, computeDiffStats } from './diff.js'
 import { brailleSpinnerFrame } from '../braille-spinner.js'
-import { displayWidth, truncateToDisplayWidth } from '../width.js'
+import { ambiguousWideEnabled, displayWidth, truncateToDisplayWidth } from '../width.js'
 import { useAsciiGlyphs } from '../term-caps.js'
 import { EXPAND_HINT, truncationHint } from '../truncation-marker.js'
 
-/** 宽度口径：与 LiveEngine.rowsForLine 一致。工具输出（git diff/代码/日志）常含
- *  `— … │ →` 等 ambiguous 符号 + CJK，按 .length/stringWidth(narrow) 截断会低估
- *  实际列宽 → 尾行溢出终端宽度折行 → rowsForLine 低估 → chrome 残留重影。 */
-const WIDE = { ambiguousAsWide: true }
+/** 跟随终端已选择的字宽策略，标题、输出和引擎使用同一口径。 */
+const WIDE = { get ambiguousAsWide(): boolean { return ambiguousWideEnabled() } }
 
 export interface FormatToolCardInput {
   /** 工具名称 */
@@ -51,6 +49,9 @@ export interface FormatToolCardInput {
   toolInput?: Record<string, unknown>
   /** 完整展开（ctrl+o），不截断 */
   expanded?: boolean
+  showParameters?: boolean
+  columns?: number
+  expandHint?: string
 }
 
 const DEFAULT_MAX_LINES = 4
@@ -107,10 +108,49 @@ function indentBody(bodyLines: readonly string[], indent: string, theme: RivetTh
     `${indent}${i === 0 ? color(BODY_FIRST_PREFIX, theme.dim) : BODY_CONT_PREFIX}${line}`)
 }
 
+function toolObject(toolName: string, input?: Record<string, unknown>, rawPath?: string): string {
+  const family = getToolFamily(toolName).family
+  const value = family === 'run' ? input?.command
+    : family === 'read' || family === 'write' ? input?.file_path ?? input?.path ?? rawPath
+    : family === 'find' ? input?.pattern ?? input?.query : undefined
+  return typeof value === 'string' ? value.split('\n')[0]! : input ? toolArgSummary(toolName, input) : rawPath ?? ''
+}
+
+function toolHeader(toolName: string, object: string, glyph: string, status: string, elapsedMs: number | undefined, theme: RivetTheme, columns?: number, depth = 0, linkPath?: string): string {
+  let prefix = `${'  '.repeat(depth)}${glyph} ${toolTitleHead(toolName)}`
+  const statusText = `${status}${elapsedMs === undefined ? '' : ` ${formatElapsed(elapsedMs)}`}`
+  const width = columns === undefined ? Number.POSITIVE_INFINITY : Math.max(0, columns - 1)
+  const suffix = `${displayWidth(prefix + ' · ' + statusText, WIDE) > width ? ' ' : ' · '}${statusText}`
+  const prefixBudget = Math.max(0, width - displayWidth(suffix, WIDE))
+  const ellW = displayWidth('…', WIDE)
+  if (displayWidth(prefix, WIDE) > prefixBudget) prefix = `${truncateToDisplayWidth(prefix, Math.max(0, prefixBudget - ellW), WIDE)}${prefixBudget >= ellW ? '…' : ''}`
+  const budget = Math.max(0, width - displayWidth(prefix + suffix, WIDE) - 2)
+  const clipped = displayWidth(object, WIDE) > budget ? `${truncateToDisplayWidth(object, Math.max(0, budget - ellW), WIDE)}${budget >= ellW ? '…' : ''}` : object
+  const statusColor = status === '失败' ? theme.error : status === '等待回答' ? theme.warning : status === '运行中' ? theme.muted : theme.success
+  const label = color(clipped, theme.muted)
+  return `${color(prefix, theme.toolColor(toolName), { bold: true })}${clipped ? `  ${linkPath ? fileLink(label, linkPath) : label}` : ''}${color(suffix, statusColor)}`
+}
+
 /**
  * 格式化工具卡片为 ANSI 行数组（Claude Code ●/⎿ 结构）。
  */
 export function formatToolCard(input: FormatToolCardInput, theme: RivetTheme): string[] {
+  const rows = formatToolCardRows(input, theme)
+  if (input.columns === undefined) return rows
+  const width = Math.max(0, input.columns - 1)
+  return rows.map(row => displayWidth(row, WIDE) > width
+    ? `${truncateToDisplayWidth(row, Math.max(0, width - displayWidth('…', WIDE)), WIDE)}${width >= displayWidth('…', WIDE) ? '…' : ''}`
+    : row)
+}
+
+function truncationRows(omitted: number, range: string, total: number, input: FormatToolCardInput, theme: RivetTheme): string[] {
+  return [
+    color(`${truncationHint(omitted, '行', input.expandHint)} · 显示 ${range} / 共 ${total} 行`, theme.secondary),
+    color(input.rawPath ? `全文来源: ${input.rawPath}` : '全文不可用（没有原始来源）', theme.muted),
+  ]
+}
+
+function formatToolCardRows(input: FormatToolCardInput, theme: RivetTheme): string[] {
   const {
     toolName,
     content,
@@ -127,33 +167,26 @@ export function formatToolCard(input: FormatToolCardInput, theme: RivetTheme): s
   const indent = depth > 0 ? '  '.repeat(depth) : ''
   const isQuestion = toolName === 'ask_user_question'
 
-  // ── Header: ● Verb(arg) (elapsed) ───────────────────────────
+  // ── Header: 状态标记 + 动作 + 对象 + 状态/耗时 ───────────────
   // Bullet 形色双通道：状态不能只靠颜色编码——16 色终端与红绿色觉障碍下
   // 「成功」和「失败」会是同一个 ›。形状同时承载状态，颜色只做强化。
-  // 成功态 › 不走 ASCII 降级：useAsciiGlyphs 的门槛是 chalk.level<3，tmux(level 2)
-  // 也会命中，而 › 在那里渲染正常——降级它等于给绝大多数会话的主流状态换字形。
-  // 新引入的 ✗ / ⠋ 才降级（braille 与 dingbat 在 legacy conhost 是 tofu）。
   const useAscii = useAsciiGlyphs()
-  const bulletColor = isError ? theme.error : isQuestion ? theme.warning : streaming ? theme.dim : theme.success
   const bulletGlyph = isError ? (useAscii ? 'x' : '✗')
     : isQuestion ? '?'
     : streaming ? (useAscii ? '-' : '⠋')
-    : '›'
-  const title = toolCardTitle(toolName, toolInput, rawPath)
-  const tColor = isQuestion ? theme.warning : theme.toolColor(toolName)
+    : useAscii ? '+' : '✓'
   // 文件路径 → OSC 8 可点击链接（支持的终端 Cmd/Ctrl+Click 直接打开；其余纯文本降级）
   const linkPath = rawPath
     ?? (typeof toolInput?.path === 'string' ? toolInput.path : undefined)
     ?? (typeof toolInput?.file_path === 'string' ? toolInput.file_path : undefined)
-  const titleColored = color(title, tColor, { bold: true })
-  let header = `${indent}${color(bulletGlyph, bulletColor)} ${linkPath ? fileLink(titleColored, linkPath) : titleColored}`
-  if (streaming) {
-    header += ` ${color('…', theme.dim)}`
-  } else if (elapsedMs !== undefined) {
-    header += ` ${color(`(${formatElapsed(elapsedMs)})`, theme.muted)}`
-  }
+  const status = isError ? '失败' : isQuestion ? '等待回答' : streaming ? '运行中' : '完成'
+  const header = toolHeader(toolName, toolObject(toolName, toolInput, rawPath), bulletGlyph, status, elapsedMs, theme, input.columns, depth, linkPath)
 
   const lines: string[] = [header]
+  if (input.showParameters && toolInput) {
+    lines.push(`${indent}${BODY_CONT_PREFIX}${color('参数', theme.secondary)}`)
+    lines.push(...indentBody(JSON.stringify(toolInput, null, 2).split('\n').map(line => color(line, theme.muted)), indent, theme))
+  }
 
   // ── Streaming delegation preview ──────────────────────────────
   // When a delegate_batch/delegate_task call is streaming its args (no result
@@ -188,9 +221,9 @@ export function formatToolCard(input: FormatToolCardInput, theme: RivetTheme): s
       lines.push(...indentBody(diffLines, indent, theme))
     } else {
       const hunkLabel = stats.hunks > 0 ? `${stats.hunks} 处修改` : `${changeCount} 行修改`
-      const summary = `⎿ ${hunkLabel} (+${stats.adds} −${stats.dels})`
+      const summary = `${hunkLabel} (+${stats.adds} −${stats.dels})`
       lines.push(`${indent}${color(BODY_FIRST_PREFIX, theme.dim)}${color(summary, theme.muted)}`)
-      lines.push(`${indent}${BODY_CONT_PREFIX}${color(`${EXPAND_HINT}完整 diff`, theme.secondary)}`)
+      lines.push(`${indent}${BODY_CONT_PREFIX}${color(input.expandHint ? `${input.expandHint} · 完整 diff` : `${EXPAND_HINT}完整 diff`, theme.secondary)}`)
     }
     return lines
   }
@@ -202,7 +235,7 @@ export function formatToolCard(input: FormatToolCardInput, theme: RivetTheme): s
     const shown = expanded || allLines.length <= maxLines ? allLines : allLines.slice(0, maxLines)
     const body = shown.map((l) => colorBrowserDebugLine(l, theme))
     if (!expanded && allLines.length > maxLines) {
-      body.push(color(truncationHint(allLines.length - maxLines), theme.secondary))
+      body.push(...truncationRows(allLines.length - maxLines, `1-${maxLines}`, allLines.length, input, theme))
     }
     lines.push(...indentBody(body, indent, theme))
     return lines
@@ -231,12 +264,14 @@ export function formatToolCard(input: FormatToolCardInput, theme: RivetTheme): s
 
   // 截断：read 族用头+尾预览，其他工具用头 N 行
   if (family.family === 'read') {
-    const head = contentLines.slice(0, READ_HEAD_LINES)
-    const tail = contentLines.slice(-READ_TAIL_LINES)
-    const omitted = totalLines - READ_HEAD_LINES - READ_TAIL_LINES
+    const headCount = Math.min(READ_HEAD_LINES, Math.ceil(maxLines / 2))
+    const tailCount = Math.max(0, maxLines - headCount)
+    const head = contentLines.slice(0, headCount)
+    const tail = tailCount > 0 ? contentLines.slice(-tailCount) : []
+    const omitted = totalLines - headCount - tailCount
     const body = [
       ...head.map(renderLine),
-      color(truncationHint(omitted), theme.secondary),
+      ...truncationRows(omitted, `1-${headCount}${tailCount > 0 ? `、${totalLines - tailCount + 1}-${totalLines}` : ''}`, totalLines, input, theme),
       ...tail.map(renderLine),
     ]
     lines.push(...indentBody(body, indent, theme))
@@ -247,7 +282,7 @@ export function formatToolCard(input: FormatToolCardInput, theme: RivetTheme): s
   const omitted = totalLines - maxLines
   const body = [
     ...head.map(renderLine),
-    color(truncationHint(omitted), theme.secondary),
+    ...truncationRows(omitted, `1-${maxLines}`, totalLines, input, theme),
   ]
   lines.push(...indentBody(body, indent, theme))
   return lines
@@ -297,21 +332,11 @@ export function formatToolCardLive(input: FormatToolCardLiveInput, theme: RivetT
   const bullet = input.tick !== undefined
     ? (useAscii ? ['-', '\\', '|', '/'][((input.tick % 4) + 4) % 4]! : brailleSpinnerFrame(input.tick))
     : '●'
-  const title = toolCardTitle(input.toolName, input.toolInput)
-  const elapsedSuffix = input.elapsedMs !== undefined && input.elapsedMs >= 1000
-    ? ` (${formatElapsed(input.elapsedMs)})`
-    : ''
   // 标题按整行预算裁剪，**耗时永不裁剪**：未知工具的名字 + 参数摘要可长过 80 列
   // （`mcp·server:tool(50 字符)`），窄终端折行会让 rowsForLine 低估 → chrome 残留
   // 重影；而耗时是「还要不要等」的判断依据，优先级高于标题全文。
   // 前缀宽度按 wide 上界实算——`●` 是 ambiguous 符号，CJK 终端按 2 列渲染。
-  const headerPrefixW = displayWidth(`${bullet} `, WIDE)
-  const titleBudget = input.columns - 1 - headerPrefixW - displayWidth(elapsedSuffix, WIDE)
-  const clippedTitle = displayWidth(title, WIDE) > titleBudget
-    ? `${truncateToDisplayWidth(title, Math.max(1, titleBudget - 2), WIDE)}…`
-    : title
-  let header = `${color(bullet, theme.dim)} ${color(clippedTitle, theme.toolColor(input.toolName), { bold: true })}`
-  if (elapsedSuffix) header += color(elapsedSuffix, theme.muted)
+  const header = toolHeader(input.toolName, toolObject(input.toolName, input.toolInput), bullet, '运行中', input.elapsedMs !== undefined && input.elapsedMs >= 1000 ? input.elapsedMs : undefined, theme, input.columns)
 
   const lines: string[] = [header]
   // 优先用调用方预切的行（按累加器引用缓存），否则从 outputTail 现切。
@@ -323,7 +348,7 @@ export function formatToolCardLive(input: FormatToolCardLiveInput, theme: RivetT
   // 正是 tailLines=0（并发时折叠非焦点卡片）想避免的相反效果。
   const tailCount = Math.max(0, input.tailLines ?? 3)
   // BODY_FIRST_PREFIX = '⎿  ' (3 display columns) — content has columns-3 available.
-  const maxWidth = Math.max(10, input.columns - 3)
+  const maxWidth = Math.max(0, input.columns - 1 - displayWidth(BODY_FIRST_PREFIX, WIDE))
 
   // 固定 tail 区域高度：内容不足时顶部补空行，避免卡片高度随输出变化而跳动。
   const isBrowserDebug = input.toolName === 'browser_debug'

@@ -42,7 +42,7 @@ export const SURFACE_ENTRIES: readonly SurfaceEntry[] = [
   { name: '__surface:cockpit', description: 'Cockpit — trace / verify / context', category: 'surface' },
   { name: '__surface:pager', description: 'Scrollback — browse session history', category: 'surface' },
   { name: '__surface:starmap', description: 'Starmap — 星图总览', category: 'surface' },
-  { name: '__surface:chronicle', description: 'Chronicle — 阶段传说', category: 'surface' },
+  { name: '__surface:chronicle', description: '会话 — 查看与恢复已存会话', category: 'surface' },
 ]
 
 /** 全部命令元数据。顺序即面板顺序（人工编排，勿重排）。 */
@@ -60,14 +60,14 @@ export const COMMAND_CATALOG: readonly CommandMeta[] = [
   { name: '/config', description: '设置面板 — 子代理路由 / 审查子代理 / 识图模型 / 基础项' },
   { name: '/model', description: '查看或切换当前会话模型。多 Provider 用户高频，切换后下轮生效', argsHint: 'list|<model-id>', tier: 'core', hotkey: 'F6' },
   { name: '/model list', displayOnly: true, description: '列出所有可用模型（含已配置的 Provider 下全部模型）' },
-  { name: '/chat', description: '切换到轻量聊天模式（不走完整 agent 循环，适合简单问答）' },
+  { name: '/chat', description: '兼容旧命令（模式已由消息内容自动检测，无需手动切换）' },
   { name: '/task', description: '任务模式（已废弃：意图自动检测；子代理面板用 /tasks）' },
   { name: '/tasks', description: '打开子代理任务面板（查看/切入 f/停止 x，运行中·已完成·全部）', tier: 'core', hotkey: 'F2' },
   { name: '/jobs', description: '打开后台任务面板（bash 后台启动的 shell 任务列表）' },
   { name: '/cache', description: '打开缓存面板（token 消耗 / 命中率 / 缓存省钱 / DeepSeek 官方账单）', hotkey: 'F3' },
-  { name: '/mode', description: '查看或切换提示词模式（标准/详尽/摘要，影响输出详细度）' },
+  { name: '/mode', description: '兼容旧命令（模式已由消息内容自动检测，无需手动切换）' },
   { name: '/verify', description: '显示本会话所有改动的验证状态——提交前自检哪些验证通过/未跑' },
-  { name: '/verbose', description: '开关详细工具输出（显示完整的工具调用参数与返回，排查问题用）' },
+  { name: '/verbose', description: '开关详细工具输出（后续工具卡片完整展开并显示参数，排查问题用）' },
   { name: '/new', description: '开新会话——重置上下文但不重启进程（项目记忆/配置/工作目录保留）。旧会话存档，/resume 可回访', tier: 'core' },
   { name: '/clear', description: '清屏（只清当前显示，不删会话历史）', tier: 'core' },
   { name: '/sessions', description: '列出所有历史会话——找历史/继续之前的工作', tier: 'core', hotkey: 'F8' },
@@ -92,7 +92,7 @@ export const COMMAND_CATALOG: readonly CommandMeta[] = [
   { name: '/scroll', description: '浏览历史输出（上下翻页查看已滚走的内容）' },
   { name: '/theme', description: '切换配色主题（暗色/亮色/nebula/sakura 等多套）', tier: 'core', hotkey: 'F5' },
   { name: '/fork', description: '把当前会话 fork 成新分支——想试另一条路又怕丢上下文时用' },
-  { name: '/handoff', description: '写结构化交接文档（任务目标/已完成/卡点/下一步/坑），归档后自动注入新会话', argsHint: '[备注]', tier: 'core' },
+  { name: '/handoff', description: '写结构化交接文档并归档；默认不自动注入，新会话可明确读取', argsHint: '[备注]', tier: 'core' },
   { name: '/remember', description: '把一句话写进项目长期记忆（跨会话生效，新会话自动携带）；无参查看最近的用户记忆', argsHint: '<要记住的事>', tier: 'core' },
   { name: '/vim', description: '开关 vim 键位绑定（esc 进 normal 模式等）' },
   { name: '/effort', description: '切换推理强度——控成本与控质量的核心旋钮。off 最省/max 最强/auto 按任务复杂度自动选', argsHint: 'off|low|medium|high|max|auto', tier: 'core' },
@@ -152,7 +152,7 @@ export const COMMAND_CATALOG: readonly CommandMeta[] = [
   { name: '/index', description: '重建代码库索引（模块图 + CLI 入口）' },
   { name: '/mirror', description: '切换国内镜像源（GitHub / npm / pip / go / rust）加速依赖下载', argsHint: '[status|on|off|china|default]' },
   { name: '/python', description: '检查 Python/uv/Git 环境，或为项目自动初始化 uv 环境', argsHint: '[status|setup]' },
-  { name: '/chronicle', description: '阶段传说 — 打开 Chronicle 浮层，翻项目里程碑编年史' },
+  { name: '/chronicle', description: '打开会话列表：Enter 恢复，Space 预览' },
   { name: '/starmap', description: '星图总览浮层 — 看整张星图与你的位置' },
   { name: '/pager', description: '分页浏览历史输出（滚走的内容可回看）' },
   { name: '/palette', description: '打开命令面板（模糊搜索全部命令与界面动作，同 Ctrl+P）' },
@@ -161,6 +161,12 @@ export const COMMAND_CATALOG: readonly CommandMeta[] = [
   { name: '/fast', description: '解除禅模式，恢复全量工具面（/zen 的出口）' },
   { name: '/logout', description: '登出天枢账号（清除本机 account 凭据；不影响模型 provider 的 OAuth）' },
   { name: '/panel', description: '开关右侧面板（on / off / 无参切换）', argsHint: '[on|off]' },
+  { name: '/tui', description: '查看或切换终端绘制模式；执行结束后可切换', argsHint: '[auto|classic|fullscreen]' },
+  { name: '/keybindings', description: '查看标准或旧版兼容键位；切换映射', argsHint: '[standard|legacy]' },
+  { name: '/stash', description: '暂存、恢复或交换当前草稿（本进程内，含附件）' },
+  { name: '/editor', description: '使用外部编辑器编辑草稿，返回后不自动发送' },
+  { name: '/thinking', description: '查看当前会话已有的思考详情' },
+  { name: '/paste', description: '展开、折叠或清除当前草稿中的长粘贴', argsHint: '[show|hide|clear]' },
 ]
 
 /** 真实命令（排除展示用子命令提示）。注册装配与 /help 覆盖校验只看这一份。 */

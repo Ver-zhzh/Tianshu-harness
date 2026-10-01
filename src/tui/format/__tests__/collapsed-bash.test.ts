@@ -17,7 +17,7 @@ function makeGroup(entries: CollapsedBashGroup['entries']): CollapsedBashGroup {
 }
 
 describe('formatCollapsedBashGroup', () => {
-  it('renders collapsed state with tree-style border', () => {
+  it('renders collapsed actions with an omission route and no nested frame', () => {
     const group = makeGroup([
       { id: '1', command: 'ls -la', completed: true, content: 'a\nb', startMs: Date.now() - 1000 },
       { id: '2', command: 'pwd', completed: true, content: '/home', startMs: Date.now() - 500 },
@@ -26,22 +26,19 @@ describe('formatCollapsedBashGroup', () => {
     ])
 
     const lines = formatCollapsedBashGroup({ group, expanded: false, theme, columns: 80 }).map(stripAnsi)
-    assert.ok(lines[0]!.includes('▶'), 'collapsed indicator')
     assert.ok(lines[0]!.includes('Ran 4 shell commands'), 'summary')
-    assert.ok(lines.some(l => l.includes('│')), 'left border')
-    assert.ok(lines.some(l => l.includes('╰─')), 'tree connector')
+    assert.ok(lines.some(l => l.includes('ctrl+o 展开')), 'expand route')
+    assert.ok(!lines.some(l => /[│├╰]/.test(l)), 'no nested frame')
   })
 
-  it('renders expanded state with nested tree connectors', () => {
+  it('renders all expanded actions without nested tree connectors', () => {
     const group = makeGroup([
       { id: '1', command: 'ls -la', completed: true, content: 'a\nb', startMs: Date.now() - 1000 },
       { id: '2', command: 'pwd', completed: true, content: '/home', startMs: Date.now() - 500 },
     ])
 
     const lines = formatCollapsedBashGroup({ group, expanded: true, theme, columns: 80 }).map(stripAnsi)
-    assert.ok(lines[0]!.includes('▼'), 'expanded indicator')
-    assert.ok(lines.some(l => l.includes('├─')), 'middle connector')
-    assert.ok(lines.some(l => l.includes('╰─')), 'last connector')
+    assert.ok(!lines.some(l => /[│├╰]/.test(l)), 'no nested frame')
     assert.ok(lines.some(l => l.includes('ls -la')), 'first command')
     assert.ok(lines.some(l => l.includes('pwd')), 'last command')
   })
@@ -51,7 +48,7 @@ describe('formatCollapsedBashGroup', () => {
       { id: '1', command: 'bad', completed: true, isError: true, content: 'error', startMs: Date.now() - 1000 },
     ])
     const lines = formatCollapsedBashGroup({ group, expanded: true, theme, columns: 80 }).map(stripAnsi)
-    assert.ok(lines.some(l => l.includes('✗')), 'error marker')
+    assert.ok(lines.some(l => /[x✗].*失败/.test(l)), 'error marker and status')
   })
 
   it('shows tail stderr preview for failed entries (not just the marker)', () => {

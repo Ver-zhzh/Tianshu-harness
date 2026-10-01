@@ -51,7 +51,6 @@ function setup() {
 const PANEL_TITLE = '≡ 任务'
 // glanceDensity 默认 compact：徽章格式 `≡done/total`（full 档才是 ◐○✓ 分态）
 const BADGE_DONE5 = '≡5/5'
-const BADGE_DONE1 = '≡1/1'
 const tick = (ms: number) => new Promise(r => setTimeout(r, ms))
 
 test('新 run 未写 todo 前：上一轮全完成清单隐藏（面板 + 徽章）', async () => {
@@ -74,8 +73,10 @@ test('本 run 写入新 todo 后：新清单正常显示', async () => {
   t.out.clear()
   t.app.setTodos([mk('n1', 'new task', 'in_progress'), mk('n2', 'another', 'pending')])
   const plain = stripAnsi(t.out.chunks.join(''))
-  assert.ok(plain.includes(PANEL_TITLE), '新清单面板显示')
-  assert.ok(plain.includes('new task'), '新任务条目可见')
+  assert.ok(plain.includes('步骤 2'), 'new unfinished steps have a real expansion entry')
+  ;(t.app as any).state.todoExpanded = true
+  t.app.setInput('review')
+  assert.ok(stripAnsi(t.out.chunks.join('')).includes('new task'), 'explicit review displays the new checklist')
 })
 
 test('本 run 内推进到全完成：仍显示（本 run 有效信息）', async () => {
@@ -85,8 +86,10 @@ test('本 run 内推进到全完成：仍显示（本 run 有效信息）', asyn
   t.out.clear()
   t.app.setTodos([mk('n1', 'new task', 'completed')])
   const plain = stripAnsi(t.out.chunks.join(''))
-  assert.ok(plain.includes(PANEL_TITLE), '本 run 的全完成清单仍显示')
-  assert.ok(plain.includes(BADGE_DONE1), '本 run 的徽章仍显示')
+  assert.ok(!plain.includes('步骤 1'), 'completed steps no longer claim pending work')
+  ;(t.app as any).state.todoExpanded = true
+  t.app.setInput('review completed')
+  assert.ok(stripAnsi(t.out.chunks.join('')).includes('new task'), 'completed checklist remains available through explicit review')
 })
 
 test('idle + 全完成隐藏（原有行为防回归）', async () => {
@@ -100,7 +103,7 @@ test('idle + 全完成隐藏（原有行为防回归）', async () => {
   t.app.setInput('a')
   await tick(10)
   const shown = stripAnsi(t.out.chunks.join(''))
-  assert.ok(shown.includes(PANEL_TITLE), 'streaming 期全完成面板显示（对照帧）')
+  assert.ok(!shown.includes(PANEL_TITLE), 'completed checklist stays folded during streaming')
   // 防回归帧：idle 后同一清单隐藏
   setPhase('idle')
   t.out.clear()
@@ -117,5 +120,5 @@ test('部分完成清单跨 run 仍显示（不视为陈旧）', async () => {
   t.out.clear()
   await startStreamingRun(t.app)
   const plain = stripAnsi(t.out.chunks.join(''))
-  assert.ok(plain.includes(PANEL_TITLE), '部分完成清单跨 run 仍显示')
+  assert.ok(plain.includes('步骤 1'), 'unfinished checklist retains its entry across runs')
 })
