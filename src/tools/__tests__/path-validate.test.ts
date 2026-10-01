@@ -1,6 +1,6 @@
 import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve as resolvePath } from 'node:path'
 import { validatePath, validatePathSafe } from '../path-validate.js'
@@ -173,6 +173,24 @@ describe('validatePathSafe — sensitive file hard gate across path forms (M3)',
       const r = validatePathSafe(cwd, join(cwd, '.ENV.LOCAL'), 'read')
       assert.equal(r.ok, false)
       if (!r.ok) assert.match(r.error, /Sensitive file blocked/)
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('blocks Windows 8.3 short names (ENV~1 / CREDEN~1.JSO) of existing sensitive files', (t) => {
+    const cwd = makeCwd()
+    try {
+      writeFileSync(join(cwd, '.env'), 'SECRET=1\n')
+      writeFileSync(join(cwd, 'credentials.json'), '{}')
+      if (!existsSync(join(cwd, 'ENV~1'))) { t.skip('volume does not generate 8.3 short names'); return }
+      for (const p of ['ENV~1', 'env~1', 'CREDEN~1.JSO', join('scripts', '..', 'ENV~1')]) {
+        const r = validatePathSafe(cwd, p, 'read')
+        assert.equal(r.ok, false, p)
+        if (!r.ok) assert.match(r.error, /Sensitive file blocked/)
+      }
+      const ok = validatePathSafe(cwd, 'README.md', 'read')
+      assert.equal(ok.ok, true)
     } finally {
       rmSync(cwd, { recursive: true, force: true })
     }

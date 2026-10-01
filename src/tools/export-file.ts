@@ -2,7 +2,7 @@ import { mkdir, stat, copyFile, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'path'
 import type { Tool } from './types.js'
 import { expandHome } from '../platform.js'
-import { detectSensitiveFile } from './sensitive-file-detector.js'
+import { detectSensitiveFileOnDisk } from './sensitive-file-detector.js'
 
 const MAX_EXPORT_BYTES = 50 * 1024 * 1024 // 50MB — explicit external export safety ceiling
 
@@ -52,7 +52,7 @@ export async function exportFile(input: ExportFileInput): Promise<{ path: string
   if (!sourcePath) throw new Error('source_path 为必填项')
   // 敏感文件硬门（issue #135）：source_path 曾是唯一不经敏感检测的读路径，
   // 可把 ~/.ssh/id_rsa、.env、凭证文件直接复制出项目。copy 之前先跑同一门禁。
-  const sensitiveSource = detectSensitiveFile(sourcePath)
+  const sensitiveSource = detectSensitiveFileOnDisk(sourcePath)
   if (sensitiveSource.sensitive) {
     throw new Error(`拒绝导出敏感文件（${sensitiveSource.patternName}）：${sourcePath}。敏感文件不允许复制到项目之外。`)
   }

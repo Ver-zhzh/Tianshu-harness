@@ -1,3 +1,4 @@
+import { realpathSync } from 'fs'
 /**
  * 敏感文件检测 — fail-closed 工具层拦截。
  *
@@ -148,6 +149,25 @@ export function detectSensitiveFile(inputPath: string): SensitiveFileResult {
  * 静态枚举，检测器返回该标记项，由调用方决定处置（审批门 / 风险理由）。
  * 与具体敏感文件名区分开，便于调用方分别措辞。
  */
+/**
+ * detectSensitiveFile + 磁盘规范名复查：文件存在时再用 realpathSync.native 取其
+ * 真实长名（展开 Windows 8.3 短名 ENV~1 → .env、CREDEN~1.JSO → credentials.json，
+ * 并解析符号链接）再匹配一次。给只拿到裸路径、不经 validatePathSafe 的读路径用
+ * （import_resource 本地导入、export_file source_path）。返回 path 保持原输入。
+ */
+export function detectSensitiveFileOnDisk(inputPath: string): SensitiveFileResult {
+  const direct = detectSensitiveFile(inputPath)
+  if (direct.sensitive) return direct
+  let canonical: string
+  try {
+    canonical = realpathSync.native(inputPath)
+  } catch {
+    return direct
+  }
+  const viaDisk = detectSensitiveFile(canonical)
+  return viaDisk.sensitive ? { ...viaDisk, path: inputPath } : direct
+}
+
 export const AGGREGATE_ADD_MARKER = '__aggregate_add__'
 
 /**

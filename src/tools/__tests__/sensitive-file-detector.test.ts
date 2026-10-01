@@ -1,7 +1,11 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { existsSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
   detectSensitiveFile,
+  detectSensitiveFileOnDisk,
   detectSensitiveGitAdd,
   AGGREGATE_ADD_MARKER,
 } from '../sensitive-file-detector.js'
@@ -218,6 +222,41 @@ describe('sensitive-file-detector', () => {
       assert.equal(detectSensitiveGitAdd('').length, 0)
       assert.equal(detectSensitiveGitAdd('git add').length, 0)
       assert.equal(detectSensitiveGitAdd('git add   ').length, 0)
+    })
+  })
+
+  describe('detectSensitiveFileOnDisk — canonical on-disk name', () => {
+    it('passes through lexical hits and non-existent paths', () => {
+      assert.equal(detectSensitiveFileOnDisk('/no/such/dir/.env').sensitive, true)
+      assert.equal(detectSensitiveFileOnDisk('/no/such/dir/notes.txt').sensitive, false)
+    })
+
+    it('catches a harmless-looking symlink to .env and keeps the original path', (t) => {
+      const dir = mkdtempSync(join(tmpdir(), 'sens-disk-'))
+      try {
+        writeFileSync(join(dir, '.env'), 'SECRET=1\n')
+        try { symlinkSync(join(dir, '.env'), join(dir, 'notes.txt')) } catch { t.skip('symlink not permitted'); return }
+        const r = detectSensitiveFileOnDisk(join(dir, 'notes.txt'))
+        assert.equal(r.sensitive, true)
+        assert.equal(r.path, join(dir, 'notes.txt'))
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    it('expands Windows 8.3 short names (ENV~1, CREDEN~1.JSO)', (t) => {
+      const dir = mkdtempSync(join(tmpdir(), 'sens-disk-'))
+      try {
+        writeFileSync(join(dir, '.env'), 'SECRET=1\n')
+        writeFileSync(join(dir, 'credentials.json'), '{}')
+        writeFileSync(join(dir, 'readme-long-name.md'), '#')
+        if (!existsSync(join(dir, 'ENV~1'))) { t.skip('volume does not generate 8.3 short names'); return }
+        assert.equal(detectSensitiveFileOnDisk(join(dir, 'ENV~1')).sensitive, true)
+        assert.equal(detectSensitiveFileOnDisk(join(dir, 'CREDEN~1.JSO')).sensitive, true)
+        assert.equal(detectSensitiveFileOnDisk(join(dir, 'README~1.MD')).sensitive, false)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
     })
   })
 })

@@ -60,11 +60,18 @@ export function validatePathSafe(cwd: string, inputPath: string, mode: 'read' | 
   // Sensitive file check — fail-closed BEFORE path escape check, and across every
   // addressable FORM of the path: raw input, lexical resolve, realpath canonical
   // form. 此前只查裸输入串——`scripts/../.env` 因裸前缀白名单逃逸、`.env/`/`.env.`/
-  // `.ENV` 靠 detector 内归一化收敛、8.3 短名（CREDEN~1.JSON）靠 realpath 展开收敛。
+  // `.ENV` 靠 detector 内归一化收敛、8.3 短名（CREDEN~1.JSO）靠 realpathSync.native 展开收敛。
   // 白名单按规范形评估：裸前缀（scripts/…）不再单独放行。Hard-gate: refuse to
   // read/commit .env, credentials, private keys etc. even when the path is inside
   // the workspace or covered by a grant. 返回路径契约不变（仍返回 resolved）。
-  for (const form of [inputPath, resolved, realResolved, real]) {
+  // 8.3 短名必须用 realpathSync.native 才能展开：JS 版 realpathSync 只 lstat 逐段
+  // 解析符号链接，ENV~1 / CREDEN~1.JSO 原样保留（实测 Windows C: 盘可直接读出 .env）。
+  // 只用于敏感匹配；包含关系检查仍用上面的 real，避免 subst/网络盘下两套实现分歧。
+  let nativeReal: string | undefined
+  try {
+    nativeReal = realpathSync.native(realResolved)
+  } catch { /* 不存在的文件没有短名可展开 */ }
+  for (const form of [inputPath, resolved, realResolved, real, ...(nativeReal ? [nativeReal] : [])]) {
     const sensitiveResult = detectSensitiveFile(form)
     if (sensitiveResult.sensitive) {
       return {
