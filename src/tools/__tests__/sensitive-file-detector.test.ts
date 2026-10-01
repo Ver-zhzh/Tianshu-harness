@@ -115,6 +115,24 @@ describe('sensitive-file-detector', () => {
       assert.equal(detectSensitiveFile('C:\\Users\\x\\.ssh\\id_rsa').sensitive, true)
     })
 
+    it('detects NTFS alternate-data-stream forms (::$DATA opens the file itself on Win32)', () => {
+      for (const p of ['.env::$DATA', '.ENV::$data', '.env:stream:$DATA', '.env.local::$DATA', 'id_rsa::$DATA',
+        'credentials.json::$DATA', 'C:\\repo\\.env::$DATA', 'sub/../.env::$DATA', 'server.key:x', '.env.::$DATA']) {
+        assert.equal(detectSensitiveFile(p).sensitive, true, p)
+      }
+    })
+
+    it('stream suffix cannot borrow a whitelist extension', () => {
+      assert.equal(detectSensitiveFile('.env:notes.md').sensitive, true)
+      assert.equal(detectSensitiveFile('credentials.json:x.test.ts').sensitive, true)
+    })
+
+    it('drive letters and ordinary colon-free paths are unaffected', () => {
+      assert.equal(detectSensitiveFile('C:\\repo\\src\\index.ts').sensitive, false)
+      assert.equal(detectSensitiveFile('C:/repo/README.md').sensitive, false)
+      assert.equal(detectSensitiveFile('docs/.env.example::$DATA').sensitive, false)
+    })
+
     it('whitelists still apply case-insensitively', () => {
       assert.equal(detectSensitiveFile('Scripts/gen-creds.ts').sensitive, false)
       assert.equal(detectSensitiveFile('docs/.ENV.EXAMPLE').sensitive, false)

@@ -108,9 +108,18 @@ export interface SensitiveFileResult {
   path: string
 }
 
-/** 匹配前归一化：反斜杠→正斜杠（Windows 分隔符统一可比）、小写化（大小写不敏感）。 */
+/** 匹配前归一化：反斜杠→正斜杠（Windows 分隔符统一可比）、小写化（大小写不敏感）、
+ *  剥 NTFS 数据流后缀。 */
 function normalizeForMatch(inputPath: string): string {
-  return inputPath.replace(/\\/g, '/').toLowerCase()
+  return stripNtfsStreams(inputPath.replace(/\\/g, '/').toLowerCase())
+}
+
+/** 剥每段路径里的 NTFS 备用数据流后缀：`.env::$DATA`、`.env:stream:$DATA` 在 Win32
+ *  上打开的就是 `.env`（`::$DATA` 即默认数据流），而 `$` 结尾的敏感正则全部落空——
+ *  `read_file('.env::$DATA')` 曾原样读出凭据，realpath 也保留该后缀，各形态都救不回。
+ *  盘符段（`c:`）不动。POSIX 上冒号是合法文件名字符，剥掉只影响匹配（宁可多拦）。 */
+function stripNtfsStreams(p: string): string {
+  return p.split('/').map((seg, i) => (i === 0 && /^[a-z]:$/.test(seg)) ? seg : seg.replace(/:.*$/, '')).join('/')
 }
 
 /** 剥尾部空白/点/分隔符：`.env/`、`.env.`、`.env ` 都是 `.env` 的可寻址形态

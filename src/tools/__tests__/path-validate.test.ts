@@ -140,6 +140,20 @@ describe('validatePathSafe — sensitive file hard gate across path forms (M3)',
     }
   })
 
+  it('blocks NTFS stream forms of an existing .env (::$DATA reads the main stream on Win32)', () => {
+    const cwd = makeCwd()
+    try {
+      writeFileSync(join(cwd, '.env'), 'SECRET=1\n')
+      for (const p of ['.env::$DATA', '.ENV::$data', join('scripts', '..', '.env::$DATA')]) {
+        const r = validatePathSafe(cwd, p, 'read')
+        assert.equal(r.ok, false, p)
+        if (!r.ok) assert.match(r.error, /Sensitive file blocked/)
+      }
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
   it('blocks scripts/../.env — whitelist is evaluated on the canonicalized form, not the raw prefix', () => {
     const cwd = makeCwd()
     try {
