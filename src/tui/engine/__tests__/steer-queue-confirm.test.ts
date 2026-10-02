@@ -1,3 +1,4 @@
+import { DEFAULT_FRONTEND_PREFERENCES } from '../../frontend-preferences.js'
 /**
  * T9 steer 队列语义：
  *
@@ -28,6 +29,7 @@ function makeApp() {
     stdin: stdin as unknown as ReadStream,
     cols: 80, rows: 24, modelName: 'test',
   })
+  app.setFrontendPreferences({ ...DEFAULT_FRONTEND_PREFERENCES, renderer: 'classic' })
   return { app, out, stdin }
 }
 

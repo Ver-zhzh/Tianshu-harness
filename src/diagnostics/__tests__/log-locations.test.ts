@@ -1,7 +1,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, utimesSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
   resolveLogLocations,
@@ -60,8 +60,8 @@ describe('日志落点解析：数据根', () => {
     assert.equal(report.homeSource, 'RIVET_HOME')
     // 项目内落点挂 cwd，其余一律挂 home——不允许出现第三个根。
     for (const loc of report.locations) {
-      const underHome = loc.path === home || loc.path.startsWith(home + '/')
-      const underCwd = loc.path === cwd || loc.path.startsWith(cwd + '/')
+      const underHome = loc.path === home || loc.path.startsWith(home + sep)
+      const underCwd = loc.path === cwd || loc.path.startsWith(cwd + sep)
       assert.ok(underHome || underCwd, `${loc.id} 落在 home/cwd 之外: ${loc.path}`)
     }
   })

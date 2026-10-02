@@ -1,3 +1,4 @@
+import { DEFAULT_FRONTEND_PREFERENCES } from '../../frontend-preferences.js'
 /**
  * ghost text（P3-2）渲染层集成测试。
  *
@@ -21,6 +22,7 @@ function makeApp(cols = 80): { app: TuiApp; out: MockOut; stdin: MockIn } {
     stdin: stdin as unknown as ReadStream,
     cols, rows: 24, modelName: 'test',
   })
+  app.setFrontendPreferences({ ...DEFAULT_FRONTEND_PREFERENCES, renderer: 'classic' })
   app.setSlashCommands([
     { name: '/effort', description: 'Set reasoning effort', argsHint: 'off|low|max' },
     { name: '/help', description: 'Show all commands' },

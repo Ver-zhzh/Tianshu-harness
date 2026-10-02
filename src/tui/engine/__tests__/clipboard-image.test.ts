@@ -7,6 +7,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { Buffer } from 'node:buffer'
+import { copyTextToClipboard } from '../clipboard-text.js'
 
 // ── RED #1: 模块尚不存在，import 会失败（测试框架报错 = RED） ──
 // 此 import 在 clipboard-image.ts 创建前会抛 MODULE_NOT_FOUND。
@@ -16,6 +17,81 @@ import { Buffer } from 'node:buffer'
 // 1x1 transparent PNG (valid)
 const PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
 const PNG_DATA_URL = `data:image/png;base64,${PNG_B64}`
+
+test('Linux clipboard preserves PNG bytes and requests no added newline', async () => {
+  const { tryShellClipboard, setClipboardImageShrinker } = await import('../clipboard-image.js')
+  const png = Buffer.from(PNG_B64, 'base64')
+  setClipboardImageShrinker(async b => b)
+  try {
+    const result = await tryShellClipboard({ platform: 'linux', execFile: async (bin, args) => {
+      assert.equal(bin, 'wl-paste'); assert.ok(args.includes('--no-newline'))
+      return { stdout: png }
+    } })
+    assert.equal(result?.dataUrl, PNG_DATA_URL)
+  } finally { setClipboardImageShrinker(null) }
+})
+
+test('Linux clipboard rejects non-image output and tries X11', async () => {
+  const { tryShellClipboard } = await import('../clipboard-image.js')
+  const calls: string[] = []
+  const image = await tryShellClipboard({ platform: 'linux', execFile: async bin => {
+    calls.push(bin); return { stdout: bin === 'wl-paste' ? Buffer.from('not PNG') : Buffer.from(PNG_B64, 'base64') }
+  } })
+  assert.deepEqual(calls, ['wl-paste', 'xclip']); assert.equal(image?.dataUrl, PNG_DATA_URL)
+})
+
+for (const [platform, env, expected] of [
+  ['darwin', {}, 'pbcopy'], ['win32', {}, 'powershell.exe'],
+  ['linux', { WAYLAND_DISPLAY: 'wayland-0' }, 'wl-copy'],
+  ['linux', { DISPLAY: ':1' }, 'xclip'], ['linux', { TERMUX_VERSION: '0.118' }, 'termux-clipboard-set'],
+] as const) test(`native copy uses ${expected} without shell interpolation`, async () => {
+  const text = '你好 🎉\n$(untouched) `test`'
+  const terminal: string[] = []; const calls: string[] = []
+  assert.equal(await copyTextToClipboard(text, s => terminal.push(s), { platform, env,
+    run: async (bin, _args, input) => { calls.push(bin); assert.equal(input, text); return true },
+  }), 'native')
+  assert.deepEqual(calls, [expected]); assert.deepEqual(terminal, [])
+})
+
+test('SSH copy targets the client terminal without touching server clipboard', async () => {
+  const terminal: string[] = []
+  assert.equal(await copyTextToClipboard('你好', s => terminal.push(s), { platform: 'darwin', env: { SSH_TTY: '/dev/pts/1' },
+    run: async () => { assert.fail('remote native copy must not run'); return false },
+  }), 'terminal')
+  assert.equal(terminal[0], `\x1b]52;c;${Buffer.from('你好').toString('base64')}\x07`)
+})
+
+test('missing Linux clipboard providers fall back to a terminal request', async () => {
+  const calls: string[] = []; const terminal: string[] = []
+  await copyTextToClipboard('hello', s => terminal.push(s), { platform: 'linux', env: { WAYLAND_DISPLAY: 'w', DISPLAY: ':1' },
+    run: async bin => { calls.push(bin); return false },
+  })
+  assert.deepEqual(calls, ['wl-copy', 'xclip', 'xsel']); assert.equal(terminal.length, 1)
+})
+
+test('rapid copies preserve request order when the first native writer is slow', async () => {
+  const writes: string[] = []
+  let release!: () => void
+  const pending = new Promise<void>(resolve => { release = resolve })
+  const run = async (_bin: string, _args: string[], text: string) => {
+    if (text === 'first') await pending
+    writes.push(text); return true
+  }
+  const options = { platform: 'darwin' as const, env: {}, run }
+  const first = copyTextToClipboard('first', () => {}, options)
+  const second = copyTextToClipboard('second', () => {}, options)
+  try { await new Promise(resolve => setImmediate(resolve)); assert.deepEqual(writes, []) }
+  finally { release(); await Promise.all([first, second]) }
+  assert.deepEqual(writes, ['first', 'second'])
+})
+
+test('Wayland text paste requests text only and preserves existing newlines', async () => {
+  const { readTextFromClipboard } = await import('../clipboard-image.js')
+  const text = '你好 🎉\nline 2\n'
+  assert.equal(await readTextFromClipboard({ platform: 'linux', execFile: async (bin, args) => {
+    assert.equal(bin, 'wl-paste'); assert.deepEqual(args, ['--no-newline', '--type', 'text']); return { stdout: text }
+  } }), text)
+})
 
 // We'll import after the module exists. For now this file documents the contract.
 
@@ -324,7 +400,8 @@ test('TIFF→PNG 转换失败 → 返回 null，不得把 TIFF 原样泄漏给�
 test('大图剪贴板：读图出口先过 ingest 归一化（注入 shrinker 验证接线）', async () => {
   const mod = await import('../clipboard-image.js')
   const { tryShellClipboard, setClipboardImageShrinker } = mod
-  const big = 'A'.repeat(4 * 1024 * 1024) // > TARGET_IMAGE_BYTES(3.75MB)
+  const big = Buffer.alloc(4 * 1024 * 1024) // > TARGET_IMAGE_BYTES(3.75MB)
+  Buffer.from(PNG_B64, 'base64').copy(big)
   let calls = 0
   setClipboardImageShrinker(async (buf: Buffer) => {
     calls++

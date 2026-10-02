@@ -19,7 +19,7 @@ import { MockOut, MockIn, stripAnsi } from './_harness.js'
 
 // 粘贴测试隔离系统剪贴板——onPaste 现在会先尝试读剪贴板图片（修复右键粘贴丢图），
 // 测试环境注入「无图」reader 确保走文本路径，不受本机剪贴板当前内容影响。
-beforeEach(() => { setClipboardReader({ readImage: async () => null }) })
+beforeEach(() => { setClipboardReader({ readText: async () => null, readImage: async () => null }) })
 afterEach(() => { setClipboardReader(null) })
 
 function makeApp() {
@@ -69,7 +69,7 @@ test('粘贴插入到光标处（已有文本之间）', async () => {
 test('右键粘贴：剪贴板有图时附图，不插入乱码文本', async () => {
   // 模拟右键粘贴——终端把图片字节当文本注入 stdin（bracketed paste 包裹），
   // 同时系统剪贴板里确实有图。onPaste 应优先读剪贴板附图，吞掉乱码文本。
-  setClipboardReader({ readImage: async () => ({ dataUrl: 'data:image/png;base64,iVBOR=', mime: 'image/png', name: 'clipboard.png', source: 'png' }) })
+  setClipboardReader({ readText: async () => null, readImage: async () => ({ dataUrl: 'data:image/png;base64,iVBOR=', mime: 'image/png', name: 'clipboard.png', source: 'png' }) })
   const { app, stdin } = makeApp()
   app.start()
   // 模拟终端注入的图片字节乱码（实际是二进制被 UTF-8 解码的残留）
@@ -84,7 +84,7 @@ test('右键粘贴：剪贴板有图时附图，不插入乱码文本', async ()
 test('右键粘贴：剪贴板无图时正常插入文本', async () => {
   // 无图时 onPaste 应回退到文本路径（已由 beforeEach 的 null reader 覆盖，
   // 这里显式再测一次确保回退逻辑正确）
-  setClipboardReader({ readImage: async () => null })
+  setClipboardReader({ readText: async () => null, readImage: async () => null })
   const { app, stdin } = makeApp()
   app.start()
   stdin.dataHandler!('\x1B[200~hello world\x1B[201~')
@@ -99,7 +99,7 @@ test('性能契约：普通文本粘贴不读剪贴板图片', async () => {
   // macOS 无 native 读图包时退化为 spawn osascript，本机实测每次普通文本粘贴
   // 被推迟 410–707ms（端到端中位 512ms，跳过读图后 5ms）。
   let readCalls = 0
-  setClipboardReader({
+  setClipboardReader({ readText: async () => null,
     readImage: async () => { readCalls++; return null },
   })
   const { app, stdin } = makeApp()
@@ -113,7 +113,7 @@ test('性能契约：普通文本粘贴不读剪贴板图片', async () => {
 
 test('性能契约：多行/中文粘贴同样走零等待快路径', async () => {
   let readCalls = 0
-  setClipboardReader({
+  setClipboardReader({ readText: async () => null,
     readImage: async () => { readCalls++; return null },
   })
   const { app, stdin } = makeApp()
@@ -127,7 +127,7 @@ test('性能契约：多行/中文粘贴同样走零等待快路径', async () =
 
 test('防乱码防御未退化：乱码粘贴仍读剪贴板并附图', async () => {
   let readCalls = 0
-  setClipboardReader({
+  setClipboardReader({ readText: async () => null,
     readImage: async () => {
       readCalls++
       return { dataUrl: 'data:image/png;base64,iVBOR=', mime: 'image/png', name: 'clipboard.png', source: 'png' }

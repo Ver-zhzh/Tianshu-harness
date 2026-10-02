@@ -1,0 +1,3 @@
+# macOS filesystem metadata, including sidecars on external drives.
+**/._*
+**/.DS_Store

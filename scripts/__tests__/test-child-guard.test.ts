@@ -124,7 +124,7 @@ test('看门狗收场必须带走孙进程——祖父被杀时孙进程不能 r
         '-e',
         `
           const { spawn } = require('node:child_process')
-          const grandchild = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
+          const grandchild = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000); setTimeout(() => process.exit(1), 8000)'], { stdio: 'ignore', windowsHide: true })
           console.log('GRANDCHILD_PID=' + grandchild.pid)
           setInterval(() => {}, 1000)
         `,

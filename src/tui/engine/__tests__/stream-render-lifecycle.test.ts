@@ -1,3 +1,4 @@
+import { DEFAULT_FRONTEND_PREFERENCES } from '../../frontend-preferences.js'
 /**
  * W-B3 StreamRenderController 生命周期测试 — 验证 ticker/tick/lastActivityMs/
  * assistantHeaderDone 四个状态字段在 TuiApp 行为路径中正确流转。
@@ -24,6 +25,7 @@ function makeApp() {
     stdin: stdin as unknown as ReadStream,
     cols: 120, rows: 24, modelName: 'test', contextWindow: 200_000,
   })
+  app.setFrontendPreferences({ ...DEFAULT_FRONTEND_PREFERENCES, renderer: 'classic' })
   app.start()
   return { app, out, stdin }
 }

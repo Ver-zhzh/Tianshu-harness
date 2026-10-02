@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { delimiter, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..')
@@ -15,10 +15,11 @@ const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..')
  */
 function simulateGlobalInstallPath(): string {
   const parts = [dirname(process.execPath)]
-  for (const p of ['/usr/local/bin', '/usr/bin', '/bin', '/opt/homebrew/bin']) {
+  const systemPaths = process.platform === 'win32' ? [join(process.env.SystemRoot ?? 'C:\\Windows', 'System32')] : ['/usr/local/bin', '/usr/bin', '/bin', '/opt/homebrew/bin']
+  for (const p of systemPaths) {
     if (!parts.includes(p)) parts.push(p)
   }
-  return parts.join(':')
+  return parts.join(delimiter)
 }
 
 /**
@@ -44,11 +45,14 @@ test('postinstall 裸命令在全局安装环境（无 devDeps bin）中必须�
   const postinstall = pkg.scripts?.postinstall
   assert.ok(postinstall, 'package.json 必须声明 postinstall')
 
-  const env = { ...process.env, PATH: simulateGlobalInstallPath() }
+  const env = { ...process.env }
+  for (const key of Object.keys(env)) if (key.toLowerCase() === 'path') delete env[key]
+  env.PATH = simulateGlobalInstallPath()
   for (const cmd of unguardedCommands(postinstall)) {
     let resolvable = false
     try {
-      execFileSync('sh', ['-c', `command -v ${cmd}`], { env, stdio: 'pipe' })
+      if (process.platform === 'win32') execFileSync(join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'where.exe'), [cmd], { env, stdio: 'pipe', windowsHide: true })
+      else execFileSync('sh', ['-c', `command -v ${cmd}`], { env, stdio: 'pipe' })
       resolvable = true
     } catch {
       resolvable = false

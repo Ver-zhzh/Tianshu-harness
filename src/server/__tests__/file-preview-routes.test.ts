@@ -139,7 +139,8 @@ test('file-preview/pdf 非可转换扩展名 → 415；文件缺失 → 404', as
 test('file-preview/pdf 损坏 pptx → 422（soffice 转换失败或未安装都落 422）', { timeout: 120_000 }, async () => {
   const { cwd, router, id, cleanup } = await setup()
   try {
-    writeFileSync(join(cwd, 'broken.pptx'), Buffer.from('not a real zip'))
+    // Plain text is a supported LibreOffice import; use a truncated ZIP header.
+    writeFileSync(join(cwd, 'broken.pptx'), Buffer.from([0x50, 0x4b, 0x03, 0x04, 0xff, 0xff, 0, 0, 0xff]))
     const result = await router('GET', `/sessions/${id}/file-preview/pdf?path=broken.pptx`, {}, AUTH, fakeRes().res)
     assert.equal(result.status, 422)
     const body = result.body as { error: string }

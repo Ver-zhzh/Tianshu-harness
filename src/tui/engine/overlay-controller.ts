@@ -1,3 +1,4 @@
+import { InputLine } from './input-line.js'
 import type { PagerData, StarmapData, PaletteData, ChronicleData, TasksData, TasksGroup, TasksWorkerRow, DomainPickerData, ModelPickerData, ThemePickerData, ChoicePanelData, PlanPickerData } from '../format/overlay.js'
 import type { CockpitSnapshot, Panel } from '../cockpit/types.js'
 import type { RewindData, RewindFile, RewindMode } from '../format/rewind.js'
@@ -131,7 +132,9 @@ export class OverlayController {
   editQuery(ch: string | null): void {
     if (ch === null) {
       if (this.overlayNav.query.length === 0) return
-      this.overlayNav.query = this.overlayNav.query.slice(0, -1)
+      const input = new InputLine({ value: this.overlayNav.query })
+      input.handleKey('left', '', false, false)
+      this.overlayNav.query = input.value.slice(0, input.cursor)
     } else {
       this.overlayNav.query += ch
     }

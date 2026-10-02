@@ -71,7 +71,7 @@ test('行为契约：--test-timeout 能把持有活跃 handle 的挂起变成失
     const child = spawn(
       process.execPath,
       [...nodeTestFlags(2000), join(dir, 'hang.fixture.mts')],
-      { stdio: ['ignore', 'pipe', 'pipe'], env: cleanEnv },
+      { stdio: ['ignore', 'pipe', 'pipe'], env: cleanEnv, windowsHide: true },
     )
     let out = ''
     child.stdout.on('data', c => { out += String(c) })

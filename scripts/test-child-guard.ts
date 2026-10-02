@@ -22,8 +22,8 @@
  *  3. **汇总完整性 fail-closed**：进程退出却没见到 `ℹ tests` 行 = 什么都没验证，判非零。
  *     这一条把"核对报告条数"从人的归因习惯（见
  *     docs/analysis/2026-08-02-测试静默少跑仍报通过.md 的行动项）变成机器的闸。
- *  4. **进程组收场**（2026-09-24 补）：批次自成进程组（`detached: true`），看门狗与
- *     信号收场都按**组**杀。只 kill 直接子进程会漏掉**孙进程**——测试自己 spawn 的
+ *  4. **进程树收场**（2026-09-24 补）：POSIX 批次自成进程组，Windows 保持隐藏控制台
+ *     并用 taskkill /T 收场。只 kill 直接子进程会漏掉**孙进程**——测试自己 spawn 的
  *     长驻子进程（如 `test-runner-flags` 的 hang fixture runner）在祖父被杀后
  *     reparent 到 init 永久存活：实测机器上攒下 21 个 PPID=1、存活 11h~3天7h 的孤儿。
  *     第 4 条与 fixture 自带的寿命上限互为兜底：前者管「有人来得及杀」，后者管
@@ -34,6 +34,7 @@
  */
 
 import { spawn } from 'node:child_process'
+import { forceKillTree } from '../src/platform.js'
 
 /** 无任何输出多久视为挂起。最慢单用例 ~40s（见 test-runner-flags.ts 依据），留足余量。 */
 export const DEFAULT_IDLE_MS = 180_000
@@ -100,29 +101,26 @@ export function runGuardedChild(opts: GuardOptions): Promise<GuardedResult> {
     }
 
     const child = spawn(process.execPath, opts.args, {
-      stdio: ['ignore', 'pipe', 'pipe'],
+      // Windows 的隐藏控制台需可继承，覆盖 Node 内部未提供 windowsHide 的测试 worker。
+      stdio: [process.platform === 'win32' ? 'inherit' : 'ignore', 'pipe', 'pipe'],
       env: opts.env ?? process.env,
       cwd: opts.cwd,
       shell: false,
       windowsHide: true,
-      // 让批次自成**进程组**：收场时按组杀，才能连带带走批次的子进程。
-      // 只 kill 直接子进程是不够的——测试自己 spawn 的孙进程（如
-      // test-runner-flags 的 hang fixture runner）会在祖父被杀后 reparent 到 init
-      // 永久存活：2026-09-24 实测机器上攒下 21 个 PPID=1、存活 11h~3天7h 的孤儿。
-      // 这道防线的前提是「有人来得及杀」；若整棵树被 SIGKILL 端掉，由 fixture 自带
-      // 的寿命上限兜底（见 test-runner-flags.test.ts 的 fixture 自毁定时器）。
-      detached: true,
+      // POSIX 按进程组收场；Windows 保留隐藏控制台继承，按 PID 回收进程树。
+      detached: process.platform !== 'win32',
     })
 
     /**
-     * 杀**整个进程组**（批次 + 它 spawn 的子进程）；组已不存在时退回杀进程本身。
-     *
-     * `detached: true` 让批次成为新组的组长（pgid === child.pid），于是 `-pid`
-     * 指向整组——这是「祖父被收场时孙进程不留孤儿」的唯一手段。
+     * 回收整个批次：Windows 用 taskkill /T，POSIX 用批次进程组。
      */
     const killTree = (sig: NodeJS.Signals): void => {
       const pid = child.pid
       if (pid === undefined) return
+      if (process.platform === 'win32') {
+        forceKillTree(child)
+        return
+      }
       try {
         process.kill(-pid, sig)
       } catch {
@@ -202,8 +200,8 @@ export function runGuardedChild(opts: GuardOptions): Promise<GuardedResult> {
       armIdle()
     }
 
-    function onSignal(sig: NodeJS.Signals): void {
-      killTree(sig)
+    function onSignal(): void {
+      killTree('SIGKILL')
     }
 
     child.stdout?.on('data', consume)
@@ -217,7 +215,7 @@ export function runGuardedChild(opts: GuardOptions): Promise<GuardedResult> {
     armIdle()
 
     child.on('error', () => finalize(null))
-    child.on('exit', (code) => {
+    child.on('close', (code) => {
       // 看门狗已 kill 时 killed 已置位，finalize 会走对应分支。
       finalize(code)
     })

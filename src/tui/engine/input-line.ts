@@ -603,6 +603,8 @@ export class InputLine {
     // ── Insert mode ────────────────────────────────────────────
     // Meta/Option key (word-level) — check before switch
     if (meta) {
+      if (char === 'b') return this.moveWordLeft()
+      if (char === 'f') return this.moveWordRight()
       switch (name) {
         case 'left': return this.moveWordLeft()
         case 'right': return this.moveWordRight()

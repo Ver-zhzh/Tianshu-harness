@@ -50,7 +50,8 @@ import { ApprovalIntentController } from './approval-intent-controller.js'
 import { MetricsGlanceController } from './metrics-glance-controller.js'
 import { StreamRenderController } from './stream-render-controller.js'
 import { InputController } from './input-controller.js'
-import { ANSI, color, fg, bg, QUERY_CURSOR_POS, osc52Clipboard, imageProtocol } from './ansi.js'
+import { ANSI, color, fg, bg, QUERY_CURSOR_POS, imageProtocol } from './ansi.js'
+import { copyTextToClipboard } from './clipboard-text.js'
 import {
   encodeTermImage,
   parseImageDataUrl,
@@ -436,6 +437,8 @@ export class TuiApp {
   private detailReturn?: { id: string; nav: ReturnType<OverlayController['nav']> }
   private approvalDraft: DraftSnapshot | null = null
   private editorActive = false
+  private inputHandoffGeneration = 0
+  private readonly clipboardAbort = new AbortController()
   private currentTaskTitle = ''
   private mainTaskStopped = false
   private mainTaskEnded?: number
@@ -1085,6 +1088,8 @@ export class TuiApp {
     // 审批/意图/overlay 模式下不处理粘贴——粘贴文本会"穿透"到输入框，
     // 退出模式后出现幽灵文本。
     this.input.onPaste(async (text) => {
+      const generation = this.inputHandoffGeneration
+      if (this.terminalRestored || this.editorActive) return
       const mode = this.input.getMode()
       if (mode !== 'input') return
       // Connect overlay active → route paste into connectInput, not the main input box
@@ -1133,6 +1138,7 @@ export class TuiApp {
       if (this.overlay.activeId() === 'help') { this.helpPanel.paste(text); this.overlay.rerender(); return }
       if (this.overlay.activeId() === 'permissions' && this.permissionPanel) { this.permissionPanel.paste(text); this.overlay.rerender(); return }
       if (this.overlay.isActive()) return
+      if (!this.canApplyPaste(generation)) return
       // 确认窗口内粘贴 = 继续对话：取消 pending-exit 再插入文本
       // （与打字路径的取消同一状态位，见 handleKey 的 Normal input processing）。
       if (this.inputController.ctrlCPendingSince > 0) {
@@ -1147,6 +1153,7 @@ export class TuiApp {
       if (looksLikeBinaryPaste(text) && this.inputLine.images.length < MAX_IMAGES) {
         try {
           const imgResult = await readImageFromClipboard()
+          if (!this.canApplyPaste(generation)) return
           if (imgResult) {
             this.inputLine.addImage(imgResult.dataUrl)
             this.writeBatcher.schedule()
@@ -1155,6 +1162,7 @@ export class TuiApp {
         } catch {
           // 剪贴板读图失败（无图/不支持）→ 落入正常文本粘贴
         }
+        if (!this.canApplyPaste(generation)) return
       }
 
       // 粘贴内容是「一整段图片路径」（单行或多行，见 parseImagePathPaste）→ 逐张挂成附件；
@@ -1164,6 +1172,7 @@ export class TuiApp {
         const outcome = await loadPastedImages(pastedPaths.map((p) => resolve(p)), {
           slots: MAX_IMAGES - this.inputLine.images.length,
         })
+        if (!this.canApplyPaste(generation)) return
         for (const notice of formatImagePasteNotices(outcome, MAX_IMAGES)) {
           this.commitStatic(color(notice, this.theme.warning))
         }
@@ -1543,9 +1552,9 @@ export class TuiApp {
         this.renderLive()
       }
       const event = this.inputLine.handleKey(key.name, key.char, key.ctrl, key.meta, key.shift)
-      // 选区剪切/复制的 OSC52 drain（终端支持时写系统剪贴板，不支持者无害忽略）
+      // Drain the internal selection through the local clipboard or client terminal.
       const clip = this.inputLine.takeClipboardOut()
-      if (clip != null) this.stdout.write(osc52Clipboard(clip))
+      if (clip != null) void copyTextToClipboard(clip, sequence => { if (!this.terminalRestored) this.stdout.write(sequence) }, { signal: this.clipboardAbort.signal })
       if (event?.type === 'change') {
         // 输入变化使 @ 补全循环失效
         this.inputController.fileCompletion = null
@@ -1660,6 +1669,7 @@ export class TuiApp {
   /** 进入审批编辑模式：把工具入参 JSON 放进输入行（e 键 / 光标第 3 项共用）。 */
   private enterApprovalEditMode(): void {
     if (!this.approvalIntentController.approvalPending) return
+    this.inputHandoffGeneration++
     this.approvalDraft = this.inputLine.snapshot()
     this.approvalIntentController.approvalEditMode = true
     this.approvalIntentController.approvalEditError = ''
@@ -1695,9 +1705,11 @@ export class TuiApp {
   private copyFrontendSelection(): boolean {
     const selection = this.frontend.copySelection()
     if (!selection) return false
-    this.stdout.write(osc52Clipboard(selection))
     this.frontend.clearSelection()
-    this.commitStatic(`已发送复制请求（${selection.length}字符）`)
+    void copyTextToClipboard(selection, sequence => { if (!this.terminalRestored) this.stdout.write(sequence) }, { signal: this.clipboardAbort.signal }).then(method => {
+      if (this.terminalRestored || method === 'cancelled') return
+      this.commitStatic(`${method === 'native' ? '已复制' : '已发送复制请求'}（${selection.length}字符）`)
+    })
     if (this.overlay.isActive()) this.overlay.rerender()
     else this.renderLive()
     return true
@@ -1786,10 +1798,11 @@ export class TuiApp {
   }
 
   private async openDraftEditor(): Promise<void> {
-    if (this.editorActive || this.overlay.isActive()) return
+    if (this.terminalRestored || this.editorActive || this.overlay.isActive()) return
     const draft = this.inputLine.snapshot()
     const full = this.frontend.isFullscreen
     this.editorActive = true
+    this.inputHandoffGeneration++
     try {
       this.live.suppressProbe()
       if (full) this.frontend.stopFullscreen()
@@ -1797,22 +1810,26 @@ export class TuiApp {
       this.input.setSuspended(true)
       this.stdout.write(ANSI.KITTY_KEYBOARD_OFF + '\x1B[?2004l' + ANSI.SHOW_CURSOR)
       const text = await editDraftInEditor(this.inputLine.expandPastes(draft.value))
+      if (this.terminalRestored) return
       this.inputLine.restore(draft)
       if (text !== null) this.inputLine.setValue(text)
       this.commitStatic(text === null ? '编辑器失败，已恢复原草稿' : '已返回编辑器，尚未发送')
     } catch (error) {
+      if (this.terminalRestored) return
       this.inputLine.restore(draft)
       this.commitStatic(`编辑器交接失败，已恢复草稿：${(error as Error).message}`)
     } finally {
-      this.input.setSuspended(false)
       this.editorActive = false
-      try { this.stdout.write('\x1B[?2004h' + ANSI.KITTY_KEYBOARD_DISAMBIGUATE_ON) } catch { this.restoreClassicRenderer() }
-      if (full) {
-        try { this.frontend.startFullscreen(this.workflow.preferences.mouse) }
-        catch (error) { this.restoreClassicRenderer(); this.commitStatic(`编辑器返回后全屏恢复失败，已切经典模式：${(error as Error).message}`) }
+      if (!this.terminalRestored) {
+        this.input.setSuspended(false)
+        try { this.stdout.write('\x1B[?2004h' + ANSI.KITTY_KEYBOARD_DISAMBIGUATE_ON) } catch { this.restoreClassicRenderer() }
+        if (full) {
+          try { this.frontend.startFullscreen(this.workflow.preferences.mouse) }
+          catch (error) { this.restoreClassicRenderer(); this.commitStatic(`编辑器返回后全屏恢复失败，已切经典模式：${(error as Error).message}`) }
+        }
+        else { this.live.reset(); this.live.resumeProbe() }
+        this.requestPump(); this.renderLive()
       }
-      else { this.live.reset(); this.live.resumeProbe() }
-      this.requestPump(); this.renderLive()
     }
   }
 
@@ -2336,6 +2353,7 @@ export class TuiApp {
   /** 激活 overlay */
   activateOverlay(id: string): boolean {
     if (this.terminalRestored) return false
+    this.inputHandoffGeneration++
     this.historyOpenGeneration++
     if (this.historyOpening) { this.historyOpening = false; this.frontend.closeHistory() }
     // overlay 内 ESC 应即时响应，关闭输入处理器的 lone-ESC 超时。
@@ -2492,6 +2510,7 @@ export class TuiApp {
 
   /** 停用 overlay */
   deactivateOverlay(): void {
+    this.inputHandoffGeneration++
     this.historyOpenGeneration++
     if (this.historyOpening) { this.historyOpening = false; this.frontend.closeHistory() }
     const returnTo = this.overlay.activeId() === 'pager' ? this.detailReturn : undefined
@@ -4449,8 +4468,8 @@ export class TuiApp {
   private isPrintableKey(key: { name: string; char: string; ctrl?: boolean; meta?: boolean }): boolean {
     if (key.ctrl || key.meta) return false
     const ch = key.char
-    if (!ch || ch.length !== 1) return false
-    const code = ch.charCodeAt(0)
+    if (!ch || Array.from(ch).length !== 1) return false
+    const code = ch.codePointAt(0)!
     return code >= 0x20 && code !== 0x7f && code !== 0x5d // exclude DEL and ]
   }
 
@@ -4474,6 +4493,9 @@ export class TuiApp {
   restoreTerminalSync(): void {
     if (this.terminalRestored) return
     this.terminalRestored = true
+    this.inputHandoffGeneration++
+    this.clipboardAbort.abort()
+    this.input.setSuspended(true)
     this.historyOpenGeneration++
     if (this.historyOpening) { this.historyOpening = false; this.frontend.closeHistory() }
     try {
@@ -6122,13 +6144,21 @@ export class TuiApp {
    * Ctrl+V 处理：优先读剪贴板图片 → 失败则 fallback 到文本粘贴。
    * 焦点防抖：如果输入框在最近 FOCUS_DEBOUNCE_MS 内刚获得焦点，跳过剪贴板读图。
    */
+  private canApplyPaste(generation: number): boolean {
+    return !this.terminalRestored && !this.editorActive && generation === this.inputHandoffGeneration
+      && this.input.getMode() === 'input' && !this.overlay.isActive()
+  }
+
   private async handleCtrlV(): Promise<void> {
+    const generation = this.inputHandoffGeneration
+    if (!this.canApplyPaste(generation)) return
     // 非 input 模式不处理（overlay / approval 等）
     if (this.input.getMode() !== 'input') return
 
     // 焦点防抖：overlay 关闭后短时间内 Ctrl+V 走文本路径
     if (Date.now() - this.lastInputFocusAt < FOCUS_DEBOUNCE_MS) {
       const text = await readTextFromClipboard()
+      if (!this.canApplyPaste(generation)) return
       if (text) {
         this.inputLine.insertText(text)
         this.writeBatcher.schedule()
@@ -6138,6 +6168,7 @@ export class TuiApp {
 
     try {
       const result = await readImageFromClipboard()
+      if (!this.canApplyPaste(generation)) return
       if (result) {
         if (this.inputLine.images.length >= MAX_IMAGES) {
           this.commitStatic(color(`⚠ 最多附加 ${MAX_IMAGES} 张图片`, this.theme.warning))
@@ -6153,7 +6184,9 @@ export class TuiApp {
     }
 
     // 无图或失败 → 走文本粘贴路径
+    if (!this.canApplyPaste(generation)) return
     const text = await readTextFromClipboard()
+    if (!this.canApplyPaste(generation)) return
     if (text) {
       this.inputLine.insertText(text)
       this.writeBatcher.schedule()

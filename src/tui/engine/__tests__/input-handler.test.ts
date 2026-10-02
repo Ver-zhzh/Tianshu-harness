@@ -16,6 +16,17 @@ function makeStdin(): ReadStream & { emitData(s: string): void } {
   return ee
 }
 
+describe('enhanced terminal Meta shortcuts', () => {
+  for (const [sequence, char, shift] of [['\x1b[118;3u', 'v', false], ['\x1b[86;4u', 'V', true]] as const) {
+    it(sequence, () => {
+      const stdin = makeStdin(); const handler = new InputHandler({ stdin }); const keys: KeyPress[] = []
+      handler.onAnyKey(key => keys.push(key))
+      try { stdin.emitData(sequence); assert.equal(keys[0]?.char, char); assert.equal(keys[0]?.meta, true); assert.equal(keys[0]?.shift, shift) }
+      finally { handler.dispose() }
+    })
+  }
+})
+
 describe('InputHandler · escape timeout dispatch (B1)', () => {
   it('lone ESC dispatches escape after timeout', async () => {
     const stdin = makeStdin()

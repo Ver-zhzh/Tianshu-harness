@@ -78,3 +78,43 @@ jobs:
         # （`/D:/repo/...`），经 join/readdir/mkdir 成 `D:\D:\...` → ENOENT。scripts 层
         # （swebench-run 的 LOCAL_TMP）与 src 侧（promotion 的 existsSync 判据）各一处。
         run: npx tsx scripts/run-node-tests.ts scripts/ src/context/__tests__/promotion.test.ts
+
+  cli-frontend:
+    name: CLI frontend (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    env:
+      RIVET_HOME: ${{ github.workspace }}/ceshi/frontend-platform/home
+      FRONTEND_BUILD: ${{ github.workspace }}/ceshi/frontend-platform/build
+      # Unit fixtures choose their host explicitly; a runner is not a GUI terminal.
+      TERM: rivet-test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: actions/setup-python@v5
+        if: runner.os != 'Windows'
+        with:
+          python-version: '3.x'
+      - run: npm ci
+      - run: npm run typecheck
+      - name: Frontend tests and native POSIX PTY
+        run: >-
+          node --import tsx scripts/run-node-tests.ts
+          src/tui/ src/cli/ src/__tests__/external-editor
+          src/__tests__/platform-conventions src/__tests__/platform-shell
+          scripts/__tests__/test-home-isolation
+      - name: Build CLI frontend
+        run: >-
+          node --import tsx --input-type=module -e
+          "import { build } from 'tsup'; import config from './tsup.config.ts'; await build({ ...config, config: false, outDir: process.env.FRONTEND_BUILD, clean: false, publicDir: false, onSuccess: undefined });"
+      - name: Verify bundled CLI help
+        run: >-
+          node --input-type=module -e
+          "import { execFileSync } from 'node:child_process'; import { join } from 'node:path'; for (const option of ['--help', '--version']) process.stdout.write(execFileSync(process.execPath, [join(process.env.FRONTEND_BUILD, 'cli', 'entry.js'), option], { encoding: 'utf8', windowsHide: true }));"

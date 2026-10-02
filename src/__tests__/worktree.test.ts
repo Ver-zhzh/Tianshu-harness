@@ -2,12 +2,12 @@ import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { parseWorktreeList, buildWorktreeArgs, getCurrentGitRef, createWorktree, cleanupStaleHandsBranches, removeWorktree, hasUnlandedWork, commitAll } from '../agent/worktree.js'
 
 function git(dir: string, args: string[]): string {
-  return execFileSync('git', args, { cwd: dir, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] })
+  return execFileSync('git', args, { cwd: dir, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
 }
 
 function initGitRepo(dir: string, branch = 'main'): void {
@@ -147,7 +147,9 @@ describe('createWorktree branch uniqueness (S1b)', () => {
     assert.ok(wt.branch.startsWith(baseBranch), 'unique branch keeps base prefix')
 
     const list = git(repo, ['worktree', 'list', '--porcelain'])
-    assert.ok(list.includes(wt.path), 'worktree is registered')
+    assert.ok(parseWorktreeList(list).some(entry =>
+      resolve(entry.path) === resolve(wt!.path) && entry.branch === wt!.branch,
+    ), 'worktree is registered with the selected branch')
   })
 
   it('includes git stderr in the thrown error', () => {

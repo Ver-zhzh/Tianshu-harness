@@ -90,7 +90,7 @@ test('TTL 内不重复扫盘，invalidate 后重新扫', async () => {
       now: () => NOW,
     })
     source.data()
-    await waitFor(() => roots > 0, 3_000, '首次扫盘')
+    await waitFor(() => roots > 0 && !source.data().loading, 3_000, '首次扫盘完成')
     const afterFirst = roots
     source.data()
     source.data()

@@ -49,7 +49,7 @@ export interface ClipboardReader {
 }
 
 export interface ShellClipboardOpts {
-  execFile?: (bin: string, args: string[]) => Promise<{ stdout: string; stderr?: string }>
+  execFile?: (bin: string, args: string[]) => Promise<{ stdout: string | Buffer; stderr?: string | Buffer }>
   platform?: NodeJS.Platform
   readFile?: (path: string) => Promise<Buffer>
   tmpdir?: string
@@ -160,7 +160,7 @@ export async function readImageFromClipboard(): Promise<ClipboardImage | null> {
  * Read plain text from system clipboard.
  * Used as fallback when Ctrl+V finds no image in clipboard.
  */
-export async function readTextFromClipboard(): Promise<string | null> {
+export async function readTextFromClipboard(opts: Pick<ShellClipboardOpts, 'platform' | 'execFile'> = {}): Promise<string | null> {
   // Test injection path（与 readImageFromClipboard 同款）
   if (_reader?.readText) {
     try {
@@ -169,25 +169,26 @@ export async function readTextFromClipboard(): Promise<string | null> {
       return null
     }
   }
-  const pf = process.platform
+  const pf = opts.platform ?? process.platform
+  const ef = opts.execFile ?? (async (bin: string, args: string[]) => execFileAsync(bin, args, { windowsHide: true, timeout: 5_000, maxBuffer: 1024 * 1024 }))
   try {
     if (pf === 'darwin') {
-      const r = await execFileAsync('pbpaste', [], { windowsHide: true, timeout: 5_000, maxBuffer: 1024 * 1024 })
-      return r.stdout
+      const r = await ef('pbpaste', [])
+      return r.stdout.toString()
     }
     if (pf === 'linux') {
       // Try wl-paste first (Wayland), then xclip (X11)
       try {
-        const r = await execFileAsync('wl-paste', [], { windowsHide: true, timeout: 5_000, maxBuffer: 1024 * 1024 })
-        return r.stdout
+        const r = await ef('wl-paste', ['--no-newline', '--type', 'text'])
+        return r.stdout.toString()
       } catch {
-        const r = await execFileAsync('xclip', ['-selection', 'clipboard', '-o'], { windowsHide: true, timeout: 5_000, maxBuffer: 1024 * 1024 })
-        return r.stdout
+        const r = await ef('xclip', ['-selection', 'clipboard', '-o'])
+        return r.stdout.toString()
       }
     }
     if (pf === 'win32') {
-      const r = await execFileAsync('powershell', ['-NoProfile', '-Command', 'Get-Clipboard'], { windowsHide: true, timeout: 5_000, maxBuffer: 1024 * 1024 })
-      return r.stdout
+      const r = await ef('powershell', ['-NoProfile', '-Command', '[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);Get-Clipboard -Raw'])
+      return r.stdout.toString()
     }
   } catch {
     // No clipboard text tools available
@@ -220,7 +221,7 @@ async function tryNativeClipboard(): Promise<ClipboardImage | null> {
 
 export async function tryShellClipboard(opts?: ShellClipboardOpts): Promise<ClipboardImage | null> {
   const ef = opts?.execFile ?? (async (bin, args) => {
-    const r = await execFileAsync(bin, args, { windowsHide: true, timeout: 15_000, maxBuffer: 50 * 1024 * 1024 })
+    const r = await execFileAsync(bin, args, { encoding: 'buffer', windowsHide: true, timeout: 15_000, maxBuffer: 50 * 1024 * 1024 })
     return { stdout: r.stdout, stderr: r.stderr }
   })
   const pf = opts?.platform ?? process.platform
@@ -243,9 +244,13 @@ export async function tryShellClipboard(opts?: ShellClipboardOpts): Promise<Clip
 
 // ── macOS: osascript（单次嵌套 coercion）──
 
+function appleScriptLiteral(value: string): string {
+  return '"' + value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\r/g, '\\r').replace(/\n/g, '\\n') + '"'
+}
+
 async function tryMacOSClipboard(
   pf: NodeJS.Platform,
-  ef: (bin: string, args: string[]) => Promise<{ stdout: string }>,
+  ef: (bin: string, args: string[]) => Promise<{ stdout: string | Buffer }>,
   rf: (path: string) => Promise<Buffer>,
   td: string,
   uuid: () => string,
@@ -264,7 +269,7 @@ async function tryMacOSClipboard(
   const script = [
     'try',
     '  set imgData to the clipboard as «class PNGf»',
-    `  set filePath to POSIX file "${pngPath}" as text`,
+    `  set filePath to POSIX file ${appleScriptLiteral(pngPath)} as text`,
     '  set fRef to open for access file filePath with write permission',
     '  set eof of fRef to 0',
     '  write imgData to fRef',
@@ -273,7 +278,7 @@ async function tryMacOSClipboard(
     'on error',
     '  try',
     '    set imgData to the clipboard as «class TIFF»',
-    `    set filePath to POSIX file "${tiffPath}" as text`,
+    `    set filePath to POSIX file ${appleScriptLiteral(tiffPath)} as text`,
     '    set fRef to open for access file filePath with write permission',
     '    set eof of fRef to 0',
     '    write imgData to fRef',
@@ -282,7 +287,7 @@ async function tryMacOSClipboard(
     '  on error',
     '    try',
     '      set imgData to the clipboard as «class JPEG»',
-    `      set filePath to POSIX file "${jpgPath}" as text`,
+    `      set filePath to POSIX file ${appleScriptLiteral(jpgPath)} as text`,
     '      set fRef to open for access file filePath with write permission',
     '      set eof of fRef to 0',
     '      write imgData to fRef',
@@ -298,7 +303,7 @@ async function tryMacOSClipboard(
   let stdout: string
   try {
     const r = await ef('osascript', ['-e', script])
-    stdout = r.stdout
+    stdout = r.stdout.toString()
   } catch {
     // osascript 缺失/执行失败（无工具/无剪贴板授权）→ 调用方走文本粘贴
     return null
@@ -334,19 +339,20 @@ async function tryMacOSClipboard(
 // ── Linux: xclip / wl-paste ──
 
 async function tryLinuxClipboard(
-  ef: (bin: string, args: string[]) => Promise<{ stdout: string }>,
+  ef: (bin: string, args: string[]) => Promise<{ stdout: string | Buffer }>,
 ): Promise<ClipboardImage | null> {
   // Wayland first (more common on modern desktops)
   const commands: [string, string[]][] = [
-    ['wl-paste', ['-t', 'image/png']],
+    ['wl-paste', ['--no-newline', '-t', 'image/png']],
     ['xclip', ['-selection', 'clipboard', '-t', 'image/png', '-o']],
   ]
   for (const [bin, args] of commands) {
     try {
       const r = await ef(bin, args)
       if (!r.stdout || r.stdout.length === 0) continue
-      const buf = Buffer.from(r.stdout, 'latin1') // binary data comes through stdout
+      const buf = Buffer.isBuffer(r.stdout) ? r.stdout : Buffer.from(r.stdout, 'latin1')
       if (buf.length === 0) continue
+      if (detectImageMime(buf, 'clipboard') !== 'image/png') continue
       return bufToClipboardImage(await activeImageShrinker()(buf), 'clipboard.png')
     } catch {
       // Try next
@@ -358,7 +364,7 @@ async function tryLinuxClipboard(
 // ── Windows: PowerShell ──
 
 async function tryWindowsClipboard(
-  ef: (bin: string, args: string[]) => Promise<{ stdout: string }>,
+  ef: (bin: string, args: string[]) => Promise<{ stdout: string | Buffer }>,
   rf: (path: string) => Promise<Buffer>,
   td: string,
   uuid: () => string,
@@ -389,7 +395,7 @@ async function convertToPng(
   pf: NodeJS.Platform,
   buf: Buffer,
   srcPath: string,
-  ef: (bin: string, args: string[]) => Promise<{ stdout: string }>,
+  ef: (bin: string, args: string[]) => Promise<{ stdout: string | Buffer }>,
   td: string,
   uuid: () => string,
   rf?: (path: string) => Promise<Buffer>,
