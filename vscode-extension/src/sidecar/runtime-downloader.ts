@@ -10,7 +10,7 @@
  * jsDelivr 不承载 Release 资产（且 50MB 上限），不在链路内。
  *
  * 代理：Node 24 内置 fetch（undici）不会自动读 https_proxy。通过
- * EnvHttpProxyAgent 在企业代理环境下自动接入——零外部依赖。
+ * 随扩展打包的 EnvHttpProxyAgent 在企业代理环境下自动接入。
  */
 import * as vscode from 'vscode'
 import { createHash } from 'node:crypto'

@@ -21,6 +21,7 @@ function onPath(name: string): string | undefined {
 
 /** Resolve Windows Node shims to argv; prompts must never enter cmd.exe. */
 export function resolveCliCommand(cli: string, args: string[], cwd: string): { command: string; args: string[] } {
+  if (/\.(?:c|m)?js$/i.test(cli)) return { command: process.execPath, args: [resolve(cwd, cli), ...args] }
   if (process.platform !== 'win32') return { command: cli, args }
   const file = /[\\/]/.test(cli) ? resolve(cwd, cli) : onPath(cli) ?? cli
   if (!/\.(cmd|bat)$/i.test(file)) return { command: file, args }

@@ -15,6 +15,17 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const require = createRequire(import.meta.url)
 const tick = () => new Promise((resolve) => setImmediate(resolve))
 
+test('Node CLI source entries use the current runtime and preserve arguments on every platform', () => {
+  const { resolveCliCommand } = load('src/sidecar/cli-command.ts')
+  const args = ['serve', '--port', '1234', '中文 & path']
+  for (const name of ['main.js', 'entry.mjs', 'entry.cjs']) {
+    const entry = join('源码 路径', name)
+    const command = resolveCliCommand(entry, args, process.cwd())
+    assert.equal(command.command, process.execPath)
+    assert.deepEqual(Array.from(command.args), [resolve(entry), ...args])
+  }
+})
+
 // The extension host API is unavailable in Node; keep the production modules real.
 function load(relative: string, mocks: Record<string, unknown> = {}, globals: Record<string, unknown> = {}) {
   const cache = new Map<string, { exports: any }>()
