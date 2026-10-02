@@ -1237,6 +1237,8 @@ export class TuiApp {
       // Esc 回到审批 y/n 提示。其余键落入 InputLine 正常编辑。
       if (this.approvalIntentController.approvalEditMode && this.approvalIntentController.approvalPending) {
         if (key.name === 'ctrl_c') {
+          if (this.approvalDraft) this.inputLine.restore(this.approvalDraft)
+          this.approvalDraft = null
           this.resolveApproval(false)
           this.approvalIntentController.approvalEditMode = false
           this.approvalIntentController.approvalEditError = ''
