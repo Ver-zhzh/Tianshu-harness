@@ -92,7 +92,8 @@ export function entryDisplayName(toolName: string, input: Record<string, unknown
 
   // read 族：file_path > file > path
   if (t === 'read_file' || t === 'read' || t === 'read_policy' || t === 'read_section') {
-    const path = input.file_path ?? input.file ?? input.path ?? '?'
+    const path = input.file_path ?? input.file ?? input.path
+      ?? (Array.isArray(input.file_paths) ? input.file_paths.join(', ') : '?')
     return typeof path === 'string' ? path : '?'
   }
 

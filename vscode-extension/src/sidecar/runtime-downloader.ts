@@ -79,6 +79,7 @@ export function rivetOnPath(): Promise<boolean> {
     const probe = spawn(os.platform() === 'win32' ? 'where' : 'which', ['rivet'], {
       stdio: 'ignore',
       shell: os.platform() === 'win32',
+      windowsHide: true,
     })
     probe.on('close', (code) => resolve(code === 0))
     probe.on('error', () => resolve(false))
@@ -124,7 +125,7 @@ function sha256File(path: string): string {
 function untar(archive: string, destDir: string): Promise<void> {
   // macOS / Linux / Windows 10+ 都自带 tar
   return new Promise((resolve, reject) => {
-    const child = spawn('tar', ['-xzf', archive, '-C', destDir], { stdio: 'ignore' })
+    const child = spawn('tar', ['-xzf', archive, '-C', destDir], { stdio: 'ignore', windowsHide: true })
     child.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`tar exit ${code}`))))
     child.on('error', reject)
   })

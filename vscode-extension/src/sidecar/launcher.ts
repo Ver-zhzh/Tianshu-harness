@@ -14,13 +14,15 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { createServer } from 'node:net'
 import * as os from 'node:os'
+import { join } from 'node:path'
+import { resolveCliCommand } from './cli-command.js'
 
 export interface SidecarHandle {
   port: number
   token: string
   baseUrl: string
-  /** 结束进程（幂等）。 */
-  dispose: () => void
+  /** 结束进程树并等待退出（幂等）。 */
+  dispose: () => Promise<void>
   /** 进程退出时回调（异常退出用于 UI 提示 + 重启入口）。 */
   onExit: (cb: (code: number | null) => void) => void
 }
@@ -33,9 +35,11 @@ export interface LauncherOptions {
   port?: number
   /** 日志行回调（接 OutputChannel）。 */
   onLog?: (line: string) => void
+  /** 启动未完成时取消健康检查并回收进程。 */
+  signal?: AbortSignal
 }
 
-export type LaunchFailReason = 'cli-not-found' | 'spawn-failed' | 'health-timeout'
+export type LaunchFailReason = 'cli-not-found' | 'spawn-failed' | 'health-timeout' | 'cleanup-failed'
 
 export class SidecarLaunchError extends Error {
   readonly reason: LaunchFailReason
@@ -66,10 +70,12 @@ async function waitHealthy(
   token: string,
   child: ChildProcess,
   getSpawnError: () => Error | undefined,
+  signal?: AbortSignal,
   timeoutMs = 20_000,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
+    signal?.throwIfAborted()
     const spawnErr = getSpawnError()
     if (spawnErr) {
       const code = (spawnErr as NodeJS.ErrnoException).code
@@ -84,36 +90,51 @@ async function waitHealthy(
     if (child.exitCode !== null) {
       throw new SidecarLaunchError(`sidecar 启动失败（exit ${child.exitCode}）`, 'spawn-failed')
     }
+    const healthController = new AbortController()
+    const cancelHealth = () => healthController.abort()
+    const timer = setTimeout(cancelHealth, 2_000)
+    signal?.addEventListener('abort', cancelHealth, { once: true })
     try {
       const res = await fetch(`${baseUrl}/health`, {
         headers: { authorization: `Bearer ${token}` },
-        signal: AbortSignal.timeout(2_000),
+        signal: healthController.signal,
       })
       if (res.ok) return
     } catch {
       // not up yet
+    } finally {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', cancelHealth)
     }
+    signal?.throwIfAborted()
     await new Promise((r) => setTimeout(r, 300))
   }
   throw new SidecarLaunchError('sidecar 健康检查超时（20s）', 'health-timeout')
 }
 
 export async function launchSidecar(opts: LauncherOptions): Promise<SidecarHandle> {
+  opts.signal?.throwIfAborted()
   const cli = opts.cliPath?.trim() || 'rivet'
   const port = opts.port && opts.port > 0 ? opts.port : await pickFreePort()
+  opts.signal?.throwIfAborted()
   const token = randomBytes(24).toString('hex')
   const baseUrl = `http://127.0.0.1:${port}`
 
-  const child = spawn(cli, ['serve', '--port', String(port)], {
+  const command = resolveCliCommand(cli, ['serve', '--port', String(port)], opts.cwd)
+  const child = spawn(command.command, command.args, {
     cwd: opts.cwd,
     env: { ...process.env, RIVET_SERVER_TOKEN: token },
     stdio: ['ignore', 'pipe', 'pipe'],
-    // Windows 上 npm 全局命令是 .cmd shim，需要 shell 解析（对齐 CLI 侧
-    // /update 的 npm.cmd 经验教训）。
-    shell: os.platform() === 'win32',
+    shell: false,
+    windowsHide: true,
   })
   let spawnError: Error | undefined
-  child.on('error', (err) => { spawnError = err })
+  let settleStopped!: () => void
+  const stopped = new Promise<void>((resolve) => { settleStopped = resolve })
+  child.on('error', (err) => {
+    spawnError = err
+    if (!child.pid) settleStopped()
+  })
 
   const log = (chunk: Buffer) => {
     for (const line of chunk.toString().split('\n')) {
@@ -125,25 +146,61 @@ export async function launchSidecar(opts: LauncherOptions): Promise<SidecarHandl
 
   const exitCbs: Array<(code: number | null) => void> = []
   let disposed = false
+  let disposal: Promise<void> | undefined
   child.on('exit', (code) => {
+    settleStopped()
     if (!disposed) for (const cb of exitCbs) cb(code)
   })
+  const dispose = (): Promise<void> => {
+    if (!disposal) {
+      disposed = true
+      disposal = (async () => {
+        if (os.platform() === 'win32' && child.pid && child.exitCode === null && child.signalCode === null) {
+          await new Promise<void>((resolve, reject) => {
+            const killer = spawn(join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'taskkill.exe'),
+              ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true })
+            const fail = (message: string) => {
+              if (child.exitCode !== null || child.signalCode !== null) resolve()
+              else reject(new SidecarLaunchError(message, 'cleanup-failed'))
+            }
+            killer.once('error', (err) => fail(`sidecar 进程树回收失败: ${err.message}`))
+            killer.once('close', (code) => {
+              if (code === 0) resolve()
+              else fail(`sidecar 进程树回收失败（taskkill exit ${code}）`)
+            })
+          })
+        } else {
+          child.kill()
+        }
+        await stopped
+      })()
+    }
+    return disposal
+  }
+  let cancelLaunch!: () => void
+  const cancelled = new Promise<never>((_resolve, reject) => {
+    cancelLaunch = () => {
+      void dispose().catch(() => {})
+      reject(new Error('sidecar 启动已取消'))
+    }
+  })
+  opts.signal?.addEventListener('abort', cancelLaunch, { once: true })
 
   try {
-    await waitHealthy(baseUrl, token, child, () => spawnError)
+    if (opts.signal?.aborted) cancelLaunch()
+    await Promise.race([waitHealthy(baseUrl, token, child, () => spawnError, opts.signal), cancelled])
   } catch (err) {
-    child.kill()
+    await dispose()
     throw err
+  } finally {
+    opts.signal?.removeEventListener('abort', cancelLaunch)
   }
 
   return {
     port,
     token,
     baseUrl,
-    dispose: () => {
-      disposed = true
-      child.kill()
-    },
+    dispose,
     onExit: (cb) => exitCbs.push(cb),
   }
 }
