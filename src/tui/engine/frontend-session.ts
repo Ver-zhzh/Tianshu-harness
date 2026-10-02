@@ -1,7 +1,7 @@
 import type { WriteStream } from 'node:tty'
 import { UIHistory, type UIRecordInput } from '../ui-history.js'
 import { ConversationViewport, viewportCellSlice, viewportHighlightCells, wrapViewportText, type ViewportCell } from './conversation-viewport.js'
-import { FullscreenEngine, type MousePress, type TerminalSize } from './fullscreen-engine.js'
+import { FullscreenEngine, MOUSE_ON, MOUSE_OFF, type MousePress, type TerminalSize } from './fullscreen-engine.js'
 import type { KeyPress } from './input-handler.js'
 import { budgetInputChrome } from './input-layout.js'
 import { decodeTeamPanelModel } from '../team-panel-model.js'
@@ -43,6 +43,7 @@ export class FrontendSession {
   private linkPress?: { x: number; y: number; moved: boolean }
   private visible: ViewportCell[] = []
   private historyTop = 0
+  private copyRow?: number
   private clearedCount = 0
   private composer: Array<{ y: number; line: number; startCol: number }> = []
   private diagnostic = ''
@@ -54,7 +55,7 @@ export class FrontendSession {
   }
 
   constructor(
-    stdout: WriteStream,
+    private readonly stdout: WriteStream,
     private readonly getSize: () => TerminalSize,
     private readonly onChange: () => void,
     private readonly onDiagnostic: (text: string) => void,
@@ -169,6 +170,12 @@ export class FrontendSession {
   startFullscreen(mouse: boolean): void { this.engine.enter(mouse); this.mouseEnabled = mouse; this.onChange() }
   stopFullscreen(): void { this.engine.leave(); this.mouseEnabled = false; this.clearSelection(); this.reading = false; this.viewport?.stopReading() }
   setMouse(enabled: boolean): void { this.engine.setMouse(enabled); this.mouseEnabled = enabled; if (!enabled) this.clearSelection() }
+  setHistoryMouse(enabled: boolean): void {
+    if (this.engine.active) return
+    this.stdout.write(enabled ? MOUSE_ON : MOUSE_OFF)
+    this.mouseEnabled = enabled
+    if (!enabled) this.clearSelection()
+  }
 
   render(liveLines: FrontendLiveLine[], chromeStart: number, identity: string | string[]): void {
     if (!this.engine.active || !this.viewport) return
@@ -204,7 +211,8 @@ export class FrontendSession {
     }
     const selectedHistory = this.highlight(historyLines)
     const padding = Array.from({ length: Math.max(0, available - keptDynamic.length - statusRows - intro.length - selectedHistory.length) }, () => '')
-    const footer = statusRows ? [wrapViewportText(this.viewport.status, width)[0] ?? ''] : []
+    const footer = statusRows ? [wrapViewportText(this.selection?.moved ? '[复制] Ctrl+C · Esc 取消选区' : this.viewport.inlineStatus, width)[0] ?? ''] : []
+    this.copyRow = statusRows && this.selection?.moved ? identityRows.length + intro.length + selectedHistory.length + padding.length + 1 : undefined
     const frame = [...identityRows, ...intro, ...selectedHistory, ...padding, ...footer, ...keptDynamic.map(l => l.text), ...keptChrome.map(l => l.text)]
     this.composer = []
     let caret: { row: number; col: number } | undefined
@@ -225,7 +233,8 @@ export class FrontendSession {
     const lines = budget ? this.viewport.render(width, budget) : []
     this.visible = this.viewport.visibleCells.slice()
     if (!budget) this.visible = []
-    return [title, ...this.highlight(lines), wrapViewportText(this.viewport.status, width)[0] ?? ''].slice(0, height)
+    this.copyRow = this.selection?.moved ? lines.length + 2 : undefined
+    return [title, ...this.highlight(lines), wrapViewportText(this.selection?.moved ? '[复制] Ctrl+C · Esc 取消选区' : this.viewport.status, width)[0] ?? ''].slice(0, height)
   }
   async showHistory(current: () => boolean = () => true): Promise<void> {
     await this.ready
@@ -244,7 +253,7 @@ export class FrontendSession {
     if (key.name === 'escape' && this.selection) { this.clearSelection(); this.onChange(); return true }
     return this.viewport.handleKey(key)
   }
-  handleKey(key: KeyPress): boolean {
+  handleKey(key: KeyPress, hasDraft = false): boolean {
     if (!this.engine.active || !this.viewport) return false
     if (key.name === 'pageup' || key.name === 'pagedown') {
       this.reading = true
@@ -252,6 +261,11 @@ export class FrontendSession {
       return this.viewport.handleKey(key)
     }
     if (!this.reading) return false
+    if (key.name === 'escape' && this.selection?.moved) { this.clearSelection(); this.onChange(); return true }
+    if (hasDraft || (key.char && !key.ctrl) || key.meta || ['backspace', 'delete', 'ctrl_u', 'ctrl_w', 'ctrl_j', 'ctrl_v', 'ctrl_z', 'ctrl_y'].includes(key.name)) {
+      this.closeHistory()
+      return false
+    }
     if (this.handleHistoryKey(key)) return true
     if (key.name === 'escape') { this.reading = false; this.viewport.stopReading(); this.onChange(); return true }
     return false
@@ -304,6 +318,7 @@ export class FrontendSession {
     }
     return lines.join('\n') || null
   }
+  copyButtonHit(x: number, y: number): boolean { return !!this.selection?.moved && y === this.copyRow && x >= 1 && x <= 6 }
   clearSelection(): void { this.selection = undefined; this.linkPress = undefined }
   linkTargetAt(event: MousePress): string | null {
     if (event.type === 'press' && event.ctrl) this.linkPress = { x: event.x, y: event.y, moved: false }

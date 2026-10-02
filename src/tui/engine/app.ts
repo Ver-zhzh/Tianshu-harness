@@ -40,6 +40,7 @@ import { toolExpandHint } from '../truncation-marker.js'
 import { MAX_IMAGES } from './image-attach.js'
 import { looksLikeFilePath } from './path-like.js'
 import { formatImagePasteNotices, loadPastedImages, parseImagePathPaste } from './image-paste.js'
+import { homedir } from 'node:os'
 import { readImageFromClipboard, readTextFromClipboard, looksLikeBinaryPaste, FOCUS_DEBOUNCE_MS } from './clipboard-image.js'
 import { WriteBatcher } from './write-batcher.js'
 import { StreamRenderer } from './stream-renderer.js'
@@ -1055,10 +1056,14 @@ export class TuiApp {
     this.overlay.register('terminal-mode', this.modePanel)
     this.helpPanel = new HelpPanel(() => this.workflow.preferences, () => this.theme, () => this.deactivateOverlay(), text => { this.inputLine.setValue(text); this.renderLive() })
     this.overlay.register('help', this.helpPanel)
-    this.overlay.register('ui-history', { render: (width, height) => this.frontend.renderHistory(width, height) })
+    this.overlay.register('ui-history', {
+      render: (width, height) => this.frontend.renderHistory(width, height),
+      onActivate: () => this.frontend.setHistoryMouse(this.workflow.preferences.mouse),
+      onDeactivate: () => this.frontend.setHistoryMouse(false),
+    })
     const mouse = new FrontendMouse()
     this.input.onMouse(event => {
-      if (!this.frontend.isFullscreen || !this.workflow.preferences.mouse || this.editorActive) return
+      if ((!this.frontend.isFullscreen && this.overlay.activeId() !== 'ui-history') || !this.workflow.preferences.mouse || this.editorActive) return
       mouse.handle(event, { session: this.frontend, line: this.inputLine, overlay: this.overlay, controller: this.overlayController,
         columns: this.columns, render: () => this.renderLive(), key: name => this.handleOverlayKey({ char: '', name }),
         copy: () => this.copyFrontendSelection(), copyOnSelect: this.workflow.preferences.copyOnSelect, message: text => this.commitStatic(text) })
@@ -1125,6 +1130,7 @@ export class TuiApp {
       if (this.overlay.activeId() === 'permissions' && this.permissionPanel) { this.permissionPanel.paste(text); this.overlay.rerender(); return }
       if (this.overlay.isActive()) return
       if (!this.canApplyPaste(generation)) return
+      this.frontend.closeHistory()
       // 确认窗口内粘贴 = 继续对话：取消 pending-exit 再插入文本
       // （与打字路径的取消同一状态位，见 handleKey 的 Normal input processing）。
       if (this.inputController.ctrlCPendingSince > 0) {
@@ -1155,7 +1161,7 @@ export class TuiApp {
       // 全员加载失败才回退普通文本（保留旧的单图语义）。
       const pastedPaths = parseImagePathPaste(text)
       if (pastedPaths) {
-        const outcome = await loadPastedImages(pastedPaths.map((p) => resolve(p)), {
+        const outcome = await loadPastedImages(pastedPaths.map((p) => /^~[\\/]/.test(p) ? resolve(homedir(), p.slice(2)) : resolve(p)), {
           slots: MAX_IMAGES - this.inputLine.images.length,
         })
         if (!this.canApplyPaste(generation)) return
@@ -1289,7 +1295,7 @@ export class TuiApp {
 
       // 计划审阅卡钉在 chrome：overlay 未开时先吃按键，避免漏进 slash / 输入框。
       if (this.pendingPlanApproval && !this.overlay.isActive() && this.handlePlanReviewKey(key)) return
-      if (!this.overlay.isActive() && this.frontend.handleKey(key)) return
+      if (!this.overlay.isActive() && this.frontend.handleKey(key, !!this.inputLine.value || this.inputLine.images.length > 0)) return
 
       // ── Global shortcuts (before input line processing) ──────
       if (key.name === 'shift_tab') {
@@ -1698,7 +1704,6 @@ export class TuiApp {
   private copyFrontendSelection(): boolean {
     const selection = this.frontend.copySelection()
     if (!selection) return false
-    this.frontend.clearSelection()
     void copyTextToClipboard(selection, sequence => { if (!this.terminalRestored) this.stdout.write(sequence) }, { signal: this.clipboardAbort.signal }).then(method => {
       if (this.terminalRestored || method === 'cancelled') return
       this.commitStatic(`${method === 'native' ? '已复制' : '已发送复制请求'}（${selection.length}字符）`)
@@ -4495,7 +4500,10 @@ export class TuiApp {
       // 备用屏只在确实处于激活态时才退出：无条件发 ?1049l 会让部分终端跳到
       // 一个陈旧的保存光标位置。
       if (this.frontend.isFullscreen) this.frontend.stopFullscreen()
-      else if (this.overlay.isActive()) this.stdout.write(ANSI.ALT_SCREEN_OFF)
+      else if (this.overlay.isActive()) {
+        if (this.overlay.activeId() === 'ui-history') this.frontend.setHistoryMouse(false)
+        this.stdout.write(ANSI.ALT_SCREEN_OFF)
+      }
       this.stdout.write('\x1B[?2004l')
       // 弹出 Kitty keyboard protocol（与 start() 的 DISAMBIGUATE_ON 成对），
       // 避免把增强键盘状态遗留给 shell/后续程序。
