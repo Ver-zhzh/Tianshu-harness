@@ -537,6 +537,8 @@ function extensionFixture(opts: { runtime?: string; delayedHealth?: boolean; del
   })
   const extension = load('src/extension.ts', {
     vscode: {
+      EventEmitter: class { event() { return { dispose() {} } } fire() {} },
+      lm: { registerLanguageModelChatProvider: () => ({ dispose() {} }) },
       window: { createOutputChannel: () => ({ appendLine: (line: string) => logs.push(line) }), showInformationMessage: async () => {}, showErrorMessage: async (message: string) => logs.push(message) },
       workspace: { workspaceFolders: [{ uri: { fsPath: root } }], getConfiguration: () => ({ get: (key: string) => key === 'serverPort' ? opts.realPort ?? 12345 : key === 'cliPath' ? opts.realShim : undefined }) },
       commands: { registerCommand: (key: string, cb: any) => { commands.set(key, cb); return { dispose() {} } } },
@@ -550,6 +552,9 @@ function extensionFixture(opts: { runtime?: string; delayedHealth?: boolean; del
     './delegation/executor.js': { DelegationExecutor: class { register() {} detach() {} } },
     './views/status-bar.js': { StatusBarController: class { setSidecarState() {} } },
     './scm/commit-message.js': { registerCommitMessageCommand(_context: unknown, resolve: any) { getCliPath = resolve } },
+    './scm/source-control.js': { TianshuSourceControl: class {} },
+    './chat/human-interaction.js': { ChatHumanInteraction: class {} },
+    './chat/participant.js': { TianshuChatParticipant: class {} },
     './sidecar/runtime-downloader.js': {
       rivetOnPath: async () => !opts.runtime,
       ensureRuntime: async () => {
