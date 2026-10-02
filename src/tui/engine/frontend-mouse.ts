@@ -7,11 +7,15 @@ import type { OverlayController } from './overlay-controller.js'
 import { getEditorCommand } from '../external-editor.js'
 import { boxInnerWidth } from '../box-chars.js'
 
-export function frontendOpenCommand(target: string, platform = process.platform): [string, string[]] {
+export function frontendOpenCommand(target: string, platform = process.platform, env: NodeJS.ProcessEnv = process.env): [string, string[]] {
   if (!/^https?:\/\//i.test(target)) {
     if (platform === 'win32') return ['notepad.exe', [target]]
     if (platform === 'darwin') return ['open', ['-t', target]]
     const editor = (getEditorCommand().match(/"[^"]*"|'[^']*'|[^\s]+/g) ?? []).map(part => part.replace(/^(["'])(.*)\1$/, '$2'))
+    if (env.TERM_PROGRAM === 'WezTerm') return ['wezterm', ['start', '--', ...editor, target]]
+    if (env.TERM === 'xterm-kitty') return ['kitty', [...editor, target]]
+    if (/^foot(-|$)/.test(env.TERM ?? '')) return ['foot', [...editor, target]]
+    if (env.TERM === 'alacritty') return ['alacritty', ['-e', ...editor, target]]
     return ['x-terminal-emulator', ['-e', ...editor, target]]
   }
   const encoded = Buffer.from(target).toString('base64')
@@ -22,13 +26,27 @@ export function frontendOpenCommand(target: string, platform = process.platform)
 }
 
 /** Local files always go to a text editor; file associations never execute them. */
-export function openFrontendTarget(target: string): Promise<void> {
-  const [command, args] = frontendOpenCommand(target)
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: 'ignore', windowsHide: true })
-    child.on('error', reject)
-    child.on('exit', code => code === 0 ? resolve() : reject(new Error(`打开程序退出 ${code}`)))
-  })
+export async function openFrontendTarget(target: string): Promise<void> {
+  const commands = [frontendOpenCommand(target)]
+  if (process.platform === 'linux' && !/^https?:\/\//i.test(target)) {
+    const editor = frontendOpenCommand(target, 'linux', {})[1].slice(1)
+    commands.push(['gnome-terminal', ['--', ...editor]], ['konsole', ['-e', ...editor]], ['xterm', ['-e', ...editor]])
+  }
+  let missing: unknown
+  for (const [command, args] of commands) {
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const child = spawn(command, args, { stdio: 'ignore', windowsHide: true })
+        child.once('error', reject)
+        child.once('exit', code => code === 0 ? resolve() : reject(new Error(`打开程序退出 ${code}`)))
+      })
+      return
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      missing = error
+    }
+  }
+  throw missing
 }
 
 export class FrontendMouse {

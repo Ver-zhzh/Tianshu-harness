@@ -1,7 +1,7 @@
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdir, writeFile, rm } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import {
   LANG_BY_EXT,
@@ -31,6 +31,8 @@ before(async () => {
   await writeFile(join(testDir, 'node_modules', 'pkg', 'index.js'), '')
   await writeFile(join(testDir, '.git', 'objects', 'hash'), '')
   await writeFile(join(testDir, '.rivet', 'knowledge', 'memory.json'), '')
+  await writeFile(join(testDir, '._sample.ts'), 'AppleDouble metadata')
+  await writeFile(join(testDir, '.DS_Store'), 'Finder metadata')
 })
 
 after(async () => {
@@ -74,7 +76,7 @@ describe('language inference', () => {
 describe('collectFiles', () => {
   it('returns files matching directory walk', async () => {
     const files = await collectFiles(testDir)
-    const names = files.map(f => f.replace(testDir + '/', ''))
+    const names = files.map(f => relative(testDir, f))
     assert.ok(names.includes('sample.ts'), `expected sample.ts, got ${names.join(', ')}`)
     assert.ok(names.includes('sample.js'), `expected sample.js`)
   })
@@ -86,12 +88,19 @@ describe('collectFiles', () => {
 
   it('skips .git', async () => {
     const files = await collectFiles(testDir)
-    assert.ok(!files.some(f => f.includes('.git/')), 'should not include .git files')
+    assert.ok(!files.some(f => relative(testDir, f).split(/[\\/]/).includes('.git')), 'should not include .git files')
   })
 
   it('skips .rivet', async () => {
     const files = await collectFiles(testDir)
-    assert.ok(!files.some(f => f.includes('.rivet/')), 'should not include .rivet files')
+    assert.ok(!files.some(f => relative(testDir, f).split(/[\\/]/).includes('.rivet')), 'should not include .rivet files')
+  })
+
+  it('skips macOS metadata without hiding ordinary dot directories', async () => {
+    const files = await collectFiles(testDir)
+    assert.ok(!files.some(f => f.split(/[\\/]/).at(-1)?.startsWith('._')), 'AppleDouble is not source code')
+    assert.ok(!files.some(f => f.endsWith('.DS_Store')), 'Finder metadata is not source code')
+    assert.ok(files.some(f => f.includes('.hidden-dir')), 'ordinary dot directories remain searchable')
   })
 
   it('does NOT skip .hidden-dir (only well-known tool dirs)', async () => {
@@ -101,7 +110,7 @@ describe('collectFiles', () => {
 
   it('returns nested files', async () => {
     const files = await collectFiles(testDir)
-    assert.ok(files.some(f => f.includes('sub/nested.tsx')), 'should include nested files')
+    assert.ok(files.some(f => relative(testDir, f) === join('sub', 'nested.tsx')), 'should include nested files')
   })
 
   it('returns single file when path is a file', async () => {

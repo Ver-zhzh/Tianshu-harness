@@ -1,8 +1,12 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { resolve } from 'node:path'
 import { parseMentions, normalizeMentionRefs, normalizeMentionPath } from '../mention-parser.js'
 
 describe('normalizeMentionRefs（P3-C 提交规范化）', () => {
+  it('dot-dot filename inside workspace stays local', () => {
+    assert.equal(normalizeMentionPath(resolve('workspace'), './..notes.ts'), '..notes.ts')
+  })
   it('cwd 内路径规范为相对路径', () => {
     const refs = parseMentions('fix @file:./src/../src/a.ts 与 @file:src/b.ts')
     const out = normalizeMentionRefs(refs, '/repo')

@@ -185,6 +185,8 @@ export async function collectFiles(searchPath: string): Promise<string[]> {
     }
     for (const entry of entries) {
       if (files.length >= MAX_FILES) return
+      // Finder/external-drive metadata is never source, including sidecars of excluded directories.
+      if (entry.name.startsWith('._') || entry.name === '.DS_Store') continue
       const full = join(dir, entry.name)
       if (entry.isDirectory()) {
         if (excludeDirs.has(entry.name)) continue

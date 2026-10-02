@@ -1,3 +1,4 @@
+import { DEFAULT_FRONTEND_PREFERENCES } from '../../frontend-preferences.js'
 /**
  * 派发契约卡在「同一 order id 再派发」时必须重新打卡。
  *
@@ -32,6 +33,7 @@ function makeApp() {
     stdin: new MockIn() as unknown as ReadStream,
     cols: 120, rows: 24, modelName: 'test', contextWindow: 200_000,
   })
+  app.setFrontendPreferences({ ...DEFAULT_FRONTEND_PREFERENCES, renderer: 'classic' })
   app.start()
   out.chunks.length = 0
   return { app, out }

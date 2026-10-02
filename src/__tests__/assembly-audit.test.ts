@@ -235,6 +235,7 @@ describe('assembly audit — field consumption coverage', () => {
   test('decisionStyle: confirmed display-only (regression guard)', () => {
     const decisionStyleConsumers = starDomainFields
       .find(f => f.field === 'decisionStyle')!.consumers
+      .map(f => f.replace(/\\/g, '/'))
       .filter(f => !f.includes('tui/') && !f.includes('main.ts'))
     const expectedTuiOnly = decisionStyleConsumers.every(
       f => f.includes('tui/') || f.includes('main.ts'),

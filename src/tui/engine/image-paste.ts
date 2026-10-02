@@ -17,39 +17,57 @@
 
 import { loadImageAttachment } from './image-attach.js'
 import { looksLikeImagePath } from './image-attach.js'
+import { existsSync } from 'node:fs'
 
 /** 加载器：路径 → data URL；失败抛错。可注入（单测不碰文件系统/图像工具）。 */
 export type ImagePathLoader = (absolutePath: string) => Promise<string>
 
 const defaultLoader: ImagePathLoader = async (absolutePath) => (await loadImageAttachment(absolutePath)).dataUrl
 
-/**
- * 去掉终端粘贴常见的两种包裹：成对引号（`"…"` / `'…'`）与反斜杠转义空格
- * （`/Users/x/My\ Shot.png`）。只处理这两类——不做 shell 反转义，避免把
- * Windows 路径里的反斜杠吃掉。
- */
-function unwrapPastedPath(line: string): string {
-  let out = line.trim()
-  const first = out[0]
-  if ((first === '"' || first === "'") && out.length > 1 && out.endsWith(first)) {
-    out = out.slice(1, -1)
+/** Parse path words only; no expansion or shell execution. Windows backslashes are literal. */
+function splitPathWords(line: string, windows: boolean): string[] | null {
+  const words: string[] = []
+  let word = '', quote = '', quotedWord = false
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]!
+    if (ch === "\\" && !windows && quote !== "'") {
+      const next = line[i + 1]
+      if (next === undefined) return null
+      if (quote === '"' && !['"', "\\", '$', '`'].includes(next)) word += ch
+      else { word += next; i++ }
+    } else if (quote) {
+      if (ch === quote) quote = ''
+      else word += ch
+    } else if ((ch === '"' || ch === "'") && (word.length === 0 || (!windows && quotedWord))) {
+      quote = ch
+      quotedWord = true
+    } else if (/\s/.test(ch)) {
+      if (word) { words.push(word); word = '' }
+      quotedWord = false
+    } else word += ch
   }
-  return out.replace(/\\ /g, ' ').trim()
+  if (quote) return null
+  if (word) words.push(word)
+  return words
 }
 
-/**
- * 把粘贴文本解析成图片路径列表。
- * 返回 null = 这不是「一整段图片路径」的粘贴（调用方按普通文本处理）。
- * 返回 [] 不会被返回——没有非空行也按 null 处理。
- */
-export function parseImagePathPaste(text: string): string[] | null {
-  const lines = text
-    .split(/\r?\n/)
-    .map(unwrapPastedPath)
-    .filter((line) => line.length > 0)
-  if (lines.length === 0) return null
-  if (!lines.every((line) => looksLikeImagePath(line))) return null
-  return lines
+/** All words must be images; mixed prose is returned unchanged to the input line. */
+export function parseImagePathPaste(text: string, platform: NodeJS.Platform = process.platform): string[] | null {
+  const paths: string[] = []
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (!line) continue
+    const windowsPath = /^["']?(?:[A-Za-z]:[\\/]|\\\\)/.test(line)
+    const words = splitPathWords(line, windowsPath || (platform === 'win32' && !/^(?:\/|~\/|\.\.?\/)/.test(line)))
+    if (words?.length && words.every(looksLikeImagePath)) paths.push(...words)
+    else if (looksLikeImagePath(line)
+      && !/\s+(?:\/|~\/|\.\.?\/|[A-Za-z]:[\\/]|\\\\)/.test(line)
+      && (/^(?:\/|~\/|\.\.?\/|[A-Za-z]:[\\/]|\\\\)/.test(line) || existsSync(line))) {
+      // An ambiguous relative pathname must exist so ordinary prose stays text.
+      paths.push(line)
+    } else return null
+  }
+  return paths.length ? paths : null
 }
 
 export interface LoadPastedImagesOptions {

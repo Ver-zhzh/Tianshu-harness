@@ -1,7 +1,7 @@
 /**
  * @mention parser — extract @file:, @folder:, @symbol: references from user input.
  */
-import { resolve as resolvePath, relative as relativePath } from 'node:path'
+import { resolve as resolvePath, relative as relativePath, isAbsolute, sep } from 'node:path'
 
 export interface MentionReference {
   type: 'file' | 'folder' | 'symbol' | 'codebase'
@@ -31,7 +31,7 @@ export function stripMentions(input: string): string {
 export function normalizeMentionPath(cwd: string, p: string): string {
   const abs = resolvePath(cwd, p)
   const rel = relativePath(cwd, abs)
-  return rel.startsWith('..') ? p : rel
+  return rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel) ? p : rel.split(sep).join('/')
 }
 
 /** 批量规范化（turn-step-producer 组装 mentions context 时调用）。 */

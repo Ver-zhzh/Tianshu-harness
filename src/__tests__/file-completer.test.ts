@@ -1,5 +1,9 @@
-import { describe, it } from 'node:test'
+import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { extractAtToken, getCompletions, applyCompletion } from '../tui/file-completer.js'
 
 describe('extractAtToken', () => {
@@ -15,21 +19,35 @@ describe('extractAtToken', () => {
 })
 
 describe('getCompletions', () => {
+  let cwd: string
+  before(() => {
+    cwd = mkdtempSync(join(tmpdir(), 'rivet-completion-'))
+    execFileSync('git', ['init', '-q', cwd], { windowsHide: true })
+    mkdirSync(join(cwd, 'src', 'tui', 'engine'), { recursive: true })
+    mkdirSync(join(cwd, 'src', '中文'), { recursive: true })
+    for (const path of ['src/tui/engine/app.ts', 'src/tui/engine/application.ts', 'src/中文/截图(一).png']) {
+      writeFileSync(join(cwd, path), '')
+    }
+  })
+  after(() => rmSync(cwd, { recursive: true, force: true }))
   it('returns matching files from cwd', () => {
     // TUI 2.x 后 app.ts 位于 src/tui/engine/
-    const results = getCompletions('src/tui/engine/app', process.cwd(), 5)
+    const results = getCompletions('src/tui/engine/app', cwd, 5)
     assert.ok(results.length > 0)
     assert.ok(results[0]!.includes('src/tui/engine/app'))
   })
 
   it('limits results', () => {
-    const results = getCompletions('src/', process.cwd(), 3)
+    const results = getCompletions('src/', cwd, 3)
     assert.ok(results.length <= 3)
   })
 
   it('returns empty array for nonexistent path', () => {
-    const results = getCompletions('nonexistent-xyz-123/', process.cwd(), 5)
+    const results = getCompletions('nonexistent-xyz-123/', cwd, 5)
     assert.equal(results.length, 0)
+  })
+  it('returns actual Unicode paths instead of Git quoted octal strings', () => {
+    assert.deepEqual(getCompletions('截图', cwd, 5), ['src/中文/截图(一).png'])
   })
 })
 

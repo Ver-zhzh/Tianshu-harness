@@ -1,7 +1,7 @@
 import { glob, mkdir } from 'node:fs/promises'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { constants, tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { nodeTestFlags, resolveTestTimeoutMs } from './test-runner-flags.js'
 import { runGuardedChild, DEFAULT_IDLE_MS } from './test-child-guard.js'
 
@@ -88,9 +88,14 @@ if (files.length === 0) {
 // rivetHome() 的优先级是 RIVET_HOME > 平台默认（src/config/paths.ts），所以钉
 // RIVET_HOME 即可覆盖后者；HOME 刻意**不动**——defaultRivetHome() 派生的路径断言
 // （workspace-config / pro-license 等）继续按真实 $HOME 语义跑，行为不变。
-const ISOLATED_RIVET_HOME = join(PROJECT_TMP, 'rivet-home')
+const ISOLATED_RIVET_HOME = mkdtempSync(join(PROJECT_TMP, 'rivet-test-home-'))
+process.once('exit', () => {
+  if (dirname(resolve(ISOLATED_RIVET_HOME)) !== resolve(PROJECT_TMP)) return
+  try { rmSync(ISOLATED_RIVET_HOME, { recursive: true, force: true }) }
+  catch { console.error(`无法回收本次测试目录：${ISOLATED_RIVET_HOME}`) }
+})
 
-const testEnv = {
+const testEnv: NodeJS.ProcessEnv = {
   ...process.env,
   TMPDIR: PROJECT_TMP,
   TMP: PROJECT_TMP,
@@ -101,10 +106,10 @@ const testEnv = {
   // mkdtemp expect "not a git repo"). Harmless for the OS temp dir case.
   GIT_CEILING_DIRECTORIES: PROJECT_TMP,
 }
+// An inherited session override would bypass the isolated home and mix runs.
+delete testEnv.RIVET_SESSION_DIR
 
-// 每次运行从干净目录起步：上一轮的 grants/checkpoint 索引会改变下一轮的起点
-// （例如「未记住的授权不得从磁盘复活」这类断言会被上一轮残留直接证伪）。
-rmSync(ISOLATED_RIVET_HOME, { recursive: true, force: true })
+// A unique home keeps concurrent macOS/Windows runs from deleting each other's fixtures.
 
 // 超时上限是防「电脑卡死」的关键：Node 不设 --test-timeout 就是 Infinity，任一测试
 // 卡住整个批次进程就永久挂着，被遗弃的整跑会一直占 CPU 直到手动清理。曾攒下 4 个

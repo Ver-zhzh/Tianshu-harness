@@ -50,7 +50,7 @@ test('RED #2: Ctrl+V onAnyKey → handleCtrlV → inputLine.addImage (end-to-end
   const { app, stdin } = makeApp()
   app.start()
   // 注入 mock：reader 返回固定 data URL
-  setClipboardReader({
+  setClipboardReader({ readText: async () => null,
     async readImage() {
       return { dataUrl: PNG_DATA_URL, mime: 'image/png', name: 'clip.png', source: 'png' as const }
     },
@@ -96,7 +96,7 @@ test('RED #3: Ctrl+V with no image in clipboard → text fallback', async () => 
 test('RED #4: Ctrl+V within 1s focus debounce → skip image read', async () => {
   const { app, stdin } = makeApp()
   let readCalls = 0
-  setClipboardReader({
+  setClipboardReader({ readText: async () => null,
     async readImage() { readCalls++; return null }
   })
   app.start()
@@ -112,7 +112,7 @@ test('RED #4: Ctrl+V within 1s focus debounce → skip image read', async () => 
 test('RED #5: Ctrl+V after 1s debounce → reader is called', async () => {
   const { app, stdin } = makeApp()
   let readCalls = 0
-  setClipboardReader({
+  setClipboardReader({ readText: async () => null,
     async readImage() { readCalls++; return null }
   })
   app.start()
@@ -132,7 +132,7 @@ test('RED #6: at MAX_IMAGES cap → no addImage, warning committed', async () =>
   app.start()
   // 灌满 4 张
   for (let i = 0; i < 4; i++) {
-    setClipboardReader({
+    setClipboardReader({ readText: async () => null,
       async readImage() { return { dataUrl: `${PNG_DATA_URL}#${i}`, mime: 'image/png', name: `c${i}.png`, source: 'png' as const } }
     })
     ;(app as any).lastInputFocusAt = Date.now() - 1100
@@ -142,7 +142,7 @@ test('RED #6: at MAX_IMAGES cap → no addImage, warning committed', async () =>
   setClipboardReader(null)
 
   // 第 5 张
-  setClipboardReader({
+  setClipboardReader({ readText: async () => null,
     async readImage() { return { dataUrl: `${PNG_DATA_URL}#5`, mime: 'image/png', name: 'c5.png', source: 'png' as const } }
   })
   ;(app as any).lastInputFocusAt = Date.now() - 1100

@@ -9,6 +9,7 @@
  */
 import type { ReadStream, WriteStream } from 'node:tty'
 import { TuiApp } from '../app.js'
+import { DEFAULT_FRONTEND_PREFERENCES, type FrontendPreferences } from '../../frontend-preferences.js'
 
 export class MockOut {
   isTTY = true
@@ -68,6 +69,7 @@ export interface MakeAppOptions {
   contextWindow?: number
   /** 是否自动调用 app.start()。默认 true：真实生命周期中 start() 后才会渲染。 */
   autoStart?: boolean
+  renderer?: FrontendPreferences['renderer']
 }
 
 /**
@@ -90,6 +92,7 @@ export function makeApp(opts: MakeAppOptions = {}): { app: TuiApp; out: MockOut;
     modelName: opts.modelName ?? 'test',
     ...(opts.contextWindow != null ? { contextWindow: opts.contextWindow } : {}),
   })
+  app.setFrontendPreferences({ ...DEFAULT_FRONTEND_PREFERENCES, renderer: opts.renderer ?? 'classic' })
   if (opts.autoStart !== false) {
     app.start()
   }
