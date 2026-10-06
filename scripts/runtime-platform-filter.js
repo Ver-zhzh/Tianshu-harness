@@ -27,3 +27,51 @@ export function isForeignPlatformPackage(name, keepArch) {
   if (m[2] === 'musl') return true
   return raw !== keepArch
 }
+
+const ESBUILD_PLATFORMS = new Set(['win32', 'darwin', 'linux'])
+const ESBUILD_ARCH_ALIASES = new Map([
+  ['x64', 'x64'],
+  ['x86_64', 'x64'],
+  ['arm64', 'arm64'],
+  ['aarch64', 'arm64'],
+])
+
+/**
+ * Resolve the platform binary package that esbuild needs in the packaged sidecar.
+ * TAURI_ENV_TARGET_TRIPLE takes precedence over the host for cross-builds.
+ * Unknown or unsupported targets return null so staging can fail closed.
+ *
+ * @param {{ targetTriple?: string, platform: string, arch: string }} target
+ * @returns {string | null}
+ */
+export function resolveEsbuildPlatformPackage({ targetTriple = '', platform, arch }) {
+  const triple = String(targetTriple || '').trim().toLowerCase()
+  let targetPlatform = platform
+
+  if (triple) {
+    if (/windows|win32|mingw/.test(triple)) targetPlatform = 'win32'
+    else if (/darwin|apple/.test(triple)) targetPlatform = 'darwin'
+    else if (/linux/.test(triple)) targetPlatform = 'linux'
+    else return null
+  }
+
+  const normalizedArch = ESBUILD_ARCH_ALIASES.get(String(arch || '').toLowerCase())
+  if (!ESBUILD_PLATFORMS.has(targetPlatform) || !normalizedArch) return null
+  return `@esbuild/${targetPlatform}-${normalizedArch}`
+}
+
+/**
+ * Resolve and check the target esbuild package without performing filesystem I/O.
+ * The staging script injects its package lookup so this fail-closed gate is testable.
+ *
+ * @param {{ targetTriple?: string, platform: string, arch: string }} target
+ * @param {(packageName: string) => boolean} packageExists
+ * @returns {{ packageName: string | null, installed: boolean }}
+ */
+export function checkEsbuildPlatformPackage(target, packageExists) {
+  const packageName = resolveEsbuildPlatformPackage(target)
+  return {
+    packageName,
+    installed: packageName !== null && packageExists(packageName),
+  }
+}

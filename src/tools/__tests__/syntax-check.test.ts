@@ -4,6 +4,7 @@ import {
   syntaxCheck,
   checkSyntax,
   checkPythonSyntaxTreeSitter,
+  _isEsbuildInfraErrorForTest,
   _resetEsbuildCacheForTest,
   _resetTsCacheForTest,
   _resetPythonParserForTest,
@@ -88,6 +89,18 @@ describe('syntaxCheck', async () => {
   })
 
   describe('JavaScript', async () => {
+    it('classifies a missing esbuild platform binary as infrastructure failure', () => {
+      const missingOptionalBinary = new Error(
+        'The package "@esbuild/win32-x64" could not be found, and is needed by esbuild.',
+      )
+      assert.equal(_isEsbuildInfraErrorForTest(missingOptionalBinary), true)
+      assert.equal(
+        _isEsbuildInfraErrorForTest(new Error("Cannot find package '@esbuild/linux-x64' imported from esbuild.js")),
+        true,
+      )
+      assert.equal(_isEsbuildInfraErrorForTest(new Error('ERROR: Expected "}" but found end of file')), false)
+    })
+
     it('passes valid JS', async () => {
       assert.equal(await syntaxCheck('/a/script.js', 'const x = 1;\nconsole.log(x);'), null)
     })

@@ -1,6 +1,57 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { isForeignPlatformPackage } from '../runtime-platform-filter.js'
+import { checkEsbuildPlatformPackage, isForeignPlatformPackage, resolveEsbuildPlatformPackage } from '../runtime-platform-filter.js'
+
+test('resolveEsbuildPlatformPackage selects the required target binary', () => {
+  assert.equal(
+    resolveEsbuildPlatformPackage({
+      targetTriple: 'x86_64-pc-windows-msvc',
+      platform: 'linux',
+      arch: 'x64',
+    }),
+    '@esbuild/win32-x64',
+  )
+  assert.equal(
+    resolveEsbuildPlatformPackage({
+      targetTriple: 'aarch64-apple-darwin',
+      platform: 'win32',
+      arch: 'arm64',
+    }),
+    '@esbuild/darwin-arm64',
+  )
+  assert.equal(
+    resolveEsbuildPlatformPackage({ targetTriple: '', platform: 'win32', arch: 'x64' }),
+    '@esbuild/win32-x64',
+  )
+  assert.equal(
+    resolveEsbuildPlatformPackage({ targetTriple: 'unknown-target', platform: 'win32', arch: 'x64' }),
+    null,
+  )
+  assert.equal(
+    resolveEsbuildPlatformPackage({ targetTriple: '', platform: 'win32', arch: 'x86' }),
+    null,
+  )
+})
+
+test('checkEsbuildPlatformPackage rejects a missing target optionalDependency', () => {
+  const windowsX64 = {
+    targetTriple: 'x86_64-pc-windows-msvc',
+    platform: 'linux',
+    arch: 'x64',
+  }
+  assert.deepEqual(
+    checkEsbuildPlatformPackage(windowsX64, name => name !== '@esbuild/win32-x64'),
+    { packageName: '@esbuild/win32-x64', installed: false },
+  )
+  assert.deepEqual(
+    checkEsbuildPlatformPackage(windowsX64, name => name === '@esbuild/win32-x64'),
+    { packageName: '@esbuild/win32-x64', installed: true },
+  )
+  assert.deepEqual(
+    checkEsbuildPlatformPackage({ targetTriple: 'unsupported', platform: 'win32', arch: 'x64' }, () => true),
+    { packageName: null, installed: false },
+  )
+})
 
 test('isForeignPlatformPackage detects @esbuild platform pkgs', () => {
   assert.equal(isForeignPlatformPackage('@esbuild/darwin-x64', 'arm64'), true)

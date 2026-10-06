@@ -31,7 +31,16 @@ const ESBUILD_BREAKER_THRESHOLD = 2
 
 function isEsbuildInfraError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err)
-  return /timed out|terminated|unavailable/i.test(msg)
+  const missingPlatformBinary =
+    /The package\s+["']@esbuild\/[^"']+["']\s+could not be found/i.test(msg) ||
+    /Cannot find (?:module|package)\s+["']@esbuild\//i.test(msg) ||
+    /(?:ERR_MODULE_NOT_FOUND|MODULE_NOT_FOUND)[^\r\n]*@esbuild\//i.test(msg)
+  return /timed out|terminated|unavailable/i.test(msg) || missingPlatformBinary
+}
+
+/** Test-only: keep native-package load failures distinct from parse diagnostics. */
+export function _isEsbuildInfraErrorForTest(err: unknown): boolean {
+  return isEsbuildInfraError(err)
 }
 
 function getEsbuildCallTimeoutMs(): number {

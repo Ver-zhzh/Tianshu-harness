@@ -33,7 +33,7 @@ import { existsSync, mkdirSync, cpSync, readFileSync, writeFileSync, rmSync, sta
 import { dirname, join, relative, isAbsolute } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
-import { isForeignPlatformPackage } from './runtime-platform-filter.js'
+import { checkEsbuildPlatformPackage, isForeignPlatformPackage } from './runtime-platform-filter.js'
 import { pruneTreeSitterWasms } from './tree-sitter-wasm-keep.js'
 import { pruneTypescriptStaging } from './typescript-stage-trim.js'
 import { writeStagingMarker, clearStagingMarker } from './staged-runtime-verify.js'
@@ -112,6 +112,30 @@ function readDeps(dir) {
   }
 }
 
+const esbuildPackageCheck = checkEsbuildPlatformPackage(
+  {
+    targetTriple: process.env.TAURI_ENV_TARGET_TRIPLE,
+    platform: process.platform,
+    arch: resolveTargetArch(),
+  },
+  name => Boolean(pkgDir(name)),
+)
+const ESBUILD_PLATFORM_PACKAGE = esbuildPackageCheck.packageName
+if (!ESBUILD_PLATFORM_PACKAGE) {
+  console.error('✗ stage-runtime-deps: unable to resolve the target platform package required by esbuild; refusing to stage an incomplete runtime.')
+  process.exit(1)
+}
+function failMissingEsbuildPlatformPackage() {
+  console.error(
+    `✗ stage-runtime-deps: required package ${ESBUILD_PLATFORM_PACKAGE} is missing from node_modules. ` +
+      'Install dependencies with optionalDependencies enabled (do not use --omit=optional) before packaging.',
+  )
+  process.exit(1)
+}
+// This optionalDependency is mandatory for the selected target. Check before
+// cleaning dist so a misconfigured install cannot destroy a previously staged tree.
+if (!esbuildPackageCheck.installed) failMissingEsbuildPlatformPackage()
+
 if (existsSync(destModules)) rmSync(destModules, { recursive: true, force: true })
 mkdirSync(destModules, { recursive: true })
 // dist/ 脱离仓库独立分发时（桌面端 Resources/rivet-runtime）没有上级 package.json，
@@ -126,7 +150,7 @@ writeFileSync(join(repoRoot, 'dist', 'package.json'), JSON.stringify({ name, ver
 writeStagingMarker(join(repoRoot, 'dist'), 'copying root package closure')
 
 const visited = new Set()
-const queue = ROOTS.map(name => ({ name, from: repoRoot }))
+const queue = [...ROOTS, ESBUILD_PLATFORM_PACKAGE].map(name => ({ name, from: repoRoot }))
 const missing = []
 let copied = 0
 let skippedForeign = 0
@@ -151,6 +175,7 @@ while (queue.length > 0) {
 
   const src = pkgDir(name, from)
   if (!src) {
+    if (name === ESBUILD_PLATFORM_PACKAGE) failMissingEsbuildPlatformPackage()
     // Optional/platform packages for other hosts are not installed — skip quietly
     // unless it's a declared root (then surface it).
     if (from === repoRoot) missing.push(name)
