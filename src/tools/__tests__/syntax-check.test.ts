@@ -1,5 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { cpuPool } from '../../workers/cpu-pool.js'
 import {
   syntaxCheck,
   checkSyntax,
@@ -99,6 +100,23 @@ describe('syntaxCheck', async () => {
         true,
       )
       assert.equal(_isEsbuildInfraErrorForTest(new Error('ERROR: Expected "}" but found end of file')), false)
+    })
+
+    it('does not surface a missing esbuild platform binary as a syntax warning', async () => {
+      const originalRun = cpuPool.run
+      let workerCallMade = false
+      cpuPool.run = async () => {
+        workerCallMade = true
+        throw new Error('The package "@esbuild/win32-x64" could not be found, and is needed by esbuild.')
+      }
+      _resetEsbuildCacheForTest()
+      try {
+        assert.equal(await syntaxCheck('/a/script.js', 'const a = 1;'), null)
+        assert.equal(workerCallMade, true, 'the simulated esbuild worker failure must be exercised')
+      } finally {
+        cpuPool.run = originalRun
+        _resetEsbuildCacheForTest()
+      }
     })
 
     it('passes valid JS', async () => {

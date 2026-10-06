@@ -1,14 +1,25 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { cpSync, existsSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import { RUNTIME_BUNDLED } from '../external-deps.js'
+import { resolveEsbuildPlatformPackage } from '../runtime-platform-filter.js'
 import { findInstallRoot, formatVersionLine } from '../../src/cli/version.js'
 
 const scripts = fileURLToPath(new URL('../', import.meta.url))
+
+function hostEsbuildPlatformPackageName() {
+  const name = resolveEsbuildPlatformPackage({ targetTriple: '', platform: process.platform, arch: process.arch })
+  if (!name) throw new Error(`unsupported test host for esbuild: ${process.platform}/${process.arch}`)
+  return name
+}
+
+function nodeModulePackagePath(root, name) {
+  return join(root, 'node_modules', ...name.split('/'))
+}
 
 function packageAt(dir: string, dependencies: Record<string, string> = {}, code = 'module.exports = {}', optionalDependencies: Record<string, string> = {}) {
   mkdirSync(dir, { recursive: true })
@@ -24,6 +35,7 @@ function fixture(roots = true) {
   }
   writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'tianshu-harness', version: '9.9.9', type: 'module' }))
   if (roots) for (const name of RUNTIME_BUNDLED) packageAt(join(root, 'node_modules', name))
+  packageAt(nodeModulePackagePath(root, hostEsbuildPlatformPackageName()))
   const sqlite = join(root, 'node_modules', 'better-sqlite3')
   packageAt(sqlite)
   mkdirSync(join(sqlite, 'lib'))
@@ -38,6 +50,7 @@ function stage(root: string) {
   const env = { ...process.env }
   delete env.NODE_PATH
   delete env.STAGE_SKIP_SQLITE_CHECK
+  delete env.TAURI_ENV_TARGET_TRIPLE
   return spawnSync(process.execPath, [join(root, 'scripts', 'stage-runtime-deps.js')], { cwd: root, env, encoding: 'utf8' })
 }
 
@@ -63,6 +76,36 @@ test('staging traverses nested versions and preserves their hoisted dependency r
   } finally {
     rmSync(root, { recursive: true, force: true })
     rmSync(closed, { recursive: true, force: true })
+  }
+})
+
+test('staging includes the host target esbuild platform package', () => {
+  const root = fixture()
+  try {
+    const result = stage(root)
+    assert.equal(result.status, 0, result.stderr)
+    const stagedPackageJson = join(root, 'dist', 'node_modules', ...hostEsbuildPlatformPackageName().split('/'), 'package.json')
+    assert.ok(existsSync(stagedPackageJson), hostEsbuildPlatformPackageName())
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a missing target esbuild package fails before deleting existing staged files', () => {
+  const root = fixture()
+  try {
+    const packageName = hostEsbuildPlatformPackageName()
+    rmSync(nodeModulePackagePath(root, packageName), { recursive: true, force: true })
+    const sentinel = join(root, 'dist', 'node_modules', 'keep-before-failed-stage.txt')
+    mkdirSync(dirname(sentinel), { recursive: true })
+    writeFileSync(sentinel, 'previous staging')
+
+    const result = stage(root)
+    assert.equal(result.status, 1, result.stdout + result.stderr)
+    assert.ok(result.stderr.includes(`required package ${packageName} is missing`), result.stderr)
+    assert.equal(readFileSync(sentinel, 'utf8'), 'previous staging')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
   }
 })
 
