@@ -141,7 +141,7 @@ describe("this repo's own project instructions", () => {
     // 回归：此前 escapeXml 后从头切到 8,000，AGENTS.md 末尾三节与整份 .rivet.md
     // 一起消失——主控和子代理都读不到自己的 git 提交纪律与高危命令闸门。
     const pi = block()
-    for (const gate of ['高危命令纪律', 'Agent 安全保护', '通用执行纪律', 'Code Conventions']) {
+    for (const gate of ['给 agent 的纪律', 'Code Conventions', 'Complex Spec Workflow']) {
       assert.ok(pi.includes(gate), `hard-gate section "${gate}" must be present`)
     }
   })
@@ -159,7 +159,7 @@ describe("this repo's own project instructions", () => {
     const pi = out.match(/<project-instructions>[\s\S]*?<\/project-instructions>/)![0]
     assert.ok(pi.length <= 4_000, `sub-agent block is ${pi.length} chars`)
     assert.ok(pi.length < block().length)
-    for (const gate of ['高危命令纪律', 'Agent 安全保护']) {
+    for (const gate of ['给 agent 的纪律', 'Code Conventions', 'Complex Spec Workflow']) {
       assert.ok(pi.includes(gate), `sub-agent lost hard-gate section "${gate}"`)
     }
   })
@@ -167,7 +167,11 @@ describe("this repo's own project instructions", () => {
   it('the source documents are what the fitter is fed', () => {
     // 分层判据认的是 markdown 结构，不是仓库专有标题——但这两份文档确实是
     // 输入，读不到就说明 readRivetMd 的来源变了，此处的回归断言随之失效。
-    assert.ok(readFileSync(join(REPO, 'AGENTS.md'), 'utf-8').includes('## 高危命令纪律'))
+    assert.ok(readFileSync(join(REPO, 'AGENTS.md'), 'utf-8').includes('## 给 agent 的纪律'))
     assert.ok(readFileSync(join(REPO, '.rivet.md'), 'utf-8').includes('## Code Conventions'))
+    assert.ok(readFileSync(join(REPO, '.rivet.md'), 'utf-8').includes('## Complex Spec Workflow'))
+    assert.ok(readFileSync(join(REPO, '.rivet.md'), 'utf-8').includes('## Complex Spec Workflow'))
+    assert.ok(readFileSync(join(REPO, '.rivet.md'), 'utf-8').includes('## Complex Spec Workflow'))
+    assert.ok(readFileSync(join(REPO, '.rivet.md'), 'utf-8').includes('## Complex Spec Workflow'))
   })
 })
