@@ -170,8 +170,5 @@ describe("this repo's own project instructions", () => {
     assert.ok(readFileSync(join(REPO, 'AGENTS.md'), 'utf-8').includes('## 给 agent 的纪律'))
     assert.ok(readFileSync(join(REPO, '.rivet.md'), 'utf-8').includes('## Code Conventions'))
     assert.ok(readFileSync(join(REPO, '.rivet.md'), 'utf-8').includes('## Complex Spec Workflow'))
-    assert.ok(readFileSync(join(REPO, '.rivet.md'), 'utf-8').includes('## Complex Spec Workflow'))
-    assert.ok(readFileSync(join(REPO, '.rivet.md'), 'utf-8').includes('## Complex Spec Workflow'))
-    assert.ok(readFileSync(join(REPO, '.rivet.md'), 'utf-8').includes('## Complex Spec Workflow'))
   })
 })
