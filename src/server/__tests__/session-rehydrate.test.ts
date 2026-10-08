@@ -740,6 +740,87 @@ test('resumeRun 识别 provider:modelId 记录（2026-09-08 假阴性回归）',
   assert.deepEqual(factoryModels, ['p:kimi-x'], 'provider:modelId 原模型必须按记录原样续跑')
 })
 
+// issue #399：`global:`/`cn:` 是模型 id 的**区域前缀**，不是 provider 名。旧
+// isAvailable 把首段当 provider pin 钉死（`global` ≠ 真实 provider `WorkBuddy`），
+// some 回调提前 return false，连 `o.id === m` 整串相等都走不到 → 续跑必然
+// model_unavailable。同一原则已有先例：#313 的 resolveModelRef「首段只有确属已配置
+// provider 才算限定，否则整串是模型 id」。
+test('resumeRun 区域前缀模型（global:）vs 真实可用列表 → 判为可用，不得降级（issue #399）', async () => {
+  const factoryModels: (string | undefined)[] = []
+  const mem = new LazyMemoryPersistence(crashSeed('global:deepseek-v4.1-flash', 'tianshu'))
+  const mgr = new RuntimeSessionManager({
+    createAgent: (_cwd, _id, _mode, modelId) => {
+      factoryModels.push(modelId)
+      return new NoopAgent()
+    },
+    persistence: mem,
+    listModels: () => [
+      { id: 'global:deepseek-v4.1-flash', alias: 'deepseek-v4.1-flash', provider: 'WorkBuddy' },
+      { id: 'v4-pro', alias: 'v4', provider: 'p' },
+    ],
+    defaultModelId: 'v4-pro',
+  })
+  const res = await mgr.resumeRun('crash')
+  assert.deepEqual(res, { ok: true, model: 'global:deepseek-v4.1-flash', switched: false })
+  assert.deepEqual(factoryModels, ['global:deepseek-v4.1-flash'], '必须按记录原样续跑，而非降级默认模型')
+})
+
+test('resumeRun 区域前缀剥离比较：global: 记录命中 cn: 可用条目（同模型跨区域）', async () => {
+  const factoryModels: (string | undefined)[] = []
+  const mem = new LazyMemoryPersistence(crashSeed('global:deepseek-v4.1-flash', 'tianshu'))
+  const mgr = new RuntimeSessionManager({
+    createAgent: (_cwd, _id, _mode, modelId) => {
+      factoryModels.push(modelId)
+      return new NoopAgent()
+    },
+    persistence: mem,
+    listModels: () => [
+      { id: 'cn:deepseek-v4.1-flash', alias: 'deepseek-v4.1-flash', provider: 'WorkBuddy' },
+      { id: 'v4-pro', alias: 'v4', provider: 'p' },
+    ],
+    defaultModelId: 'v4-pro',
+  })
+  const res = await mgr.resumeRun('crash')
+  assert.equal(res.ok, true)
+  assert.equal((res as { switched: boolean }).switched, false, '剥掉区域前缀后同一 wire id，无需降级')
+  assert.deepEqual(factoryModels, ['global:deepseek-v4.1-flash'])
+})
+
+test('resumeRun provider pin（真 provider 名）仍然有效', async () => {
+  const factoryModels: (string | undefined)[] = []
+  const mem = new LazyMemoryPersistence(crashSeed('WorkBuddy:deepseek-v4.1-flash', 'tianshu'))
+  const mgr = new RuntimeSessionManager({
+    createAgent: (_cwd, _id, _mode, modelId) => {
+      factoryModels.push(modelId)
+      return new NoopAgent()
+    },
+    persistence: mem,
+    listModels: () => [
+      { id: 'deepseek-v4.1-flash', alias: 'ds', provider: 'WorkBuddy' },
+      { id: 'v4-pro', alias: 'v4', provider: 'p' },
+    ],
+    defaultModelId: 'v4-pro',
+  })
+  const res = await mgr.resumeRun('crash')
+  assert.deepEqual(res, { ok: true, model: 'WorkBuddy:deepseek-v4.1-flash', switched: false })
+  assert.deepEqual(factoryModels, ['WorkBuddy:deepseek-v4.1-flash'])
+})
+
+test('resumeRun 无 available 列表 → 沿用原模型（不做可用性判定，行为不变）', async () => {
+  const factoryModels: (string | undefined)[] = []
+  const mem = new LazyMemoryPersistence(crashSeed('global:deepseek-v4.1-flash', 'tianshu'))
+  const mgr = new RuntimeSessionManager({
+    createAgent: (_cwd, _id, _mode, modelId) => {
+      factoryModels.push(modelId)
+      return new NoopAgent()
+    },
+    persistence: mem,
+  })
+  const res = await mgr.resumeRun('crash')
+  assert.deepEqual(res, { ok: true, model: 'global:deepseek-v4.1-flash', switched: false })
+  assert.deepEqual(factoryModels, ['global:deepseek-v4.1-flash'])
+})
+
 test('resumeRun 原模型不可用且无兜底 → 显式降级默认模型续跑（不再死路）', async () => {
   const factoryModels: (string | undefined)[] = []
   const mem = new LazyMemoryPersistence(crashSeed('gone-model', 'tianshu'))

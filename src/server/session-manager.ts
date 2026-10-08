@@ -3254,13 +3254,38 @@ export class RuntimeSessionManager {
     const isAvailable = (m: string | undefined): m is string => {
       if (!m) return false
       if (!available) return true
+      // issue #399：模型 id 自身可带区域前缀（`global:`/`cn:`，如
+      // `global:deepseek-v4.1-flash`）。首段只有在**确属可用列表中某个真实
+      // provider 名**时才算 provider 限定；否则它只是 id 的一部分，绝不能当
+      // provider pin 去卡 `o.provider !== pinnedProvider` —— 那会让 some 回调
+      // 提前 return false，连 `o.id === m` 整串相等都走不到（续跑必然
+      // model_unavailable）。原则同 #313 的 resolveModelRef（显式前缀优先，
+      // 无法识别则整串是模型 id）。
+      const REGION_PREFIXES = ['global:', 'cn:']
+      const stripRegion = (s: string): string => {
+        for (const p of REGION_PREFIXES) if (s.startsWith(p)) return s.slice(p.length)
+        return s
+      }
       const colon = m.indexOf(':')
-      const pinnedProvider = colon > 0 ? m.slice(0, colon) : undefined
-      const modelRef = pinnedProvider ? m.slice(colon + 1) : m
+      if (colon <= 0) {
+        // 裸模型 id/alias（无前缀）：整串比较。
+        return available.some((o) => o.id === m || o.alias === m)
+      }
+      const head = m.slice(0, colon)
+      const modelRef = m.slice(colon + 1)
       if (!modelRef) return false
+      const pinnedProvider = available.some((o) => o.provider === head) ? head : undefined
+      const mStripped = stripRegion(m)
       return available.some((o) => {
-        if (pinnedProvider && o.provider !== pinnedProvider) return false
-        return o.id === modelRef || o.alias === modelRef || o.id === m || o.alias === m
+        // 整串相等优先（provider:modelId 记录形态）。
+        if (o.id === m || o.alias === m) return true
+        // 剥掉区域前缀后相等——同 wire id 跨区域也认。
+        if (stripRegion(o.id) === mStripped || stripRegion(o.alias) === mStripped) return true
+        // provider pin 命中且剩余部分相等（仅当头确为真实 provider 名）。
+        if (pinnedProvider && o.provider === pinnedProvider && (o.id === modelRef || o.alias === modelRef)) {
+          return true
+        }
+        return false
       })
     }
     let target = original
