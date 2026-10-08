@@ -101,7 +101,7 @@ import { isKeylessProviderEntry } from '../config/provider-presets.js'
 import type { ProviderListItem } from './config-provider-contract.js'
 import { allPresetKeys, resolvePreset, resolvePresetBaseUrl, resolvePresetDefaultModel, resolvePresetLabel, resolvePresetProtocol } from '../api/pro-registry.js'
 import { buildOAuthRoutes, oauthListFields } from './config-routes-oauth.js'
-import { modelConfigSchema, providerCapabilitiesSchema, PROVIDER_PROTOCOL_VALUES, type ModelConfig, type ProviderCapabilitiesConfig, type ProviderProtocol } from '../config/schema.js'
+import { modelConfigSchema, providerCapabilitiesSchema, PROVIDER_PROTOCOL_VALUES, type ModelConfig, type ProviderCapabilitiesConfig, type ProviderConfig, type ProviderProtocol } from '../config/schema.js'
 import { queryDeepSeekBalance, type BalanceResult } from '../api/balance-client.js'
 import { discoverVisionModels, validateVisionModel } from '../api/vision-model-onboarding.js'
 import { generateImage } from '../api/image-gen-client.js'
@@ -165,8 +165,9 @@ import { buildProFeatureRoutes } from './pro-feature-routes.js'
 import { buildZenRoutes } from './config-routes-zen.js'
 import { buildPermissionRoutes } from './config-routes-permissions.js'
 import { listProviderKeys } from '../config/provider-key-store.js'
+import { defaultKeyOf } from '../config/provider-keys.js'
 import { contractModels } from '../config/contract-models.js'
-import { resolveApiKey, resolveCredentialKey } from '../api/factory.js'
+import { resolveApiKey, resolveCredentialKey, tryResolveCredentialKey } from '../api/factory.js'
 import { getDeepSeekUserSummary, getDeepSeekCostReport } from '../api/deepseek-platform-client.js'
 import { listGrantedApps, revokeApp } from '../tools/computer-use/app-grants.js'
 import { computerUseModulePresent, isComputerUseSupportedPlatform, loadComputerUseImpl } from '../tools/computer-use/bridge.js'
@@ -225,6 +226,39 @@ function resolveProviderProbeTarget(
   }
   if (!baseUrl) return { error: `cannot resolve baseUrl for provider "${provider}"` }
   return { apiKey: resolvedKey, baseUrl }
+}
+
+/** 余额查询的凭据解析——与请求链路（serve.ts resolveModelSpec）同口径，复用其
+ *  凭据函数（factory.tryResolveCredentialKey / resolveApiKey），不另造解析逻辑。
+ *
+ *  优先级：指定 keyId → 该 key 的 key 级三槽（keyRef→apiKey→apiKeyEnv）；key 槽
+ *  全空或未迁移 provider → provider 级遗留链（顶层 apiKey→apiKeyEnv→resolveApiKey，
+ *  后者含 `<NAME>_API_KEY` 与 keyless 豁免）。
+ *
+ *  issue #392：此前余额路由只读默认 provider 的顶层槽，A′ 迁移后的主流形态（凭据
+ *  全在 keys[] 池、顶层三槽为空）导致每个 Key 都查不到，或恒取同一账户。
+ *  未知 keyId 明确 400——多账号下静默回落默认 key 会「取错账户」，比取不到更糟。 */
+function resolveBalanceCredential(
+  provider: ProviderConfig,
+  keyId: string | undefined,
+): { apiKey: string | undefined; keyId?: string; label?: string } | { error: string; status: number } {
+  const providerLevelKey = (): string | undefined =>
+    provider.apiKey
+    ?? process.env[provider.apiKeyEnv ?? '']
+    ?? (() => { try { return resolveApiKey(provider) } catch { return undefined } })()
+
+  const pool = provider.keys ?? []
+  const key = keyId ? pool.find(k => k.id === keyId) : defaultKeyOf(provider)
+  if (keyId && !key) return { error: `key "${keyId}" not found on provider "${provider.name}"`, status: 400 }
+  // 无池且未指定 keyId（未迁移 provider）→ provider 级遗留链，保持旧调用兼容。
+  if (!key) return { apiKey: providerLevelKey() }
+
+  // key 配了任一凭据槽 → 只用它；解析落空即 undefined（fail-closed，绝不静默改用
+  // 别的 key）。槽全空 → 回退 provider 级链，与请求端同。
+  const apiKey = (key.keyRef || key.apiKey || key.apiKeyEnv)
+    ? tryResolveCredentialKey({ name: provider.name, keyRef: key.keyRef, apiKey: key.apiKey, apiKeyEnv: key.apiKeyEnv })
+    : providerLevelKey()
+  return { apiKey, keyId: key.id, ...(key.label ? { label: key.label } : {}) }
 }
 
 interface ParsedVisionCredentials {
@@ -1309,14 +1343,18 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
       }
     }, apiToken),
 
-    'GET /config/balance': withAuth(async () => {
+    'GET /config/balance': withAuth(async (_body, params) => {
       // 查 DeepSeek 官方账户余额。仅 DeepSeek 官方端点支持（其他 provider 返回 null）。
+      // issue #392：支持 ?keyId= 查询指定 Key 的余额（多 Key 不串号）；不带 keyId
+      // 时查默认 Key，保持旧调用兼容。
       const cfg = loadConfig()
       const provider = cfg.provider.providers[cfg.provider.default]
       if (!provider) return { status: 200, body: { balance: null as BalanceResult | null } }
-      const apiKey = provider.apiKey ?? (provider.apiKeyEnv ? process.env[provider.apiKeyEnv] : undefined)
-      const balance = await queryDeepSeekBalance(apiKey, provider.baseUrl)
-      return { status: 200, body: { balance } }
+      const keyId = typeof params?.keyId === 'string' ? params.keyId : undefined
+      const cred = resolveBalanceCredential(provider, keyId)
+      if ('error' in cred) return { status: cred.status, body: { error: cred.error } }
+      const balance = await queryDeepSeekBalance(cred.apiKey, provider.baseUrl)
+      return { status: 200, body: { balance, ...(cred.keyId ? { keyId: cred.keyId } : {}), ...(cred.label ? { label: cred.label } : {}) } }
     }, apiToken),
 
     // DeepSeek 平台账户摘要：当天/当月花费、余额、Flash/Pro 用量。
