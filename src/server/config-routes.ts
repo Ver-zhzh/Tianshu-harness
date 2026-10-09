@@ -280,6 +280,9 @@ export interface ConfigRouteHooks {
   /** provider/模型/密钥写盘成功后的快照刷新通知（serve 侧据此原地重建启动快照，
    *  「替换 key」「inline 压 env」对新解析即刻生效）。实现必须 fail-open。 */
   onProviderConfigChanged?: () => void
+  /** 已注册工作区列表（issue #221 同族加固）：`GET /workspace/file-context` 的 cwd
+   *  必须命中已注册工作区，防止 Bearer 持有者枚举任意目录。 */
+  knownWorkspaces?: () => string[]
 }
 
 export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): Record<string, RouteHandler> {
@@ -289,7 +292,7 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
     try { hooks?.onProviderConfigChanged?.() } catch { /* best-effort */ }
   }
   return {
-    ...buildWorkspaceRoutes(apiToken), ...buildProviderUsageRoutes(apiToken),
+    ...buildWorkspaceRoutes(apiToken, hooks?.knownWorkspaces ?? (() => [])), ...buildProviderUsageRoutes(apiToken),
     // OAuth 型 provider（codex）的登录/登出路由按接缝外提（config-routes-oauth.ts），
     // 与 config-routes-keys.ts / config-routes-zen.ts 同先例。
     ...buildOAuthRoutes(apiToken, notifyProviderConfigChanged),

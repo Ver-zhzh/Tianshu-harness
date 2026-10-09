@@ -1046,6 +1046,8 @@ export async function runServe(opts: RunServeOptions = {}): Promise<RunningServe
     // 不刷新的话当前会话看不到它（用户表现为「配置成功但工具不出现」）。与上面两个
     // hook 同属「落盘后对存活 agent 广播」；注入式 ctx（测试）不接线，保持确定性。
     onImageGenConfigChanged: opts.context ? undefined : () => { sessions.refreshAgentTools() },
+    // file-context 路由的 cwd 工作区守卫（与 #221 同族）：只接受已注册工作区。
+    knownWorkspaces: () => registeredWorkspaces(sharedRuntime.sessions ?? undefined),
   }))
 
   // Environment route: host toolchain availability (python, uv, git, node) for setup UI.
