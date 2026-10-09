@@ -13,6 +13,7 @@ import { join, basename, dirname } from 'node:path'
 import { cpSync } from 'node:fs'
 import { execSync, execFileSync } from 'node:child_process'
 import { rivetHome } from '../config/paths.js'
+import { hasRealNode } from '../platform/resolve-node-cli.js'
 import { parseManifest, PLUGIN_NAME_PATTERN, type PluginManifest, type PluginPackageJson } from './manifest.js'
 import { cloneGitSource, GitCloneError } from './git-source.js'
 
@@ -58,11 +59,20 @@ export function resolveNpmCommand(): string {
   return isWindows ? 'npm.cmd' : 'npm'
 }
 
-/** 宿主 node 目录前置到 PATH——npm 垫片靠 PATH 解析 node（见 npmInstallArgs 注释）。 */
+/** 宿主 node 目录放到 PATH——npm 垫片靠 PATH 解析 node（见 npmInstallArgs 注释）。
+ * issue #408：目录里只有转发器（无真 node）时不抢占首位，改 append 到末尾，
+ * 让系统 PATH 里的真 node 优先命中。 */
 function withNodeOnPath(nodeDir: string): string {
-  const pathSep = process.platform === 'win32' ? ';' : ':'
+  const isWindows = process.platform === 'win32'
+  const pathSep = isWindows ? ';' : ':'
   const currentPath = process.env.PATH || ''
-  return currentPath ? `${nodeDir}${pathSep}${currentPath}` : nodeDir
+  if (!currentPath) return nodeDir
+  // 有真 node → prepend（issue #149：确保子进程能找到 node）；
+  // 只有转发器 → append 到末尾，避免劫持系统 node（issue #408）。
+  if (hasRealNode(nodeDir, process.platform, existsSync)) {
+    return `${nodeDir}${pathSep}${currentPath}`
+  }
+  return `${currentPath}${pathSep}${nodeDir}`
 }
 
 /**

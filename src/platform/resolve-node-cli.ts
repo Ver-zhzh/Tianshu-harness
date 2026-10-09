@@ -21,6 +21,27 @@ export interface ResolvedStdioCommand {
   args: string[]
 }
 
+/**
+ * issue #408：判定目录里是否有"真 node"，而非转发器。
+ *
+ * 背景：桌面端 bundled 的 node-runtime 目录里，Windows 上只有 `node.cmd`
+ * 转发器（内容为 `@ECHO OFF` + `"%~dp0tianshu-runtime.exe" %*`），没有真 node。
+ * 若把这种目录 prepend 到 PATH 前部，cmd.exe 解析 `node` 时会命中转发器，
+ * 抢占用户系统里真正的 Node（issue #408 的劫持链）。
+ *
+ * 判定：Windows 上 `node.exe` 存在即算真 node（转发器是 .cmd 形态）；
+ * POSIX 上 `node` 存在即算。
+ */
+export function hasRealNode(
+  nodeDir: string,
+  platform: NodeJS.Platform,
+  existsSyncFn: (path: string) => boolean = existsSync,
+): boolean {
+  const p = platform === 'win32' ? winPath : posixPath
+  const exe = platform === 'win32' ? 'node.exe' : 'node'
+  return existsSyncFn(p.join(nodeDir, exe))
+}
+
 function pathApi(platform: NodeJS.Platform) {
   return platform === 'win32' ? winPath : posixPath
 }
@@ -172,9 +193,15 @@ export function buildStdioEnvWithNodePath(
   const pathRest = user.PATH ?? user.Path ?? base.PATH ?? base.Path ?? ''
   const fallback = pathRest ? [] : systemPathFallback(platform, base)
   const merged = { ...base, ...user }
+  // issue #408：nodeDir 只有转发器（无真 node）时不抢占首位——改 append 到末尾，
+  // 让系统 PATH 里的真 node 优先命中；有真 node 时保持 prepend（issue #149）。
+  const existsFn = deps.existsSync ?? existsSync
+  const pathParts = pathRest ? [pathRest] : fallback
   const env: Record<string, string> = {
     ...merged,
-    PATH: [nodeDir, ...(pathRest ? [pathRest] : fallback)].join(pathSep),
+    PATH: hasRealNode(nodeDir, platform, existsFn)
+      ? [nodeDir, ...pathParts].join(pathSep)
+      : [...pathParts, nodeDir].join(pathSep),
   }
   if (platform === 'win32') {
     // issue #149 根因 B：npx 分发的 bin 由 `cmd /d /s /c <bin名>` 执行，cmd 按

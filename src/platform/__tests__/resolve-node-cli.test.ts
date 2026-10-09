@@ -70,6 +70,7 @@ describe('buildStdioEnvWithNodePath', () => {
         execPath: '/opt/node/bin/node',
         platform: 'linux',
         getDefaultEnvironment: () => ({ PATH: '/default', HOME: '/home/u' }),
+        existsSync: () => true, // 模拟真 node 存在 → prepend（issue #149 行为）
       },
     )
     assert.equal(env.TOKEN, 'secret')
@@ -84,6 +85,7 @@ describe('buildStdioEnvWithNodePath', () => {
         execPath: 'C:\\app\\node.exe',
         platform: 'win32',
         getDefaultEnvironment: () => ({ PATH: 'C:\\Windows' }),
+        existsSync: () => true, // 模拟真 node 存在 → prepend
       },
     )
     assert.ok(env.PATH?.startsWith(`C:\\app;`))
@@ -97,6 +99,7 @@ describe('buildStdioEnvWithNodePath', () => {
       execPath: posix.join('/opt', 'node', 'bin', 'node'),
       platform: 'darwin',
       getDefaultEnvironment: () => ({ PATH: '/usr/bin' }),
+      existsSync: () => true, // 模拟真 node 存在 → prepend
     })
     assert.ok(env.PATH?.startsWith(posix.join('/opt', 'node', 'bin') + ':'))
   })
@@ -112,6 +115,7 @@ describe('buildStdioEnvWithNodePath', () => {
       platform: 'win32',
       // MCP SDK 1.29.0 之前的 win32 白名单就是这样：有 SYSTEMROOT 没有 PATH。
       getDefaultEnvironment: () => ({ SYSTEMROOT: 'C:\\Windows' }),
+      existsSync: () => true, // 模拟真 node 存在 → prepend
     })
     assert.equal(
       env.PATH,
@@ -125,6 +129,7 @@ describe('buildStdioEnvWithNodePath', () => {
       execPath: 'D:\\app\\node.exe',
       platform: 'win32',
       getDefaultEnvironment: () => ({ SYSTEMROOT: 'D:\\Win' }),
+      existsSync: () => true, // 模拟真 node 存在 → prepend
     })
     assert.ok(env.PATH?.includes('D:\\Win\\System32'))
     assert.ok(!env.PATH?.includes('C:\\Windows'))
@@ -135,6 +140,7 @@ describe('buildStdioEnvWithNodePath', () => {
       execPath: 'C:\\app\\node.exe',
       platform: 'win32',
       getDefaultEnvironment: () => ({ PATH: 'C:\\Windows\\System32', SYSTEMROOT: 'C:\\Windows' }),
+      existsSync: () => true, // 模拟真 node 存在 → prepend
     })
     assert.equal(env.PATH, 'C:\\app;C:\\Windows\\System32')
   })
@@ -144,8 +150,50 @@ describe('buildStdioEnvWithNodePath', () => {
       execPath: '/opt/node/bin/node',
       platform: 'linux',
       getDefaultEnvironment: () => ({}),
+      existsSync: () => true, // 模拟真 node 存在 → prepend
     })
     assert.equal(env.PATH, '/opt/node/bin')
+  })
+})
+
+// ── issue #408：nodeDir 只有转发器（无真 node）时不抢占 PATH 首位 ──
+// 桌面端 bundled 的 node-runtime 目录在 Windows 上只有 node.cmd 转发器，
+// prepend 到 PATH 前部会劫持用户系统的真 node。本组断言：无真 node 时改 append 到末尾。
+
+describe('buildStdioEnvWithNodePath — 无真 node 时不抢占首位（issue #408）', () => {
+  it('win32: nodeDir 无 node.exe 时 append 到末尾，不抢占系统 node', () => {
+    const env = buildStdioEnvWithNodePath(
+      { PATH: 'D:\\nvm\\nodejs' },
+      {
+        execPath: 'E:\\tianshu\\node-runtime\\win-x64\\tianshu-runtime.exe',
+        platform: 'win32',
+        getDefaultEnvironment: () => ({ PATH: 'D:\\nvm\\nodejs' }),
+        existsSync: () => false, // 模拟：目录里没有真 node.exe（只有转发器）
+      },
+    )
+    assert.ok(env.PATH?.startsWith('D:\\nvm\\nodejs;'), `系统 node 应排首位，实际: ${env.PATH}`)
+    assert.ok(env.PATH?.endsWith('E:\\tianshu\\node-runtime\\win-x64'), `bundled 目录仍应在 PATH 中，实际: ${env.PATH}`)
+  })
+
+  it('win32: nodeDir 有真 node.exe 时仍 prepend（issue #149 行为不变）', () => {
+    const env = buildStdioEnvWithNodePath(
+      { PATH: 'D:\\nvm\\nodejs' },
+      {
+        execPath: 'C:\\app\\node.exe',
+        platform: 'win32',
+        getDefaultEnvironment: () => ({ PATH: 'D:\\nvm\\nodejs' }),
+        existsSync: (p) => p.endsWith('node.exe'), // 模拟真 node 存在
+      },
+    )
+    assert.ok(env.PATH?.startsWith('C:\\app;'), `实际: ${env.PATH}`)
+  })
+
+  it('hasRealNode: win32 认 node.exe，posix 认 node', async () => {
+    const { hasRealNode } = await import('../resolve-node-cli.js')
+    assert.equal(hasRealNode('C:\\app', 'win32', (p) => p === 'C:\\app\\node.exe'), true)
+    assert.equal(hasRealNode('C:\\app', 'win32', () => false), false)
+    assert.equal(hasRealNode('/opt/node/bin', 'linux', (p) => p === '/opt/node/bin/node'), true)
+    assert.equal(hasRealNode('/opt/node/bin', 'linux', () => false), false)
   })
 })
 
