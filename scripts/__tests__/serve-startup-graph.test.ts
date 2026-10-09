@@ -50,8 +50,10 @@ const FORBIDDEN_HEAVY = [
  * server 面增长把图推到 489；jszip/yaml 随之静态进图。父链核对（why）确认增长来自
  * server 路由/兼容层，FORBIDDEN_HEAVY 8 模块仍全绿、无 agent/tui 内核回流。
  * 上限 → 500（489 + ~2% 余量）。若技能管理后续把静态边改动态 import，应回调本值。
+ * 2026-10-09：500→510——file-context 路由加工作区守卫（安全修复，#221 同族），
+ * 引入 workspace-guard → project-trust 链，实测 504。FORBIDDEN_HEAVY 仍全绿。
  */
-const REACHABLE_LIMIT = 500
+const REACHABLE_LIMIT = 510
 
 /**
  * 启动图允许静态出现的 bare 包（tsup 会按入口可达性把它们打进 chunk）。
