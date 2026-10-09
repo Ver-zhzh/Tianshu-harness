@@ -1254,8 +1254,36 @@ async function executeToolUseInner(
         return { toolResult: { type: 'tool_result', tool_use_id: tu.id, content: denyMsg, is_error: true }, traceStore, importGraph, lastConflictCheckCount, checkpointCreated, latestRisk }
      }
       if (finalInput !== tu.input) {
+        const originalInput = tu.input
         tu.input = finalInput
         params.input = finalInput
+        // Re-gate (2026-10 approval-path audit): the deny / bash-deny / self-kill
+        // gates above ran against the ORIGINAL input. An approval-time edit
+        // (editedInput) can swap in a command those gates never saw — e.g. approve
+        // a benign `echo`, edit it into `rm -rf /` or `pkill node`. Re-run the same
+        // three gates on the final input BEFORE execution; on a hit, refuse exactly
+        // like the original gate at the top (error tool result, no throw). The edit
+        // itself is still allowed — only a gated final input is rejected.
+        const editDenied = isToolDenied(tu.name, tu.input, denyRules)
+        const editBashDenied = tu.name === 'bash' && typeof tu.input.command === 'string'
+          ? isBashCommandDenied(tu.input.command, bashDenyPrefixes)
+          : false
+        const editSelfKill = tu.name === 'bash' && typeof tu.input.command === 'string'
+          ? isSelfDestructiveKill(tu.input.command, selfProcessTree())
+          : false
+        if (editDenied || editBashDenied || editSelfKill) {
+          // Restore the pre-approval input before returning so downstream consumers
+          // (fingerprint, artifact/trace records) never see the rejected command as
+          // if it were the executed one.
+          tu.input = originalInput
+          params.input = originalInput
+          const reason = editSelfKill
+            ? "Tool execution blocked: this command would terminate the agent's own runtime (the Rivet sidecar / Node process it runs in). That aborts the session and drops its API auth. To restart a local dev server, use a targeted command like `npx kill-port <port>` or kill a specific non-agent PID; otherwise ask the user to restart it manually."
+            : `Tool execution denied: the approved edit to ${tu.name} matches an active deny rule. This is a user-configured permission boundary, not a dead end — continue via another route: gather evidence with read-only tools (read_file/grep/glob), write probes under .rivet/scratch/, or ask the user to adjust the permissions deny rules if this operation is genuinely required.`
+          deps.onGateBlocked?.(editSelfKill ? 'self-kill' : 'deny')
+          callbacks.onToolResult(tu.id, tu.name, reason, true)
+          return { toolResult: { type: 'tool_result', tool_use_id: tu.id, content: reason, is_error: true }, traceStore, importGraph, lastConflictCheckCount, checkpointCreated, latestRisk }
+        }
      }
       // Thermocline 2: learn bash command prefix into session allowlist after approval
       if (tu.name === 'bash' && typeof tu.input.command === 'string') {
