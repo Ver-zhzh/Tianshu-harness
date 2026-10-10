@@ -42,6 +42,7 @@ import { buildHandoffPrompt } from './handoff.js'
 import { ensureVerifyDeclaration, renderRivetMdStack, upsertStackSection } from '../bootstrap/verify-declaration.js'
 import { exportsDir } from '../config/paths.js'
 import { listPlans, rejectPlan, resolvePlanOptionLabel, resolvePlanRef, stripCopiedTitleSuffix } from '../plan/plan-store.js'
+import { isSafeFileName } from '../utils/safe-path.js'
 import { approvePlanAndKickoff } from './plan-kickoff.js'
 import { fullRebuild, generateCodebaseIndexBlock, getHeadSha } from '../repo/codebase-index.js'
 import { isDiagramType, buildDiagramDoc, renderDiagramBlock, formatDiagramList } from './diagram-templates.js'
@@ -2119,6 +2120,13 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
       }
 
       const cwd = ctx.agent.cwd
+      // slug 直达 rejectPlan：先过 isSafeFileName 门（与 /plan-approve 的
+      // resolvePlanRef 白名单同构的 fail-closed；store 层 planFilePath 亦有门）。
+      if (!isSafeFileName(slug)) {
+        pushStatic(createLogEntry({ type: 'system', content: `Plan not found: "${slug}". Use /plan-list to see available plans.`, isError: true }))
+        setIsStreaming(false)
+        return true
+      }
       const rejected = await rejectPlan(cwd, slug)
       if (!rejected) {
         pushStatic(createLogEntry({ type: 'system', content: `Plan not found: "${slug}". Use /plan-list to see available plans.`, isError: true }))

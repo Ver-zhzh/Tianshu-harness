@@ -400,3 +400,70 @@ describe('stripPlanChrome', () => {
     assert.deepEqual(stripPlanChrome('# 只有正文\n\nline'), ['# 只有正文', '', 'line'])
   })
 })
+
+describe('plan slug 路径穿越防护 (isSafeFileName 门)', () => {
+  function setup() {
+    const dir = mkdtempSync(join(tmpdir(), 'rivet-plan-test-'))
+    return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) }
+  }
+
+  it('rejectPlan 拒绝穿越 slug：返回 null 且盘外文件不变', async () => {
+    const { dir, cleanup } = setup()
+    try {
+      const victim = join(dir, 'victim.md')
+      const { writeFileSync, readFileSync } = await import('node:fs')
+      writeFileSync(victim, 'precious')
+      const rejected = await rejectPlan(dir, '../../victim')
+      assert.equal(rejected, null)
+      assert.equal(readFileSync(victim, 'utf-8'), 'precious')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('readPlan / readPlanSync 对穿越 slug 返回 null', async () => {
+    const { dir, cleanup } = setup()
+    try {
+      assert.equal(await readPlan(dir, '../secret'), null)
+      assert.equal(readPlanSync(dir, '..\\secret'), null)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('writePlan 对穿越 slug fail-closed（抛错，不落盘）', async () => {
+    const { dir, cleanup } = setup()
+    try {
+      await assert.rejects(() => writePlan(dir, '../../evil', '# evil'))
+      assert.ok(!existsSync(join(dir, 'evil.md')))
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('deletePlan 对穿越 slug 返回 false，不删盘外文件', async () => {
+    const { dir, cleanup } = setup()
+    try {
+      const victim = join(dir, 'keep.md')
+      const { writeFileSync } = await import('node:fs')
+      writeFileSync(victim, 'keep me')
+      assert.equal(await deletePlan(dir, '../../keep'), false)
+      assert.ok(existsSync(victim))
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('正常 slug 不受影响', async () => {
+    const { dir, cleanup } = setup()
+    try {
+      await writePlan(dir, '正常计划-01', '# 标题\n\n正文')
+      const doc = await readPlan(dir, '正常计划-01')
+      assert.ok(doc)
+      assert.equal(doc!.title, '标题')
+      assert.equal(await deletePlan(dir, '正常计划-01'), true)
+    } finally {
+      cleanup()
+    }
+  })
+})
