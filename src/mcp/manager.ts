@@ -338,8 +338,15 @@ export class McpManager {
       // onclose 是异步（子进程 'close' 事件）触发的，此处清掉它就等于没抑制。
       // 下一次 _connectServer 成功时会清。
       this.suppressReconnect.add(serverId)
-      try { await conn.transport.close() } catch { /* best-effort */ }
-      this.connections.delete(serverId)
+      let closed = false
+      try {
+        await conn.transport.close()
+        closed = true
+      } catch {
+        // close 抛错：保留登记（conn 已在登记中，suppressReconnect 已加），
+        // 孤子进程在进程退出时由 killChildrenSync() 回收
+      }
+      if (closed) this.connections.delete(serverId)
     }
     this.reconnectAttempts.delete(serverId)
     this.pendingApprovals.delete(serverId)
@@ -398,8 +405,16 @@ export class McpManager {
     try {
       const server = await this._connectServer(serverId, serverConfig)
       if (!isCurrent()) {
+        // 子进程已 spawn，先登记——close 抛错也能被 killChildrenSync() 回收
+        this.connections.set(serverId, server)
         this.suppressReconnect.add(serverId)
-        try { await server.transport.close() } catch { /* best-effort */ }
+        try {
+          await server.transport.close()
+          this.connections.delete(serverId)
+        } catch {
+          // close 抛错：保留登记（suppressReconnect 已加防重连），孤子进程
+          // 在进程退出时由 killChildrenSync() 回收
+        }
         return []
       }
       stderrTail = server.stderrTail?.() ?? ''
@@ -412,9 +427,15 @@ export class McpManager {
 
         const mcpTools = await this._discoverTools(serverId, server)
         if (!isCurrent()) {
+          // 此处 server 已在登记中（_connectServer 后登记）；close 成功才 delete
           this.suppressReconnect.add(serverId)
-          try { await server.transport.close() } catch { /* best-effort */ }
-          this.connections.delete(serverId)
+          try {
+            await server.transport.close()
+            this.connections.delete(serverId)
+          } catch {
+            // close 抛错：保留登记（suppressReconnect 已加防重连），孤子进程
+            // 在进程退出时由 killChildrenSync() 回收
+          }
           return []
         }
 
@@ -427,9 +448,16 @@ export class McpManager {
           interactive: mcpApprovalInteractive(),
         })
         if (inventory.action === 'block') {
+          // 此站点 close 前从未登记过，先登记——close 抛错也能被 killChildrenSync() 回收
+          this.connections.set(serverId, server)
           this.suppressReconnect.add(serverId) // 防 close→onclose→自动重连→再拦 循环
-          this.connections.delete(serverId)
-          try { await server.transport.close() } catch { /* best-effort */ }
+          try {
+            await server.transport.close()
+            this.connections.delete(serverId)
+          } catch {
+            // close 抛错：保留登记（suppressReconnect 已加防重连），孤子进程
+            // 在进程退出时由 killChildrenSync() 回收
+          }
           this._recordApprovalHold(serverId, serverConfig, 'awaiting', inventory.pending)
           return []
         }
@@ -521,7 +549,14 @@ export class McpManager {
         return rivetTools
       } catch (err) {
         // Tool discovery failed — close the transport that was just opened
-        try { await server.transport.close() } catch { /* best-effort */ }
+        this.connections.set(serverId, server)
+        try {
+          await server.transport.close()
+        } catch {
+          // close 抛错：保留登记并抑制重连，孤子进程退出时由 killChildrenSync() 回收
+          this.suppressReconnect.add(serverId)
+          throw err
+        }
         this.connections.delete(serverId)
         throw err
       }
