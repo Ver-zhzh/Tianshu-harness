@@ -63,11 +63,11 @@ describe('knowledge-index', () => {
     const oldEntry = appendMemoryEntry(cwd, {
       text: 'Bundler webpack is used for all builds in this project',
       kind: 'project_rule', confidence: 0.9, source: 'manual', status: 'verified', tags: [], topic: 'build',
-    })
+    })!
     const newEntry = appendMemoryEntry(cwd, {
       text: 'Bundler esbuild is used for all builds in this project',
       kind: 'project_rule', confidence: 0.95, source: 'essence-gate', status: 'verified', tags: [], topic: 'build',
-    })
+    })!
     supersedeMemoryEntry(cwd, oldEntry.id, newEntry.id)
 
     const idx = new KnowledgeIndex(cwd)
