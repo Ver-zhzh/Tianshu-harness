@@ -1663,7 +1663,13 @@ export class RuntimeSessionManager {
         continue
       }
       if (this.syncExternalRecord(existing, rawRecord)) recordMerged = true
-      if (!existing.running && existing.eventsLoaded && !existing.tombstoned) {
+      // 漂移合并资格：已加载的会话（原有），或**有活 listener 的已淘汰会话**。
+      // issue #445 rework 后 watched-idle 超 TTL 会被淘汰（eventsLoaded=false
+      // 但 listeners 保留），若此处仍只看 eventsLoaded，活着的 SSE 连接永远
+      // 收不到外部新事件（回归）。无 listener 的已淘汰会话保持原样：内存已
+      // 释放，无外部进度时不做任何重读。
+      const mergeEligible = existing.eventsLoaded || existing.listeners.size > 0
+      if (!existing.running && mergeEligible && !existing.tombstoned) {
         const merge = this.maybeSyncExternalEvents(existing)
         if (merge) eventMerges.push(merge)
       }
@@ -1752,8 +1758,12 @@ export class RuntimeSessionManager {
     // 水位只在读成功后前进——读失败下轮重试
     session.externalSyncSize = stat.size
     session.externalSyncMtimeMs = stat.mtimeMs
-    // 等待期间会话被逐出/卸载/替换 → 丢弃这份陈旧磁盘快照（同 ensureEventsAsync 的守卫）
-    if (this.sessions.get(id) !== session || !session.eventsLoaded || session.tombstoned) return
+    // 等待期间会话被逐出/卸载/替换 → 丢弃这份陈旧磁盘快照（同 ensureEventsAsync 的守卫）。
+    // 资格判定与 adoptExternalSessions 对齐：已加载，或有活 listener 的已淘汰会话
+    // （evicted-watched：eventsLoaded=false 但 listeners 保留）都仍是有效合并目标；
+    // 二者皆无才是真正失效的快照。novel 过滤（seq > session.seq）保证只合并尾部
+    // 新事件，不把全量历史重新常驻内存。
+    if (this.sessions.get(id) !== session || (!session.eventsLoaded && session.listeners.size === 0) || session.tombstoned) return
     if (artifactIds) for (const a of artifactIds) session.knownArtifacts.add(a)
     if (diskFirst !== undefined && diskFirst > (session.diskFirstSeq ?? 1)) session.diskFirstSeq = diskFirst
     const novel = candidates.filter((e) => e.seq > session.seq).sort((a, b) => a.seq - b.seq)
