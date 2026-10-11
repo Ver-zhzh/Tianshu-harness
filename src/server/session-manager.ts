@@ -2009,7 +2009,7 @@ export class RuntimeSessionManager {
       this.sweepStaleDelegationNodes(session, 'caller_aborted')
     }
     this.touchLoaded(session)
-    this.evictLoadedBeyondCap()
+    this.evictLoadedBeyondCap(session.record.id)
   }
 
   /** Fold a freshly-read on-disk log into the session (shared by the sync and
@@ -2105,7 +2105,7 @@ export class RuntimeSessionManager {
       await session.eventsLoadPromise
     }
     this.touchLoaded(session)
-    this.evictLoadedBeyondCap()
+    this.evictLoadedBeyondCap(session.record.id)
   }
 
   /** Async twin of getEvents — reconnect/replay entry point for HTTP routes. */
@@ -2260,16 +2260,37 @@ export class RuntimeSessionManager {
 
   /**
    * Drop event logs of idle LRU sessions to bound resident memory. Never unloads
-   * a session that's live (agent built or running) or being watched (SSE
-   * listeners) — its in-memory log is the source of truth for in-flight appends
-   * and replay; those reload cleanly from disk once idle.
+   * a session that's live (agent built or running). Watched-but-idle sessions
+   * (SSE listeners, no agent/run) are the issue #445 leak: listeners only drop
+   * when the client disconnects, so a couple of long-lived tabs pin their full
+   * ring forever. Once such a log is quiescent past the idle TTL its events are
+   * provably on disk (every append is flushed through persistence.appendEvent),
+   * so it may be dropped like any unwatched session — a reconnect replays from
+   * disk via getEvents→ensureEvents (the same path an evicted unwatched log
+   * uses), so no event is silently lost. idleAgentTtlMs <= 0 disables the path
+   * (preserving the old "never evict a watched session" behavior).
+   *
+   * `exceptId` shields the session being opened by the current ensureEvents
+   * call: without it a just-loaded watched-idle log would be dropped by the
+   * same call that read it, and getEvents would hand back an empty log.
    */
-  private evictLoadedBeyondCap(): void {
+  private evictLoadedBeyondCap(exceptId?: string): void {
     let i = 0
     while (i < this.loadedOrder.length && this.loadedOrder.length > this.maxLoadedSessions) {
       const id = this.loadedOrder[i]!
       const s = this.sessions.get(id)
-      if (!s || s.agent || s.running || s.listeners.size > 0) { i++; continue }
+      if (!s || s.agent || s.running) { i++; continue }
+      if (id === exceptId) { i++; continue }
+      const watched = s.listeners.size > 0
+      if (watched && (this.idleAgentTtlMs <= 0 || this.now() - s.record.updatedAt < this.idleAgentTtlMs)) {
+        i++
+        continue
+      }
+      // Unflushed coalesced deltas live only in memory — flush before dropping
+      // so the replay they came from keeps every event (same guard unloadSession
+      // uses).
+      this.flushDeltaBuf(s)
+      this.flushToolResultBuf(s)
       s.events = []
       s.knownArtifacts = new Set()
       s.eventsLoaded = false
