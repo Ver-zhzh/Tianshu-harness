@@ -19,6 +19,35 @@ export interface McpNetworkConfig {
 }
 
 /**
+ * 启动即执行类环境变量（issue #137 同类，对称 `src/tools/bash.ts` 的显式剥离）：
+ * 它们不含 KEY/TOKEN/SECRET 关键词，敏感过滤兜不住，但可在子进程启动时注入
+ * 任意代码（NODE_OPTIONS 的 --require、JAVA_TOOL_OPTIONS 的 -javaagent、
+ * LD_PRELOAD/DYLD_INSERT_LIBRARIES 的 so 注入）。
+ *
+ * MCP server 的 env 来自用户配置/技能/配置同步等可写来源，且审批指纹刻意不绑定
+ * env 键值（凭据轮换容忍）——仅改值不触发重审，故在此处显式剥离，与 bash 路径
+ * 的 #137 硬化对齐。
+ */
+const CODE_EXEC_ENV_VARS = [
+  'NODE_OPTIONS',
+  'JAVA_TOOL_OPTIONS',
+  '_JAVA_OPTIONS',
+  'JDK_JAVA_OPTIONS',
+  'LD_PRELOAD',
+  'DYLD_INSERT_LIBRARIES',
+] as const
+
+/** 剥离启动即执行类环境变量（大小写不敏感，覆盖 win32）。 */
+export function stripCodeExecEnvVars(env: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const [key, value] of Object.entries(env)) {
+    if ((CODE_EXEC_ENV_VARS as readonly string[]).includes(key.toUpperCase())) continue
+    out[key] = value
+  }
+  return out
+}
+
+/**
  * 计算需要补充的代理键（不覆盖 `existing` 中已有的代理变量）。
  * 对称 whisper 的判定：只要 HTTPS_PROXY / HTTP_PROXY（含小写）任一已存在，
  * 就不再写入应用设置里的 proxy——用户显式配置优先。
@@ -62,5 +91,8 @@ export function buildStdioChildEnv(
 ): Record<string, string> {
   const merged: Record<string, string> = { ...(staticEnv ?? {}), ...dynamicEnv }
   const proxyEnv = buildMcpProxyEnv(merged, network)
-  return buildStdioEnvWithNodePath({ ...proxyEnv, ...merged }, deps)
+  // 对称 issue #137：剥离 NODE_OPTIONS 等启动即执行类变量——配置可控的 env 值
+  // 原样进子进程且审批指纹不绑定值（凭据轮换容忍），与 bash 路径的不对称是
+  // 真实攻击面（探针：NODE_OPTIONS=--require 可在子进程启动即执行任意代码）。
+  return buildStdioEnvWithNodePath(stripCodeExecEnvVars({ ...proxyEnv, ...merged }), deps)
 }
