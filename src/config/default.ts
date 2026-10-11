@@ -289,4 +289,6 @@ export const DEFAULT_CONFIG: Config = {
   },
   plugins: { enabled: {} },
   hooks: {},
+  // Token 台账：空对象 = 本地累计开、上传关（endpoint 缺省即不上传）。
+  tokenLedger: {},
 }

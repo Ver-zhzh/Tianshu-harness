@@ -1048,6 +1048,31 @@ const runtimeSchema = z.object({
 
 export type RuntimeConfig = z.infer<typeof runtimeSchema>
 
+/**
+ * Token 消耗台账（src/token-ledger/）：以各会话 cache-log 计费行为事实源，
+ * 本地累计 day×model 消耗快照，可向论坛端点推送（POST JSON + Bearer）。
+ * forum.endpoint 缺省 = 只记本地台账不上传；env RIVET_FORUM_API /
+ * RIVET_FORUM_TOKEN 分别覆盖 endpoint/apiKey。
+ */
+export const tokenLedgerSchema = z.object({
+  /** 本地台账开关，默认 true（仅累计，不上传）。 */
+  enabled: z.boolean().optional(),
+  /** 论坛展示用的设备名，缺省回退 os.hostname()。 */
+  deviceName: z.string().optional(),
+  forum: z.object({
+    /** 完整推送 URL（POST）。缺省 = 不同步。 */
+    endpoint: z.string().optional(),
+    /** 论坛颁发的 Bearer token。 */
+    apiKey: z.string().optional(),
+    /** 会话内定时自动同步，默认 false（opt-in）。 */
+    autoSync: z.boolean().optional(),
+    /** 自动同步间隔（分钟），默认 30。 */
+    intervalMinutes: z.number().int().positive().optional(),
+  }).strict().optional(),
+}).default({})
+
+export type TokenLedgerConfig = z.infer<typeof tokenLedgerSchema>
+
 export const configSchema = z.object({
   provider: z.object({
     default: z.string(),
@@ -1114,6 +1139,7 @@ export const configSchema = z.object({
   plugins: z.object({
     enabled: z.record(z.boolean()).default({}),
   }).default({}),
+  tokenLedger: tokenLedgerSchema,
 })
 
 export type Config = {
@@ -1152,6 +1178,7 @@ export type Config = {
   pro: ProConfig
   plugins: { enabled: Record<string, boolean> }
   hooks: { disabled?: string[]; timeoutMs?: number; slowMs?: number }
+  tokenLedger: TokenLedgerConfig
 }
 
 export type ProviderConfig = z.infer<typeof providerSchema>

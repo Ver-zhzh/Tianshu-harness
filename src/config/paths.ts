@@ -173,6 +173,14 @@ export function updateCheckPath(): string {
 }
 
 /**
+ * Token 消耗台账状态文件（跨会话全局）：累计 day×model 聚合 + 各 cache-log
+ * 消费游标 + 论坛推送回执。`base` 供测试注入临时 home，不设 RIVET_HOME。
+ */
+export function tokenLedgerStatePath(base?: string): string {
+  return join(base ?? rivetHome(), 'token-ledger.json')
+}
+
+/**
  * /connect wizard draft — unfinished provider setup, saved on Esc and offered
  * for resume next time. Never holds a plaintext key: only a keyRef into
  * secrets.json. TTL/cleanup is owned by the reader. `base` lets tests inject

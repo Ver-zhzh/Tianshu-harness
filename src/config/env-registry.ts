@@ -3,8 +3,8 @@
  *
  * name/defaultHint/files 由 scripts/gen-env-registry.ts 生成，勿手改；
  * description 字段人工维护，重新生成时按 name 保留。
- * 最后生成：2026-10-11T04:08:53.181Z
- * 共 240 个变量。
+ * 最后生成：2026-10-11T07:00:21.622Z
+ * 共 242 个变量。
  *
  * 每个条目含：名称 / 默认值提示 / 引用文件 / 简要说明。
  * 当源码中新增 RIVET_* 引用但注册表未同步时，
@@ -532,6 +532,18 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
     defaultHint: '',
     files: ['main.ts'],
     description: '',
+  },
+  {
+    name: 'RIVET_FORUM_API',
+    defaultHint: '',
+    files: ['token-ledger/service.ts', 'token-ledger/__tests__/service.test.ts'],
+    description: '论坛 token 消耗同步端点（完整 POST URL），覆盖 config tokenLedger.forum.endpoint',
+  },
+  {
+    name: 'RIVET_FORUM_TOKEN',
+    defaultHint: '',
+    files: ['token-ledger/service.ts'],
+    description: '论坛同步 Bearer token，覆盖 config tokenLedger.forum.apiKey',
   },
   {
     name: 'RIVET_FRAME_TELEMETRY',

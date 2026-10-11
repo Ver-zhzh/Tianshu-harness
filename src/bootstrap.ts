@@ -27,6 +27,7 @@ import { loadConfig as loadLayeredConfig } from './config/manager.js'
 import { isRuntimeLeanAspect } from './config/runtime-lean.js'
 import { isProFeatureEnabled } from './config/pro-license.js'
 import { lastSessionPointerDir, rivetHome, stateDir } from './config/paths.js'
+import { TokenLedgerService } from './token-ledger/service.js'
 import { setTargetConventions, applyConfiguredGitBashPath } from './platform.js'
 import { AgentLoop } from './agent/loop.js'
 import { resolveZenConfig } from './agent/zen-mode.js'
@@ -241,6 +242,9 @@ export interface BootstrapContext {
   /** Persist the final TUI perf summary through the existing telemetry writer. */
   flushTuiPerfSummary: (summary: TuiPerfSummary) => Promise<void>
   heartbeatInterval: ReturnType<typeof setInterval>
+  /** Token 消耗台账（论坛同步，src/token-ledger/）：tokenLedger.enabled!==false 时
+   *  构造；autoSync+endpoint 齐全才启定时推送，shutdown 时冲刷（有界超时）。 */
+  tokenLedger?: import('./token-ledger/service.js').TokenLedgerService
   /** True when first-run template init is pending — TUI layer handles the
    *  AGENTS.md prompt. Set by needsTemplatesInit() during bootstrap. */
   templatesPendingAgents?: boolean
@@ -1462,6 +1466,8 @@ export function createShutdownHandler(ctx: BootstrapContext): () => Promise<void
         try { process.stderr.write(`[shutdown] callback error: ${(err as Error)?.message}\n`) } catch { /* noop */ }
       } finally {
         if (ctx.heartbeatInterval) clearInterval(ctx.heartbeatInterval)
+        // Token 台账最后一趟推送（autoSync 全开时才有动作）：有界超时，不拖退出。
+        try { await ctx.tokenLedger?.shutdownFlush() } catch { /* best-effort */ }
         try { ctx.refs.lspManager?.dispose() } catch { /* best-effort */ }
         try { ctx.refs.mcpManager?.killChildrenSync?.() } catch { /* best-effort */ }
         void ctx.refs.mcpManager?.shutdown?.()
@@ -2481,6 +2487,16 @@ export async function bootstrapInteractiveSession(opts: BootstrapOptions = {}): 
   // （sidecar 时序缝隙：先查后载则合并视图查不到注册项）。
   await loadProModule()
 
+  // 14a. Token 消耗台账（论坛同步）：本地累计默认开，endpoint+autoSync 齐全才启
+  // 定时推送。台账是旁路观测面，任何构造失败都不得影响启动。
+  let tokenLedger: TokenLedgerService | undefined
+  try {
+    if (config.tokenLedger?.enabled !== false) {
+      tokenLedger = new TokenLedgerService(config)
+      tokenLedger.startAutoSync()
+    }
+  } catch { /* best-effort */ }
+
   // 14. Shutdown handler
   const shutdown = createShutdownHandler({
     config, provider, apiKey, auth, sessionId, session, persist,
@@ -2489,6 +2505,7 @@ export async function bootstrapInteractiveSession(opts: BootstrapOptions = {}): 
     shutdown: async () => {}, // placeholder, replaced below
     flushTuiPerfSummary: async () => {}, // placeholder; TUI bridge is attached on final context
     heartbeatInterval,
+    tokenLedger,
   })
 
   let ctx: BootstrapContext
@@ -2509,6 +2526,7 @@ export async function bootstrapInteractiveSession(opts: BootstrapOptions = {}): 
     shutdown,
     flushTuiPerfSummary,
     heartbeatInterval,
+    tokenLedger,
     templatesPendingAgents,
   }
 

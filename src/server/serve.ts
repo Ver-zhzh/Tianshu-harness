@@ -53,6 +53,7 @@ import { registeredWorkspaces } from './workspace-guard.js'
 import { buildProjectDocsRoutes } from './project-docs-routes.js'
 import { buildTrustRoutes } from './trust-api.js'
 import { buildCacheRoutes } from './cache-routes.js'
+import { buildTokenLedgerRoutes } from './token-ledger-routes.js'
 import { buildSpeechRoutes, createSpeechEngineFromEnv, type SpeechEngine } from './speech-routes.js'
 import { CronScheduler, setActiveScheduler, setScheduleWriteGuard, setUnattendedAutomationGate } from './cron-scheduler.js'
 export { installParentWatchdog, probeParentAlive, maxMissesFromGraceEnv, type ParentWatchdogOptions } from './parent-watchdog.js'
@@ -1076,6 +1077,9 @@ export async function runServe(opts: RunServeOptions = {}): Promise<RunningServe
 
   // Cache usage route: 跨会话 cache-log 聚合 — 桌面端读不到 ~/.rivet 下的日志文件。
   Object.assign(routes, buildCacheRoutes({ apiToken, defaultCwd: () => process.cwd() }))
+
+  // Token 台账路由：本地消耗查询 + 手动触发论坛同步（service 懒建为进程级单例）。
+  Object.assign(routes, buildTokenLedgerRoutes({ apiToken }))
 
   // 桌面端的项目授信入口（此前只有 CLI 能授信，配置被剥离后无处恢复）。
   Object.assign(routes, buildTrustRoutes(apiToken, () => registeredWorkspaces(sharedRuntime.sessions ?? undefined)))
