@@ -8,41 +8,41 @@ tags: [token-ledger, forum, sync, api, integration]
 
 # Token 消耗台账 · 论坛同步接口与接入交接
 
-> 面向论坛侧接入方的完整交接文档：契约、字段、幂等语义、论坛端实现建议、调试方法。
-> CLI 侧实现：`src/token-ledger/`（store / forum-sync / service）+ `src/server/token-ledger-routes.ts`。
+> 三段式架构的完整交接：**客户端（CLI/桌面端）→ 天枢 token-server → 论坛**。
+> 客户端实现：`src/token-ledger/` + `src/server/token-ledger-routes.ts`；
+> 中间层：`token-server/`（Cloudflare Worker + D1，附属服务，不进开源仓——其 API 契约见本文与 `token-server/README.md`）。
 
-## 1. 这是什么
-
-天枢 CLI 把用户本机的 token 消耗汇总成**累计快照**，推送到论坛端点，论坛按设备展示消耗榜单/个人页。
-
-数据流：
+## 1. 架构与数据流
 
 ```
-各会话 cache-log.jsonl（计费行，唯一事实源）
-        │  字节游标增量消费（append-only，不重扫）
-        ▼
-~/.rivet/token-ledger.json（本地台账：day×model 累计 + 游标 + 推送回执）
-        │  digest 判重，有变更才推
-        ▼
-POST {forum.endpoint}（累计快照，幂等 upsert）
+客户端 cache-log.jsonl（计费行，唯一事实源）
+   │  字节游标增量折叠
+   ▼
+本地台账 ~/.rivet/token-ledger.json（day×model 累计）
+   │  digest 判重，有变更才推
+   ▼
+POST {token-server}/v1/token-usage ── Bearer 用户同步密钥（论坛签发）
+   │  D1 覆盖式 upsert（累计语义，重推/乱序/丢包不重复计数）
+   ▼
+论坛后端：签发/吊销密钥（admin API）· 拉取个人聚合与榜单 → 渲染展示
 ```
 
-两条关键性质，论坛端可以依赖：
+两条关键性质：
 
-- **累计语义**：每次推送的都是"截至目前的全量累计"，不是增量。丢包、重推、乱序、间隔多久推一次，都不会导致重复计数——论坛端只做 upsert（按 `deviceId` 覆盖最新快照）。
-- **本地是权威**：推送失败不影响本地台账增长；端点恢复后下一趟推送自动补齐全部历史。论坛端不需要处理"补洞"。
+- **累计语义**：每次推送都是"截至目前全量"，论坛/token-server 只做 upsert，不需要去重表。
+- **本地是权威**：推送失败不影响本地台账增长；端点恢复后下一趟自动补齐全部历史。
 
 ## 2. 用户侧配置（如何开启同步）
 
-`~/.rivet/config.json`：
+用户在论坛个人页生成同步密钥（论坛后端调 token-server 签发），填入 `~/.rivet/config.json`：
 
 ```json
 {
   "tokenLedger": {
     "deviceName": "小明的 MacBook",
     "forum": {
-      "endpoint": "https://forum.example.com/api/token-usage",
-      "apiKey": "论坛签发的 Bearer token",
+      "endpoint": "https://<token-server 域名>/v1/token-usage",
+      "apiKey": "tsu_论坛签发的密钥",
       "autoSync": true,
       "intervalMinutes": 30
     }
@@ -52,20 +52,20 @@ POST {forum.endpoint}（累计快照，幂等 upsert）
 
 | 字段 | 缺省行为 |
 |------|---------|
-| `enabled` | 默认 `true`（本地台账始终累计；这只是本地记录，不上传） |
-| `deviceName` | 缺省 `os.hostname()`；论坛展示用 |
+| `enabled` | 默认 `true`（本地台账始终累计；只是本地记录，不上传） |
+| `deviceName` | 缺省 `os.hostname()`；展示用 |
 | `forum.endpoint` | **缺省 = 不上传**。完整 POST URL，客户端不拼路径 |
 | `forum.apiKey` | 配置了才带 `Authorization: Bearer` 头 |
-| `forum.autoSync` | 默认 `false`；`true` 且 endpoint 已配时，会话内每 `intervalMinutes`（默认 30）推一趟，退出时冲刷最后一趟（3s 有界） |
+| `forum.autoSync` | 默认 `false`；`true` 且 endpoint 已配时，会话内每 `intervalMinutes`（默认 30）推一趟，退出时冲刷最后一趟（3s 有界）。桌面端由 sidecar 进程承担间隔推送 |
 
 环境变量覆盖（联调/多环境）：`RIVET_FORUM_API` 覆盖 endpoint，`RIVET_FORUM_TOKEN` 覆盖 apiKey。
 
-## 3. HTTP 契约（论坛端要实现的部分）
+## 3. 客户端 → token-server 契约
 
 ```
-POST {用户配置的 endpoint}
+POST /v1/token-usage
 Content-Type: application/json
-Authorization: Bearer <apiKey>        # 用户配置了就带
+Authorization: Bearer tsu_<用户同步密钥>
 ```
 
 ### 3.1 请求体 `TokenUsageSnapshot`
@@ -76,110 +76,76 @@ Authorization: Bearer <apiKey>        # 用户配置了就带
   "deviceId": "3f6b2a1c-9e2d-4f7b-b8a1-0c5d6e7f8a9b",
   "deviceName": "小明的 MacBook",
   "sentAt": "2026-10-11T08:30:00.000Z",
-  "totals": {
-    "requests": 128,
-    "input": 3456789,
-    "output": 234567,
-    "cacheRead": 2900000,
-    "cacheCreate": 300000,
-    "cost": 5.1234
-  },
+  "totals": { "requests": 128, "input": 3456789, "output": 234567, "cacheRead": 2900000, "cacheCreate": 300000, "cost": 5.1234 },
   "days": [
-    {
-      "date": "2026-10-10",
-      "model": "deepseek-flash",
-      "provider": "deepseek",
-      "requests": 100,
-      "input": 3000000,
-      "output": 200000,
-      "cacheRead": 2500000,
-      "cacheCreate": 300000,
-      "cost": 4.5
-    }
+    { "date": "2026-10-10", "model": "deepseek-flash", "provider": "deepseek",
+      "requests": 100, "input": 3000000, "output": 200000, "cacheRead": 2500000, "cacheCreate": 300000, "cost": 4.5 }
   ]
 }
 ```
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `version` | `1` | 载荷版本；未来变更会递增，论坛端应拒绝/告警未知版本 |
-| `deviceId` | uuid | 安装级匿名 id（首次生成后持久化）。**upsert 主键**。不含任何用户身份信息 |
+| `version` | `1` | 载荷版本；破坏性变更会递增 |
+| `deviceId` | uuid | 安装级匿名 id（客户端持久化）。**upsert 主键**，不含用户身份 |
 | `deviceName` | string | 展示名，用户可改 |
-| `sentAt` | ISO 8601 | 本次推送时间（客户端时钟） |
-| `totals` | object | 全量累计，等于 `days` 的求和（客户端保证一致，论坛端可直接信 totals） |
-| `days[]` | array | 逐日 × 模型明细，`date` 升序；同一 (date, model, provider) 只出现一次 |
+| `sentAt` | ISO 8601 | 客户端推送时间；token-server 用它做 stale 守卫（不前进的整包丢弃） |
+| `totals` | object | 全量累计 = `days` 求和（客户端保证一致） |
+| `days[]` | array | 逐日 × 模型明细，`date` 升序；同 (date, model, provider) 只出现一次 |
 | `requests` | int | 计费请求数（主请求 + side_path + 中断重试行） |
-| `input` | int | cache-**inclusive** 输入 tokens（= uncached + cacheRead + cacheCreate） |
-| `output` | int | 输出 tokens |
-| `cacheRead` / `cacheCreate` | int | 前缀缓存命中 / 创建 tokens |
-| `cost` | number | 按用户本地定价配置估算（DeepSeek 官方含峰谷）。**缺定价的模型计 0**——它是估算下限，不是账单 |
-| `provider` | string? | 老数据行可能缺省；缺省时论坛端按空串处理 |
+| `input` | int | cache-**inclusive** 输入 tokens |
+| `output` / `cacheRead` / `cacheCreate` | int | 输出 / 缓存命中 / 缓存创建 tokens |
+| `cost` | number | 客户端按本地定价估算（DeepSeek 官方含峰谷）；**未定价模型计 0**，是估算下限不是账单 |
+| `provider` | string? | 老数据行可能缺省 |
 
-### 3.2 响应约定与客户端行为
+### 3.2 响应与客户端行为
 
-| 论坛响应 | 客户端行为 |
+| token-server 响应 | 客户端行为 |
 |---------|-----------|
-| 2xx | 确认：钉住已确认摘要，台账无新变化时不再推 |
-| 4xx（除 429） | 视为载荷/鉴权问题，**不重试**，回执记 `http_4xx`；修复后用户手动 `/sync` 或等下趟 |
-| 429 / 5xx / 网络 / 超时(10s) | 瞬态：当场重试一次（1s 退避），仍失败记回执，等下一趟定时推送 |
+| 2xx `{ ok, stale, receivedAt }` | 确认；`stale:true` = 旧包被丢弃（仍算成功）。台账无新变化时客户端不再推 |
+| 401 | 密钥无效/已吊销，不重试，回执记 `http_4xx`（用户需回论坛重新签发） |
+| 其他 4xx | 载荷问题，不重试 |
+| 429 / 5xx / 网络 / 超时(10s) | 瞬态：当场重试一次（1s 退避），失败等下趟定时推送 |
 
-论坛端返回体内容客户端不解析，任意 JSON/空皆可；建议返回 `{ "ok": true }` 或错误细节方便排查。
+## 4. token-server → 论坛契约
 
-## 4. 论坛端实现建议
+论坛后端持有 `ADMIN_TOKEN`（wrangler secret），服务端对服务端调用：
 
-### 4.1 存储
+| 路由 | 说明 |
+|------|------|
+| `POST /v1/admin/keys` | 签发密钥 `{ forumUserId, label? }` → 201 `{ keyId, key, prefix }`。**明文只返回这一次**，库存 sha256 |
+| `GET /v1/admin/keys?forumUserId=` | 列密钥（prefix/时间/吊销态，不回明文） |
+| `POST /v1/admin/keys/revoke` | 吊销 `{ keyId }`；吊销后客户端推送/自查立即 401 |
+| `GET /v1/usage/leaderboard?days=30&limit=50` | 榜单：按论坛用户跨设备聚合，`totalTokens` 降序 |
+| `GET /v1/usage/me?days=30` | 个人聚合（也可用用户自己的 `tsu_` key 直查）：窗口 totals + 逐日 + 各设备快照 |
 
-一张设备快照表即可起步：
+论坛接入流程：
 
-```sql
-CREATE TABLE token_usage_snapshots (
-  device_id      TEXT PRIMARY KEY,        -- = 载荷 deviceId
-  api_key_id     TEXT NOT NULL,           -- 鉴权时解析出的论坛用户/key id
-  device_name    TEXT NOT NULL,
-  version        INT  NOT NULL,
-  sent_at        TIMESTAMPTZ NOT NULL,
-  totals         JSONB NOT NULL,          -- {requests,input,output,cacheRead,cacheCreate,cost}
-  days           JSONB NOT NULL,          -- day×model 明细数组
-  received_at    TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-```
+1. 用户在论坛个人页点「生成同步密钥」→ 论坛后端调 `POST /v1/admin/keys` → key 展示给用户一次
+2. 用户填进 CLI 配置，客户端开始自动上报
+3. 论坛渲染：个人页用 `/v1/usage/me` 数据（用户 key 直查或后端转发）；榜单页后端拉 `/v1/usage/leaderboard` join 论坛昵称/头像
 
- upsert：`INSERT ... ON CONFLICT (device_id) DO UPDATE SET ...`。**不需要去重表**——累计快照天然幂等，重复投递收敛到同一状态。
+> 备选路径：论坛也可以**自建接收端**绕开 token-server——客户端契约（§3）不变，按 deviceId upsert 即可。推荐走 token-server：密钥体系、stale 守卫、口径校验都已实现并有测试覆盖。
 
-要防乱序覆盖（旧快照晚到）可加一行守卫：`WHERE excluded.sent_at > token_usage_snapshots.sent_at`。
+## 5. 本地调试（联调用）
 
-### 4.2 鉴权
-
-- 论坛给用户签发 token（个人设置页生成，可吊销）；用户填进 CLI 配置。
-- 端点校验 `Authorization: Bearer`，把 `deviceId` 绑定到该 token 对应的账号；**同账号多设备** = 多条 `deviceId` 记录，个人页按账号聚合。
-
-### 4.3 展示聚合
-
-- 今日/本周：`days` 里按 `date` 过滤求和（date 是客户端本地时区的 `YYYY-MM-DD`）。
-- 榜单：按 `totals.input + totals.output` 或 `totals.cost` 排序（注意 cost 是估算下限）。
-- 缓存率：`cacheRead / input`（分母为 cache-inclusive 口径）。
-
-## 5. 本地调试（论坛联调时用）
-
-桌面 sidecar 暴露三条路由（`Authorization: Bearer <sidecar token>`），也可用于自检：
+桌面 sidecar 暴露三条路由（`Authorization: Bearer <sidecar token>`）：
 
 ```bash
 # 本地台账视图（窗口聚合 + 全量累计）
 curl -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$PORT/token-ledger/summary?days=30"
-
-# 同步状态：deviceId / 是否有未确认变更(pending) / 上次推送回执
+# 同步状态：deviceId / pending / 上次推送回执
 curl -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$PORT/token-ledger/status"
-
 # 立即同步一次（联调主力；未配置 endpoint 返回 400 + 配置提示）
 curl -X POST -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$PORT/token-ledger/sync"
 ```
 
-联调技巧：`RIVET_FORUM_API=http://localhost:4000/hook rivet` 起个本地接收端即可看到真实载荷，不需要先配 config。
+token-server 本地起：`cd token-server && npm run db:init:local && npm run dev`，然后 `RIVET_FORUM_API=http://127.0.0.1:8787/v1/token-usage rivet` 即可看到真实上报。
 
 ## 6. 边界与 FAQ
 
 - **payload 里没有会话内容**：只有 token 计数与模型名，不含代码、prompt、文件路径。
-- **deviceId 重置**：删 `~/.rivet/token-ledger.json` 会生成新 deviceId 并从 cache-log 全量重建台账——论坛端会看到一个"新设备"，旧记录需管理员合并（或保留，按账号聚合则自动正确）。
-- **用户中途换 endpoint**：累计语义保证新端点第一趟就拿到完整历史。
-- **cost 口径**：按客户端配置的定价估算（官方 DeepSeek 走峰谷价），未定价模型计 0；账单以平台为准，论坛展示建议标注"估算"。
-- **version 演进**：新增字段只向后兼容地加；破坏性变更递增 `version`，论坛端对未知版本返回 4xx 即可让客户端停推并留回执。
+- **deviceId 重置**：删 `~/.rivet/token-ledger.json` 会生成新 deviceId 并全量重建——token-server 视为新设备，历史留在旧 deviceId 下（论坛按账号聚合则自动正确）。
+- **换 key**：论坛重新签发后，设备下一次推送自动改绑新 key，历史消耗并入。
+- **cost 口径**：客户端配置定价的估算（官方 DeepSeek 峰谷）；展示建议标注「估算」，账单以平台为准。
+- **version 演进**：新增字段只向后兼容地加；破坏性变更递增 `version`，token-server 对未知版本回 400（客户端停推留回执）。

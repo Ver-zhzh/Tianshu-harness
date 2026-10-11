@@ -54,6 +54,7 @@ import { buildProjectDocsRoutes } from './project-docs-routes.js'
 import { buildTrustRoutes } from './trust-api.js'
 import { buildCacheRoutes } from './cache-routes.js'
 import { buildTokenLedgerRoutes } from './token-ledger-routes.js'
+import { TokenLedgerService } from '../token-ledger/service.js'
 import { buildSpeechRoutes, createSpeechEngineFromEnv, type SpeechEngine } from './speech-routes.js'
 import { CronScheduler, setActiveScheduler, setScheduleWriteGuard, setUnattendedAutomationGate } from './cron-scheduler.js'
 export { installParentWatchdog, probeParentAlive, maxMissesFromGraceEnv, type ParentWatchdogOptions } from './parent-watchdog.js'
@@ -1078,8 +1079,19 @@ export async function runServe(opts: RunServeOptions = {}): Promise<RunningServe
   // Cache usage route: 跨会话 cache-log 聚合 — 桌面端读不到 ~/.rivet 下的日志文件。
   Object.assign(routes, buildCacheRoutes({ apiToken, defaultCwd: () => process.cwd() }))
 
-  // Token 台账路由：本地消耗查询 + 手动触发论坛同步（service 懒建为进程级单例）。
-  Object.assign(routes, buildTokenLedgerRoutes({ apiToken }))
+  // Token 台账路由：本地消耗查询 + 手动触发论坛同步。sidecar 是长驻进程，
+  // 桌面用户的会话不经过 CLI bootstrap——autoSync+endpoint 齐全时在进程内
+  // 启动间隔推送，否则桌面端产生的消耗永远等不到一趟自动同步。
+  // 台账是旁路观测面：构造失败只意味着本次无自动推送，路由仍懒建兜底。
+  let tokenLedgerService: TokenLedgerService | undefined
+  try {
+    const tlConfig = loadConfig()
+    if (tlConfig.tokenLedger?.enabled !== false) {
+      tokenLedgerService = new TokenLedgerService(tlConfig)
+      tokenLedgerService.startAutoSync()
+    }
+  } catch { /* best-effort */ }
+  Object.assign(routes, buildTokenLedgerRoutes({ apiToken, service: tokenLedgerService }))
 
   // 桌面端的项目授信入口（此前只有 CLI 能授信，配置被剥离后无处恢复）。
   Object.assign(routes, buildTrustRoutes(apiToken, () => registeredWorkspaces(sharedRuntime.sessions ?? undefined)))
