@@ -668,6 +668,19 @@ const DEFAULT_PORT = 3100
 let storeLockDegraded = false
 
 /**
+ * issue #450: 启动期数据目录权限加固。数据目录膨胀后（数万文件）Windows ACL
+ * 加固可能超时或失败——加固只是纵深防御的一层，失败时降级记录 warn 后继续
+ * 启动，不让它一票否决本地服务。
+ */
+export function hardenServeDataDir(dir: string, ensureDir: (dir: string) => void = ensurePrivateDirectory): void {
+  try {
+    ensureDir(dir)
+  } catch (err) {
+    serverLogger.warn(`[serve] 数据目录权限加固失败，降级继续启动 (#450): ${err instanceof Error ? err.message : String(err)}`)
+  }
+}
+
+/**
  * Start the runtime API server. Returns the bound port, a close() that aborts
  * all in-flight work, and the RuntimeSessionManager backing the multi-session
  * API. Throws if no token is available (fail-closed).
@@ -685,7 +698,7 @@ export async function runServe(opts: RunServeOptions = {}): Promise<RunningServe
   if (!apiToken) {
     throw new Error('RIVET_SERVER_TOKEN is required for rivet serve')
   }
-  if (!opts.ephemeral) ensurePrivateDirectory(profileRivetHome())
+  if (!opts.ephemeral) hardenServeDataDir(profileRivetHome())
   const port = opts.port ?? DEFAULT_PORT
   // 监听地址：显式 opts（serveCommand --host / 测试注入）> env（桌面壳经父 env 继承
   // RIVET_SERVE_HOST 可达，零 Rust 改动）> 默认 127.0.0.1（行为不变）。

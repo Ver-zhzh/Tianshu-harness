@@ -6,16 +6,35 @@ import { join } from 'node:path'
 import childProcess from 'node:child_process'
 import fs from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
-import { PRIVATE_PATH_ACL_SCRIPT, ensurePrivateDirectory, protectPrivatePath } from '../private-path.js'
+import { PRIVATE_PATH_ACL_SCRIPT, ensurePrivateDirectory, normalizeAclSddlForComparison, protectPrivatePath } from '../private-path.js'
 import { privateAclAssertions, unsafeAclFixture, withoutAuditPrivilege } from './windows-acl-fixture.js'
 
 test('private paths only persist modified DACLs, keeping owner/group/audit untouched', () => {
   assert.doesNotMatch(PRIVATE_PATH_ACL_SCRIPT, /Set-Acl|SetOwner|SetGroup|SetAuditRule|SetAuditRuleProtection/)
   assert.match(PRIVATE_PATH_ACL_SCRIPT, /SetAccessRuleProtection\(\$true, \$false\)/)
   assert.match(PRIVATE_PATH_ACL_SCRIPT, /-notcontains \$current\.GetOwner\(\[Security\.Principal\.SecurityIdentifier\]\)\.Value/)
-  assert.match(PRIVATE_PATH_ACL_SCRIPT, /GetSecurityDescriptorSddlForm\('Access'\) -ne \$acl\.GetSecurityDescriptorSddlForm\('Access'\)/)
+  // issue #450: SDDL 比较前先归一化继承标记（D:PAI -> D:P），只差 AI 标记时判为已收敛
+  assert.match(PRIVATE_PATH_ACL_SCRIPT, /-replace '\^D:PAI', 'D:P'/)
+  assert.match(PRIVATE_PATH_ACL_SCRIPT, /\$curSddl = \$current\.GetSecurityDescriptorSddlForm\('Access'\) -replace/)
+  assert.match(PRIVATE_PATH_ACL_SCRIPT, /if \(\$curSddl -ne \$newSddl\)/)
   assert.match(PRIVATE_PATH_ACL_SCRIPT, /\[IO\.Directory\]::SetAccessControl\(\$item\.FullName, \$acl\)/)
   assert.match(PRIVATE_PATH_ACL_SCRIPT, /\[IO\.File\]::SetAccessControl\(\$item\.FullName, \$acl\)/)
+})
+
+test('issue #450: SDDL normalization treats AI-marker-only drift as converged', () => {
+  const ace = '(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;S-1-5-21-1-2-3-1001)'
+  // 报告者的实测用例：只差 AI 前缀 → 判一致（不再触发全树重写）
+  assert.equal(normalizeAclSddlForComparison(`D:PAI${ace}`), `D:P${ace}`)
+  assert.equal(normalizeAclSddlForComparison(`D:P${ace}`), `D:P${ace}`)
+  // 未设保护（D:AI）仍与目标 D:P 不同 → 照常写入加固
+  assert.notEqual(normalizeAclSddlForComparison(`D:AI${ace}`), `D:P${ace}`)
+  // ACE 集合不同 → 照常写入
+  assert.notEqual(
+    normalizeAclSddlForComparison(`D:PAI(A;OICI;FA;;;SY)`),
+    `D:P(A;OICI;FA;;;BA)`,
+  )
+  // 非 D: 开头的输入原样返回
+  assert.equal(normalizeAclSddlForComparison(''), '')
 })
 
 test('Windows private-path caller sends the DACL-only script and retains failure diagnostics', () => {

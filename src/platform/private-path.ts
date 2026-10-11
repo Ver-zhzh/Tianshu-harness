@@ -19,11 +19,29 @@ foreach ($sid in @($user.Value, 'S-1-5-18', 'S-1-5-32-544')) {
 }
 $current = $item.GetAccessControl()
 if (@($user.Value, 'S-1-5-18', 'S-1-5-32-544') -notcontains $current.GetOwner([Security.Principal.SecurityIdentifier]).Value) { throw 'Untrusted storage owner is unsafe' }
-if ($current.GetSecurityDescriptorSddlForm('Access') -ne $acl.GetSecurityDescriptorSddlForm('Access')) {
+# issue #450: normalize the SDDL before comparing (see normalizeAclSddlForComparison).
+# Windows may read the DACL back as D:PAI(...) while the constructed target is
+# D:P(...); with P (no parent inheritance) already set, AI is only a provenance
+# marker and the effective grants are identical. Without normalization the two
+# are forever judged "different", causing a tens-of-seconds full-subtree
+# rewrite on every startup.
+$curSddl = $current.GetSecurityDescriptorSddlForm('Access') -replace '^D:PAI', 'D:P'
+$newSddl = $acl.GetSecurityDescriptorSddlForm('Access')
+if ($curSddl -ne $newSddl) {
   if ($item.PSIsContainer) { [IO.Directory]::SetAccessControl($item.FullName, $acl) }
   else { [IO.File]::SetAccessControl($item.FullName, $acl) }
 }
 `
+
+/**
+ * issue #450: SDDL 语义归一化（与 PRIVATE_PATH_ACL_SCRIPT 内的 PowerShell
+ * `-replace '^D:PAI', 'D:P'` 同规则）。读回的 DACL 头带 `AI`（自动继承标记，
+ * 如 `D:PAI(...)`）而目标是 `D:P(...)` 时，有效权限完全相同，应判为已收敛，
+ * 避免每次启动都在整棵子树上重跑数十秒的无效写入。
+ */
+export function normalizeAclSddlForComparison(sddl: string): string {
+  return sddl.replace(/^D:PAI/, 'D:P')
+}
 
 export function protectPrivatePath(path: string, platform = process.platform): void {
   if (lstatSync(path).isSymbolicLink()) throw new Error('Private storage cannot be a symbolic link')
