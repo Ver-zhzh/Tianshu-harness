@@ -85,12 +85,21 @@ export async function runHeadless(config: HeadlessRunConfig): Promise<HeadlessRu
   // 回调集恒为**全量**，不再按 streamJson 二分成两套（2026-09-18 无头
   // --stream-events 0 字节事故的根因之一）：事件 tap 只在 inner **定义了**某个
   // 回调时才包装它（event-tap.ts 里 onPhaseChange / onDelegationActivity 都是条件
-  // 挂载），所以"非 stream-json 就少定义几个"会让 --stream-events 的事件流随输出
+  // 挂接），所以"非 stream-json 就少定义几个"会让 --stream-events 的事件流随输出
   // 开关静默变薄——同一面审计镜换个开关就少两类事件。现在统一全量定义，stdout 侧
   // 仍由 streamJson 逐处 gate，输出字节不变。
+  //
+  // #441：text 是**全轮拼接**（正文轮 + 验收/continuation 等中间轮），而文本模式
+  // stdout 期望的是「最终回复」一段。turnText 逐轮累加，onTurnComplete 轮边界把
+  // 非空轮文本定格进 lastTurnText 后清零——末轮的定格值即 Claude Code -p 语义。
+  // 全轮拼接留给 --json 的 payload.text（字段语义本来就是整个 run 的 transcript）
+  // 不变，避免破坏既有消费者。
+  let lastTurnText = ''
+  let turnText = ''
   const base: AgentCallbacks = {
     onTextDelta: delta => {
       text += delta
+      turnText += delta
       if (streamJson) emit({ type: 'text_delta', text: redactText(delta) })
     },
     onThinkingDelta: delta => { if (streamJson) emit({ type: 'thinking_delta', text: redactText(delta) }) },
@@ -103,6 +112,12 @@ export async function runHeadless(config: HeadlessRunConfig): Promise<HeadlessRu
     },
     onTurnComplete: (turnUsage, turnNumber, isFinal) => {
       usage = turnUsage
+      // 轮边界：本轮有文本就定格为「最终回复」候选，然后清零轮累加器——不清零
+      // lastTurnText 会退化成全轮拼接（#441 双打印的根因）。零文本轮（纯工具轮）
+      // 不覆盖定格值：保留上一轮的最终回复，避免「模型最后一轮只调工具不说话」
+      // 时 stdout 变空。
+      if (turnText.trim().length > 0) lastTurnText = turnText.trim()
+      turnText = ''
       if (streamJson) emit({ type: 'turn_complete', usage: turnUsage, turn: turnNumber, is_final: isFinal ?? false })
     },
     onPhaseChange: (phase, detail) => {
@@ -178,7 +193,11 @@ export async function runHeadless(config: HeadlessRunConfig): Promise<HeadlessRu
     ? { success: true, text, ...(usage ? { usage } : {}) }
     : { success: false, text, error: error ?? 'Unknown error' }
 
-  const stdout = config.json ? JSON.stringify(payload) : streamJson ? '' : payload.text
+  // #441：文本模式只输出末轮文本（最终回复）；--json 的 payload.text 保持
+  // 全轮拼接语义（既有消费者依赖完整 transcript）。末轮零文本时回退全轮拼接，
+  // 保证「模型没说过话」的失败路径仍有可见输出。
+  const finalText = lastTurnText.trim().length > 0 ? lastTurnText : text
+  const stdout = config.json ? JSON.stringify(payload) : streamJson ? '' : finalText
 
   return {
     exitCode: success ? 0 : 1,

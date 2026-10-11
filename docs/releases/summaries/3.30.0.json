@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "version": "3.30.0",
+  "date": "2026-10-11",
+  "fullNotesUrl": "https://github.com/huiliyi37/Tianshu-harness/releases/tag/v3.30.0",
+  "locales": {
+    "zh": {
+      "title": "自动更新链端到端修复与受控灰度上线",
+      "highlights": [
+        "根修桌面自动更新全灭事故：存量会话保存核对死等 30s 恒报失败，改读盘上高水位后 1.5s 完成；更新重启窗口自动置前，保存失败给「仍然更新」知情逃生门。",
+        "收敛改道补修：改道卡狂轰（单任务弹十余次）根修，验证 job 运行期间不再误判停滞，plan 相位不再无信号退回；改道建议由实际投递结果驱动。",
+        "Insights 新增调用来源分组统计 token 消耗；峰/闲时 chip 回迁标题栏且节假日调休全按闲时；MCP 无人值守时工具变更默认拦截（fail-closed）。"
+      ],
+      "notice": "3.29.0–3.29.2 的桌面用户需手动下载覆盖安装一次本版才能恢复自动更新（本地数据不受影响），之后版本恢复自动更新。本版起更新经灰度策略门分批推送，未收到推送属预期；设置内可开预览通道优先体验。LAN Direct 手机直连：设置 → 远程访问 →「同一 Wi-Fi 直连」，明文仅私网可达，不可信网络请走 Tailscale。完整清单见 docs/releases/v3.30.0.md。"
+    },
+    "en": {
+      "title": "Auto-update chain fixed end to end, controlled rollout live",
+      "highlights": [
+        "Root-fixes the desktop auto-update outage: existing sessions deadlocked 30s on a save-confirmation check and always failed; reading the on-disk high-water mark cuts it to 1.5s. Relaunched windows now come to the front, and save failures offer an informed \"update anyway\" escape.",
+        "Course-correction overhaul: runaway correction cards (a dozen per task) are fixed at the root, running verification jobs no longer read as stalls, plans no longer regress without signal, and suggestions are driven by confirmed delivery.",
+        "Insights now groups token usage by call source; the peak/off-peak chip returns to the title bar with holidays counted as off-peak; MCP tool changes default to blocked when no UI is present (fail-closed)."
+      ],
+      "notice": "Desktop users on 3.29.0–3.29.2 must manually download and install this release once to restore auto-update (local data is unaffected); later versions update automatically again. From this release on, updates roll out in batches through a staged policy gate—not receiving a prompt immediately is expected, and the preview channel in Settings gives early access. LAN Direct: Settings → Remote access → “Same Wi-Fi direct”, plaintext on private networks only—use Tailscale on untrusted networks. Full notes: docs/releases/v3.30.0.md."
+    }
+  }
+}

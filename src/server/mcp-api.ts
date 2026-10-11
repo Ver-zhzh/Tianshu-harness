@@ -62,8 +62,10 @@ function persistMcpServers(servers: Record<string, McpServerConfig>): void {
  * 保留自历史语义（当时仅覆盖未授信剥离）。
  *
  * 若未来立项「桌面端支持项目级 MCP」，必须同步三件套：
- *   ① sidecar spawn 设 RIVET_MCP_APPROVAL=gate（desktop/src-tauri/src/lib.rs
- *      与 wsl_attach.rs 两处；当前未设 → fail-open 会吞掉连接级审批门）；
+ *   ① sidecar spawn 把 RIVET_MCP_APPROVAL 从 open 改 gate——三处有人值守
+ *      spawn 点（desktop/src-tauri/src/lib.rs、wsl_attach.rs、vscode 扩展
+ *      launcher.ts）当前均显式设 open（#443 审查修复：无 UI 缺省已是
+ *      fail-closed，不注入会把有人值守宿主的 MCP 全拦死且无恢复路径）；
  *   ② 连接级审批 UI 接线（McpSettings / client / types 三处；当前
  *      McpServerStatus 联合里还没有 awaiting-approval / denied）；
  *   ③ 本函数与 i18n（mcp.configStripped / trustNotice）的文案语义。

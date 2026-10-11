@@ -745,8 +745,17 @@ async function main() {
       : result.exitCode
     // 无头一次性进程：stdio MCP 子进程会挂住事件循环——退出前显式拆掉
     // （交互路径的等价收尾挂在 shutdown handler 上，无头分支不走那条路）。
+    // #442：shutdown() 是 await transport.close()，某些 server 的 close 握手
+    // 不返回就会把 process.exit 堵死（脚本/CI 永久挂起）。两条防线：
+    // ① killChildrenSync 先行——SIGKILL 子进程组，不等优雅关闭；
+    // ② shutdown 加 3s 超时——超时即放弃优雅路径，反正 ① 已兜住子进程。
     try { mcpRefs.mcpManager?.killChildrenSync?.() } catch { /* best-effort */ }
-    try { await mcpRefs.mcpManager?.shutdown?.() } catch { /* best-effort */ }
+    try {
+      await Promise.race([
+        mcpRefs.mcpManager?.shutdown?.() ?? Promise.resolve(),
+        new Promise<void>(resolve => setTimeout(resolve, 3000).unref?.()),
+      ])
+    } catch { /* best-effort */ }
     process.exit(exitCode)
   }
 

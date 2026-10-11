@@ -675,6 +675,7 @@ export class DelegationCoordinator {
   /** A4: per-worker silence clocks — the runtime primary gate. */
   private readonly liveness: WorkerLiveness
   /** Logical IDs are resumable aliases; all transient state below uses parentTurnId. */
+  private readonly dispatchAttempts = new Map<string, string>()
   private readonly dispatchOrders = new Map<string, WorkOrder>()
   private readonly dispatchCheckpoints = new Map<string, WorkerCheckpoint>()
   /** A4: per-dispatch controllers so a stall sweep aborts only the wedged worker. */
@@ -855,6 +856,7 @@ export class DelegationCoordinator {
   }
 
   private clearDispatchState(): void {
+    this.dispatchAttempts.clear()
     this.dispatchOrders.clear()
     this.dispatchCheckpoints.clear()
     this.resumeSources.clear()
@@ -920,6 +922,9 @@ export class DelegationCoordinator {
   /** Legacy logical IDs may address a worker only when the target is unique. */
   private resolveLiveDispatch(id: string): string | undefined {
     if (this.orderControllers.has(id)) return id
+    for (const [dispatchId, attemptId] of this.dispatchAttempts) {
+      if (attemptId === id && this.orderControllers.has(dispatchId)) return dispatchId
+    }
     const matches = [...this.dispatchOrders.values()].filter(order => order.id === id && this.orderControllers.has(order.parentTurnId))
     return matches.length === 1 ? matches[0]!.parentTurnId : undefined
   }
@@ -927,13 +932,18 @@ export class DelegationCoordinator {
   private ownDispatch(order: WorkOrder): void {
     if (this.dispatchOrders.has(order.parentTurnId)) throw new Error(`Duplicate active worker dispatch: ${order.parentTurnId}`)
     this.dispatchOrders.set(order.parentTurnId, order)
+    this.dispatchAttempts.set(order.parentTurnId, randomUUID())
+  }
+
+  private identifyDispatchResult(order: WorkOrder, result: WorkerResult): IdentifiedWorkerResult {
+    return stampWorkerResultIdentity(result, { dispatchId: order.parentTurnId, attemptId: this.dispatchAttempts.get(order.parentTurnId) })
   }
 
   private releaseDispatch(order: WorkOrder): void {
     if (this.dispatchOrders.get(order.parentTurnId) !== order) return
     for (const table of [this.orderControllers, this.liveMessages, this.nestedUpstream, this.activityUpstream,
       this.resumeBaselines, this.resumeSources, this.resumeMessages, this.resumeCheckpoints, this.steerQueues,
-      this.inflightFiles, this.dispatchNonces, this.dispatchCheckpoints, this.batchPrewarmByOrder, this.batchStigmergyByOrder]) {
+      this.inflightFiles, this.dispatchNonces, this.dispatchCheckpoints, this.dispatchAttempts, this.batchPrewarmByOrder, this.batchStigmergyByOrder]) {
       table.delete(order.parentTurnId)
     }
     this.policyCancelledIds.delete(order.parentTurnId)
@@ -973,7 +983,7 @@ export class DelegationCoordinator {
 
   /** 指定 order 当前是否在跑（TUI 判断直达通道可用性）。 */
   isWorkerRunning(workOrderId: string): boolean {
-    return this.orderControllers.has(workOrderId) || [...this.dispatchOrders.values()].some(order => order.id === workOrderId && this.orderControllers.has(order.parentTurnId))
+    return Boolean(this.resolveLiveDispatch(workOrderId)) || [...this.dispatchOrders.values()].some(order => order.id === workOrderId && this.orderControllers.has(order.parentTurnId))
   }
 
   /**
@@ -1866,7 +1876,7 @@ export class DelegationCoordinator {
     // 豁免（审查 M1）：verifier 的合法形态就是「不声明 files 跑全量测试」，
     // 其写副作用仅限测试文件，不在此闸口径内。
     if (classifyProfile(order.profile) === 'hands' && order.profile !== 'verifier' && !(order.scope.files?.length)) {
-      const blocked: WorkerResult[] = [{
+      const blocked: WorkerResult[] = [this.identifyDispatchResult(order, {
         workOrderId: order.id,
         status: 'blocked',
         summary: 'Write worker requires an explicit scope.files — refusing to dispatch a writer with no file boundary',
@@ -1876,7 +1886,7 @@ export class DelegationCoordinator {
         risks: ['write worker dispatched without scope.files'],
         nextActions: ['Re-dispatch with explicit scope.files before delegating write work'],
         evidenceStatus: 'blocked',
-      }]
+      })]
       persistWorkerNonExecution(order, nonce, blocked, 'blocked')
       return {
         status: 'completed',
@@ -1907,7 +1917,7 @@ export class DelegationCoordinator {
       // 等槽后被唤醒的订单用最新登记表重查，语义自洽。
       const conflict = this.checkGlobalFileConflict(order)
       if (conflict) {
-        const blocked: WorkerResult[] = [{
+        const blocked: WorkerResult[] = [this.identifyDispatchResult(order, {
           workOrderId: order.id,
           status: 'blocked',
           summary: `Cross-wave file conflict: ${conflict.join(', ')} already in-flight by another worker — refusing overlapping dispatch`,
@@ -1917,7 +1927,7 @@ export class DelegationCoordinator {
           risks: [`cross-wave file conflict: ${conflict.join(', ')}`],
           nextActions: ['Wait for the in-flight worker to settle, or narrow scope.files to non-overlapping files'],
           evidenceStatus: 'blocked',
-        }]
+        })]
         persistWorkerNonExecution(order, nonce, blocked, 'blocked')
         return {
           status: 'completed',
@@ -1940,7 +1950,7 @@ export class DelegationCoordinator {
       return run
     } catch (error) {
       if (!isLocalWorkerPolicyError(error)) throw error
-      const results = [workerFailureResult(order, error)]
+      const results = [this.identifyDispatchResult(order, workerFailureResult(order, error))]
       persistWorkerNonExecution(order, nonce, results, 'blocked')
       return { status: 'completed', order, results, packet: await buildPrimaryWorkerPacket(results, this.config.artifactStore) }
     } finally {
@@ -1998,7 +2008,7 @@ export class DelegationCoordinator {
       // Flash→Pro 升级重试复用同一 identity，只有重新派发才换新；且不复用
       // 持久化 nonce。
       dispatchId: order.parentTurnId,
-      attemptId: randomUUID(),
+      attemptId: this.dispatchAttempts.get(order.parentTurnId),
     }
     const identify = (result: WorkerResult): IdentifiedWorkerResult =>
       stampWorkerResultIdentity(result, identity)
@@ -2218,6 +2228,7 @@ export class DelegationCoordinator {
     // 嵌套委派上行：本 worker 再派的 sub-worker 活动盖上 parentWorkerId 戳
     // （更深层已盖过的保留——祖先只透传，父子关系以最近一层为准）后回传调用方。
     workerConfig.onNestedDelegation = (activity) => {
+      if (this.orderControllers.get(order.parentTurnId) !== orderController) return
       const upstream = this.nestedUpstream.get(order.parentTurnId)
       if (!upstream) return
       try {
@@ -2230,6 +2241,7 @@ export class DelegationCoordinator {
     }
     // WC: 输入直达 — worker 每个工具回合结算时 drain 本 order 的 steer 队列。
     workerConfig.onSteerDrain = () => {
+      if (this.orderControllers.get(order.parentTurnId) !== orderController) return null
       const q = this.steerQueues.get(order.parentTurnId)
       if (!q || q.length === 0) return null
       const text = q.join('\n')
@@ -3164,7 +3176,7 @@ export class DelegationCoordinator {
               (decision.kind === 'cancel_all' || o.groupId === decision.groupId) && judge.cancellable(o)
             // pending：撤出队列，当场合成结果
             for (const cancelled of queue.cancelPending(inScope)) {
-              const settled = buildPolicyCancelledResult(cancelled, policyLabel)
+              const settled = this.identifyDispatchResult(cancelled, buildPolicyCancelledResult(cancelled, policyLabel))
               allResults.push(settled)
               onWorkerSettled?.(settled)
               completedCount++
@@ -3178,9 +3190,9 @@ export class DelegationCoordinator {
           }
         }
       } catch (error) {
-        const failure = this.policyCancelledIds.has(order.parentTurnId)
+        const failure = this.identifyDispatchResult(order, this.policyCancelledIds.has(order.parentTurnId)
           ? buildPolicyCancelledResult(order, policyLabel)
-          : workerFailureResult(order, error, { failureReason: classifyWorkerError(error) })
+          : workerFailureResult(order, error, { failureReason: classifyWorkerError(error) }))
         allResults.push(failure)
         queue.markFailed(order)
         onWorkerSettled?.(failure)
@@ -3224,9 +3236,9 @@ export class DelegationCoordinator {
         }
         unmet.push(depId)
       }
-      const settled = skippedDeps.length > 0
+      const settled = this.identifyDispatchResult(order, skippedDeps.length > 0
         ? skippedDependencyResult(order, skippedDeps)
-        : blockedDependencyResult(order, unmet, failedDeps)
+        : blockedDependencyResult(order, unmet, failedDeps))
       allResults.push(settled)
       queue.markFailed(order)
       onWorkerSettled?.(settled)

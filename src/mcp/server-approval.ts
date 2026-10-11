@@ -18,7 +18,11 @@
  * 决策持久化在 `<rivetHome>/mcp-approvals.json`（按指纹键控，永不写进仓库目录，
  * 0o600）。`rivetHome()` 尊重 RIVET_HOME，测试据此注入临时 home。
  *
- * 无交互 UI 时 **fail-open**（用户拍板，issue #215）——见 `mcpApprovalInteractive()`。
+ * 无交互 UI 时 **fail-closed**（#443，2026-10-10）——见 `mcpApprovalInteractive()`。
+ * 历史上（#215 至 #443 之间）是 fail-open；#443 改判依据：PR #354 给 headless
+ * 装配 MCP 后，无 UI 放行变成真实可达的 tool poisoning 攻击面。显式
+ * `RIVET_MCP_APPROVAL=open` 保持放行（CI / 脚本 / desktop sidecar——有人值守
+ * 宿主，审批 UI 落地前由壳显式注入）。
  */
 
 import { createHash } from 'node:crypto'
@@ -129,18 +133,28 @@ export function checkMcpServerApproval(cfg: McpServerConfig): McpApprovalDecisio
 /**
  * 是否存在「可批准 MCP 连接的交互界面」。
  *
- * 用户已拍板（issue #215）：**无交互 UI 时 fail-open——照跑不拦**。判据可覆盖：
- *   1. `RIVET_MCP_APPROVAL=gate` → 强制门生效（接入审批 UI 的宿主必须显式设置；
- *      见下「为什么」）。
- *   2. `RIVET_MCP_APPROVAL=open` → 强制 fail-open（CI / 无头脚本 / 测试）。
- *   3. 未显式指定 → 看 stdout 是否 TTY：只有真正的交互终端才有地方弹提示，
- *      否则（headless / `-p` / 管道重定向 / 桌面 sidecar）一律 fail-open。
+ * #443（2026-10-10）把无 UI 的缺省从 fail-open 改为 fail-closed：
+ *   1. `RIVET_MCP_APPROVAL=gate` → 门生效（审批 UI 宿主显式设置；尚未有宿主
+ *      接入——desktop/WSL attach/vscode 三处 spawn 均显式设 open，审批 UI
+ *      三件套落地时改 gate）。
+ *   2. `RIVET_MCP_APPROVAL=open` → 强制 fail-open（用户显式选择；CI / 一次性
+ *      脚本 / 测试，以及有人值守宿主的 spawn 点——desktop lib.rs、WSL
+ *      attach wsl_attach.rs、vscode 扩展 launcher.ts 三处注入）。
+ *   3. 未显式指定 → 看 stdout 是否 TTY：真终端可弹提示 → gate；headless / `-p` /
+ *      管道重定向 → **fail-closed（awaiting，spawn 前拦截）**。headless 没有人
+ *      能看见、也没有人能回应审批提示，而 MCP spawn 等同「在本机跑配置里写的
+ *      代码」（stdio server 连接瞬间执行 command 并注入 env）——把这条攻击面
+ *      留给 tool poisoning（描述被篡改、清单变更）静默放行，代价大于让无人值守
+ *      脚本显式设 open。
  *
- * 为什么 fail-open 而不是 fail-closed：这道门的目标是「让用户**知情地**授权一次
- * spawn」。没有 UI 时没有人能看见、也没有人能回应这个提示，fail-closed 会把所有
- * CLI 一次性脚本、CI、桌面冷启动全部焊死——代价远大于收益。反过来，接入交互审批
- * UI 的宿主必须显式设 `RIVET_MCP_APPROVAL=gate`，否则门不生效——这是**有意**的：
- * 没有 UI 就不该拦。未来若误删这段判定导致「等待审批」永远吊住，回头读这里。
+ * 为什么不再沿袭 #215 的 fail-open：#215 拍板时无头路径**不装配 MCP**
+ * （main.ts headless 分支根本不调 initializeMcp），fail-open 是一纸空文、
+ * 无实际暴露面；PR #354（2026-10-04）给 headless 补齐 MCP 装配后，这条
+ * fail-open 变成了真实可达的静默放行路径（#443 实测 stderr 告警即证）。
+ * 兼容性：desktop / WSL attach / vscode 三处有人值守 spawn 均显式设 open，
+ * 行为不变；CI / 脚本设 open 即恢复原行为；TTY 交互路径不变。首次无批准记录
+ * 的 headless 用户会看到明确的 awaiting-approval 拦截与可执行指引（TTY 重跑
+ * 审批 / 显式 open），不再是零信号的静默放行。
  */
 export function mcpApprovalInteractive(): boolean {
   const mode = process.env.RIVET_MCP_APPROVAL
@@ -149,14 +163,27 @@ export function mcpApprovalInteractive(): boolean {
   return Boolean(process.stdout.isTTY)
 }
 
-let failOpenNoticed = false
-function notifyFailOpenOnce(): void {
-  if (failOpenNoticed) return
-  failOpenNoticed = true
+/**
+ * awaiting 状态的用户可读指引（manager 落进 connection state 的 error 字段）。
+ * 按宿主分流：交互宿主有 REST 审批出口；headless（#443 fail-closed 拦截）对
+ * CLI 无头用户指向可执行动作——TTY 里跑一次完成审批 / 显式 open——而不是
+ * 指向不可达的 POST /mcp/servers/:id/approve 死端点。
+ */
+export function awaitingApprovalHint(serverId: string): string {
+  return mcpApprovalInteractive()
+    ? `MCP server "${serverId}" is awaiting approval — not started. Approve via POST /mcp/servers/${serverId}/approve`
+    : `MCP server "${serverId}" is blocked — headless has no approval UI (#443 fail-closed). Run once in an interactive terminal to approve, or set RIVET_MCP_APPROVAL=open if you trust this config.`
+}
+
+let failClosedNoticed = false
+function notifyFailClosedOnce(): void {
+  if (failClosedNoticed) return
+  failClosedNoticed = true
   console.error(
-    '[rivet] 检测到无交互 UI（headless / 非 TTY / RIVET_MCP_APPROVAL=open），' +
-    'MCP 连接级审批门 fail-open——服务器照常启动、不拦截。' +
-    '需要审批拦截时设 RIVET_MCP_APPROVAL=gate 并在有 TTY 的界面中操作。',
+    '[rivet] 检测到无交互 UI（headless / 非 TTY / 未设 RIVET_MCP_APPROVAL），' +
+    'MCP 连接级审批门 fail-closed——服务器不启动。' +
+    '一次性脚本 / CI 明确信任该配置时设 RIVET_MCP_APPROVAL=open 放行；' +
+    '或先在交互终端（TTY）里运行一次以完成审批。',
   )
 }
 
@@ -165,9 +192,17 @@ function notifyFailOpenOnce(): void {
  * `_mcpApprovalDecision` 委托到这里）。
  */
 export function resolveMcpApproval(cfg: McpServerConfig): McpApprovalDecision {
+  // 显式 open：无条件放行（CI / 一次性脚本明知故犯的出口，保持 #215 语义）。
+  if (process.env.RIVET_MCP_APPROVAL === 'open') return 'approved'
   if (!mcpApprovalInteractive()) {
-    notifyFailOpenOnce()
-    return 'approved'
+    // headless 无 UI：查持久化记录（此前在 TTY 里已批准的指纹依然有效）；
+    // 未知指纹按 store 结果原样返回——无记录 = awaiting（manager 拦在 spawn
+    // 前并登记 pending，用户可在 TTY 宿主 approve），denied 记录则拒绝。
+    // #443 的 fail-closed 语义由「拦截 spawn」承载，不是改写返回值。
+    // CI 恢复原行为设 RIVET_MCP_APPROVAL=open。
+    const decision = checkMcpServerApproval(cfg)
+    if (decision !== 'approved') notifyFailClosedOnce()
+    return decision
   }
   return checkMcpServerApproval(cfg)
 }

@@ -391,6 +391,13 @@ export function serveSpawnEnv(home: string, rivetHome: string, cacheDir: string,
     NODE_COMPILE_CACHE: cacheDir,
     RIVET_SERVE_TIMING: '1',
     RIVET_SERVER_TOKEN: token,
+    // 孤儿防线（2026-10-11 实测泄漏复盘）：serve 的 parent-watchdog 只认
+    // RIVET_PARENT_PID，缺失即不装守护——脚本/agent 起的 serve 在启动者死后
+    // 永久残留（实测 0.0.0.0:59396 孤儿，0.0.0.0 还把暴露面挂到局域网）。
+    // 把 serve 的生命周期绑到本脚本进程：脚本退出（正常/超时/异常）后，
+    // watchdog 连续 3 次探测失败（≈9s）即自退。显式覆盖而非继承——
+    // 白名单语义下继承值本来就不该存在，这里钉死真值防宿主污染。
+    RIVET_PARENT_PID: String(process.pid),
   }
   // 宿主探针（where/reg）、子进程查找与 locale 的最小必需集。
   for (const key of ['PATH', 'PATHEXT', 'SYSTEMROOT', 'COMSPEC', 'TMPDIR', 'TEMP', 'TMP', 'LANG', 'LC_ALL']) {

@@ -1,10 +1,13 @@
+import { tmpdir } from 'node:os'
+import { persistWorkerResult } from '../../agent/worker-result-store.js'
+import { saveWorkerSession } from '../../agent/worker-session-persist.js'
 /**
  * Worker Detail 内容构建器测试。
  */
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { buildWorkerDetailContent } from '../worker-detail.js'
 import { SessionPersist, getSessionDir } from '../../agent/session-persist.js'
@@ -155,4 +158,25 @@ test('cleanup worker-detail test artifacts', () => {
   try {
     rmSync(join(subagentsDir(), `${orderFileKey('wo_team:T1')}.json`))
   } catch { /* ignore */ }
+})
+
+
+test('worker detail selects historical result and transcript by attempt when dispatch ID is reused', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rivet-detail-attempt-')), priorHome = process.env.RIVET_HOME
+  process.env.RIVET_HOME = dir
+  try {
+    for (const attemptId of ['old', 'new']) {
+      persistWorkerResult({ workOrderId: 'batch:0', dispatchId: 'same', attemptId, status: 'passed', summary: `${attemptId} result`,
+        findings: [], artifacts: [], changedFiles: [], risks: [], nextActions: [], evidenceStatus: 'unverified' }, undefined, attemptId)
+      saveWorkerSession('batch:0', 'code_scout', attemptId, [{ role: 'assistant', content: `${attemptId} transcript` }], undefined, undefined, undefined, attemptId)
+    }
+    const detail = buildWorkerDetailContent('old', dir, liveView({ workerId: 'old', workOrderId: 'batch:0', dispatchId: 'same', attemptId: 'old' }))
+    assert.match(detail.content, /old result/)
+    assert.match(detail.content, /old transcript/)
+    assert.doesNotMatch(detail.content, /new result|new transcript/)
+  } finally {
+    if (priorHome === undefined) delete process.env.RIVET_HOME
+    else process.env.RIVET_HOME = priorHome
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

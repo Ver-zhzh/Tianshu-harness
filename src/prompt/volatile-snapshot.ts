@@ -1,6 +1,7 @@
 import { readFileSync, existsSync } from 'fs'
 import { join } from 'path'
 import { gitStatusCache } from './volatile-git.js'
+import type { GitStatusCache } from './volatile-git.js'
 import { summarizeGitStatus } from './git-status-summary.js'
 import { loadProjectMemory } from '../context/project-memory-loader.js'
 import { loadKnowledgeManifestBlock } from '../context/knowledge-manifest.js'
@@ -28,6 +29,9 @@ export interface SnapshotInput {
   projectIndexBlock?: string
   /** Optional MeridianDb instance for codebase index generation. */
   meridianDb?: import('../repo/meridian-db.js').MeridianDb
+  /** 新鲜度判定用的 git 状态缓存（createVolatileSnapshotFresh 专用；
+   *  createVolatileSnapshot 不读它——历史行为逐字节一致）。 */
+  gitCache?: GitStatusCache
 }
 
 function readRivetMdOnce(cwd: string): string | undefined {
@@ -112,4 +116,33 @@ export function createVolatileSnapshot(input: SnapshotInput): VolatileContext {
     seedCapsuleBlock,
     projectIndexBlock,
   }) as VolatileContext
+}
+
+/**
+ * 带新鲜度判定的会话启动快照（生产主路径，create-agent-config 使用）。
+ *
+ * 不变量：冻结的 git 快照要么新鲜（≤TTL）要么不存在，绝不冻结陈旧值。
+ * 背景（2026-10-11 注入快照滞后事故）：gitStatusCache.get() 同步且不查 TTL，
+ * 常驻进程（桌面 sidecar）空闲数小时后新建会话，会把上次缓存值（可任意旧，
+ * 甚至落在 detached HEAD 等异常窗口）原样冻进会话首屏，而首 2 条用户消息
+ * 没有任何解冻路径（engine.ts 的 refreshGit 需 userMessagesSinceGitRefresh
+ * >= 3 或 markGitDirty 写类工具）。冷进程反而首轮就准——ctx.gitStatus 为
+ * undefined 时 volatile.ts 的 `ctx.gitStatus ?? gitStatusCache.get(ctx.cwd)`
+ * 会在轮边界 refreshIfStale 刷新缓存后读到新值。本函数把冷进程的语义
+ * 推广到热进程：陈旧缓存 → 冻结 undefined，走同一条回落路径。
+ *
+ * 缓存安全：git 块只进 dynamic appendix（末位 user 消息 trailer，请求最尾），
+ * 不进冻结前缀；会话首条消息前不存在旧前缀，无缓存可碎。
+ */
+export function createVolatileSnapshotFresh(input: SnapshotInput): VolatileContext {
+  if (input.getGitStatus) return createVolatileSnapshot(input)
+
+  const cache = input.gitCache ?? gitStatusCache
+  if (!cache.isFreshAt(input.cwd)) {
+    return createVolatileSnapshot({ ...input, getGitStatus: () => undefined })
+  }
+  // 新鲜路径：显式取注入缓存（或全局缓存）的当前值冻结——不能裸调
+  // createVolatileSnapshot(input)，否则值会从全局缓存另读一份，与
+  // isFreshAt 判定的缓存不一致（测试注入 gitCache 时即暴露该分叉）。
+  return createVolatileSnapshot({ ...input, getGitStatus: () => cache.get(input.cwd) })
 }

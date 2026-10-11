@@ -183,6 +183,8 @@ describe('concurrent top-level batches: batch-scoped side-table isolation', () =
     }])
     assert.equal(runs, 0)
     assert.equal(result.results[0]?.status, 'blocked')
+    assert.equal(result.results[0]?.dispatchId, 'toolu_blocked:batch:0')
+    assert.ok(result.results[0]?.attemptId, 'un-dispatched terminal must carry an execution identity')
     const tables = coordinator as unknown as {
       batchPrewarmByOrder: Map<string, unknown>; batchStigmergyByOrder: Map<string, unknown>
     }
@@ -296,7 +298,8 @@ describe('concurrent top-level batches: batch-scoped side-table isolation', () =
     })
     const req = (batch: string, i: number) => ({ parentTurnId: `toolu_${batch}:batch:${i}`, kind: 'code_search' as const,
       profile: 'code_scout' as const, objective: `Search module ${i} thoroughly for batch ${batch}`, scope: { files: [`src/${i}.ts`] } })
-    const a = coordinator.delegateBatch([req('A', 0), req('A', 1)], 'first_success')
+    const settled: WorkerResult[] = []
+    const a = coordinator.delegateBatch([req('A', 0), req('A', 1), { ...req('A', 2), dependencies: ['batch:0'] }], 'first_success', undefined, undefined, result => settled.push(result))
     const b = coordinator.delegateBatch([req('B', 0), req('B', 1)], 'primary_decides')
     try {
       for (let i = 0; captures.size < 4 && i < 200; i++) await new Promise(r => setTimeout(r, 5))
@@ -306,6 +309,9 @@ describe('concurrent top-level batches: batch-scoped side-table isolation', () =
       assert.equal(captures.get('toolu_A:batch:1')!.abortSignal?.aborted, true)
       assert.equal(captures.get('toolu_B:batch:1')!.abortSignal?.aborted, false, 'A policy cannot abort B:batch:1')
       assert.equal(captures.get('toolu_B:batch:0')!.abortSignal?.aborted, false)
+      const pending = settled.find(r => r.workOrderId === 'batch:2')
+      assert.equal(pending?.dispatchId, 'toolu_A:batch:2')
+      assert.ok(pending?.attemptId, 'pending cancellation has its own identity')
     } finally { for (const release of releases.values()) release(); await Promise.allSettled([a, b]); coordinator.shutdown() }
   })
 
@@ -357,8 +363,52 @@ describe('concurrent top-level batches: batch-scoped side-table isolation', () =
       assert.ok(result, 'overlapping writer must be refused before execution')
       assert.equal(result.results[0]?.status, 'blocked')
       assert.match(result.results[0]?.summary ?? '', /Cross-wave file conflict/)
+      assert.equal(result.results[0]?.dispatchId, 'toolu_B:batch:0')
+      assert.ok(result.results[0]?.attemptId, 'early refused dispatch must be distinguishable from active A')
       assert.deepEqual(captures, ['toolu_A:batch:0'])
     } finally { release(); await Promise.allSettled([a, ...(b ? [b] : [])]); coordinator.shutdown() }
+  })
+
+
+  it('reused dispatch rejects stale attempt controls, snapshots and nested callbacks', { timeout: 10_000 }, async () => {
+    const captures: WorkerSessionConfig[] = [], nested: string[] = []
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    let activeAttempt: string | undefined
+    const coordinator = new DelegationCoordinator({
+      baseToolRegistry: makeRegistry(), modelCards: cards, maxWorkers: 2, cwd: homeDir,
+      runtimeFactory: runtimeFactoryFor,
+      runWorker: async config => {
+        captures.push(config)
+        config.onSessionReady?.(() => [{ role: 'assistant', content: `run ${captures.length}` }])
+        if (captures.length > 1) { config.onActivity?.('turn', 'active'); await gate }
+        return finished(config.order.id)
+      },
+    })
+    const req = { parentTurnId: 'reused:batch:0', kind: 'code_search' as const, profile: 'code_scout' as const,
+      objective: 'Search implementation dependencies and identify call boundaries thoroughly', scope: { files: ['src/a.ts'] } }
+    const first = await coordinator.delegate({ ...req, onNestedActivity: () => nested.push('old') })
+    const oldAttempt = first.results[0]!.attemptId!
+    const second = coordinator.delegate({ ...req, onNestedActivity: () => nested.push('new'), onActivity: event => { activeAttempt = event.attemptId } })
+    try {
+      for (let i = 0; captures.length < 2 && i < 200; i++) await new Promise(r => setTimeout(r, 5))
+      assert.equal(captures.length, 2)
+      assert.ok(activeAttempt)
+      assert.notEqual(activeAttempt, oldAttempt)
+      assert.equal(coordinator.getLiveWorkerMessages(oldAttempt), undefined, 'old attempt cannot read new run')
+      assert.equal(coordinator.getLiveWorkerMessages(activeAttempt)?.[0]?.content, 'run 2')
+      assert.equal(coordinator.killWorker(oldAttempt), false)
+      assert.equal(coordinator.steerWorker(oldAttempt, 'stale guidance'), false)
+      assert.equal(captures[1]!.abortSignal?.aborted, false)
+      assert.equal(coordinator.steerWorker(activeAttempt, 'new guidance'), true)
+      assert.equal(captures[0]!.onSteerDrain?.(), null, 'old worker callback cannot drain new guidance')
+      assert.equal(captures[1]!.onSteerDrain?.(), 'new guidance')
+      captures[0]!.onNestedDelegation?.({ workOrderId: 'late child', parentToolId: 'late', status: 'running' })
+      captures[1]!.onNestedDelegation?.({ workOrderId: 'current child', parentToolId: 'current', status: 'running' })
+      assert.deepEqual(nested, ['new'], 'old callbacks cannot route into new upstream')
+      assert.equal(coordinator.killWorker(activeAttempt), true)
+      assert.equal(captures[1]!.abortSignal?.aborted, true)
+    } finally { release(); await second; coordinator.shutdown() }
   })
 
 })

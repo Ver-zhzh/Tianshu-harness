@@ -191,6 +191,12 @@ export async function launchSidecar(opts: LauncherOptions): Promise<SidecarHandl
   const desktopDir = opts.desktopDir?.trim()
   const env: NodeJS.ProcessEnv = { ...process.env, RIVET_SERVER_TOKEN: token }
   if (desktopDir) env.RIVET_DESKTOP_DIR = desktopDir
+  // MCP 审批门（#443 审查修复）：sidecar stdout 是 pipe（非 TTY），#443 后无 UI
+  // 缺省 fail-closed——不注入则用户配置的 MCP 被拦且 IDE 内无审批 UI 恢复路径。
+  // IDE 是有人值守环境（用户看得见并自己配置 MCP），显式 open 与 desktop
+  // sidecar（lib.rs）/ WSL attach（wsl_attach.rs）同语义；审批 UI 落地时三处
+  // 一起改 gate。显式覆盖而非继承：用户 shell 里设过别的值不应透传进 sidecar。
+  env.RIVET_MCP_APPROVAL = 'open'
   const child = spawn(command.command, command.args, {
     cwd: opts.cwd,
     env,

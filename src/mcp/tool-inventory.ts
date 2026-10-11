@@ -14,9 +14,11 @@
  *     （含 diff 摘要）；用户 approve 时把「被展示的那版 hash」arm 下来，重拉
  *     精确匹配才消费放行——用户批准的是他看到的版本，批准期间二次换毒拦得住
  *     （TOCTOU；见 evaluateInventoryGate 的 armed 分支与测试用例）。
- *   - 不一致 + fail-open 宿主（无 UI，与 #215「无 UI 不拦」严格对齐）→ allow +
- *     changed 标记（manager 把变更拼进工具描述警示 = 模型可见信号 ③）；**不写
- *     accepted**——「存在未接受的变更」持续可见，直到被显式接受。
+ *   - 不一致 + fail-closed 宿主（headless / 无 UI，#443）→ 同样 block（拦截
+ *     待批）。此前是「放行 + changed 标记」，#443 实测 tool poisoning 攻击面
+ *     成立后改为与连接门同语义。显式 `RIVET_MCP_APPROVAL=open`（CI / 脚本
+ *     明确信任）保持原 fail-open 行为：放行 + changed 标记（模型可见警示信号
+ *     ③）+ **不写 accepted**——「存在未接受的变更」持续可见，直到被显式接受。
  *
  * 存储 `<rivetHome>/mcp-tool-inventory.json`（与 mcp-approvals.json 同目录、
  * 同 writeFileAtomicSync 写入口径；按配置指纹键控，永不写进仓库目录）。
@@ -161,7 +163,19 @@ function warnChangeOnce(fingerprint: string, serverId: string, hash: string, dif
   if (warned.has(key)) return
   warned.add(key)
   const line = `[rivet] MCP 服务器「${serverId}」工具清单变更（新增 ${diff.added.length} / 移除 ${diff.removed.length} / 修改 ${diff.changed.length}）——`
-    + '当前宿主无交互审批 UI（fail-open），已放行但视为未经重新审批；变更提示已拼入该服务器工具描述。'
+    + '当前宿主设置了 RIVET_MCP_APPROVAL=open（显式放行），已放行但视为未经重新审批；变更提示已拼入该服务器工具描述。'
+  if (warnSink) warnSink(line)
+  else console.error(line)
+}
+
+/** 清单不一致 + fail-closed 宿主（headless 未显式 open，#443）→ block 拦截。 */
+function warnBlockedChangeOnce(fingerprint: string, serverId: string, hash: string, diff: InventoryDiff): void {
+  const key = `blocked:${fingerprint}:${hash}`
+  if (warned.has(key)) return
+  warned.add(key)
+  const line = `[rivet] MCP 服务器「${serverId}」工具清单变更（新增 ${diff.added.length} / 移除 ${diff.removed.length} / 修改 ${diff.changed.length}）`
+    + '——无交互 UI 下默认拦截（防 rug pull / tool poisoning，#443）。'
+    + '如确信变更可信：在交互终端重新批准，或设 RIVET_MCP_APPROVAL=open 放行。'
   if (warnSink) warnSink(line)
   else console.error(line)
 }
@@ -176,7 +190,8 @@ export function evaluateInventoryGate(opts: {
   fingerprint: string
   serverId: string
   tools: readonly InventoryTool[]
-  /** 交互宿主（gate）：true 时不一致 → block；false（fail-open）→ 放行 + 标记。 */
+  /** 交互宿主（gate 或 TTY）：true 时不一致 → block；false → #443 fail-closed
+   *  拦截（显式 RIVET_MCP_APPROVAL=open 例外：放行 + 变更标记）。 */
   interactive: boolean
 }): InventoryVerdict {
   const store = readInventoryStore()
@@ -211,8 +226,27 @@ export function evaluateInventoryGate(opts: {
       pending: { reason: 'inventory-change', inventoryHash: record.hash, inventoryDiff: diff, changedAt },
     }
   }
-  warnChangeOnce(opts.fingerprint, opts.serverId, record.hash, diff)
-  return { action: 'allow', record, changed: { diff, changedAt } }
+  // fail-closed（#443）：headless / 无 UI（interactive=false）时，清单变更与
+  // 连接门同语义——拦截待批，而不是放行 + 标记。rug pull / tool poisoning 的
+  // 主要攻击面就是「审批后换脸」，静默放行等于把这道防线卸了。拦截走 block
+  // （而非 denied）：pending 登记后用户可在 TTY 宿主里 approve（arm hash），
+  // 下次连接精确匹配消费放行。显式 RIVET_MCP_APPROVAL=open = 用户明确信任，
+  // 按标记放行（与连接门 resolveMcpApproval 的 open→approved 同语义）。
+  // 真值源纪律：interactive 由调用方（manager → mcpApprovalInteractive，已综合
+  // gate/open/TTY 三态）传入，是唯一判定入口；open 是本函数唯一的直接 env 读
+  // （open 属于「用户显式表达信任」，与宿主形态正交——manager 侧 interactive
+  // 判定里 TTY 与 gate 都不携带它）。
+  if (process.env.RIVET_MCP_APPROVAL === 'open') {
+    warnChangeOnce(opts.fingerprint, opts.serverId, record.hash, diff)
+    return { action: 'allow', record, changed: { diff, changedAt } }
+  }
+  warnBlockedChangeOnce(opts.fingerprint, opts.serverId, record.hash, diff)
+  return {
+    action: 'block',
+    record,
+    diff,
+    pending: { reason: 'inventory-change', inventoryHash: record.hash, inventoryDiff: diff, changedAt },
+  }
 }
 
 /** 记录「用户已批准该清单 hash」——approve 时由 manager 调用；下次连接精确匹配消费。 */

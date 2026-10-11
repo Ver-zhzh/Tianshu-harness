@@ -503,6 +503,40 @@ describe('McpManager connection-level approval gate (issue #215)', () => {
       else process.env.RIVET_MCP_APPROVAL = prev
     }
   })
+
+  it('#443 headless 未显式设置：fail-closed——无记录指纹拦截，已批准指纹放行', async () => {
+    // withApprovalHome 默认 gate；这里手动清掉 env 模拟「headless 未显式设置」。
+    // node:test 环境非 TTY，mcpApprovalInteractive() → false。
+    await withApprovalHome(async () => {
+      const prev = process.env.RIVET_MCP_APPROVAL
+      delete process.env.RIVET_MCP_APPROVAL
+      try {
+        const cfg = { command: 'node', args: ['c443.js'] }
+        // 无记录 → awaiting（fail-closed，#443）
+        assert.equal(resolveMcpApproval(cfg), 'awaiting')
+        const mgr = new McpManager(makeConfig({ c: cfg }))
+        let spawned = false
+        mgr['_connectServer'] = async (serverId) => mockConnectedServer(serverId, () => { spawned = true })
+        mgr['_discoverTools'] = async () => []
+        await mgr.initialize()
+        assert.equal(spawned, false, '#443：headless 未显式 open 时不得 spawn')
+        assert.equal(mgr.getStates().find(s => s.serverId === 'c')?.status, 'awaiting-approval')
+        // 审查修复：headless 下 error 文案不得指向 CLI 用户不可达的 REST approve
+        // 端点——指引落在可执行动作（TTY 重跑 / 显式 open）上。
+        const blockedError = mgr.getStates().find(s => s.serverId === 'c')?.error ?? ''
+        assert.ok(!blockedError.includes('POST /mcp/servers'), 'headless 文案不得指向 REST 死端点：' + blockedError)
+        assert.match(blockedError, /RIVET_MCP_APPROVAL=open|interactive terminal/, 'headless 文案须给出可执行指引')
+
+        // 已批准指纹（此前在 TTY 宿主批准过）→ headless 下依然放行
+        const { approveMcpServer } = await import('../server-approval.js')
+        approveMcpServer(cfg)
+        assert.equal(resolveMcpApproval(cfg), 'approved')
+      } finally {
+        if (prev === undefined) delete process.env.RIVET_MCP_APPROVAL
+        else process.env.RIVET_MCP_APPROVAL = prev
+      }
+    })
+  })
 })
 
 // ── 清单快照门（rug pull 防线 ①③）──────────────────────────────────────────

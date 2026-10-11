@@ -99,6 +99,65 @@ describe('runHeadless', () => {
     assert.equal(result.exitCode, 1)
     assert.deepEqual(result.json, { success: false, text: '', error: 'boom' })
   })
+
+  it('text mode prints only the last turn text when the run has multiple turns (#441)', async () => {
+    const result = await runHeadless({
+      prompt: 'hello',
+      json: false,
+      streamJson: false,
+      createAgent: () => ({
+        run: async (_prompt: string, callbacks: AgentCallbacks) => {
+          // 正文轮 + 验收/continuation 补充轮：两轮各有文本（#441 的双打印场景）
+          callbacks.onTextDelta('初步回答')
+          callbacks.onTurnComplete({ input_tokens: 10, output_tokens: 3 }, 1)
+          callbacks.onTextDelta('最终回复')
+          callbacks.onTurnComplete({ input_tokens: 12, output_tokens: 4 }, 2, true)
+        },
+      }),
+    })
+
+    assert.equal(result.exitCode, 0)
+    assert.equal(result.stdout, '最终回复')
+  })
+
+  it('json mode keeps the full transcript in payload.text across turns (#441)', async () => {
+    const result = await runHeadless({
+      prompt: 'hello',
+      json: true,
+      streamJson: false,
+      createAgent: () => ({
+        run: async (_prompt: string, callbacks: AgentCallbacks) => {
+          callbacks.onTextDelta('初步回答')
+          callbacks.onTurnComplete({ input_tokens: 10, output_tokens: 3 }, 1)
+          callbacks.onTextDelta('最终回复')
+          callbacks.onTurnComplete({ input_tokens: 12, output_tokens: 4 }, 2, true)
+        },
+      }),
+    })
+
+    assert.equal(result.exitCode, 0)
+    assert.equal(result.json?.text, '初步回答最终回复')
+  })
+
+  it('text mode keeps the previous turn text when the final turn is tool-only (#441)', async () => {
+    const result = await runHeadless({
+      prompt: 'hello',
+      json: false,
+      streamJson: false,
+      createAgent: () => ({
+        run: async (_prompt: string, callbacks: AgentCallbacks) => {
+          callbacks.onTextDelta('最终回复')
+          callbacks.onTurnComplete({ input_tokens: 10, output_tokens: 3 }, 1)
+          // 纯工具轮：只调工具不说话——stdout 不能因此变空
+          callbacks.onToolResult('t1', 'Bash', 'ok', false)
+          callbacks.onTurnComplete({ input_tokens: 12, output_tokens: 4 }, 2, true)
+        },
+      }),
+    })
+
+    assert.equal(result.exitCode, 0)
+    assert.equal(result.stdout, '最终回复')
+  })
 })
 
 // Headless --goal reuses the same AgentLoop + GoalTracker as the TUI /goal

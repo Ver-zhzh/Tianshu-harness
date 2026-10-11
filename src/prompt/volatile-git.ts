@@ -44,6 +44,14 @@ function trimCache<V>(map: Map<string, { value: V; timestamp: number }>, ttlMs: 
   }
 }
 
+export interface GitStatusCache {
+  get(cwd: string): string | undefined
+  prime(cwd: string, nextValue: string | undefined, primeAt?: number): void
+  refresh(cwd: string): Promise<void>
+  refreshIfStale(cwd: string): Promise<void>
+  isFreshAt(cwd: string): boolean
+}
+
 export function createGitStatusCache(options: GitStatusCacheOptions) {
   const values = new Map<string, { value: string | undefined; timestamp: number }>()
   const refreshing = new Map<string, Promise<void>>()
@@ -59,8 +67,19 @@ export function createGitStatusCache(options: GitStatusCacheOptions) {
       return values.get(cwd)?.value
     },
 
-    prime(cwd: string, nextValue: string | undefined): void {
-      values.set(cwd, { value: nextValue, timestamp: options.now() })
+    /**
+     * 新鲜度判定（不触发刷新、无副作用）：条目存在且 age < TTL。
+     * createVolatileSnapshotFresh 用它在会话启动时决定「冻结值」还是
+     * 「冻结 undefined 走轮边界回落」——见该函数的不变量注释。
+     */
+    isFreshAt(cwd: string): boolean {
+      return isFresh(cwd)
+    },
+
+    prime(cwd: string, nextValue: string | undefined, primeAt?: number): void {
+      // primeAt：注入测试/回放场景显式指定“何时写入”——供新鲜度判定
+      // （isFreshAt）构造过期条目，不改变生产语义（缺省 = 当前时刻）。
+      values.set(cwd, { value: nextValue, timestamp: primeAt ?? options.now() })
       trimCache(values, options.ttlMs)
     },
 

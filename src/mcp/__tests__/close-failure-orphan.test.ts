@@ -15,6 +15,10 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { McpManager } from '../manager.js'
 
+// 本文件测连接登记/孤儿回收，不测审批门。#443 起无 UI 缺省 fail-closed，
+// node:test 非 TTY 会让 spawn 被拦——显式 open 保持连接语义用例的原行为。
+process.env.RIVET_MCP_APPROVAL = 'open'
+
 function makeConfig(servers: Record<string, unknown>) {
   return {
     servers,

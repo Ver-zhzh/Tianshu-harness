@@ -168,4 +168,20 @@ describe('getWorkerLog', () => {
     assert.deepEqual(emptyLive?.transcript, [], 'empty active snapshot must not expose stale disk history')
   })
 
+
+  it('historical attempt never reads current live transcript when dispatch ID is reused', async () => {
+    const manager = makeManager(), id = manager.createSession({}).id
+    persistWorkerResult({ workOrderId: 'batch:0', dispatchId: 'same', attemptId: 'old', status: 'passed', summary: 'old',
+      findings: [], changedFiles: [], artifacts: [], risks: [], nextActions: [], evidenceStatus: 'unverified' }, undefined, 'oldnonce')
+    saveWorkerSession('batch:0', 'code_scout', 'old', [{ role: 'assistant', content: 'old transcript' }], undefined, undefined, undefined, 'oldnonce')
+    const targets: string[] = []
+    ;(manager as any).coordinatorBySession.set(id, () => ({ getLiveWorkerMessages: (target: string) => {
+      targets.push(target)
+      return target === 'new' || target === 'same' ? [{ role: 'assistant', content: 'new live transcript' }] : undefined
+    } }))
+    const log = await manager.getWorkerLog(id, 'batch:0', { dispatchId: 'same', attemptId: 'old' })
+    assert.deepEqual(targets, ['old'])
+    assert.equal(log?.transcript[0]?.text, 'old transcript')
+  })
+
 })

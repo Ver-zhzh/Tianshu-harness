@@ -6,7 +6,7 @@ import { createAuthProvider } from '../auth/registry.js'
 import { PromptEngine } from '../prompt/engine.js'
 import type { FrozenSnapshotData } from '../prompt/frozen-snapshot.js'
 import { detectModelFamily } from '../prompt/static.js'
-import { createVolatileSnapshot } from '../prompt/volatile-snapshot.js'
+import { createVolatileSnapshotFresh } from '../prompt/volatile-snapshot.js'
 import { resolvePromptBlocks, invalidatePromptBlocks } from '../prompt/block-policy.js'
 import { FallbackStreamClient } from '../api/fallback-client.js'
 import type { AgentConfig } from './loop-types.js'
@@ -271,7 +271,7 @@ export function createAgentConfig(input: AgentConfigInput): Pick<
     maxTokens: model.maxTokens,
     staticCtx: { tools: gatedTools, modelFamily: detectModelFamily(model.id) },
     approvalMode: input.approvalMode,
-    volatileCtx: createVolatileSnapshot({
+    volatileCtx: createVolatileSnapshotFresh({
       cwd,
       sessionMemoryBlock: input.sessionMemoryBlock,
       // 会话启动期解析一次并冻结——中途改配置不生效（改前缀 = 全量重建）。

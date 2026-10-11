@@ -3,6 +3,9 @@ import assert from 'node:assert/strict'
 import { createTransport, StdioConnectError } from '../transport-factory.js'
 import { McpManager } from '../manager.js'
 
+// 测启动 stderr 分类，不测审批门（#443 起无 UI 缺省 fail-closed，见 manager.test.ts 头注释）。
+process.env.RIVET_MCP_APPROVAL = 'open'
+
 test('failed stdio handshake retains stderr, including a single chunk larger than the tail limit', async () => {
   await assert.rejects(createTransport({
     command: process.execPath,

@@ -425,15 +425,28 @@ test('FleetRegistry: concurrent dispatch identities preserve independent control
   const a = { ...running('batch:0', 'tool_A', 'code_scout'), dispatchId: 'tool_A:batch:0', attemptId: 'A' }
   const b = { ...running('batch:0', 'tool_B', 'code_scout'), dispatchId: 'tool_B:batch:0', attemptId: 'B' }
   fleet.apply(a); fleet.apply(b)
-  assert.deepEqual(fleet.getActiveWorkers().map(w => w.workerId), [a.dispatchId, b.dispatchId])
-  assert.equal(fleet.getWorkerById(a.dispatchId)?.workOrderId, 'batch:0')
-  assert.equal(fleet.getWorkerById(a.dispatchId)?.shortLabel, '0')
+  assert.deepEqual(fleet.getActiveWorkers().map(w => w.workerId), [a.attemptId, b.attemptId])
+  assert.equal(fleet.getWorkerById(a.attemptId)?.workOrderId, 'batch:0')
+  assert.equal(fleet.getWorkerById(a.attemptId)?.shortLabel, '0')
   fleet.apply({ ...a, status: 'completed' })
-  assert.equal(fleet.getWorkerById(b.dispatchId)?.terminal, false)
+  assert.equal(fleet.getWorkerById(b.attemptId)?.terminal, false)
   fleet.apply(a)
-  assert.equal(fleet.getWorkerById(a.dispatchId)?.terminal, true, 'late activity cannot revive completed dispatch')
-  assert.deepEqual(fleet.findGoneWorkers(id => id === b.dispatchId).map(w => w.workerId), [])
+  assert.equal(fleet.getWorkerById(a.attemptId)?.terminal, true, 'late activity cannot revive completed dispatch')
+  assert.deepEqual(fleet.findGoneWorkers(id => id === b.attemptId).map(w => w.workerId), [])
   fleet.clearGroup('tool_A')
-  assert.equal(fleet.getWorkerById(a.dispatchId)?.terminal, true)
-  assert.equal(fleet.getWorkerById(b.dispatchId)?.terminal, false)
+  assert.equal(fleet.getWorkerById(a.attemptId)?.terminal, true)
+  assert.equal(fleet.getWorkerById(b.attemptId)?.terminal, false)
+})
+
+
+test('FleetRegistry: reused dispatch ID keeps distinct attempts and fences late terminal events', () => {
+  const fleet = new FleetRegistry()
+  const a = { ...running('batch:0', 'tool_A', 'code_scout'), dispatchId: 'same:batch:0', attemptId: 'old' }
+  const b = { ...a, attemptId: 'new' }
+  fleet.apply(a); fleet.apply({ ...a, status: 'completed' }); fleet.apply(b)
+  assert.equal(fleet.getAllWorkers().length, 2)
+  assert.equal(fleet.getWorkerById('new')?.terminal, false)
+  fleet.apply({ ...a, status: 'failed' })
+  assert.equal(fleet.getWorkerById('new')?.terminal, false)
+  assert.equal(fleet.getWorkerById('old')?.status, 'completed')
 })

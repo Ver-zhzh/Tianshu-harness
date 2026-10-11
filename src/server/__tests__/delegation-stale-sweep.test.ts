@@ -1,3 +1,4 @@
+import { hasLiveDelegation } from '../session-delegation-state.js'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
@@ -377,4 +378,22 @@ test('abort settlement sweep: live coordinator handle delays reconciliation with
   assert.ok(terminal, 'retry must reconcile after coordinator liveness clears')
   assert.equal(terminal.data.failureReason, 'caller_aborted')
   mgr.shutdownAll()
+})
+
+
+test('stale sweep and live delegation query distinguish attempts when dispatch ID is reused', () => {
+  const manager = new RuntimeSessionManager({ createAgent: () => new NoopAgent(), defaultCwd: process.cwd() })
+  const id = manager.createSession({}).id
+  const session = (manager as any).sessions.get(id)
+  for (const attemptId of ['old', 'new']) (manager as any).emitDelegationActivity(session, {
+    workOrderId: 'batch:0', dispatchId: 'same', attemptId, status: 'running', parentToolId: attemptId,
+  })
+  manager.setCoordinatorRef(id, () => ({ isWorkerRunning: (target: string) => target === 'new' || target === 'same' }) as never)
+  const calls: string[] = []
+  assert.equal(hasLiveDelegation([{ type: 'delegation', data: { workerId: 'batch:0', dispatchId: 'same', attemptId: 'old', status: 'running' } }], undefined,
+    target => { calls.push(target); return target === 'new' || target === 'same' }), false)
+  assert.deepEqual(calls, ['old'])
+  ;(manager as any).sweepStaleDelegationNodes(session, 'worker_gone')
+  const terminal = session.events.filter((e: SessionEvent) => e.type === 'delegation' && e.data.status === 'failed')
+  assert.deepEqual(terminal.map((e: SessionEvent) => e.data.attemptId), ['old'])
 })

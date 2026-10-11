@@ -3,6 +3,9 @@ import assert from 'node:assert/strict'
 import { fileURLToPath } from 'node:url'
 import { McpManager } from '../manager.js'
 
+// 测 stdio 重连语义，不测审批门（#443 起无 UI 缺省 fail-closed，见 manager.test.ts 头注释）。
+process.env.RIVET_MCP_APPROVAL = 'open'
+
 /**
  * issue #148：stdio 传输的 MCP server 子进程退出后不重连、也不更新状态。
  *

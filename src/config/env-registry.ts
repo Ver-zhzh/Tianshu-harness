@@ -3,8 +3,8 @@
  *
  * name/defaultHint/files 由 scripts/gen-env-registry.ts 生成，勿手改；
  * description 字段人工维护，重新生成时按 name 保留。
- * 最后生成：2026-10-10T17:10:41.734Z
- * 共 239 个变量。
+ * 最后生成：2026-10-11T04:08:53.181Z
+ * 共 240 个变量。
  *
  * 每个条目含：名称 / 默认值提示 / 引用文件 / 简要说明。
  * 当源码中新增 RIVET_* 引用但注册表未同步时，
@@ -590,7 +590,7 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
   {
     name: 'RIVET_HOME',
     defaultHint: 'os.tmpdir(',
-    files: ['tui/history-source.ts', 'tui/engine/__tests__/connect-draft-engine.test.ts', 'tui/engine/__tests__/connect-wizard-list.test.ts', 'tui/engine/__tests__/native-scrollback.test.ts', 'tui/engine/__tests__/overlay-deactivate-regression.test.ts', 'tui/engine/__tests__/session-disclosure.test.ts', 'tui/__tests__/account-status.test.ts', 'tui/__tests__/history-async.test.ts', 'tui/__tests__/ui-history-concurrent.test.ts', 'tui/__tests__/updater.test.ts', 'tui/__tests__/zen-command.test.ts', 'tools/browser-debug/__tests__/tool.test.ts', 'tools/__tests__/tool-preset.test.ts', 'server/__tests__/account-credential.test.ts', 'server/__tests__/account-device-network.test.ts', 'server/__tests__/config-routes-keys.test.ts', 'server/__tests__/config-routes-oauth.test.ts', 'server/__tests__/config-routes-provider-hot-reload.test.ts', 'server/__tests__/config-routes-put-model-probe.test.ts', 'server/__tests__/config-routes-zen.test.ts', 'server/__tests__/config-routes.test.ts', 'server/__tests__/git-pr-workbench.test.ts', 'server/__tests__/git-review-jobs.test.ts', 'server/__tests__/mcp-hot-add.test.ts', 'server/__tests__/mcp-inject-tools.test.ts', 'server/__tests__/mcp-oauth-routes.test.ts', 'server/__tests__/mcp-presets.test.ts', 'server/__tests__/mcp-server-config.test.ts', 'server/__tests__/path-grants-routes.test.ts', 'server/__tests__/plugin-api.test.ts', 'server/__tests__/plugin-session-cache.test.ts', 'server/__tests__/pr353-adoption.test.ts', 'server/__tests__/project-docs-routes.test.ts', 'server/__tests__/recordings-distill-route.test.ts', 'server/__tests__/scratch-route.test.ts', 'server/__tests__/serve-frozen-lifecycle.test.ts', 'server/__tests__/serve-model-spec.test.ts', 'server/__tests__/serve-switch-model.test.ts', 'server/__tests__/server-info.test.ts', 'server/__tests__/session-manager.test.ts', 'server/__tests__/session-routes.test.ts', 'server/__tests__/trust-api.test.ts', 'server/__tests__/worker-log-route.test.ts', 'prompt/__tests__/block-policy.test.ts', 'prompt/__tests__/engine.test.ts', 'prompt/__tests__/volatile-cache.test.ts', 'prompt/__tests__/volatile-snapshot.test.ts', 'pro/computer-use/__tests__/tool.test.ts', 'pro/__tests__/isolated-backend.test.ts', 'pro/__tests__/register-gate.test.ts', 'plugins/__tests__/design-plugin-lib.test.ts', 'plugins/__tests__/plugin-command-metadata.test.ts', 'plugins/__tests__/plugin-installer.test.ts', 'plugins/__tests__/plugin-loader.test.ts', 'mcp/oauth/__tests__/connector.test.ts', 'mcp/oauth/__tests__/request-security.test.ts', 'mcp/__tests__/manager.test.ts', 'mcp/__tests__/tool-inventory.test.ts', 'diagnostics/log-locations.ts', 'diagnostics/__tests__/log-locations.test.ts', 'diagnostics/__tests__/logs-cli.test.ts', 'config/paths.ts', 'config/__tests__/config-cli.test.ts', 'config/__tests__/config-watcher.test.ts', 'config/__tests__/manager-profile-persist.test.ts', 'config/__tests__/pro-license.test.ts', 'config/__tests__/profile.test.ts', 'config/__tests__/project-trust.test.ts', 'config/__tests__/remove-model.test.ts', 'config/__tests__/workspace-config.test.ts', 'cli/__tests__/prompt-version-warning.test.ts', 'auth/__tests__/login-flow.test.ts', 'api/__tests__/call-audit.test.ts', 'api/__tests__/deepseek-platform.test.ts', 'agent/__tests__/batch-side-table-isolation.test.ts', 'agent/__tests__/cache-worker-hardening.test.ts', 'agent/__tests__/config-watcher-release.test.ts', 'agent/__tests__/coordinator-session-resume.test.ts', 'agent/__tests__/delivery-evidence-p1.test.ts', 'agent/__tests__/delivery-recovery-regressions.test.ts', 'agent/__tests__/loop.test.ts', 'agent/__tests__/plan-templates.test.ts', 'agent/__tests__/session-cd-rebuild-stores.test.ts', 'agent/__tests__/session-cd.test.ts', 'agent/__tests__/task-state-persist.test.ts', 'agent/__tests__/worker-meta-finalize.test.ts', 'agent/__tests__/worker-session.test.ts', 'agent/__tests__/helpers/verification-pipeline-fixture.ts'],
+    files: ['tui/history-source.ts', 'tui/engine/__tests__/connect-draft-engine.test.ts', 'tui/engine/__tests__/connect-wizard-list.test.ts', 'tui/engine/__tests__/native-scrollback.test.ts', 'tui/engine/__tests__/overlay-deactivate-regression.test.ts', 'tui/engine/__tests__/session-disclosure.test.ts', 'tui/__tests__/account-status.test.ts', 'tui/__tests__/history-async.test.ts', 'tui/__tests__/ui-history-concurrent.test.ts', 'tui/__tests__/updater.test.ts', 'tui/__tests__/worker-detail.test.ts', 'tui/__tests__/zen-command.test.ts', 'tools/browser-debug/__tests__/tool.test.ts', 'tools/__tests__/tool-preset.test.ts', 'server/__tests__/account-credential.test.ts', 'server/__tests__/account-device-network.test.ts', 'server/__tests__/config-routes-keys.test.ts', 'server/__tests__/config-routes-oauth.test.ts', 'server/__tests__/config-routes-provider-hot-reload.test.ts', 'server/__tests__/config-routes-put-model-probe.test.ts', 'server/__tests__/config-routes-zen.test.ts', 'server/__tests__/config-routes.test.ts', 'server/__tests__/git-pr-workbench.test.ts', 'server/__tests__/git-review-jobs.test.ts', 'server/__tests__/mcp-hot-add.test.ts', 'server/__tests__/mcp-inject-tools.test.ts', 'server/__tests__/mcp-oauth-routes.test.ts', 'server/__tests__/mcp-presets.test.ts', 'server/__tests__/mcp-server-config.test.ts', 'server/__tests__/path-grants-routes.test.ts', 'server/__tests__/plugin-api.test.ts', 'server/__tests__/plugin-session-cache.test.ts', 'server/__tests__/pr353-adoption.test.ts', 'server/__tests__/project-docs-routes.test.ts', 'server/__tests__/recordings-distill-route.test.ts', 'server/__tests__/scratch-route.test.ts', 'server/__tests__/serve-frozen-lifecycle.test.ts', 'server/__tests__/serve-model-spec.test.ts', 'server/__tests__/serve-switch-model.test.ts', 'server/__tests__/server-info.test.ts', 'server/__tests__/session-manager.test.ts', 'server/__tests__/session-routes.test.ts', 'server/__tests__/trust-api.test.ts', 'server/__tests__/worker-log-route.test.ts', 'prompt/__tests__/block-policy.test.ts', 'prompt/__tests__/engine.test.ts', 'prompt/__tests__/volatile-cache.test.ts', 'prompt/__tests__/volatile-snapshot.test.ts', 'pro/computer-use/__tests__/tool.test.ts', 'pro/__tests__/isolated-backend.test.ts', 'pro/__tests__/register-gate.test.ts', 'plugins/__tests__/design-plugin-lib.test.ts', 'plugins/__tests__/plugin-command-metadata.test.ts', 'plugins/__tests__/plugin-installer.test.ts', 'plugins/__tests__/plugin-loader.test.ts', 'mcp/oauth/__tests__/connector.test.ts', 'mcp/oauth/__tests__/request-security.test.ts', 'mcp/__tests__/manager.test.ts', 'mcp/__tests__/tool-inventory.test.ts', 'diagnostics/log-locations.ts', 'diagnostics/__tests__/log-locations.test.ts', 'diagnostics/__tests__/logs-cli.test.ts', 'config/paths.ts', 'config/__tests__/config-cli.test.ts', 'config/__tests__/config-watcher.test.ts', 'config/__tests__/manager-profile-persist.test.ts', 'config/__tests__/pro-license.test.ts', 'config/__tests__/profile.test.ts', 'config/__tests__/project-trust.test.ts', 'config/__tests__/remove-model.test.ts', 'config/__tests__/workspace-config.test.ts', 'cli/__tests__/prompt-version-warning.test.ts', 'auth/__tests__/login-flow.test.ts', 'api/__tests__/call-audit.test.ts', 'api/__tests__/deepseek-platform.test.ts', 'agent/__tests__/batch-side-table-isolation.test.ts', 'agent/__tests__/cache-worker-hardening.test.ts', 'agent/__tests__/config-watcher-release.test.ts', 'agent/__tests__/coordinator-session-resume.test.ts', 'agent/__tests__/delivery-evidence-p1.test.ts', 'agent/__tests__/delivery-recovery-regressions.test.ts', 'agent/__tests__/loop.test.ts', 'agent/__tests__/plan-templates.test.ts', 'agent/__tests__/session-cd-rebuild-stores.test.ts', 'agent/__tests__/session-cd.test.ts', 'agent/__tests__/task-state-persist.test.ts', 'agent/__tests__/worker-meta-finalize.test.ts', 'agent/__tests__/worker-session.test.ts', 'agent/__tests__/helpers/verification-pipeline-fixture.ts'],
     description: '',
   },
   {
@@ -740,7 +740,7 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
   {
     name: 'RIVET_MCP_APPROVAL',
     defaultHint: '',
-    files: ['mcp/server-approval.ts', 'mcp/__tests__/manager.test.ts'],
+    files: ['server/__tests__/mcp-hot-add.test.ts', 'mcp/server-approval.ts', 'mcp/tool-inventory.ts', 'mcp/__tests__/close-failure-orphan.test.ts', 'mcp/__tests__/manager-stdio-reconnect.test.ts', 'mcp/__tests__/manager.test.ts', 'mcp/__tests__/stdio-startup-errors.test.ts', 'mcp/__tests__/tool-inventory.test.ts'],
     description: 'MCP 连接级审批门：gate 强制拦截、open 强制 fail-open；未设则按宿主是否有交互 UI 自动降级。',
   },
   {
@@ -758,7 +758,7 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
   {
     name: 'RIVET_MCP_OAUTH_CLIENT_ID',
     defaultHint: '\'\'',
-    files: ['tui/slash-commands.ts', 'mcp/manager.ts'],
+    files: ['tui/slash-commands.ts', 'mcp/manager.ts', 'mcp/__tests__/manager.test.ts'],
     description: '',
   },
   {
@@ -1116,6 +1116,12 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
     description: '',
   },
   {
+    name: 'RIVET_SECRETS_LOCK_TIMEOUT_MS',
+    defaultHint: '',
+    files: ['config/secrets-store.ts', 'config/__tests__/secrets-lock-takeover.test.ts'],
+    description: 'secrets.json 文件锁等待上限（默认 10000ms）；测试/CI 缩短接管等待用，非法值回落默认',
+  },
+  {
     name: 'RIVET_SECURITY_GUIDANCE',
     defaultHint: '',
     files: ['config/security-guidance-config.ts', 'agent/__tests__/create-runtime-hooks.test.ts'],
@@ -1262,7 +1268,7 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
   {
     name: 'RIVET_TOKEN_STORE',
     defaultHint: '',
-    files: ['server/__tests__/account-routes.test.ts', 'config/__tests__/secrets-store.test.ts', 'auth/secure-store.ts', 'auth/__tests__/account-model-credentials.test.ts', 'auth/__tests__/secure-store.test.ts'],
+    files: ['server/__tests__/account-routes.test.ts', 'config/__tests__/secrets-concurrent.test.ts', 'config/__tests__/secrets-lock-takeover.test.ts', 'config/__tests__/secrets-store.test.ts', 'auth/secure-store.ts', 'auth/__tests__/account-model-credentials.test.ts', 'auth/__tests__/secure-store.test.ts'],
     description: '凭据落盘加密的数据密钥托管后端：keychain(macOS 默认) / dpapi(Windows 默认) / local-key(Linux 默认，仅混淆不是安全边界) / plaintext(显式关闭加密，仅排障)。密钥库不可用时自动降级到 local-key 并打 warn。',
   },
   {

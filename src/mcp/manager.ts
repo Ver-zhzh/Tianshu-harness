@@ -5,6 +5,7 @@ import type { McpConnectionState, McpTransportType } from './types.js'
 import { createMcpToolWrapper, createMcpConnectorConsent, type McpConnectorConsent } from './wrapper.js'
 import {
   approveMcpServer,
+  awaitingApprovalHint,
   denyMcpServer,
   mcpApprovalInteractive,
   mcpServerFingerprint,
@@ -180,7 +181,8 @@ export class McpManager {
 
   /**
    * issue #215 — 连接级审批判定。委托到 server-approval.resolveMcpApproval
-   * （无交互 UI 时 fail-open）。抽成方法是为了给测试一个 always-approve 桩接缝。
+   * （无交互 UI 时 fail-closed，#443——未知指纹 awaiting 拦在 spawn 前）。
+   * 抽成方法是为了给测试一个 always-approve 桩接缝。
    * @internal Overridable for testing
    */
   _mcpApprovalDecision(cfg: McpServerConfig): McpApprovalDecision {
@@ -220,7 +222,7 @@ export class McpManager {
       transport,
       toolCount: 0,
       error: decision === 'awaiting'
-        ? `MCP server "${serverId}" is awaiting approval — not started. Approve via POST /mcp/servers/${serverId}/approve`
+        ? awaitingApprovalHint(serverId)
         : `MCP server "${serverId}" was denied — not started. Re-approve to connect.`,
     })
   }
@@ -439,8 +441,9 @@ export class McpManager {
           return []
         }
 
-        // 清单快照门（rug pull 防线 ①，见 tool-inventory.ts）：注册前 diff——变更在
-        // gate 宿主拦截待批（断开+不注册）；fail-open 宿主放行 + 变更标记（③）。
+        // 清单快照门（rug pull 防线 ①，见 tool-inventory.ts）：注册前 diff——
+        // gate 宿主与 headless 未显式 open（#443）都拦截待批（断开+不注册）；
+        // 显式 open 宿主放行 + 变更标记（③）。
         const inventory = evaluateInventoryGate({
           fingerprint: mcpServerFingerprint(serverConfig),
           serverId,

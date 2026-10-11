@@ -7,6 +7,9 @@ import { buildMcpRoutes } from '../mcp-api.js'
 import { McpManager } from '../../mcp/manager.js'
 import type { Tool } from '../../tools/types.js'
 
+// 测 REST 热加/禁用语义，不测审批门（#443 起无 UI 缺省 fail-closed，见 manager.test.ts 头注释）。
+process.env.RIVET_MCP_APPROVAL = 'open'
+
 function withTempHome(fn: (home: string) => Promise<void>): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), 'mcp-hot-'))
   const prev = process.env.RIVET_HOME

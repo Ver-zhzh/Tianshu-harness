@@ -17,6 +17,8 @@ test('serveSpawnEnv：临时 HOME/RIVET_HOME/缓存/token 覆盖，provider key 
     OPENAI_API_KEY: 'sk-leak',
     RIVET_SESSION_DIR: '/real/sessions',
     RIVET_SERVE_REPORT_LEAK: 'leak',
+    // 伪造一个父 pid 哨兵：证明注入的是本进程真实 pid，不是继承值
+    RIVET_PARENT_PID: '999999',
   }
   const saved: Record<string, string | undefined> = {}
   for (const [key, value] of Object.entries(planted)) {
@@ -33,6 +35,10 @@ test('serveSpawnEnv：临时 HOME/RIVET_HOME/缓存/token 覆盖，provider key 
     assert.equal(env.RIVET_SESSION_DIR, undefined, '真实会话目录变量不得继承')
     assert.equal(env.RIVET_SERVE_REPORT_LEAK, undefined, '未知环境变量不得继承')
     assert.equal(env.PATH, process.env.PATH, 'PATH 属于最小必需集，应保留')
+    // 孤儿防线（2026-10-11 实测泄漏：无 watchdog 的 serve 在启动者死后永久残留，
+    // 0.0.0.0:59396 孤儿即此形态）：serve 的 parent-watchdog 只认 RIVET_PARENT_PID，
+    // 缺失即不装守护。验证脚本起的 serve 必须绑定到脚本进程的生命周期。
+    assert.equal(env.RIVET_PARENT_PID, String(process.pid), '必须注入脚本自身 pid——serve watchdog 的孤儿防线')
   } finally {
     for (const [key, value] of Object.entries(saved)) {
       if (value === undefined) delete process.env[key]

@@ -132,3 +132,13 @@ test('WorkerMirror: concurrent dispatch identities isolate text and late events'
   assert.equal(store.getMessages(a.dispatchId!)[0]?.content, 'A text')
   assert.equal(store.getMessages(b.dispatchId!)[0]?.content, 'B text')
 })
+
+
+test('WorkerMirror: reused dispatch ID preserves separate attempt transcripts', () => {
+  const store = new WorkerMirrorStore()
+  const a = ev({ workOrderId: 'batch:0', dispatchId: 'same', attemptId: 'old', eventKind: 'text', eventDetail: 'old text' })
+  store.apply(a); store.apply({ ...a, status: 'completed' })
+  store.apply({ ...a, attemptId: 'new', eventDetail: 'new text' })
+  assert.equal(store.getMessages('new')[0]?.content, 'new text')
+  assert.equal(store.getMessages('old')[0]?.content, 'old text')
+})

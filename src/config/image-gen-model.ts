@@ -162,7 +162,9 @@ export function registerImageGenModelConfig(
   // 危险窗口：config 已指向该 provider 而它的 secret 尚未落盘，此时另一个并发会话读到
   // 配置就会以为「已配好」，实际调用必然 401，且报错指向 provider 而不是「还没配完」，
   // 很难归因。反过来最坏只留一个无人引用的孤儿 secret——无害，下次注册同名 provider
-  // 会覆盖它。因此也不需要回滚分支（writeSecret 是原子的，抛错即未写入）。
+  // 会覆盖它。也不需要回滚分支：writeSecret 单次调用要么整文件替换成功、要么抛错未写入
+  // （secrets-store 有跨进程事务锁，读-改-写在同一临界区内——并发语义见
+  // src/config/__tests__/secrets-concurrent.test.ts）。
   if (apiKey) writeSecret(providerName, apiKey)
 
   cfg.provider.providers[providerName] = provider

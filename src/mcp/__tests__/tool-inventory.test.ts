@@ -140,7 +140,7 @@ describe('tool-inventory', () => {
     })
   })
 
-  it('fail-open（无 UI）：放行 + 变更标记 + accepted 保持旧值（信号持续可见）', async () => {
+  it('#443 fail-closed（无 UI）：拦截待批——rug pull 不因 headless 静默放行', async () => {
     await withHome(() => {
       evaluateInventoryGate({ fingerprint: 'fp1', serverId: 's', tools: [tool('x', 'A')], interactive: true })
 
@@ -148,21 +148,56 @@ describe('tool-inventory', () => {
       __setInventoryWarnSink((m) => lines.push(m))
       try {
         const v1 = evaluateInventoryGate({ fingerprint: 'fp1', serverId: 's', tools: [tool('x', 'B')], interactive: false })
-        assert.equal(v1.action, 'allow')
-        assert.deepEqual(v1.action === 'allow' ? v1.changed?.diff.changed : [], ['x'])
+        assert.equal(v1.action, 'block', 'headless 未显式 open 时清单变更必须拦截（#443）')
+        assert.deepEqual(v1.action === 'block' ? v1.pending.inventoryDiff.changed : [], ['x'])
+        assert.equal(lines.length, 1, '拦截告警一次（进程级去重）')
+        assert.match(lines[0]!, /拦截/)
 
-        const v2 = evaluateInventoryGate({ fingerprint: 'fp1', serverId: 's', tools: [tool('x', 'B')], interactive: false })
-        assert.deepEqual(v2.action === 'allow' ? v2.changed?.diff.changed : [], ['x'], '未接受前每次连接都带标记')
-
+        // accepted 保持旧值——armed 批准流程照旧可用
         assert.equal(
           readInventoryStore().accepted['fp1']?.hash,
           computeInventory('s', [tool('x', 'A')]).hash,
-          'fail-open 不写 accepted——标记持续到被显式接受',
         )
-        assert.equal(lines.length, 1, '同一变更版本告警一次（进程级去重）')
-        assert.match(lines[0]!, /fp1|s/) // 告警含定位线索（fingerprint 或 serverId）
+        // 拦后用户批准（arm）→ 精确匹配放行：fail-closed 不堵死恢复路径
+        armInventoryApproval('fp1', v1.action === 'block' ? v1.pending.inventoryHash : '')
+        const v2 = evaluateInventoryGate({ fingerprint: 'fp1', serverId: 's', tools: [tool('x', 'B')], interactive: false })
+        assert.equal(v2.action, 'allow', 'arm 后重拉精确匹配应放行')
       } finally {
         __setInventoryWarnSink(null)
+      }
+    })
+  })
+
+  it('#443 显式 RIVET_MCP_APPROVAL=open：恢复 fail-open（放行 + 变更标记 + accepted 保持旧值）', async () => {
+    await withHome(() => {
+      const prev = process.env.RIVET_MCP_APPROVAL
+      process.env.RIVET_MCP_APPROVAL = 'open'
+      try {
+        evaluateInventoryGate({ fingerprint: 'fp-open', serverId: 's', tools: [tool('x', 'A')], interactive: true })
+
+        const lines: string[] = []
+        __setInventoryWarnSink((m) => lines.push(m))
+        try {
+          const v1 = evaluateInventoryGate({ fingerprint: 'fp-open', serverId: 's', tools: [tool('x', 'B')], interactive: false })
+          assert.equal(v1.action, 'allow')
+          assert.deepEqual(v1.action === 'allow' ? v1.changed?.diff.changed : [], ['x'])
+
+          const v2 = evaluateInventoryGate({ fingerprint: 'fp-open', serverId: 's', tools: [tool('x', 'B')], interactive: false })
+          assert.deepEqual(v2.action === 'allow' ? v2.changed?.diff.changed : [], ['x'], '未接受前每次连接都带标记')
+
+          assert.equal(
+            readInventoryStore().accepted['fp-open']?.hash,
+            computeInventory('s', [tool('x', 'A')]).hash,
+            'fail-open 不写 accepted——标记持续到被显式接受',
+          )
+          assert.equal(lines.length, 1, '同一变更版本告警一次（进程级去重）')
+          assert.match(lines[0]!, /fp-open|s/)
+        } finally {
+          __setInventoryWarnSink(null)
+        }
+      } finally {
+        if (prev === undefined) delete process.env.RIVET_MCP_APPROVAL
+        else process.env.RIVET_MCP_APPROVAL = prev
       }
     })
   })

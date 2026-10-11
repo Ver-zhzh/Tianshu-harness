@@ -2245,7 +2245,7 @@ export class RuntimeSessionManager {
   async getWorkerLog(id: string, workerId: string, opts?: WorkerLogOptions): Promise<WorkerLog | undefined> {
     if (!this.sessions.has(id)) return undefined
     const { events } = (await this.getAllEventsAsync(id)) ?? { events: [] as SessionEvent[] }
-    const liveMessages = this.coordinatorBySession.get(id)?.()?.getLiveWorkerMessages(opts?.dispatchId ?? workerId)
+    const liveMessages = this.coordinatorBySession.get(id)?.()?.getLiveWorkerMessages(opts?.attemptId ?? opts?.dispatchId ?? workerId)
     return buildWorkerLog(workerId, events, liveMessages, opts)
   }
 
@@ -4589,7 +4589,7 @@ export class RuntimeSessionManager {
     if (!snapshot?.complete) return
     for (const event of snapshot.events) {
       const { workerId, attemptId, dispatchId, parentAttemptId } = event.data as { workerId: string; attemptId?: string; dispatchId?: string; parentAttemptId?: string }
-      if (session.backgroundAborts?.has(workerId) || this.isWorkerRunning(session.record.id, dispatchId ?? workerId)) continue
+      if (session.backgroundAborts?.has(workerId) || this.isWorkerRunning(session.record.id, attemptId ?? dispatchId ?? workerId)) continue
       const key = attemptId ?? (dispatchId ? `${dispatchId}:${workerId}` : workerId)
       const started = session.delegationStartedAt ?? (session.delegationStartedAt = new Map())
       if (!started.has(key)) started.set(key, event.ts)

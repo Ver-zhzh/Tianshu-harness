@@ -177,7 +177,15 @@ function dpapiKey(dir: string, create: boolean): Buffer | null {
     const fresh = randomBytes(32)
     const sealed = dpapiCall(fresh, 'Protect')
     mkdirSync(dir, { recursive: true })
-    writeFileSync(path, sealed.toString('base64'), { mode: 0o600, flag: 'wx' })
+    try {
+      writeFileSync(path, sealed.toString('base64'), { mode: 0o600, flag: 'wx' })
+    } catch (error) {
+      // 并发首建的败者：胜者已创建密钥文件。重读胜者的密钥，而不是把 EEXIST
+      // 误判为「DPAPI 不可用」降级到 local-key（明文密钥）——与 localKey 的
+      // EEXIST 分支（见下）及 keychainKey 的 add 失败重读对称。
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') return dpapiKey(dir, false)
+      throw error
+    }
     return fresh
   } catch {
     warnOnce(
