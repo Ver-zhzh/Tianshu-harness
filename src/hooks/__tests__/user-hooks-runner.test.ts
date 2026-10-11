@@ -6,7 +6,10 @@
  */
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { resolveHookCommand } from '../user-hooks-runner.js'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { resolveHookCommand, runHooksForEvent } from '../user-hooks-runner.js'
 
 const win = 'win32' as NodeJS.Platform
 const noExists = () => false
@@ -100,6 +103,65 @@ describe('resolveHookCommand —— Windows 按扩展名选解释器', () => {
       assert.equal(r.ok ? r.cmd : '', '/proj/x.sh', platform)
       assert.deepEqual(r.ok ? r.args : [], [], platform)
       assert.equal(r.ok ? r.shell : false, true, platform)
+    }
+  })
+})
+
+describe('runHooksForEvent —— 环境隔离（issue #137 同族）', () => {
+  function setupDumpHook(scriptBody = 'env'): { dir: string; cleanup: () => void } {
+    const dir = mkdtempSync(join(tmpdir(), 'rivet-hook-env-'))
+    mkdirSync(join(dir, '.rivet'), { recursive: true })
+    const script = join(dir, 'dump.sh')
+    writeFileSync(script, `#!/bin/sh\n${scriptBody}\n`)
+    chmodSync(script, 0o755)
+    writeFileSync(join(dir, '.rivet', 'hooks.json'), JSON.stringify({ hooks: [{ event: 'preTurn', script: 'dump.sh' }] }))
+    return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) }
+  }
+
+  it('不把父进程的 NODE_OPTIONS / 启动即执行类变量泄漏给 hook 子进程', () => {
+    const prev = { ...process.env }
+    const { dir, cleanup } = setupDumpHook()
+    process.env.RIVET_TRUST_PROJECT = '1'
+    process.env.NODE_OPTIONS = '--require=/tmp/malware.js'
+    process.env.LD_PRELOAD = '/tmp/evil.so'
+    try {
+      const out = runHooksForEvent(dir, { event: 'preTurn', cwd: dir, turn: 1 }).map(r => r.output).join('\n')
+      assert.doesNotMatch(out, /^NODE_OPTIONS=/m, 'NODE_OPTIONS 必须被剥离')
+      assert.doesNotMatch(out, /^LD_PRELOAD=/m, 'LD_PRELOAD 必须被剥离')
+    } finally {
+      cleanup()
+      process.env = prev
+    }
+  })
+
+  it('不把父进程的密钥类变量泄漏给 hook 子进程', () => {
+    const prev = { ...process.env }
+    const { dir, cleanup } = setupDumpHook()
+    process.env.RIVET_TRUST_PROJECT = '1'
+    process.env.MY_FAKE_SECRET_TOKEN = 'super-secret-value-123'
+    try {
+      const out = runHooksForEvent(dir, { event: 'preTurn', cwd: dir, turn: 1 }).map(r => r.output).join('\n')
+      assert.doesNotMatch(out, /super-secret-value-123/, '密钥值不得出现在子进程环境')
+      assert.doesNotMatch(out, /^MY_FAKE_SECRET_TOKEN=/m, '密钥变量不得传出')
+    } finally {
+      cleanup()
+      process.env = prev
+    }
+  })
+
+  it('仍向 hook 送达事件上下文（RIVET_HOOK_EVENT 等）与基础变量', () => {
+    const prev = { ...process.env }
+    const { dir, cleanup } = setupDumpHook()
+    process.env.RIVET_TRUST_PROJECT = '1'
+    try {
+      const out = runHooksForEvent(dir, { event: 'preTurn', cwd: dir, turn: 7, sessionId: 's1' }).map(r => r.output).join('\n')
+      assert.match(out, /^RIVET_HOOK_EVENT=preTurn$/m)
+      assert.match(out, /^RIVET_SESSION_ID=s1$/m)
+      assert.match(out, /^RIVET_TURN=7$/m)
+      assert.match(out, /^PATH=/m, 'PATH 是子进程运行必需的，必须保留')
+    } finally {
+      cleanup()
+      process.env = prev
     }
   })
 })
