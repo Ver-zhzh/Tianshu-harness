@@ -435,3 +435,4 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 - #415 fix(prompt): 标注 tool-usage 门控工具的启用条件与降级路径（OPEN）
 - #407 fix(security): file-context 路由 cwd 加工作区守卫（OPEN）
 - #439 fix: batch concurrency (#429), ghost-abort rescue (#430), drain timer leak (#431), MCP orphan process (#432) and Windows skill path (#385)（OPEN）
+- #447 fix(server): sidecar 会话事件日志内存上限收敛（#445）（OPEN）
