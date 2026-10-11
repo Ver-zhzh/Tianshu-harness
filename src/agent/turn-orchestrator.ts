@@ -491,6 +491,8 @@ export class TurnOrchestrator {
   async execute(userInput: string, callbacks: AgentCallbacks, images?: string[]): Promise<void> {
     const { heartbeat, wrappedCallbacks } = await this.deps.initializeRun(userInput, callbacks, images)
     callbacks = wrappedCallbacks
+    const gitProbeController = new AbortController()
+    const gitProbes = new Set<Promise<void>>()
 
     let checkpointCreatedThisTurn = false
 
@@ -618,9 +620,13 @@ export class TurnOrchestrator {
         debugLog(`[turn-boundary] turn=${turn} prewarmRecentReads: ${Date.now() - _tb}ms`)
 
         // ── Git freshness: file change rate (Zeitgeber signal) ──
-        getGitChangeRate(this.deps.getCwd()).then(rate => {
-          this.deps.state.gitChangeRate = smoothChangeRate(rate, this.deps.state.gitChangeRate)
+        const gitProbe = getGitChangeRate(this.deps.getCwd(), 5, gitProbeController.signal).then(rate => {
+          if (!gitProbeController.signal.aborted) {
+            this.deps.state.gitChangeRate = smoothChangeRate(rate, this.deps.state.gitChangeRate)
+          }
         }).catch(() => {})
+        gitProbes.add(gitProbe)
+        void gitProbe.then(() => gitProbes.delete(gitProbe))
 
         // ── FS freshness: realtime external Zeitgeber signal ──
         this.deps.state.latestFsWatcherState = this.deps.getFsWatcherState() ?? { eventRate: 0, eventCount: 0, active: false }
@@ -1636,6 +1642,9 @@ export class TurnOrchestrator {
     } finally {
       heartbeat.stop()
       this.deps.stopFsWatcher()
+      // These probes own child processes with this run's cwd. Drain before returning.
+      gitProbeController.abort()
+      await Promise.all(gitProbes)
     }
   }
 }

@@ -435,6 +435,8 @@ export interface ToolResult {
   displayOutputTruncated?: boolean
   /** Path to persisted raw output file */
   rawPath?: string
+  /** Successfully observed paths from a multi-file read; excludes failed/skipped files. */
+  readPaths?: string[]
   /** Observational fidelity of this result:
    *  - lossless: full output, no truncation or collapse
    *  - truncated: output was clipped (stdout ring buffer, line limit)

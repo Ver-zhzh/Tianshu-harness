@@ -8,27 +8,32 @@ import { track } from '../tools/process-tracker.js'
 function gitSpawn(
   args: string[],
   cwd: string,
+  signal?: AbortSignal,
   // 400ms：100ms 在 Windows（git 冷启动 80–150ms，实测裸启动 75–123ms）与
   // 负载机器上频繁超时，探针静默返回空 → changeRate 恒 0（信号失明，感知
   // 间隔永不按活跃度收缩）。本函数整体异步（turn-orchestrator 后台 .then
   // 调用），最坏 6 次调用 2.4s 也不进主循环路径。
   timeoutMs = 400,
 ): Promise<string> {
+  if (signal?.aborted) return Promise.resolve('')
   return new Promise(resolve => {
     const child = track(spawnGit(args, {
       cwd,
       stdio: ['ignore', 'pipe', 'ignore'],
       timeout: timeoutMs,
+      signal,
     }))
 
     let stdout = ''
+    let failed = false
     child.stdout?.on('data', (chunk: Buffer) => {
       stdout += chunk.toString()
       if (stdout.length > 200_000) stdout = stdout.slice(-100_000)
     })
 
-    child.on('close', () => resolve(stdout.trim()))
-    child.on('error', () => resolve(''))
+    // Abort/error can precede close; only close permits cwd cleanup on Windows.
+    child.once('error', () => { failed = true })
+    child.once('close', () => resolve(failed || signal?.aborted ? '' : stdout.trim()))
   })
 }
 
@@ -36,8 +41,8 @@ function gitSpawn(
  * Get the number of tracked files in the git repository.
  * Returns 0 if not a git repo or on any error.
  */
-async function getTrackedFileCount(cwd: string): Promise<number> {
-  const out = await gitSpawn(['ls-files'], cwd)
+async function getTrackedFileCount(cwd: string, signal?: AbortSignal): Promise<number> {
+  const out = await gitSpawn(['ls-files'], cwd, signal)
   if (!out) return 0
   return out.split('\n').filter(Boolean).length
 }
@@ -58,12 +63,15 @@ async function getTrackedFileCount(cwd: string): Promise<number> {
 async function getChangedFileCount(
   cwd: string,
   lookback: number,
+  signal?: AbortSignal,
 ): Promise<number> {
   // Progressively reduce lookback until we find a valid ref
   for (let n = lookback; n >= 1; n--) {
+    if (signal?.aborted) return 0
     const out = await gitSpawn(
       ['diff', '--numstat', `HEAD~${n}`],
       cwd,
+      signal,
     )
     if (out) {
       return out.split('\n').filter(Boolean).length
@@ -87,11 +95,12 @@ async function getChangedFileCount(
 export async function getGitChangeRate(
   cwd: string,
   lookback = 5,
+  signal?: AbortSignal,
 ): Promise<number> {
-  const changed = await getChangedFileCount(cwd, lookback)
+  const changed = await getChangedFileCount(cwd, lookback, signal)
   if (changed === 0) return 0
 
-  const total = await getTrackedFileCount(cwd)
+  const total = await getTrackedFileCount(cwd, signal)
   if (total === 0) return 0
 
   return Math.min(1, changed / total)

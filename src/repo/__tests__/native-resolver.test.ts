@@ -6,8 +6,27 @@ import { rm } from 'node:fs/promises'
 import { pathToFileURL } from 'node:url'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
+import { nativeHeader } from '../../platform/__tests__/native-binary-fixtures.js'
 
 describe('native-resolver', () => {
+  for (const packed of [true, false]) {
+    it(`rejects foreign binary before dlopen (${packed ? 'packed' : 'dev'} layout)`, async () => {
+      const root = join(tmpdir(), `native-resolver-foreign-${process.pid}-${Date.now()}`)
+      const pkg = join(root, 'node_modules', 'better-sqlite3')
+      mkdirSync(join(pkg, 'lib'), { recursive: true })
+      writeFileSync(join(pkg, 'package.json'), JSON.stringify({ main: 'lib/index.js' }))
+      writeFileSync(join(pkg, 'lib', 'index.js'), 'module.exports = class { constructor() { throw new Error("must not reach native loader") } }')
+      const native = packed ? join(root, 'native') : join(pkg, 'build', 'Release')
+      mkdirSync(native, { recursive: true })
+      writeFileSync(join(native, 'better_sqlite3.node'), nativeHeader(process.platform === 'win32' ? 'darwin' : 'win32', process.arch))
+      try {
+        assert.throws(() => resolveBetterSqlite3(pathToFileURL(join(root, 'main.js')).href),
+          (err: unknown) => (err as { code?: string }).code === 'ENATIVE_BINARY_MISMATCH' && /重新构建/.test(String(err)))
+      } finally {
+        await rm(root, { recursive: true, force: true, maxRetries: 15, retryDelay: 50 })
+      }
+    })
+  }
   it('returns Database constructor when node_modules has better-sqlite3 (dev mode)', () => {
     // In dev mode, import.meta.url points to source — node_modules is on the
     // resolution path.

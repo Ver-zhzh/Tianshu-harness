@@ -73,6 +73,9 @@ jobs:
       - name: Windows bash smoke test
         run: node --import tsx --test src/tools/__tests__/bash-windows-smoke.test.ts
 
+      - name: Windows watchdog rescue and Git probe teardown
+        run: node --import tsx --test src/agent/__tests__/watchdog-rescue.test.ts src/agent/__tests__/git-freshness.test.ts src/agent/__tests__/git-freshness-lifecycle.test.ts
+
       - name: Windows private storage without audit privileges
         run: node --import tsx --test src/platform/__tests__/private-path.test.ts src/server/__tests__/server-info-protection.test.ts
 

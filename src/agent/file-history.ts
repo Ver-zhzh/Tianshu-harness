@@ -35,7 +35,7 @@ export interface RewindClaimGuard {
    *  registry directly. Checks the exact tracked path first, then the standard
    *  claim-key candidates derived from process.cwd(). Prefer blockerOf /
    *  makeOwnershipGuard in production so the real workspace cwd is used. */
-  checkClaim?(filePath: string): ClaimRef | null
+  checkClaim?(filePath: string, excludeSessionId?: string): ClaimRef | null
   reapStaleClaims?(): unknown
 }
 export type RewindGuard = RewindClaimGuard | ((filePath: string) => boolean)
@@ -100,7 +100,7 @@ function resolveRewindBlocker(
     try { guard.reapStaleClaims?.() } catch { /* best-effort */ }
     const keys = new Set([filePath, ...claimPathCandidates(process.cwd(), filePath)])
     for (const key of keys) {
-      const claim = guard.checkClaim.call(guard, key)
+      const claim = guard.checkClaim.call(guard, key, mySessionId)
       if (claim && claim.sessionId !== mySessionId) {
         return { path: filePath, sessionId: claim.sessionId, claimType: claim.claimType }
       }

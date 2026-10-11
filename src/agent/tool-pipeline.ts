@@ -69,6 +69,7 @@ import { buildSensitivePreflightMessage, shouldRequireSensitivePreflight } from 
 import { toolTargetFromInput } from './tool-target.js'
 import { execFileGit } from '../tools/spawn-git.js'
 import { patchTargetPaths, preWriteClaimPaths } from './pre-write-claims.js'
+import { normalizeClaimPath } from './claim-path.js'
 import { WRITE_TOOL_NAMES, extractWriteFilePaths } from '../tools/write-tool-helpers.js'
 import { snapshotOmissionNote } from '../tools/run-tests-snapshot-result.js'
 
@@ -1331,12 +1332,12 @@ async function executeToolUseInner(
       for (const claimPath of preWriteClaimPaths(tu, deps.cwd)) {
         const acquired = deps.sessionRegistry.acquireClaim(deps.sessionId, claimPath, 'exclusive')
         if (!acquired) {
-          const owner = deps.sessionRegistry.checkClaim(claimPath)
+          const owner = deps.sessionRegistry.checkClaim(claimPath, deps.sessionId)
           // v2（认领即租约）：先做证据体检——持有方已死（L1）或已长时间不触碰该文件
           // 且工作区干净（L2）时**自动接管**；不再依赖「有人能答批准」，headless 也能解。
           // 其余（陈旧但脏 L3 / 新鲜 L4 / shared_read / 时间不可解析）落回下面的显式
           // 接管与 fail-closed 阻断，授权语义不放松。
-          const liveness = deps.sessionRegistry.claimLiveness?.(claimPath) ?? null
+          const liveness = deps.sessionRegistry.claimLiveness?.(claimPath, deps.sessionId) ?? null
           // ask 分支的人读判据随审批载荷下发——TUI/桌面审批卡据此渲染「是否陈旧」，
           // 不必各自重算（判据口径只有 claim-liveness 一份）。
           let askReason: string | undefined
@@ -1851,9 +1852,7 @@ async function executeToolUseInner(
       let filePath = (tu.input.file_path ?? tu.input.path) as string | undefined
       // Normalize: if absolute path under cwd, convert to relative so it
       // matches git-reported paths in collectCurrentDirtyFiles.
-      if (filePath && (filePath.startsWith(deps.cwd + '/') || filePath.startsWith(deps.cwd + '\\'))) {
-        filePath = filePath.slice(deps.cwd.length + 1)
-     }
+      if (filePath) filePath = normalizeClaimPath(deps.cwd, filePath)
       if (tu.name === 'read_file' && filePath) {
         deps.taskLedger.record({ type: 'file_read', path: filePath })
      } else if ((tu.name === 'write_file' || tu.name === 'edit_file' || tu.name === 'hash_edit') && filePath) {
@@ -2104,17 +2103,16 @@ async function executeToolUseInner(
     }
     // Evidence tracking + import graph
     if (tu.name === 'read_file' && !harnessResult.isError) {
-      deps.evidence.trackFileRead(tu.input.file_path as string)
-
+      // Batch reads have no file_path. Only tool-confirmed paths count as evidence.
+      const readPaths = rawToolResult?.readPaths ?? (typeof tu.input.file_path === 'string' ? [tu.input.file_path] : [])
       // compaction_fail signal: read_file returns pruned/diet content
       const hasPruned = finalContent.includes('[pruned]') || finalContent.includes('[diet:redundant]')
       // Obligation probe 归账：无损读取关闭 read_source 阶段义务；
       // pruned/diet 内容是有损观察，只积累升级压力。
-      deps.obligations?.applyProbe({
-        tool: 'read_file',
-        target: tu.input.file_path as string,
-        lossy: hasPruned,
-      })
+      for (const filePath of readPaths) {
+        deps.evidence.trackFileRead(filePath)
+        deps.obligations?.applyProbe({ tool: 'read_file', target: filePath, lossy: hasPruned })
+      }
       if (hasPruned) {
         try {
           deps.immuneHook?.injectSignal({

@@ -17,6 +17,11 @@ import { _setSandboxBackendForTest, _resetSandboxBackendCache } from '../../tool
 import { isWriteGranted, _resetGrantsForTest, loadPersistedGrants, revokeGrant } from '../../tools/path-grants.js'
 import { rivetHome } from '../../config/paths.js'
 import { executeWithCourseProgress } from '../course-file-progress.js'
+import { EvidenceTracker } from '../evidence.js'
+import { READ_FILE_TOOL } from '../../tools/read-file.js'
+import { recordConvergenceInput, replayConvergenceInput } from '../convergence-replay.js'
+import { SessionRegistry } from '../session-registry.js'
+import { resolveBetterSqlite3 } from '../../repo/native-resolver.js'
 
 import { observeRun } from '../stall-observer.js'
 const executeToolUse: typeof rawExecuteToolUse = (...args) =>
@@ -225,6 +230,35 @@ describe('executeToolUse', () => {
     const content = (result.toolResult as any).content as string
     assert.ok(!content.includes('[策略信号：读取循环]'))
   })
+
+  for (const scenario of ['batch', 'mixed', 'failed', 'limit', 'both', 'single'] as const) {
+    it(`read_file ${scenario} records only observed paths and survives the next convergence check`, async () => {
+      const cwd = mkdtempSync(join(testTmp(), 'read-evidence-'))
+      try {
+        for (const name of ['a.ts', 'b.ts', 'c.ts', 'd.ts', 'e.ts', 'f.ts']) {
+          writeFileSync(join(cwd, name), `export const value = '${name}'\n`)
+        }
+        const evidence = new EvidenceTracker()
+        const probes: string[] = []
+        const deps = makeDeps({ cwd, evidence, obligations: { applyProbe: ({ target }: any) => probes.push(target) } as any })
+        deps.config.toolRegistry.execute = (_name, params) => READ_FILE_TOOL.execute(params)
+        const input = scenario === 'single' ? { file_path: 'a.ts' }
+          : { file_paths: scenario === 'mixed' ? [' a.ts ', 'missing.ts', ' ', 'b.ts']
+            : scenario === 'failed' ? ['missing.ts']
+            : scenario === 'limit' ? ['a.ts', 'b.ts', 'c.ts', 'd.ts', 'e.ts', 'f.ts']
+            : ['a.ts', 'b.ts'], ...(scenario === 'both' ? { file_path: 'f.ts' } : {}) }
+        const result = await executeToolUse({ id: `read-${scenario}`, name: 'read_file', input }, deps, noopCallbacks as any, 1, false)
+        assert.equal((result.toolResult as any).is_error, false)
+        const recorded = recordConvergenceInput({ turn: 2, phaseClass: 'explore', contextWindow: 200_000,
+          recentToolHistory: [], evidenceState: evidence.getState() })
+        assert.doesNotThrow(() => replayConvergenceInput(recorded))
+        const expected = scenario === 'single' ? ['a.ts'] : scenario === 'failed' ? []
+          : (scenario === 'limit' ? ['a.ts', 'b.ts', 'c.ts', 'd.ts', 'e.ts'] : ['a.ts', 'b.ts']).map(name => join(cwd, name))
+        assert.deepEqual([...evidence.getState().filesRead], expected)
+        assert.deepEqual(probes, expected)
+      } finally { rmSync(cwd, { recursive: true, force: true }) }
+    })
+  }
 
   it('P0 执行包装转发：write 工具的真实变化经 executeWithCourseProgress 送达 onCourseFileChange（§7 矩阵：事实转发接线）', async () => {
     const path = join(testTmp(), `wrap-target-${process.pid}.ts`)
@@ -451,6 +485,34 @@ describe('executeToolUse', () => {
     assert.deepEqual(owned, ['src/foo.ts'])
     assert.deepEqual([...new Set(claimed)], ['src/foo.ts'], 'pre-write guard and post-write ledger must stake the same key')
   })
+
+  for (const name of ['write_file', 'edit_file', 'hash_edit', 'plan_close', 'apply_patch', 'ast_edit']) {
+    it(`write-ledger: ${name} uses the canonical key before and after execution`, async () => {
+      const events: any[] = []
+      const owned: string[] = []
+      const claimed: string[] = []
+      const deps = makeDeps({
+        cwd: '/tmp/ws',
+        sessionId: 'mine',
+        sessionRegistry: {
+          acquireClaim: (_sid: string, path: string) => { claimed.push(path); return true },
+          checkClaim: () => null,
+        } as any,
+        taskLedger: { record: (event: any) => { events.push(event) }, getOwnedFiles: () => owned, getEvents: () => events } as any,
+        ownershipLedger: { registerOwned: (file: string) => { owned.push(file) }, getOwnedFiles: () => owned, getBaselineHead: () => '' } as any,
+      })
+      const input = name === 'apply_patch'
+        ? { diff: '--- a/./src/foo.ts\n+++ b/./src/foo.ts\n@@ -1 +1 @@\n-old\n+new' }
+        : name === 'ast_edit'
+          ? { paths: ['./src/foo.ts'], ops: [{ replace: 'x' }], dryRun: false }
+          : { file_path: './src/foo.ts', apply: true, content: 'fixture' }
+      const result = await executeToolUse({ id: `canonical-${name}`, name, input }, deps, noopCallbacks as any, 1, false)
+      assert.equal((result.toolResult as any).is_error, false, String((result.toolResult as any).content))
+      assert.deepEqual(events.filter(e => e.type === 'file_write').map(e => e.path), ['src/foo.ts'])
+      assert.deepEqual(owned, ['src/foo.ts'])
+      assert.deepEqual(claimed, ['src/foo.ts', 'src/foo.ts'], 'both guard and post-write consumer must use the same key')
+    })
+  }
 
   it('write-ledger: ast_edit singular `path` alias is no longer dropped from the ledger', async () => {
     const events: any[] = []
@@ -1170,6 +1232,34 @@ describe('executeToolUse', () => {
     assert.deepEqual(commands, ['git reset --hard'])
     assert.equal(approvals, 1)
     assert.equal(result.latestRisk.level, 'high')
+  })
+
+  it('R2: real connections block an alias write before it can change disk', async t => {
+    if (!resolveBetterSqlite3(import.meta.url)) return t.skip('native SQLite unavailable')
+    const cwd = mkdtempSync(join(tmpdir(), 'claim-write-chain-'))
+    const a = await SessionRegistry.create(join(cwd, 'state'))
+    const b = await SessionRegistry.create(join(cwd, 'state'))
+    try {
+      a.register('a', cwd)
+      b.register('b', cwd)
+      const target = join(cwd, 'file.txt')
+      const first = makeDeps({ cwd, sessionId: 'a', sessionRegistry: a })
+      const second = makeDeps({ cwd, sessionId: 'b', sessionRegistry: b })
+      first.config.toolRegistry.execute = async () => { writeFileSync(target, 'a content'); return { content: 'ok', isError: false } }
+      let peerExecuted = false
+      second.config.toolRegistry.execute = async () => { peerExecuted = true; writeFileSync(target, 'b content'); return { content: 'ok', isError: false } }
+      const accepted = await executeToolUse({ id: 'claim-a', name: 'write_file', input: { file_path: './file.txt', content: 'a content' } }, first, noopCallbacks as any, 1, false)
+      assert.equal((accepted.toolResult as any).is_error, false, String((accepted.toolResult as any).content))
+      const blocked = await executeToolUse({ id: 'claim-b', name: 'write_file', input: { file_path: target, content: 'b content' } }, second, noopCallbacks as any, 1, false)
+      assert.equal((blocked.toolResult as any).is_error, true)
+      assert.equal(peerExecuted, false)
+      assert.equal(readFileSync(target, 'utf8'), 'a content')
+      assert.equal(b.checkClaim('file.txt')?.sessionId, 'a')
+    } finally {
+      a.close()
+      b.close()
+      rmSync(cwd, { recursive: true, force: true })
+    }
   })
 
   it('R2: blocks write_file when another session holds an exclusive claim (fail-closed)', async () => {

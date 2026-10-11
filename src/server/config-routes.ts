@@ -855,6 +855,7 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
           status: 200,
           body: {
             ok: true,
+            effectiveAfterRestart: true,
             ...setRuntimeLeanConfig({ lean, maxLoadedSessions, idleAgentTtlMs, maxEventsDiskBytes, domains }),
           },
         }

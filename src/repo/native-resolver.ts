@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { existsSync, readFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
+import { assertNativeBinary } from '../platform/native-binary.js'
 
 /**
  * How far up to look for the packed `native/` dir.
@@ -171,11 +172,16 @@ export function resolveBetterSqlite3(moduleUrl: string): any | null {
     // 话启动静默、首个 registry 打开即降级。校验 wrapper 自带二进制，缺失则转
     // 自愈 + nativeBinding 绑定。
     const pkgRoot = dirname(dirname(req.resolve('better-sqlite3')))
-    if (existsSync(join(pkgRoot, 'build', 'Release', 'better_sqlite3.node'))) return RealDatabase
+    const packageBinary = join(pkgRoot, 'build', 'Release', 'better_sqlite3.node')
+    if (existsSync(packageBinary)) {
+      assertNativeBinary(packageBinary)
+      return RealDatabase
+    }
     const healed = tryFetchNativeBinary(moduleUrl)
     if (healed && selfPath) return bindPackedWrapper(selfPath, healed)
     return RealDatabase // 自愈失败维持原语义：调用方构造抛错 → 各自降级路径
-  } catch {
+  } catch (err) {
+    if ((err as { code?: string })?.code === 'ENATIVE_BINARY_MISMATCH') throw err
     // not installed
   }
 
@@ -214,6 +220,7 @@ function bindPackedWrapper(selfPath: string, nativePath: string): any {
  * `instanceof` behave normally.
  */
 function bindNativeBinding(RealDatabase: any, nativePath: string): any {
+  assertNativeBinary(nativePath)
   function BoundDatabase(this: unknown, filename?: unknown, options?: Record<string, unknown>) {
     return new RealDatabase(filename, { nativeBinding: nativePath, ...options })
   }

@@ -463,6 +463,52 @@ test('lazy rehydrate caps resident logs (LRU) and reloads evicted ones', async (
   assert.equal(replay.events.length, 1)
 })
 
+for (const mode of ['sync', 'async', 'tail', 'append'] as const) {
+  for (const budget of [undefined, 16 * 1024 * 1024, 0]) {
+    test(`event byte budget ${budget ?? 'default'} bounds ${mode} replay without changing durable history`, async () => {
+      const events = Array.from({ length: 10 }, (_, i) => ev(i + 1, 'text_delta', { text: 'x'.repeat(1024 * 1024) }))
+      const mem = new LazyMemoryPersistence([{ record: {
+        id: 'budget', status: 'completed', createdAt: 1, updatedAt: 9,
+        cwd: '/work', lastSeq: mode === 'append' ? 0 : 10, pendingApprovals: 0,
+      }, events: mode === 'append' ? [] : events }])
+      if (mode === 'async') {
+        (mem as SessionPersistenceAdapter).loadEventsAsync = async id => mem.loadEvents(id)
+      }
+      if (mode === 'tail') {
+        (mem as SessionPersistenceAdapter).loadEventsTailAsync = async (id, _maxEvents, maxEventBytes) => {
+          assert.equal(maxEventBytes, budget ?? 8 * 1024 * 1024, 'the actual tail loader must receive the resolved budget')
+          return { events: mem.loadEvents(id), diskFirstSeq: 1, lastSeq: 10, artifactIds: [], total: 10 }
+        }
+      }
+      const mgr = new RuntimeSessionManager({ createAgent: () => new NoopAgent(), persistence: mem,
+        maxEventBytes: budget, externalScanMs: 0, idleAgentTtlMs: 0 })
+      if (mode === 'append') {
+        mgr.getEvents('budget')
+        const internal = mgr as unknown as {
+          sessions: Map<string, unknown>
+          append(session: unknown, type: SessionEvent['type'], data: Record<string, unknown>): void
+        }
+        for (const event of events) internal.append(internal.sessions.get('budget'), event.type, event.data)
+      }
+      const replay = mode === 'async' || mode === 'tail' ? await mgr.getEventsAsync('budget') : mgr.getEvents('budget')
+      assert.equal(replay!.lastSeq, 10)
+      if (budget === undefined) {
+        const bytes = replay!.events.reduce((total, event) => total + Buffer.byteLength(JSON.stringify(event)), 0)
+        assert.ok(bytes <= 8 * 1024 * 1024, `default replay retained ${bytes} bytes`)
+        assert.ok(replay!.events.length > 0 && replay!.events.length < 10)
+      } else {
+        assert.equal(replay!.events.length, 10, 'explicit budget or 0 retains all ten events')
+      }
+      assert.equal(mem.events.get('budget')!.length, 10, 'memory eviction must not truncate the durable log')
+      const full = await mgr.getAllEventsAsync('budget')
+      assert.equal(full!.events.length, 10)
+      const page = await mgr.getHistoryPage('budget', 4, 3)
+      assert.deepEqual(page!.events.map(event => event.seq), [1, 2, 3])
+      assert.equal(page!.events[0]!.data.text, events[0]!.data.text, 'cold history retains the original content')
+    })
+  }
+}
+
 test('lazy load applies the memory ring cap: only the tail stays resident', async () => {
   const total = 250
   const cap = 100
@@ -1116,6 +1162,34 @@ class SyncableMemoryPersistence extends LazyMemoryPersistence {
 async function adoptAndSettle(mgr: RuntimeSessionManager): Promise<void> {
   const merges = (mgr as unknown as { adoptExternalSessions(): Promise<void>[] }).adoptExternalSessions()
   await Promise.all(merges)
+}
+
+for (const asyncRead of [false, true]) {
+  for (const scenario of ['replay', 'external'] as const) {
+    test(`watched old history preserves ${scenario} under ${asyncRead ? 'async' : 'sync'} LRU pressure`, async () => {
+      const p = new SyncableMemoryPersistence([seeded('old', { updatedAt: 100, lastSeq: 1 }), seeded('recent', { updatedAt: 9999, lastSeq: 1 })])
+      p.appendEvent('old', ev(1, 'text_delta', { text: 'old history' }))
+      p.appendEvent('recent', ev(1, 'text_delta', { text: 'recent history' }))
+      if (asyncRead) (p as SessionPersistenceAdapter).loadEventsAsync = async id => p.loadEvents(id)
+      const mgr = new RuntimeSessionManager({ createAgent: () => new NoopAgent(), persistence: p,
+        maxLoadedSessions: 1, idleAgentTtlMs: 100, externalScanMs: 0, now: () => 10000 })
+      const received: number[] = []
+      mgr.subscribe('old', event => received.push(event.seq))
+      mgr.subscribe('recent', () => {})
+      const read = (id: string) => asyncRead ? mgr.getEventsAsync(id) : Promise.resolve(mgr.getEvents(id))
+      if (scenario === 'external') await read('old')
+      await read('recent')
+      if (scenario === 'replay') {
+        assert.equal((await read('old'))!.events[0]!.data.text, 'old history', 'the requested log must survive its own load')
+        return
+      }
+      mgr.sweepIdleAgents()
+      p.appendEvent('old', ev(2, 'text_delta', { text: 'external progress' }))
+      p.saveRecord({ ...seeded('old', { updatedAt: 10000, lastSeq: 2 }).record })
+      await adoptAndSettle(mgr)
+      assert.deepEqual(received, [2], 'an existing SSE connection must receive external progress without reconnecting')
+    })
+  }
 }
 
 test('外部进程追加的事件被合并进已加载会话，并实时扇出给本进程 listener', async () => {

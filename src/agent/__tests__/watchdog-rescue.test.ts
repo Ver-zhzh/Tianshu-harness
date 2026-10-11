@@ -3,6 +3,8 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import childProcess from 'node:child_process'
+import { syncBuiltinESMExports } from 'node:module'
 import { AgentLoop } from '../loop.js'
 import { SessionContext } from '../context.js'
 import { ToolRegistry } from '../../tools/registry.js'
@@ -16,8 +18,24 @@ async function runRescue(t: import('node:test').TestContext, options: {
   endTurn?: boolean
   userOnly?: boolean
   abortAt?: 'execution'
+  holdGit?: boolean
+  streamFailure?: boolean
 } = {}) {
   const cwd = mkdtempSync(join(tmpdir(), 'rivet-watchdog-rescue-'))
+  const probes: Array<{ child: childProcess.ChildProcess; closed: boolean; done: Promise<void> }> = []
+  if (options.holdGit) {
+    const spawn = childProcess.spawn
+    t.mock.method(childProcess, 'spawn', (command: string, args: string[], opts: childProcess.SpawnOptions) => {
+      if (opts?.cwd !== cwd || args[0] !== 'diff' || args[1] !== '--numstat') return spawn(command, args, opts)
+      // A real long-lived child retains cwd on Windows; no timing race with fast Git.
+      const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { ...opts, timeout: 10_000 })
+      const probe = { child, closed: false, done: Promise.resolve() }
+      probe.done = new Promise<void>(resolve => child.once('close', () => { probe.closed = true; resolve() }))
+      probes.push(probe)
+      return child
+    })
+    syncBuiltinESMExports()
+  }
   let started!: () => void
   let release!: () => void
   const toolStarted = new Promise<void>(resolve => { started = resolve })
@@ -41,6 +59,7 @@ async function runRescue(t: import('node:test').TestContext, options: {
     stream: async (_request: unknown, callbacks: StreamCallbacks, signal?: AbortSignal) => {
       streams++
       signalStates.push(signal?.aborted ?? true)
+      if (options.streamFailure) throw new Error('controlled stream failure')
       if (streams === 1) {
         callbacks.onContentBlock({ type: 'tool_use', id: 'tool-1', name: 'slow', input: {} })
         callbacks.onStopReason('tool_use', { input_tokens: 5, output_tokens: 5 })
@@ -61,7 +80,14 @@ async function runRescue(t: import('node:test').TestContext, options: {
     compact: { enabled: false, autoThreshold: 800_000, autoFloor: 500_000, model: 'flash' },
     fsWatcherEnabled: false,
   }, new SessionContext(), cwd)
-  t.after(() => { agent.stopConfigWatcher(); agent.stopFsWatcher(); rmSync(cwd, { recursive: true, force: true }) })
+  if (options.holdGit) agent.gitChangeRate = 0.75
+  t.after(async () => {
+    // Failure cleanup must still release the deliberately held children.
+    for (const probe of probes) if (!probe.closed) probe.child.kill()
+    await Promise.all(probes.map(probe => probe.done))
+    if (options.holdGit) { t.mock.restoreAll(); syncBuiltinESMExports() }
+    agent.stopConfigWatcher(); agent.stopFsWatcher(); rmSync(cwd, { recursive: true, force: true })
+  })
   const aborts: Array<string | undefined> = []
   const errors: unknown[] = []
   const triggerAbort = () => {
@@ -83,6 +109,15 @@ async function runRescue(t: import('node:test').TestContext, options: {
     onError: error => { errors.push(error) }, onAbort: reason => { aborts.push(reason) },
     onApprovalRequired: async () => false,
   })
+  if (options.streamFailure) {
+    await run
+    assert.equal(errors.length, 1)
+    assert.match(String(errors[0]), /controlled stream failure/)
+    assert.ok(probes.length > 0)
+    assert.ok(probes.every(probe => probe.closed), 'stream failure must close every owned Git child before run returns')
+    assert.equal(agent.gitChangeRate, 0.75, 'cancelled probes must preserve the previous freshness signal')
+    return { agent, streams, aborts, oldSignal: agent.abortController!.signal, signalStates }
+  }
   await toolStarted
   const oldSignal = agent.abortController!.signal
   assert.equal(agent.resetAbortAfterRescue(), false, 'a live signal must never be replaced')
@@ -91,6 +126,11 @@ async function runRescue(t: import('node:test').TestContext, options: {
   release()
   await run
   assert.deepEqual(errors, [])
+  if (options.holdGit) {
+    assert.ok(probes.length > 0)
+    assert.ok(probes.every(probe => probe.closed), 'run must close every owned Git child before cwd cleanup')
+    assert.equal(agent.gitChangeRate, 0.75, 'cancelled probes must preserve the previous freshness signal')
+  }
   return { agent, streams, aborts, oldSignal, signalStates }
 }
 
@@ -139,4 +179,13 @@ describe('watchdog rescue — actual run-loop wiring', () => {
     assert.deepEqual(aborts, [])
     assert.deepEqual(signalStates, [false, false])
   })
+  for (const options of [
+    { holdGit: true, userOnly: true },
+    { holdGit: true },
+    { holdGit: true, userAbort: 'drain' as const, userOnly: true },
+    { holdGit: true, streamFailure: true },
+  ]) {
+    it(`closes held Git children on ${options.streamFailure ? 'stream error' : options.userAbort ? 'user abort' : options.userOnly ? 'ordinary completion' : 'rescued completion'}`,
+      { timeout: 10_000 }, async t => { await runRescue(t, options) })
+  }
 })

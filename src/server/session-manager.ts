@@ -803,13 +803,13 @@ export interface RuntimeSessionManagerOptions {
   idGenerator?: () => string
   /** Cap on retained events per session (ring buffer). Default 5000. */
   maxEvents?: number
-  /** 内存环字节预算（issue #315）：超限最旧条目退化投影（seq/type/ts + 空 data）。Default 64 MiB；0 = 关闭。 */
+  /** UI 回放缓存字节预算：超限移除最旧事件，不改磁盘或模型历史。Default 8 MiB；0 = 关闭字节限制。 */
   maxEventBytes?: number
   /**
    * Cap on how many sessions keep their event log resident at once. Lazy-loaded
    * sessions beyond this (LRU, and only ones with no live agent / not running /
-   * unwatched) have their logs dropped back to disk, bounding memory regardless
-   * of how much history accumulates. Default 16.
+   * unwatched) have their logs dropped back to disk. Protected sessions may
+   * exceed this soft cap. Default 16.
    */
   maxLoadedSessions?: number
   /** 外部新增会话的发现间隔（ms）：同 home 多进程共用时，定期装填本进程不认识的会话并推 sessions_changed。默认 5000；0 = 关闭。 */
@@ -1430,7 +1430,7 @@ export class RuntimeSessionManager {
     const envMaxEvents = Number(process.env.RIVET_MAX_EVENTS)
     this.maxEvents = opts.maxEvents
       ?? (Number.isFinite(envMaxEvents) && envMaxEvents >= 100 ? Math.floor(envMaxEvents) : 5000)
-    this.maxEventBytes = opts.maxEventBytes ?? 64 * 1024 * 1024
+    this.maxEventBytes = opts.maxEventBytes ?? 8 * 1024 * 1024
     this.maxLoadedSessions = opts.maxLoadedSessions ?? 16
     // 审批等待超时：0（默认）= 永不超时——审批卡持久化可回放，无限等优于长
     // 自主任务被误拒；部署侧（无人值守/CI）可用 RIVET_APPROVAL_TIMEOUT_MS

@@ -10,11 +10,11 @@
  * better-sqlite3 is not installed — the nullDb fallback handles it.
  *
  * ── 构建期 ABI 断言（防「静默丢持久化」）────────────────────────────────
- * dist/native/ 的二进制 **只被桌面 sidecar 加载**（npm 发布的 CLI 把 dist/native
- * 排除在 files 外，靠用户安装时 npm rebuild 自己的 better-sqlite3）。桌面 sidecar
+ * dist/native/ 供本机 dist/serve 使用，并作为桌面原生件的 staging 源（npm 发布
+ * 的 CLI 把 dist/native 排除在 files 外，靠安装时重编自己的 better-sqlite3）。桌面 sidecar
  * 跑的是 fetch-node-runtime.js 打包进去的固定 Node（默认 24.18.0 → ABI 137），
- * **不是**构建机的 Node。若构建机在 Node 24（ABI 137）下打包，二进制 ABI 与运行时
- * 不匹配 → 加载失败 → 退化成 nullDb → 跨会话知识/claims/registry 全部静默失能。
+ * **不是**任意构建机的 Node。若宿主安装的二进制 ABI 与目标运行时不同，
+ * 加载失败会让跨会话知识/claims/registry 失能，因此构建期必须核对。
  *
  * 这里在打包后强制校验「二进制 ABI == 目标运行时 ABI」，不匹配 fail-closed，
  * 把「发到用户手里才发现」提前到构建期硬失败。目标 Node 版本与 fetch-node-runtime
@@ -22,19 +22,28 @@
  * 逃生舱：PACK_NATIVE_SKIP_ABI_CHECK=1 跳过（仅限明确知道自己在干什么的场景）。
  */
 
-import { existsSync, mkdirSync, copyFileSync, statSync, openSync, readSync, closeSync, rmSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, copyFileSync, statSync, rmSync, readFileSync, mkdtempSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { tmpdir } from 'node:os'
+import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
 import { execFileSync } from 'node:child_process'
+import { assertNativeBinary } from '../src/platform/native-binary.ts'
+import { resolveTargetPlatform } from './runtime-platform-filter.js'
+import { packedSqlitePath } from './native-pack-paths.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 // 脚本在 scripts/，仓库根在上一级
 const repoRoot = join(__dirname, '..')
 
 const SOURCE = join(repoRoot, 'node_modules', 'better-sqlite3', 'build', 'Release', 'better_sqlite3.node')
-const TARGET_DIR = join(repoRoot, 'dist', 'native')
-const TARGET = join(TARGET_DIR, 'better_sqlite3.node')
+const HOST = { os: process.platform, arch: process.arch }
+const PLATFORM = resolveTargetPlatform()
+const CROSS = PLATFORM.os !== HOST.os || PLATFORM.arch !== HOST.arch
+const HOST_TARGET = join(repoRoot, 'dist', 'native', 'better_sqlite3.node')
+const TARGET = packedSqlitePath(repoRoot, PLATFORM)
+const TARGET_DIR = dirname(TARGET)
 
 // 目标运行时版本与 scripts/fetch-node-runtime.js 单一同源：直接 import 其
 // DEFAULT_NODE_VERSION，杜绝两处常量漂移（漂移会让本断言失去意义）。import 失败
@@ -157,66 +166,15 @@ function assertAbi() {
 // 把它塞进 x86_64 包 → Intel 机器上 sidecar(x64 node) 加载 arm64 .node 失败 →
 // 退化 nullDb（跨会话知识/claims/registry 静默失能）。这正是「前面打的 Intel 包
 // 有问题」的根因。修法：目标架构 ≠ 宿主架构时，用 prebuild-install 拉目标架构对应
-// 目标 Node 版本(ABI)的预编译 .node，直接落到 dist/native。
-const HOST_ARCH = process.arch // 'arm64' | 'x64' | …
-
-/** 从 Tauri 目标三元组解析目标架构；无则退回宿主。 */
-function resolveTargetArch() {
-  const triple = (process.env.TAURI_ENV_TARGET_TRIPLE || '').trim()
-  if (triple) {
-    const tok = triple.split('-')[0]
-    if (tok === 'aarch64' || tok === 'arm64') return 'arm64'
-    if (tok === 'x86_64') return 'x64'
-    if (tok === 'i686') return 'x86'
-  }
-  return HOST_ARCH
-}
-
-/** 目标平台的 Node process.platform token（prebuild-install --platform 用）。 */
-function resolveTargetPlatform() {
-  const triple = process.env.TAURI_ENV_TARGET_TRIPLE || ''
-  if (triple.includes('windows')) return 'win32'
-  if (triple.includes('darwin')) return 'darwin'
-  if (triple.includes('linux')) return 'linux'
-  return process.platform
-}
-
-// Mach-O CPU 类型常量。用于跨架构打包后校验产物确实是目标架构，
-// 而不是（跨架构无法 require 探测 ABI 时）盲信 prebuild-install。
-const CPU_TYPE_X86_64 = 0x01000007
-const CPU_TYPE_ARM64 = 0x0100000c
-
-/** 读一个 thin Mach-O 64 的 cputype → 'x64' | 'arm64' | null（无法判定）。 */
-function machoArch(path) {
-  let fd
-  try {
-    fd = openSync(path, 'r')
-    const buf = Buffer.alloc(8)
-    if (readSync(fd, buf, 0, 8, 0) < 8) return null
-    // 磁盘上 mac thin .node 是小端：magic MH_MAGIC_64 = 0xFEEDFACF。
-    const magicLE = buf.readUInt32LE(0)
-    if (magicLE !== 0xfeedfacf) return null // fat/universal 或非 macho64 → 不判定
-    const cpu = buf.readUInt32LE(4)
-    if (cpu === CPU_TYPE_X86_64) return 'x64'
-    if (cpu === CPU_TYPE_ARM64) return 'arm64'
-    return null
-  } catch {
-    return null
-  } finally {
-    if (fd !== undefined) closeSync(fd)
-  }
-}
+// 目标 Node 版本(ABI)的预编译 .node，落到 dist/native/<os>-<arch>/。
 
 /**
  * 跨架构：用 prebuild-install 拉目标架构的 better-sqlite3 预编译二进制。
- * prebuild-install 装到 <pkg>/build/Release，会覆盖宿主架构二进制，所以先备份、
- * 拷贝到 dist/native 后再还原，保证宿主的 node_modules 不被污染（dev/CLI/后续
- * 宿主构建仍用宿主架构）。
+ * prebuild-install 在独立临时目录下载，宿主 node_modules 从不被改写。
  */
 function crossPackNative(targetArch, targetPlatform) {
   const targetNodeVersion = resolveTargetNodeVersion()
   const pkgDir = join(repoRoot, 'node_modules', 'better-sqlite3')
-  const buildRel = join(pkgDir, 'build', 'Release', 'better_sqlite3.node')
   // ⚠ 不能在 Windows 上无 shell 地 spawn .cmd：Node 修 CVE-2024-27980 之后，
   // execFileSync('...\.bin\prebuild-install.cmd', ...) 直接抛 EINVAL（2026-09-18 实测
   // 复现；同源缺陷亦见于 desktop/scripts/sign-runtime-integrity.js 的 tsx.cmd）。
@@ -240,41 +198,33 @@ function crossPackNative(targetArch, targetPlatform) {
     process.exit(1)
   }
 
-  const backup = existsSync(buildRel) ? `${buildRel}.hostbak` : null
-  if (backup) copyFileSync(buildRel, backup)
+  const scratch = mkdtempSync(join(tmpdir(), 'tianshu-pack-native-'))
+  const buildRel = join(scratch, 'build', 'Release', 'better_sqlite3.node')
   try {
+    copyFileSync(join(pkgDir, 'package.json'), join(scratch, 'package.json'))
     console.log(
       `[pack-native] 跨架构：prebuild-install --arch ${targetArch} --platform ${targetPlatform} --target ${targetNodeVersion}`,
     )
     execFileSync(
       process.execPath,
       [piBin, '--arch', targetArch, '--platform', targetPlatform, '--target', targetNodeVersion, '--runtime', 'node'],
-      { cwd: pkgDir, stdio: 'inherit', windowsHide: true },
+      { cwd: scratch, stdio: 'inherit', windowsHide: true },
     )
     if (!existsSync(buildRel)) {
       throw new Error('prebuild-install 未产出 better_sqlite3.node（可能该架构/版本无预编译包）')
     }
+    assertNativeBinary(buildRel, PLATFORM)
     copyFreshInode(buildRel, TARGET)
   } finally {
-    // 还原宿主架构二进制，绝不把跨架构产物留在 node_modules。
-    if (backup) {
-      copyFreshInode(backup, buildRel)
-      rmSync(backup, { force: true })
-    }
+    rmSync(scratch, { recursive: true, force: true })
   }
 
   // 架构校验（fail-closed）：磁盘产物必须确实是目标架构。ABI 正确性由
   // prebuild-install --target <目标 Node 版本> 保证（跨架构无法 require 探测）。
-  const producedArch = machoArch(TARGET)
-  if (producedArch && producedArch !== targetArch) {
-    console.error(
-      `❌ pack-native: 跨架构产物架构不符 —— 期望 ${targetArch}，实际 ${producedArch}。拒绝打入包中。`,
-    )
-    process.exit(1)
-  }
+  const info = assertNativeBinary(TARGET, PLATFORM)
   const sizeKb = Math.round(statSync(TARGET).size / 1024)
   console.log(
-    `✅ pack-native: 跨架构打包完成 — better_sqlite3.node (${sizeKb}KB, ${producedArch || 'arch?'}) ` +
+    `✅ pack-native: 跨平台打包完成 — better_sqlite3.node (${sizeKb}KB, ${info.format} ${targetArch}) ` +
       `for Node v${targetNodeVersion} → ${TARGET}`,
   )
 }
@@ -294,6 +244,7 @@ function copyFreshInode(src, dest) {
   copyFileSync(src, dest)
 }
 function packAxObserver() {
+  if (CROSS || PLATFORM.os !== 'darwin') return
   if (!existsSync(AX_OBSERVER_SOURCE)) return
   mkdirSync(TARGET_DIR, { recursive: true })
   const target = join(TARGET_DIR, 'ax-observer')
@@ -310,14 +261,26 @@ if (!existsSync(SOURCE)) {
 
 mkdirSync(TARGET_DIR, { recursive: true })
 
-const TARGET_ARCH = resolveTargetArch()
-if (TARGET_ARCH === HOST_ARCH) {
-  // 同架构：直接拷宿主 node_modules 的二进制，走 require 探测式 ABI 断言。
+if (!CROSS) {
+  // 同平台、同架构：拷宿主产物，走 require 探测式 ABI 断言。
+  assertNativeBinary(SOURCE, HOST)
   copyFreshInode(SOURCE, TARGET)
   const sizeKb = Math.round(statSync(TARGET).size / 1024)
   console.log('✅ Packed better_sqlite3.node (%dKB) → %s', sizeKb, TARGET)
   assertAbi()
 } else {
-  console.log(`[pack-native] 目标架构 ${TARGET_ARCH} ≠ 宿主架构 ${HOST_ARCH} — 走跨架构拉取路径`)
-  crossPackNative(TARGET_ARCH, resolveTargetPlatform())
+  assertNativeBinary(SOURCE, HOST)
+  if (!existsSync(HOST_TARGET)) copyFreshInode(SOURCE, HOST_TARGET)
+  assertNativeBinary(HOST_TARGET, HOST)
+  const fingerprint = path => {
+    const stat = statSync(path)
+    return `${stat.ino}:${stat.mtimeMs}:${createHash('sha256').update(readFileSync(path)).digest('hex')}`
+  }
+  const before = [HOST_TARGET, SOURCE].map(fingerprint)
+  crossPackNative(PLATFORM.arch, PLATFORM.os)
+  for (const [i, path] of [HOST_TARGET, SOURCE].entries()) {
+    assertNativeBinary(path, HOST)
+    if (fingerprint(path) !== before[i]) throw new Error(`pack-native: 宿主原生件被改写：${path}`)
+  }
+  console.log(`✅ pack-native: 宿主 ${HOST.os}-${HOST.arch} 原生件格式、架构、内容与 inode 均未改变`)
 }

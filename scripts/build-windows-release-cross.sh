@@ -131,14 +131,14 @@ npm run tauri:build -- --runner cargo-xwin --target x86_64-pc-windows-msvc --bun
 node scripts/assert-mobile-bundle.js src-tauri/resources
 cd ..
 
-# 产物内容完整性断言（同 build-windows-release.sh：dist 缺 main.js / cli/entry.js 拒打）
-for f in dist/main.js dist/cli/entry.js; do
+# 产物内容完整性断言：检查 Tauri 实际消费的目标副本。
+for f in desktop/src-tauri/resources/rivet-runtime/main.js desktop/src-tauri/resources/rivet-runtime/cli/entry.js; do
   if [ ! -f "$f" ]; then
     echo "✗ 缺少 $f——dist 未构建或产物不全，拒绝打包" >&2
     exit 1
   fi
 done
-echo "  ✅ dist/main.js + dist/cli/entry.js 就位"
+echo "  ✅ 目标运行时 main.js + cli/entry.js 就位"
 
 # 5. 收集产物
 mkdir -p release

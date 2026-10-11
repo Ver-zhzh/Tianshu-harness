@@ -117,13 +117,14 @@ Authorization: Bearer tsu_<用户同步密钥>
 | `GET /v1/admin/keys?forumUserId=` | 列密钥（prefix/时间/吊销态，不回明文） |
 | `POST /v1/admin/keys/revoke` | 吊销 `{ keyId }`；吊销后客户端推送/自查立即 401 |
 | `GET /v1/usage/leaderboard?days=30&limit=50` | 榜单：按论坛用户跨设备聚合，`totalTokens` 降序 |
+| `GET /v1/admin/usage?forumUserId=&days=30` | 读单个用户的用量（响应与 `/v1/usage/me` 同构）——论坛个人页渲染的**正规通道**：用户 key 只在签发那一次露面，论坛不该留明文 |
 | `GET /v1/usage/me?days=30` | 个人聚合（也可用用户自己的 `tsu_` key 直查）：窗口 totals + 逐日 + 各设备快照 |
 
 论坛接入流程：
 
 1. 用户在论坛个人页点「生成同步密钥」→ 论坛后端调 `POST /v1/admin/keys` → key 展示给用户一次
 2. 用户填进 CLI 配置，客户端开始自动上报
-3. 论坛渲染：个人页用 `/v1/usage/me` 数据（用户 key 直查或后端转发）；榜单页后端拉 `/v1/usage/leaderboard` join 论坛昵称/头像
+3. 论坛渲染：个人页用 `GET /v1/admin/usage?forumUserId=`（论坛后端持 `ADMIN_TOKEN` 直读，与 `/v1/usage/me` 同构；用户自己带 key 时也可走 `/v1/usage/me`）；榜单页后端拉 `/v1/usage/leaderboard` join 论坛昵称/头像
 
 > 备选路径：论坛也可以**自建接收端**绕开 token-server——客户端契约（§3）不变，按 deviceId upsert 即可。推荐走 token-server：密钥体系、stale 守卫、口径校验都已实现并有测试覆盖。
 

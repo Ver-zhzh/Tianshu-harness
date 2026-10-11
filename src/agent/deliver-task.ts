@@ -648,7 +648,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
       const claimConflicts: Array<{ file: string; holder: string; claimType: string }> = []
       if (ctx.sessionRegistry && ctx.sessionId && report.ownedFiles.length > 0) {
         for (const f of report.ownedFiles) {
-          const claim = ctx.sessionRegistry.checkClaim(f)
+          const claim = ctx.sessionRegistry.checkClaim(f, ctx.sessionId)
           if (claim && claim.sessionId !== ctx.sessionId) {
             claimConflicts.push({ file: f, holder: claim.sessionId, claimType: claim.claimType })
           }

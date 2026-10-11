@@ -2,6 +2,8 @@ import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync } from 'node:fs'
 import { validateTrend } from './retrospect-fingerprint.js'
+import { normalizeClaimPath } from './claim-path.js'
+import { acquireStoredClaim, migrateClaimStorage } from './claim-registry-storage.js'
 
 export function projectHash(cwd: string): string {
   return createHash('sha256').update(cwd).digest('hex').slice(0, 12)
@@ -145,12 +147,21 @@ export class SessionRegistry {
     if (_forceNullDbForTest) return new SessionRegistry(createNullDb())
     if (!existsSync(stateDir)) mkdirSync(stateDir, { recursive: true })
     let db: any
+    let nativeUnavailable = false
     try {
       const { resolveBetterSqlite3 } = await import('../repo/native-resolver.js')
       const Database = resolveBetterSqlite3(import.meta.url)
-      if (!Database) throw new Error('better-sqlite3 not installed')
+      if (!Database) {
+        nativeUnavailable = true
+        throw new Error('better-sqlite3 not installed')
+      }
       const dbPath = join(stateDir, 'registry.db')
-      db = new Database(dbPath)
+      try { db = new Database(dbPath) }
+      catch (err) {
+        nativeUnavailable = (err as { code?: string })?.code === 'MODULE_NOT_FOUND'
+          || (err as Error).message.includes('Could not locate the bindings file')
+        throw err
+      }
       db.pragma('journal_mode = WAL')
       db.pragma('busy_timeout = 3000')
       db.pragma('foreign_keys = ON')
@@ -166,6 +177,7 @@ export class SessionRegistry {
       // 过度保守）。幂等；两条都吞异常，降级/异常库不得阻断 create()。
       try { db.exec('ALTER TABLE claims ADD COLUMN last_touched_at TEXT') } catch { /* already exists */ }
       try { db.exec('UPDATE claims SET last_touched_at = acquired_at WHERE last_touched_at IS NULL') } catch { /* no claims table yet */ }
+      migrateClaimStorage(db)
     } catch (err) {
       // Packaged sidecar with a broken native bundle: fail loud, never degrade.
       if ((err as { code?: string })?.code === 'ESQLITE_BUNDLE_BROKEN') throw err
@@ -182,7 +194,11 @@ export class SessionRegistry {
       } else {
         console.error('Session registry schema failed:', err)
       }
-      db = createNullDb()
+      // A database that failed open/schema/migration/locking is not the
+      // documented "native dependency absent" degrade mode. Reject claims so
+      // a damaged registry cannot silently disable the write mutex.
+      try { db?.close() } catch { /* failed open */ }
+      db = createNullDb(nativeUnavailable)
     }
     return new SessionRegistry(db)
   }
@@ -303,35 +319,21 @@ export class SessionRegistry {
   }
 
   acquireClaim(sessionId: string, filePath: string, claimType: 'exclusive' | 'shared_read'): boolean {
-    const now = new Date().toISOString()
-    // Check existing claims
-    const existing = this.safeAll<{ session_id: string; claim_type: string }>(
-      'SELECT session_id, claim_type FROM claims WHERE file_path = ?', filePath
-    )
-
-    for (const c of existing) {
-      if (c.session_id === sessionId) {
-        // v2：同会话重复认领 = 该持有方刚又触碰了这个文件 → 刷新文件级租约凭据。
-        // 这一处刷新覆盖全部写路径（tool-pipeline 三处 acquireClaim 调用点），
-        // 调用方零改动。必须落盘后再返 true，否则凭据永远停在首次取得时刻。
-        this.safeRun(
-          'UPDATE claims SET last_touched_at = ? WHERE session_id = ? AND file_path = ?',
-          now, sessionId, filePath
-        )
-        return true // same session re-acquires
-      }
-      if (c.claim_type === 'exclusive') return false // file exclusively locked by another
-      if (claimType === 'exclusive') return false // want exclusive but shared_read exists
+    try {
+      return acquireStoredClaim(this.db, sessionId, filePath, claimType)
+    } catch (err) {
+      console.error('SessionRegistry claim acquisition error:', (err as Error).message)
+      return false
     }
-    const changes = this.safeRun(
-      'INSERT OR REPLACE INTO claims (session_id, file_path, claim_type, acquired_at, last_touched_at) VALUES (?, ?, ?, ?, ?)',
-      sessionId, filePath, claimType, now, now
-    )
-    return changes > 0
   }
 
   releaseClaim(sessionId: string, filePath: string): void {
-    this.safeRun('DELETE FROM claims WHERE session_id = ? AND file_path = ?', sessionId, filePath)
+    this.safeRun('DELETE FROM claims WHERE session_id = ? AND file_path = ?', sessionId, this.claimKey(sessionId, filePath))
+  }
+
+  private claimKey(sessionId: string, filePath: string): string {
+    const cwd = this.safeGet<{ cwd: string }>('SELECT cwd FROM sessions WHERE id = ?', sessionId)?.cwd
+    return normalizeClaimPath(cwd, filePath)
   }
 
   /**
@@ -345,7 +347,7 @@ export class SessionRegistry {
   releaseClaimIfUnchanged(sessionId: string, filePath: string, expectedLastTouchedAt: string): boolean {
     const changes = this.safeRun(
       'DELETE FROM claims WHERE session_id = ? AND file_path = ? AND COALESCE(last_touched_at, acquired_at) = ?',
-      sessionId, filePath, expectedLastTouchedAt,
+      sessionId, this.claimKey(sessionId, filePath), expectedLastTouchedAt,
     )
     return changes > 0
   }
@@ -354,10 +356,11 @@ export class SessionRegistry {
     this.safeRun('DELETE FROM claims WHERE session_id = ?', sessionId)
   }
 
-  checkClaim(filePath: string): ClaimEntry | null {
+  checkClaim(filePath: string, excludeSessionId?: string): ClaimEntry | null {
     const row = this.safeGet<ClaimEntry>(
-      'SELECT session_id AS sessionId, claim_type AS claimType, file_path AS filePath FROM claims WHERE file_path = ? LIMIT 1',
-      filePath
+      `SELECT session_id AS sessionId, claim_type AS claimType, file_path AS filePath FROM claims
+       WHERE file_path = ? AND (? IS NULL OR session_id != ?) ORDER BY claim_type = 'exclusive' DESC, rowid LIMIT 1`,
+      normalizeClaimPath(undefined, filePath), excludeSessionId ?? null, excludeSessionId ?? null,
     )
     return row ?? null
   }
@@ -368,7 +371,7 @@ export class SessionRegistry {
    * 由 pid 存活推出；lastTouchedAt 在历史行回填前退化为 acquiredAt（非 null）。
    * 无 claim（或降级 nullDb）→ null，调用方按「无冲突」处理。
    */
-  claimLiveness(filePath: string): ClaimLiveness | null {
+  claimLiveness(filePath: string, excludeSessionId?: string): ClaimLiveness | null {
     const row = this.safeGet<{
       ownerSessionId: string
       ownerPid: number | null
@@ -380,8 +383,9 @@ export class SessionRegistry {
               c.acquired_at AS acquiredAt, c.last_touched_at AS lastTouchedAt,
               s.pid AS ownerPid
        FROM claims c LEFT JOIN sessions s ON s.id = c.session_id
-       WHERE c.file_path = ? LIMIT 1`,
-      filePath,
+       WHERE c.file_path = ? AND (? IS NULL OR c.session_id != ?)
+       ORDER BY c.claim_type = 'exclusive' DESC, c.rowid LIMIT 1`,
+      normalizeClaimPath(undefined, filePath), excludeSessionId ?? null, excludeSessionId ?? null,
     )
     if (!row) return null
     return {
@@ -649,7 +653,7 @@ export class SessionRegistry {
  * what degrade-to-in-memory means here. get()/all() still return nothing, so
  * checkClaim() stays null and no phantom owner is ever reported.
  */
-function createNullDb(): any {
+function createNullDb(allowClaims = true): any {
   const noopStmt = {
     run: () => ({ changes: 1, lastInsertRowid: 0 }),
     all: () => [] as any[],
@@ -658,6 +662,13 @@ function createNullDb(): any {
   return new Proxy(Object.create(null), {
     get: (_target, prop: string) => {
       if (prop === 'prepare') return () => noopStmt
+      if (prop === 'transaction') return (fn: () => unknown) => {
+        const run = () => {
+          if (!allowClaims) throw new Error('claim registry unavailable after database initialization failure')
+          return fn()
+        }
+        return Object.assign(run, { immediate: run })
+      }
       if (prop === 'exec') return () => {}
       if (prop === 'pragma') return () => {}
       if (prop === 'close') return () => {}

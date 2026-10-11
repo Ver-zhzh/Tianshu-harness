@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import { RUNTIME_BUNDLED } from '../external-deps.js'
 import { findInstallRoot, formatVersionLine } from '../../src/cli/version.js'
+import { nativeHeader } from '../../src/platform/__tests__/native-binary-fixtures.js'
 
 const scripts = fileURLToPath(new URL('../', import.meta.url))
 
@@ -19,9 +20,11 @@ function packageAt(dir: string, dependencies: Record<string, string> = {}, code 
 function fixture(roots = true) {
   const root = mkdtempSync(join(tmpdir(), 'tianshu-stage-closure-'))
   mkdirSync(join(root, 'scripts'))
-  for (const file of ['stage-runtime-deps.js', 'runtime-platform-filter.js', 'tree-sitter-wasm-keep.js', 'typescript-stage-trim.js', 'staged-runtime-verify.js', 'external-deps.js']) {
+  for (const file of ['stage-runtime-deps.js', 'native-pack-paths.js', 'runtime-platform-filter.js', 'tree-sitter-wasm-keep.js', 'typescript-stage-trim.js', 'staged-runtime-verify.js', 'external-deps.js']) {
     cpSync(join(scripts, file), join(root, 'scripts', file))
   }
+  mkdirSync(join(root, 'src', 'platform'), { recursive: true })
+  cpSync(join(scripts, '..', 'src', 'platform', 'native-binary.ts'), join(root, 'src', 'platform', 'native-binary.ts'))
   writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'tianshu-harness', version: '9.9.9', type: 'module' }))
   if (roots) for (const name of RUNTIME_BUNDLED) packageAt(join(root, 'node_modules', name))
   const sqlite = join(root, 'node_modules', 'better-sqlite3')
@@ -30,16 +33,34 @@ function fixture(roots = true) {
   writeFileSync(join(sqlite, 'package.json'), JSON.stringify({ main: 'lib/index.js' }))
   writeFileSync(join(sqlite, 'lib', 'index.js'), 'module.exports = class { exec() {} prepare() { return { run() {}, get() { return { c: 1 } } } } close() {} }')
   mkdirSync(join(root, 'dist', 'native'), { recursive: true })
-  writeFileSync(join(root, 'dist', 'native', 'better_sqlite3.node'), '')
+  writeFileSync(join(root, 'dist', 'native', 'better_sqlite3.node'), nativeHeader(process.platform, process.arch))
   return root
 }
 
-function stage(root: string) {
+function stage(root: string, overrides: Record<string, string> = {}) {
   const env = { ...process.env }
   delete env.NODE_PATH
   delete env.STAGE_SKIP_SQLITE_CHECK
-  return spawnSync(process.execPath, [join(root, 'scripts', 'stage-runtime-deps.js')], { cwd: root, env, encoding: 'utf8' })
+  delete env.TAURI_ENV_TARGET_TRIPLE
+  return spawnSync(process.execPath, [join(root, 'scripts', 'stage-runtime-deps.js')], { cwd: root, env: { ...env, ...overrides }, encoding: 'utf8' })
 }
+
+test('same-architecture foreign OS staging validates its scoped binary without loading it on the host', () => {
+  const root = fixture()
+  const os = process.platform === 'win32' ? 'darwin' : 'win32'
+  try {
+    const target = join(root, 'dist', 'native', `${os}-${process.arch}`)
+    mkdirSync(target)
+    writeFileSync(join(target, 'better_sqlite3.node'), nativeHeader(os, process.arch))
+    writeFileSync(join(root, 'node_modules', 'better-sqlite3', 'lib', 'index.js'), 'module.exports = class { constructor() { throw new Error("must not load foreign addon") } }')
+    const triple = `${process.arch === 'arm64' ? 'aarch64' : 'x86_64'}-${os === 'win32' ? 'pc-windows-msvc' : 'apple-darwin'}`
+    const result = stage(root, { TAURI_ENV_TARGET_TRIPLE: triple })
+    assert.equal(result.status, 0, result.stdout + result.stderr)
+    assert.match(result.stdout, /跨平台 better_sqlite3/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
 
 test('staging traverses nested versions and preserves their hoisted dependency resolution outside the source tree', () => {
   const root = fixture()

@@ -1074,6 +1074,7 @@ async function handleMultiRead(
   }
 
   const sections: string[] = []
+  const readPaths: string[] = []
   let totalBytes = 0
   let errors = 0
 
@@ -1105,6 +1106,7 @@ async function handleMultiRead(
         })
       }
       noteFileObserved(payload.canonicalPath, currentStat.mtimeMs, currentStat.size, params.sessionId)
+      readPaths.push(payload.canonicalPath)
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       // trimmed 可能本来就是相对路径——只有以 cwd 开头时才转相对，避免 relative()
@@ -1119,6 +1121,7 @@ async function handleMultiRead(
   const content = sections.join('\n\n')
   return {
     content,
+    readPaths,
     uiContent: `Read ${paths.length - errors}/${paths.length} files (${(totalBytes / 1024).toFixed(1)} KB total)`,
   }
 }

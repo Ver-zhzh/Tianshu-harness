@@ -14,7 +14,7 @@
  *
  * @module pre-write-claims
  */
-import { isAbsolute, relative, resolve, sep } from 'node:path'
+import { normalizeClaimPath } from './claim-path.js'
 
 export interface ClaimRef {
   sessionId: string
@@ -23,7 +23,7 @@ export interface ClaimRef {
 
 /** Minimal structural view of SessionRegistry needed for claim lookups. */
 export interface PathClaimLookup {
-  checkClaim(filePath: string): ClaimRef | null
+  checkClaim(filePath: string, excludeSessionId?: string): ClaimRef | null
   reapStaleClaims?(): unknown
 }
 
@@ -50,20 +50,18 @@ export function claimPathCandidates(cwd: string, filePath: string): string[] {
     keys.add(value)
     // Windows claims may be written either `a\b` or `a/b` depending on the
     // tool branch; try both so cross-tool claim lookups don't silently miss.
-    if (value.includes('\\') && !value.includes('/')) keys.add(value.split('\\').join('/'))
-    else if (value.includes('/') && !value.includes('\\')) keys.add(value.split('/').join('\\'))
+    const slash = value.replace(/\\/g, '/')
+    keys.add(slash)
+    keys.add(slash.replace(/\//g, '\\'))
+    if (slash.startsWith('./')) keys.add(`./${slash.slice(2).replace(/\//g, '\\')}`)
   }
   add(filePath)
-  add(filePath.replace(/^\.\//, ''))
-  const abs = isAbsolute(filePath) ? filePath : resolve(cwd, filePath)
-  add(abs)
-  try {
-    const rel = relative(cwd, abs)
-    if (rel && rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)) {
-      add(rel)
-      add(`./${rel}`)
-    }
-  } catch { /* keep direct/absolute keys; a malformed path must not throw the guard */ }
+  const canonical = normalizeClaimPath(cwd, filePath)
+  add(canonical)
+  if (!canonical.startsWith('/') && !/^[a-z]:/i.test(canonical)) {
+    add(`./${canonical}`)
+    add(normalizeClaimPath(undefined, `${cwd}/${canonical}`))
+  }
   return [...keys]
 }
 
@@ -76,7 +74,7 @@ export function makePathClaimResolver(registry: PathClaimLookup, mySessionId: st
   try { registry.reapStaleClaims?.() } catch { /* best-effort */ }
   const blockerOf: PathClaimResolver['blockerOf'] = (filePath, opts) => {
     for (const key of claimPathCandidates(cwd, filePath)) {
-      const claim = registry.checkClaim(key)
+      const claim = registry.checkClaim(key, mySessionId)
       if (!claim || claim.sessionId === mySessionId) continue
       if (opts?.exclusiveOnly && claim.claimType !== 'exclusive') continue
       return { sessionId: claim.sessionId, claimType: claim.claimType, matchedPath: key }
@@ -124,8 +122,7 @@ export function preWriteClaimPaths(
   tu: { id: string; name: string; input: Record<string, unknown> },
   cwd: string,
 ): string[] {
-  const norm = (p: string): string =>
-    p.startsWith(cwd + '/') || p.startsWith(cwd + '\\') ? p.slice(cwd.length + 1) : p
+  const norm = (p: string): string => normalizeClaimPath(cwd, p)
   const one = (v: unknown): string[] =>
     typeof v === 'string' && v.length > 0 ? [norm(v)] : []
   switch (tu.name) {

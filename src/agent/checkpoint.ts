@@ -43,7 +43,7 @@ export interface OwnershipGuard {
 /** Minimal structural view of SessionRegistry needed for ownership checks. */
 export interface ClaimLookup {
   reapStaleClaims(): string[]
-  checkClaim(filePath: string): { sessionId: string; claimType: string } | null
+  checkClaim(filePath: string, excludeSessionId?: string): { sessionId: string; claimType: string } | null
 }
 
 /**
