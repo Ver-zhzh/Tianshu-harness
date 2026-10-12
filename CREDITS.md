@@ -440,3 +440,4 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 - #467 fix(approval): INJECTION/扩展破坏/SED绕过三表走原始+归一化双视图判定（CLOSED）
 - #466 fix(lsp): RPC 消息体加 16MiB 上限，堵住超大 Content-Length 导致的客户端 OOM（CLOSED）
 - #464 fix(goal): 每轮迭代推进后重发 goal_state，修复桌面端步数计数器恒为 0/100（CLOSED）
+- #462 fix(search): chunker 定义边界正则 ReDoS——超长行跳过模式匹配（CLOSED）
