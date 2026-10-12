@@ -120,6 +120,23 @@ import { resolveEffortSupported } from '../api/provider.js'
 /** 生图真测用的固定提示词——要足够简单，任何生图模型都能画出来。 */
 const IMAGE_GEN_TEST_PROMPT = 'a red circle on a white background'
 
+/**
+ * 服务端配置文件中已声明的环境变量密钥名集合
+ * （provider.apiKeyEnv / provider.keys[].apiKeyEnv）。
+ * 试画/探测类端点只允许解析这些名字——见 parseImageGenRequest 的安全边界注释。
+ */
+function declaredKeyEnvs(): Set<string> {
+  const names = new Set<string>()
+  const providers = loadConfig().provider.providers ?? {}
+  for (const provider of Object.values(providers)) {
+    if (typeof provider.apiKeyEnv === 'string' && provider.apiKeyEnv) names.add(provider.apiKeyEnv)
+    for (const key of provider.keys ?? []) {
+      if (typeof key.apiKeyEnv === 'string' && key.apiKeyEnv) names.add(key.apiKeyEnv)
+    }
+  }
+  return names
+}
+
 interface ParsedImageGenRequest {
   baseUrl: string
   modelId: string
@@ -136,8 +153,14 @@ interface ParsedImageGenRequest {
 /**
  * 生图 provider 的凭据/参数解析。apiKey 与 apiKeyEnv 互斥；真测需要**实际**的
  * key，因此 apiKeyEnv 会在此刻从 process.env 解析（配置里只持久化变量名）。
+ *
+ * 安全边界：请求体里的 apiKeyEnv 变量名只能是服务端配置文件中已声明的
+ * （provider.apiKeyEnv / provider.keys[].apiKeyEnv）。试画/探测类端点必须传
+ * `envPolicy: 'reject-undeclared'`——否则调用方可让服务端读出任意环境变量
+ * （如 AWS_SECRET_ACCESS_KEY）并以 Bearer 密钥发往自选的 baseUrl，形成机密
+ * 外泄原语。onboard 类端点只持久化变量名，不走这条限制。
  */
-function parseImageGenRequest(body: unknown, options: { requireProviderName?: boolean } = {}): ParsedImageGenRequest {
+function parseImageGenRequest(body: unknown, options: { requireProviderName?: boolean; envPolicy?: 'reject-undeclared' } = {}): ParsedImageGenRequest {
   const record = (body ?? {}) as Record<string, unknown>
   const baseUrl = typeof record.baseUrl === 'string' ? record.baseUrl.trim() : ''
   const modelId = typeof record.modelId === 'string' ? record.modelId.trim() : ''
@@ -150,6 +173,9 @@ function parseImageGenRequest(body: unknown, options: { requireProviderName?: bo
   if (!modelId) return { baseUrl, modelId: '', error: 'modelId is required' }
   if (options.requireProviderName && !providerName) return { baseUrl, modelId, error: 'providerName is required' }
   if (apiKey && apiKeyEnv) return { baseUrl, modelId, error: 'Use either apiKey or apiKeyEnv, not both.' }
+  if (options.envPolicy === 'reject-undeclared' && apiKeyEnv && !declaredKeyEnvs().has(apiKeyEnv)) {
+    return { baseUrl, modelId, error: `Environment variable "${apiKeyEnv}" is not declared in the saved provider configuration` }
+  }
 
   const resolvedKey = apiKey ?? (apiKeyEnv ? process.env[apiKeyEnv] : undefined)
   return {
@@ -245,8 +271,14 @@ interface ParsedVisionCredentials {
   error?: string
 }
 
-/** Resolve only nonblank credential input; env values never leave this boundary. */
-function parseVisionCredentials(body: unknown): ParsedVisionCredentials {
+/** Resolve only nonblank credential input; env values never leave this boundary.
+ * 安全边界：'reject-undeclared'（discover）拒绝一切未在服务端配置中声明的变量名；
+ * 'no-resolve-undeclared'（onboard）允许声明新变量名，但本次校验不解析它——
+ * 否则调用方可让服务端读出任意环境变量并以密钥发往自选的 baseUrl（机密外泄原语）。 */
+function parseVisionCredentials(
+  body: unknown,
+  options: { envPolicy?: 'reject-undeclared' | 'no-resolve-undeclared' } = {},
+): ParsedVisionCredentials {
   const { baseUrl, providerName, apiKey, apiKeyEnv } = (body ?? {}) as Record<string, unknown>
   if (baseUrl !== undefined && typeof baseUrl !== 'string') return { error: 'baseUrl must be a string' }
   if (providerName !== undefined && typeof providerName !== 'string') return { error: 'providerName must be a string' }
@@ -260,6 +292,17 @@ function parseVisionCredentials(body: unknown): ParsedVisionCredentials {
   if (normalizedKey && normalizedEnv) return { error: 'apiKey and apiKeyEnv cannot both be set' }
   if (normalizedEnv && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(normalizedEnv)) {
     return { error: 'apiKeyEnv must be a valid environment variable name' }
+  }
+  if (options.envPolicy && normalizedEnv && !declaredKeyEnvs().has(normalizedEnv)) {
+    if (options.envPolicy === 'reject-undeclared') {
+      return { error: `Environment variable "${normalizedEnv}" is not declared in the saved provider configuration` }
+    }
+    // 'no-resolve-undeclared'：新变量名只做持久化，本次校验不携带解析出的密钥。
+    return {
+      ...(typeof baseUrl === 'string' && baseUrl.trim() ? { baseUrl: baseUrl.trim() } : {}),
+      ...(typeof providerName === 'string' && providerName.trim() ? { providerName: providerName.trim() } : {}),
+      apiKeyEnv: normalizedEnv,
+    }
   }
   const resolvedKey = normalizedKey ?? (normalizedEnv ? process.env[normalizedEnv]?.trim() : undefined)
   if (normalizedEnv && !resolvedKey) return { error: `Environment variable "${normalizedEnv}" is not set or is blank in the server process` }
@@ -1163,7 +1206,7 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
     }, apiToken),
 
     'POST /config/vision-model/discover': withAuth(async (body) => {
-      const { baseUrl, providerName, apiKey, apiKeyEnv, error } = parseVisionCredentials(body)
+      const { baseUrl, providerName, apiKey, apiKeyEnv, error } = parseVisionCredentials(body, { envPolicy: 'reject-undeclared' })
       if (error) return { status: 400, body: { error } }
       if (!baseUrl) return { status: 400, body: { error: 'baseUrl is required' } }
       try {
@@ -1179,7 +1222,7 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
     }, apiToken),
 
     'POST /config/vision-model/onboard': withAuth(async (body) => {
-      const { baseUrl, providerName, apiKey, apiKeyEnv, error } = parseVisionCredentials(body)
+      const { baseUrl, providerName, apiKey, apiKeyEnv, error } = parseVisionCredentials(body, { envPolicy: 'no-resolve-undeclared' })
       const { modelId } = (body ?? {}) as { modelId?: unknown }
       if (error) return { status: 400, body: { error } }
       if (!providerName) return { status: 400, body: { error: 'providerName is required' } }
@@ -1244,7 +1287,7 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
     // 真测：发一条固定提示词到真实端点，验证**真能出图**（而不是只验 /models 的
     // 连通性）。生图比文本慢得多，超时给 60s。
     'POST /config/image-gen-model/test': withAuth(async (body) => {
-      const parsed = parseImageGenRequest(body)
+      const parsed = parseImageGenRequest(body, { envPolicy: 'reject-undeclared' })
       if (parsed.error) return { status: 400, body: { error: parsed.error } }
       try {
         const result = await generateImage({

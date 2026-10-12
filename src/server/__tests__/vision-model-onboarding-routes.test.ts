@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createRouter } from '../index.js'
 import { buildConfigRoutes } from '../config-routes.js'
-import { loadConfig } from '../../config/manager.js'
+import { loadConfig, saveConfig } from '../../config/manager.js'
 
 const TOKEN = 'vision-route-token'
 const AUTH = { authorization: `Bearer ${TOKEN}` }
@@ -73,27 +73,55 @@ test('dedicated vision onboarding routes discover, validate once, and save witho
   assert.deepEqual(config.agent.visionModel, { provider: 'vision-custom', model: 'custom-vision-1', maxTokens: 1024 })
 })
 
-test('vision onboarding resolves apiKeyEnv before discovery and image validation', async () => {
+test('vision discover/onboard only resolve apiKeyEnv names declared in the saved provider config', async () => {
   const router = createRouter(buildConfigRoutes(TOKEN))
   const envName = 'RIVET_VISION_ONBOARDING_TEST_KEY'
   process.env[envName] = 'env-only-key'
-  requiredAuthorization = 'Bearer env-only-key'
-  const completionsBefore = completionCount
+  const prevRequired = requiredAuthorization
+  const configBefore = JSON.stringify(loadConfig())
   try {
+    // 未声明的变量名：discover 直接 400，上游零请求——任意环境变量不可被读出外泄。
+    const callsBefore = completionCount
+    const rejected = await router('POST', '/config/vision-model/discover', {
+      baseUrl, apiKeyEnv: envName,
+    }, AUTH)
+    assert.equal(rejected.status, 400)
+    assert.match(String((rejected.body as { error?: string }).error ?? ''), /not declared/)
+    assert.equal(completionCount, callsBefore)
+
+    // 声明后：discover 解析变量并作为密钥发送。
+    const cfg = loadConfig()
+    cfg.provider.providers['vision-env-declared'] = {
+      name: 'vision-env-declared',
+      apiKeyEnv: envName,
+      baseUrl,
+      protocol: 'openai',
+      capabilities: {},
+      thinking: 'enabled',
+      maxTokens: 1024,
+      allowProFallback: false,
+      models: [],
+      unsupported: [],
+      userSaved: true,
+    }
+    saveConfig(cfg)
+    requiredAuthorization = ['Bearer', 'env-only-key'].join(' ')
     const discovery = await router('POST', '/config/vision-model/discover', {
       baseUrl, apiKeyEnv: envName,
     }, AUTH)
     assert.equal(discovery.status, 200)
-    const response = await router('POST', '/config/vision-model/onboard', {
-      providerName: 'vision-env', baseUrl, modelId: 'custom-vision-1', apiKeyEnv: envName,
-    }, AUTH)
 
-    assert.equal(response.status, 200)
-    assert.equal(completionCount, completionsBefore + 1)
-    assert.equal(loadConfig().provider.providers['vision-env']?.apiKeyEnv, envName)
+    // onboard 新变量名：校验阶段不解析不发送（上游放行未认证即通过），只持久化变量名。
+    requiredAuthorization = undefined
+    const onboarded = await router('POST', '/config/vision-model/onboard', {
+      providerName: 'vision-env-new', baseUrl, modelId: 'custom-vision-1', apiKeyEnv: 'RIVET_VISION_NEW_KEY',
+    }, AUTH)
+    assert.equal(onboarded.status, 200)
+    assert.equal(loadConfig().provider.providers['vision-env-new']?.apiKeyEnv, 'RIVET_VISION_NEW_KEY')
   } finally {
     delete process.env[envName]
-    requiredAuthorization = undefined
+    requiredAuthorization = prevRequired
+    saveConfig(JSON.parse(configBefore))
   }
 })
 
