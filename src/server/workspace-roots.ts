@@ -26,7 +26,9 @@ const protectedRoots = [
   'C:/$Recycle.Bin',
   'C:/Recovery',
 ]
-function protectedDirectory(path: string): boolean {
+/** 系统保护目录判定——validateWorkspaceRoots 与工作区配置校验共用。
+ * 黑名单语义：精确命中或位于其下（大小写不敏感、尾部斜杠归一）。 */
+export function isProtectedDirectory(path: string): boolean {
   const value = path.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
   return (
     !value ||
@@ -52,10 +54,10 @@ export function validateWorkspaceRoots(input: unknown, cwd?: string): string[] {
     try {
       const path = translateWindowsShellPath(value.trim())
       if (!isAbsolute(path)) throw new Error('Folder path must be absolute')
-      if (protectedDirectory(path))
+      if (isProtectedDirectory(path))
         throw new Error('System-protected folder cannot be a project folder')
       const real = realpathSync(path)
-      if (protectedDirectory(real))
+      if (isProtectedDirectory(real))
         throw new Error('System-protected folder cannot be a project folder')
       if (!statSync(real).isDirectory()) throw new Error('Not a folder')
       accessSync(real, constants.R_OK | constants.X_OK)

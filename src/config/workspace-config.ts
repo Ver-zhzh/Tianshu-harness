@@ -5,7 +5,9 @@
  */
 import { loadConfig, saveConfig } from './manager.js'
 import { rivetHome } from './paths.js'
-import { isAbsolute, relative, resolve } from 'node:path'
+import { homedir } from 'node:os'
+import { isAbsolute, join, relative, resolve } from 'node:path'
+import { isProtectedDirectory } from '../server/workspace-roots.js'
 
 export interface WorkspaceConfigSnapshot {
   /** 未指定目录的新会话落点；null = 未配置。 */
@@ -51,6 +53,35 @@ export function assertScratchDirInDataRoot(dir: string): void {
 }
 
 /**
+ * `defaultDir` 未校验 → 已注册工作区投毒（2026-10-12 安全审计）。
+ *
+ * `registeredWorkspaces()`（workspace-guard.ts，issue #221 守卫的 allowlist
+ * 来源之一）把 defaultDir 直接纳入"已注册工作区"，进而放行 /project-docs、
+ * /project-templates/*、/project/trust 等路由的 cwd 参数。defaultDir 零校验 =
+ * 任何能写配置的一方（Bearer 鉴权 ≠ 用户同意，见 #221）都能把任意目录
+ * （如 /etc）注册进来，绕过 #221 守卫：PUT /project-docs {cwd:"/etc"} 可往
+ * /etc 写 AGENTS.md，POST /project/trust {cwd:"/etc"} 可自我授信；mode=default
+ * 的新会话也会落进去。与 scratchDir 的 assertScratchDirInDataRoot
+ * （issue #223）同族缺口。
+ *
+ * 只拦系统保护目录（与 validateWorkspaceRoots 同一名单）：普通目录仍视为
+ * 用户意图，不做存在性等限制，保持最小改动。
+ *
+ * @throws Error —— 路由层（workspace-route.ts 的 PUT /config/workspace）转 400。
+ */
+function assertDefaultDirSafe(dir: string): void {
+  // 与 server/workspace.ts 的 expandTilde 同语义：校验必须看到运行时真实
+  // 落点，否则 ~/ 开头可绕过名单检查。
+  const expanded =
+    dir === '~' || dir.startsWith('~/') || dir.startsWith('~\\')
+      ? join(homedir(), dir === '~' ? '' : dir.slice(2))
+      : dir
+  if (isProtectedDirectory(expanded)) {
+    throw new Error('Invalid "defaultDir" — system-protected folder cannot be a workspace')
+  }
+}
+
+/**
  * 写入用户全局配置——**部分更新语义**（2026-09-15 审查跟进）：
  *   undefined = 不改该字段（设置页每个控件独立提交，漏传 ≠ 清除）；
  *   null / 空白字符串 = 清除该字段（回到旧行为）；
@@ -69,7 +100,10 @@ export function setWorkspaceConfig(input: { defaultDir?: unknown; scratchDir?: u
   const next = { ...(cfg.workspace ?? {}) }
   if (input.defaultDir !== undefined) {
     const v = readPath(input.defaultDir, 'defaultDir')
-    if (v) next.defaultDir = v
+    if (v) {
+      assertDefaultDirSafe(v)
+      next.defaultDir = v
+    }
     else delete next.defaultDir
   }
   if (input.scratchDir !== undefined) {

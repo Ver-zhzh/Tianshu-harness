@@ -8,7 +8,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { rivetHome } from '../paths.js'
 import { setWorkspaceConfig } from '../workspace-config.js'
@@ -56,5 +56,29 @@ test('清除 scratchDir 仍然有效（null / 空串）', () => {
     assert.equal(setWorkspaceConfig({ scratchDir: null }).scratchDir, null)
     setWorkspaceConfig({ scratchDir: join(home, 'workspace-custom') })
     assert.equal(setWorkspaceConfig({ scratchDir: '   ' }).scratchDir, null)
+  })
+})
+
+test('defaultDir 指向系统保护目录必须被拒（2026-10-12 审计：已注册工作区投毒）', () => {
+  withTempHome(() => {
+    const evil = process.platform === 'win32' ? 'C:\\Windows' : '/etc'
+    assert.throws(() => setWorkspaceConfig({ defaultDir: evil }), /defaultDir/i)
+    // 子目录同样不能进 allowlist
+    const evilSub = process.platform === 'win32' ? 'C:\\Windows\\System32' : '/etc/ssh'
+    assert.throws(() => setWorkspaceConfig({ defaultDir: evilSub }), /defaultDir/i)
+    // 大小写 / 尾部斜杠变体同样拦住
+    const evilCase = process.platform === 'win32' ? 'c:\\windows\\' : '/ETC/'
+    assert.throws(() => setWorkspaceConfig({ defaultDir: evilCase }), /defaultDir/i)
+  })
+})
+
+test('defaultDir 普通目录仍然可用，null 可清除（2026-10-12 审计）', () => {
+  withTempHome(() => {
+    // 注意：withTempHome 的目录在 /tmp 下（受保护名单覆盖），故正向用例
+    // 取 home 下的路径；校验只看名单不看存在性，无需真实建目录。
+    const dir = join(homedir(), `tianshu-audit-proj-${process.pid}`)
+    const snap = setWorkspaceConfig({ defaultDir: dir })
+    assert.equal(snap.defaultDir, dir)
+    assert.equal(setWorkspaceConfig({ defaultDir: null }).defaultDir, null)
   })
 })
