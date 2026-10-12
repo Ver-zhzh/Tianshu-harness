@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { encodeMessage, decodeMessages, createRpcClient } from '../rpc.js'
+import { encodeMessage, decodeMessages, createRpcClient, MAX_LSP_MESSAGE_BYTES } from '../rpc.js'
 import { PassThrough } from 'node:stream'
 
 describe('encodeMessage', () => {
@@ -61,6 +61,13 @@ describe('decodeMessages', () => {
     const { messages, rest } = decodeMessages(raw)
     assert.equal(messages.length, 1)
     assert.equal(rest, 'Content-Length: 999\r\n\r\n{"jso')
+  })
+
+  it('throws on Content-Length above the cap (DoS guard)', () => {
+    assert.throws(
+      () => decodeMessages(`Content-Length: ${MAX_LSP_MESSAGE_BYTES + 1}\r\n\r\n`),
+      /LSP message body too large/,
+    )
   })
 })
 
@@ -190,6 +197,33 @@ describe('createRpcClient', () => {
   it('dispose does not throw', () => {
     const { toServer, toClient } = connect()
     const client = createRpcClient(toClient, toServer)
+    client.dispose()
+  })
+
+  it('kills the transport when the server claims an oversized message (DoS guard)', async () => {
+    const { toServer, toClient } = connect()
+    const client = createRpcClient(toClient, toServer)
+
+    const pending = client.request('initialize', {})
+    // Malicious/compromised server: huge Content-Length, body never follows.
+    // Without the cap the client would buffer forever until OOM.
+    toClient.write(`Content-Length: ${MAX_LSP_MESSAGE_BYTES + 1}\r\n\r\n`)
+
+    await assert.rejects(() => pending, /LSP transport failed/)
+    // After transport death, further bytes must be ignored, not buffered.
+    toClient.write('x'.repeat(4096))
+    await new Promise(r => setTimeout(r, 20))
+    client.dispose()
+  })
+
+  it('kills the transport when headerless garbage exceeds the buffer cap', async () => {
+    const { toServer, toClient } = connect()
+    const client = createRpcClient(toClient, toServer)
+
+    const pending = client.request('initialize', {})
+    toClient.write('G'.repeat(MAX_LSP_MESSAGE_BYTES + 1))
+
+    await assert.rejects(() => pending, /buffer exceeded/)
     client.dispose()
   })
 })

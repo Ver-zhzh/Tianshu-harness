@@ -45,6 +45,18 @@ export function encodeMessage(msg: JsonRpcMessage): string {
 
 const CRLFCRLF = Buffer.from('\r\n\r\n')
 
+/**
+ * Hard cap on a single LSP JSON-RPC message body (and on the total bytes the
+ * client buffers while waiting for a complete frame).
+ *
+ * Without this, a malicious or compromised language server can send
+ * `Content-Length: 999999999` and make the client accumulate bytes until the
+ * process OOMs — request timeouts do not protect this path because buffering
+ * happens independently of pending requests. 16 MiB is far above any
+ * legitimate LSP payload (full-document diagnostics rarely exceed 1 MiB).
+ */
+export const MAX_LSP_MESSAGE_BYTES = 16 * 1024 * 1024
+
 export function decodeMessages(input: string | Buffer): { messages: JsonRpcMessage[]; rest: string } {
   const messages: JsonRpcMessage[] = []
   const buf = Buffer.isBuffer(input) ? input : Buffer.from(input, 'utf8')
@@ -62,6 +74,11 @@ export function decodeMessages(input: string | Buffer): { messages: JsonRpcMessa
     }
 
     const contentLength = parseInt(lengthMatch[1]!, 10)
+    if (contentLength > MAX_LSP_MESSAGE_BYTES) {
+      throw new Error(
+        `LSP message body too large: ${contentLength} bytes (limit ${MAX_LSP_MESSAGE_BYTES})`,
+      )
+    }
     const bodyStart = headerEnd + 4
     if (buf.length - bodyStart < contentLength) break
 
@@ -111,12 +128,37 @@ export function createRpcClient(
     }
   }
 
-  readable.on('data', (chunk: Buffer) => {
-    buffer = Buffer.concat([buffer, chunk])
-    const { messages, rest } = decodeMessages(buffer)
-    buffer = Buffer.from(rest, 'utf8')
+  // Once the transport is declared dead because of an oversized frame, stop
+  // consuming further bytes so a hostile server cannot keep the buffer
+  // growing after the failure was detected.
+  let transportFailed = false
+  const failTransport = (reason: string): void => {
+    if (transportFailed) return
+    transportFailed = true
+    buffer = Buffer.alloc(0)
+    readable.removeAllListeners('data')
+    abortAllPending(new Error(`LSP transport failed: ${reason}`))
+  }
 
-    for (const msg of messages) {
+  readable.on('data', (chunk: Buffer) => {
+    if (transportFailed) return
+    buffer = Buffer.concat([buffer, chunk])
+    if (buffer.length > MAX_LSP_MESSAGE_BYTES) {
+      // Oversized frame or headerless garbage: never let the buffer grow
+      // unbounded — treat the transport as dead (see MAX_LSP_MESSAGE_BYTES).
+      failTransport(`buffer exceeded ${MAX_LSP_MESSAGE_BYTES} bytes without a complete frame`)
+      return
+    }
+    let decoded: { messages: JsonRpcMessage[]; rest: string }
+    try {
+      decoded = decodeMessages(buffer)
+    } catch (err) {
+      failTransport(err instanceof Error ? err.message : String(err))
+      return
+    }
+    buffer = Buffer.from(decoded.rest, 'utf8')
+
+    for (const msg of decoded.messages) {
       if ('id' in msg && 'result' in msg && !('method' in msg)) {
         settle(msg.id, p => p.resolve(msg.result))
       } else if ('id' in msg && 'error' in msg && !('method' in msg)) {
