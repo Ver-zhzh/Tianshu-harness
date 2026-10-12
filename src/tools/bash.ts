@@ -5,7 +5,7 @@ import { execFileSync } from 'child_process'
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { DANGEROUS_BASH_PATTERNS, INJECTION_PATTERNS, matchesDangerousBash } from '../agent/approval-risk.js'
+import { DANGEROUS_BASH_PATTERNS, INJECTION_PATTERNS, matchesDangerousBash, testBoth } from '../agent/approval-risk.js'
 import {
   DEFAULT_INTERRUPT_HINT_MS,
   executionYieldMessage,
@@ -1151,12 +1151,13 @@ export const BASH_TOOL: Tool = {
     // that the raw form does not match.
     // matchesDangerousBash 内含原始/归一化双视图（${IFS}/续行/字符级转义/
     // 引号拼接让语义不变的命令在文本上认不出）；INJECTION 清单此前只在
-    // auto-safe 档被消费，manual 档是死代码——此处一并激活。
+    // auto-safe 档被消费，manual 档是死代码——此处一并激活，且同样走双视图，
+    // 否则 `powershel\l -enc` 这类混淆在 manual 档同样漏网。
     if (matchesDangerousBash(rawCommand) || matchesDangerousBash(rewrittenCommand)) {
       return true
     }
     if (INJECTION_PATTERNS.some(
-      pattern => pattern.test(rawCommand) || pattern.test(rewrittenCommand),
+      pattern => testBoth(pattern, rawCommand) || testBoth(pattern, rewrittenCommand),
     )) {
       return true
     }

@@ -292,7 +292,7 @@ export function normalizeBashCommand(command: string): string {
   return unquoted.replace(GIT_GLOBAL_OPTS_RE, 'git')
 }
 
-function testBoth(pattern: RegExp, command: string): boolean {
+export function testBoth(pattern: RegExp, command: string): boolean {
   return pattern.test(command) || pattern.test(normalizeBashCommand(command))
 }
 
@@ -615,25 +615,27 @@ export function assessToolRisk(
       reasons.push('git add 聚合形态（. / -A / --all）无法静态核验暂存文件——建议改用 git 工具（自带敏感文件筛查）')
       level = 'medium'
     }
-    // Command injection detection
+    // Command injection detection — 双视图并检（与 DANGEROUS_BASH_PATTERNS
+    // 同口径）：只测原始视图时，反斜杠/${IFS}/引号拼接等归一化可消除的混淆
+    // 会把 high 降级为 none，auto-safe 档零审批静默执行（如 powershel\l -enc）。
     for (const p of INJECTION_PATTERNS) {
-      if (p.test(cmd)) {
+      if (testBoth(p, cmd)) {
         reasons.push(`command injection pattern: ${p.source}`)
         level = 'high'
         break
       }
     }
-    // Extended destructive command detection
+    // Extended destructive command detection（同上：双视图并检）
     for (const p of DESTRUCTIVE_EXTENDED_PATTERNS) {
-      if (p.test(cmd)) {
+      if (testBoth(p, cmd)) {
         reasons.push(`extended destructive command: ${p.source}`)
         level = level === 'high' ? 'high' : 'medium'
         break
       }
     }
-    // Sed bypass on security-critical files
+    // Sed bypass on security-critical files（同上：双视图并检）
     for (const p of SED_BYPASS_PATTERNS) {
-      if (p.test(cmd)) {
+      if (testBoth(p, cmd)) {
         reasons.push('sed bypass on security-critical file')
         level = 'high'
         break
