@@ -69,3 +69,56 @@ test('package metadata filtering preserves rejection of sensitive resources', ()
     assert.throws(() => readPackage(root), /Sensitive files cannot be included/)
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
+
+test('sensitive guard narrows to credential shapes; design-token terms pass (#458)', () => {
+  // issue #458 误报样本：裸子串判据下全部被拒，收窄后必须通过。
+  const benign = [
+    'references/component-tokens.md',
+    'scripts/validate-tokens.cjs',
+    'templates/design-tokens-starter.json',
+    'token-curation.md',
+    'TOKEN_ECONOMY.md',
+    'Cat-Secret-Life.pptx',
+    'scripts/credential-ui/tests/credentials.test.ts',
+    'src/tokenizer.ts',
+    'src/private-keyboard.ts',
+  ]
+  for (const rel of benign) {
+    const root = mkdtempSync(join(tmpdir(), 'package-benign-token-'))
+    try {
+      writeFileSync(join(root, 'SKILL.md'), '---\nname: benign-package\ndescription: Benign fixture\n---\nBody.')
+      const file = join(root, rel)
+      mkdirSync(join(file, '..'), { recursive: true })
+      writeFileSync(file, 'design terminology, not credentials')
+      readPackage(root)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  }
+})
+
+test('sensitive guard still rejects true credential shapes (#458)', () => {
+  // 真实凭据形态必须继续被拒。
+  const sensitive = [
+    '.env',
+    '.env.production',
+    'config/credentials.json',
+    'credentials',
+    'secrets.yaml',
+    'api/secret.json',
+    'keys/id_rsa',
+    'keys/id_rsa.pub',
+    'tls/cert.pem',
+    'tls/client.key',
+    'store/keystore.p12',
+    'private-key',
+  ]
+  for (const rel of sensitive) {
+    const root = mkdtempSync(join(tmpdir(), 'package-sensitive-shape-'))
+    try {
+      writeFileSync(join(root, 'SKILL.md'), '---\nname: sensitive-package\ndescription: Sensitive fixture\n---\nBody.')
+      const file = join(root, rel)
+      mkdirSync(join(file, '..'), { recursive: true })
+      writeFileSync(file, 'synthetic fixture only')
+      assert.throws(() => readPackage(root), /Sensitive files cannot be included/, `expected rejection: ${rel}`)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  }
+})
