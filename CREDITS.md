@@ -445,3 +445,4 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 - #460 fix(config): 校验 defaultDir，堵住已注册工作区投毒（CLOSED）
 - #455 fix(server): 试画/探测端点不再从请求体解析任意 apiKeyEnv（机密外泄）（CLOSED）
 - #453 fix(artifact): sanitize sessionId to block path traversal outside baseDir（CLOSED）
+- #452 fix(hooks): hook 子进程环境隔离——复用 #137 sanitizeEnv 剥离密钥与启动即执行类变量（CLOSED）
