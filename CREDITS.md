@@ -442,3 +442,4 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 - #464 fix(goal): 每轮迭代推进后重发 goal_state，修复桌面端步数计数器恒为 0/100（CLOSED）
 - #462 fix(search): chunker 定义边界正则 ReDoS——超长行跳过模式匹配（CLOSED）
 - #461 fix(skills): 敏感文件名判据收窄——design token 术语不再被误判为凭据（CLOSED）
+- #460 fix(config): 校验 defaultDir，堵住已注册工作区投毒（CLOSED）
