@@ -438,3 +438,4 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 - #447 fix(server): sidecar 会话事件日志内存上限收敛（#445）（OPEN）
 - #448 feat(cli): 接入 Token 账本与安全同步设置（CLOSED）
 - #467 fix(approval): INJECTION/扩展破坏/SED绕过三表走原始+归一化双视图判定（CLOSED）
+- #466 fix(lsp): RPC 消息体加 16MiB 上限，堵住超大 Content-Length 导致的客户端 OOM（CLOSED）
