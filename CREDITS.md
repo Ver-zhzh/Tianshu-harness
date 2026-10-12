@@ -444,3 +444,4 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 - #461 fix(skills): 敏感文件名判据收窄——design token 术语不再被误判为凭据（CLOSED）
 - #460 fix(config): 校验 defaultDir，堵住已注册工作区投毒（CLOSED）
 - #455 fix(server): 试画/探测端点不再从请求体解析任意 apiKeyEnv（机密外泄）（CLOSED）
+- #453 fix(artifact): sanitize sessionId to block path traversal outside baseDir（CLOSED）
