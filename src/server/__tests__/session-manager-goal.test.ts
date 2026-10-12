@@ -235,6 +235,43 @@ describe('RuntimeSessionManager goal mode', () => {
     const goalEvs = evs!.events.filter((e) => e.type === 'goal_state')
     assert.equal(goalEvs.length, 1, 'still only 1 goal_state (baseline not re-emitted)')
   })
+
+  test('#463: emitGoalIteration 在每次迭代推进后重发 goal_state（iteration 递增）', async () => {
+    // 回归：此前 goal_state 只在创建/暂停/恢复/取消时下发，advanceIteration
+    // 后从不重发 → 桌面端计数器恒为 0/maxIterations。
+    const { manager } = makeManager(sessionDir)
+    const s = manager.createSession({})
+    void manager.run(s.id, 'go')
+    const snap = await manager.setGoal(s.id, { goal: 'x', maxIterations: 100, contextWindow: 1000 })
+    assert.ok(snap, 'goal created')
+
+    const tracker = manager.getSessionGoalTracker(s.id)
+    assert.ok(tracker, 'tracker attached')
+
+    tracker!.advanceIteration()
+    manager.emitGoalIteration(s.id, tracker!)
+    tracker!.advanceIteration()
+    manager.emitGoalIteration(s.id, tracker!)
+
+    const evs = manager.getEvents(s.id)
+    assert.ok(evs, 'events exist')
+    const goalEvs = evs!.events.filter((e) => e.type === 'goal_state')
+    // run 的首条消息基线快照（iteration 0）+ setGoal（iteration 0）
+    // + 两次 emitGoalIteration（iteration 1、2）。
+    // extractCriteria 在测试环境无 cheap client，直接返回不追加。
+    assert.equal(goalEvs.length, 4, 'goal_state re-emitted per iteration')
+    const iters = goalEvs.map((e) => (e.data as Record<string, unknown>).iteration)
+    assert.deepEqual(iters, [0, 0, 1, 2], 'counter advances with execution')
+    const last = goalEvs[3]!.data as Record<string, unknown>
+    assert.equal(last.maxIterations, 100)
+    assert.equal(last.status, 'active')
+  })
+
+  test('#463: emitGoalIteration 对不存在的 session 静默 no-op', () => {
+    const { manager } = makeManager(sessionDir)
+    const tracker = new GoalTracker({ goal: 'x', maxIterations: 5, contextWindow: 1000 })
+    assert.doesNotThrow(() => manager.emitGoalIteration('no-such-session', tracker))
+  })
 })
 
 describe('Goal 计划倒计时自动批准（2026-07-24）', () => {

@@ -35,6 +35,10 @@ export interface GoalContinuationDeps {
   completeTurn: (params: CompleteTurnParams) => Promise<void>
   writeTelemetry: (entry: TelemetryRecord) => void
   flushMeridianTurn: () => void
+  /** #463: per-iteration progress hook — invoked after each tracker.advanceIteration().
+   *  The sidecar wires this to re-emit a `goal_state` SSE event so desktop clients
+   *  see the iteration counter advance. Optional — CLI/TUI don't pass it. */
+  onGoalIteration?: (tracker: GoalTracker) => void
 }
 
 export type GoalCheckResult =
@@ -102,6 +106,7 @@ export class GoalContinuationController {
         const decision = await this.judgeGoalCompletion(tracker, signal)
         if (decision.action === 'continue') {
           tracker.advanceIteration()
+          this.deps.onGoalIteration?.(tracker)
           return this.finishContinuation(tracker, signal, params, decision.reminder)
         }
         this.deps.appendSystemReminder(decision.reminder, 'functional')
@@ -112,6 +117,7 @@ export class GoalContinuationController {
       }
 
       tracker.advanceIteration()
+      this.deps.onGoalIteration?.(tracker)
       return this.finishContinuation(tracker, signal, params, null)
     }
 
@@ -119,6 +125,7 @@ export class GoalContinuationController {
       const decision = await this.judgeGoalCompletion(tracker, signal)
       if (decision.action === 'continue') {
         tracker.advanceIteration()
+        this.deps.onGoalIteration?.(tracker)
         return this.finishContinuation(tracker, signal, params, decision.reminder)
       } else {
         this.deps.appendSystemReminder(decision.reminder, 'functional')

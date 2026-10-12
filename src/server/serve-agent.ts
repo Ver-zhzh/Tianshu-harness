@@ -657,6 +657,9 @@ function assembleAgentLoop(
     // I4: user hook results → desktop event stream via the session manager.
     inheritFrozenFrom,
     emitHookResult: (results, meta) => shared?.sessions?.emitHookResult(sessionId, results, meta),
+    // #463: 每轮 goal 迭代推进后重发 goal_state SSE——否则桌面端步数计数器
+    // 恒停在创建快照（0/100），因为 advanceIteration 后从不重发。
+    onGoalIteration: (tracker) => shared?.sessions?.emitGoalIteration(sessionId, tracker),
     // Per-session 工具白名单（蒸馏回放等自动化场景）。
     allowedTools,
   })

@@ -1391,6 +1391,8 @@ export function createTurnOrchestrator(self: AgentLoop): TurnOrchestrator {
     // === Sub-controllers ===
     goalContinuation: new GoalContinuationController({
       getGoalTracker: () => self.getGoalTracker(),
+      // #463: sidecar wires this to re-emit `goal_state` SSE per iteration.
+      onGoalIteration: self.config.onGoalIteration,
       hasPendingPlanApproval: async () => {
         // 待批计划闸门（2026-07-24）：最新计划为 submitted 即停 goal 续跑。
         // 读盘失败 fail-open——宁可空转不可假死。

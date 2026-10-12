@@ -112,6 +112,10 @@ export interface AgentConfig {
   }
   /** I4: emit user hook results to the desktop event stream. */
   emitHookResult?: (results: HookResult[], meta: { event: HookEvent; turn?: number; toolName?: string; error?: string }) => void
+  /** #463: per-iteration goal progress → desktop `goal_state` SSE. The sidecar
+   *  wires this to re-emit the goal snapshot each time the tracker advances an
+   *  iteration; without it the desktop counter stays at the creation snapshot. */
+  onGoalIteration?: (tracker: import('./goal-tracker.js').GoalTracker) => void
   /** Lazy-binding getter for plugin-contributed hooks (absolute script paths).
    *  Plugins load after agent assembly; this getter lets the user-hooks bridge
    *  read the current set at fire time. Returns [] when no plugins loaded. */

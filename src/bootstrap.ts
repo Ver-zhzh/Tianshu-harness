@@ -950,6 +950,8 @@ export function createAgentRuntime(deps: {
   sharedProviderHealth?: ProviderHealthTracker
   /** I4: optional callback to surface user hook results to the desktop event stream. */
   emitHookResult?: import('./agent/loop-types.js').AgentConfig['emitHookResult']
+  /** #463: optional callback to re-emit a `goal_state` event per goal iteration. */
+  onGoalIteration?: import('./agent/loop-types.js').AgentConfig['onGoalIteration']
   /** 资源压力状态行回调（透传 AgentConfig.onStatusLine；TUI 经 ctx.setStatusLine
    *  晚绑定，sidecar/worker 不传即 no-op）。 */
   onStatusLine?: (text: string | null) => void
@@ -1197,6 +1199,8 @@ export function createAgentRuntime(deps: {
       modelRoutingShadowModelCards: modelCards,
       domainKnowledgeStore,
       emitHookResult: deps.emitHookResult,
+      // #463: sidecar wires this to re-emit `goal_state` SSE per goal iteration.
+      onGoalIteration: deps.onGoalIteration,
       // 多会话隔离：turn-end 任务进度回灌与 todo-reminder 快照统一读本会话 store。
       // TUI 下 refs.todoStore 即全局 defaultStore（行为不变）；server 下每会话独立。
       // 闭包绑定 refs（switchModel 重建 loop 时复用同一 refs/todoStore）→ 守住缓存不变量。

@@ -4788,6 +4788,21 @@ export class RuntimeSessionManager {
     session.events = session.events.filter((e) => !dropped.has(e))
   }
 
+  /**
+   * #463: re-emit a `goal_state` snapshot each time the goal tracker advances
+   * an iteration. Previously the snapshot was only emitted on create/pause/
+   * resume/cancel, so the desktop iteration counter stayed at the creation
+   * snapshot (0/maxIterations) for the entire run.
+   */
+  emitGoalIteration(
+    id: string,
+    tracker: import('../agent/goal-tracker.js').GoalTracker,
+  ): void {
+    const s = this.sessions.get(id)
+    if (!s) return
+    this.append(s, 'goal_state', snapshotGoal(tracker) as unknown as Record<string, unknown>)
+  }
+
   getEvents(id: string, since = 0): { events: SessionEvent[]; lastSeq: number } | undefined {
     const s = this.sessions.get(id)
     if (!s) return undefined
