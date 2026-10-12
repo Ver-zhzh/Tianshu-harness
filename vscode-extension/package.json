@@ -83,6 +83,12 @@
         "category": "天枢"
       },
       {
+        "command": "tianshu.openVisualBuilder",
+        "title": "打开前端可视化建造与实时预览",
+        "icon": "$(browser)",
+        "category": "天枢"
+      },
+      {
         "command": "tianshu.restartSidecar",
         "title": "重启内核 sidecar",
         "category": "天枢"
@@ -171,6 +177,11 @@
     "menus": {
       "editor/context": [
         {
+          "command": "tianshu.openVisualBuilder",
+          "group": "tianshu@0",
+          "when": "resourceExtname =~ /\\.(html|htm|tsx|jsx|vue|svelte|css)$/"
+        },
+        {
           "command": "tianshu.sendSelection",
           "group": "tianshu@1"
         },
@@ -181,8 +192,20 @@
       ],
       "editor/title": [
         {
+          "command": "tianshu.openVisualBuilder",
+          "group": "navigation@1",
+          "when": "resourceExtname =~ /\\.(html|htm|tsx|jsx|vue|svelte|css)$/"
+        },
+        {
           "submenu": "tianshu.actions",
           "group": "navigation@9"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "tianshu.openVisualBuilder",
+          "group": "tianshu@1",
+          "when": "resourceExtname =~ /\\.(html|htm|tsx|jsx|vue|svelte|css)$/"
         }
       ],
       "editor/title/context": [

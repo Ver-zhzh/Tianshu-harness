@@ -9,6 +9,7 @@ import { join } from 'node:path'
 import { launchSidecar, SidecarLaunchError, type SidecarHandle } from './sidecar/launcher.js'
 import { SidecarClient } from './sidecar/client.js'
 import { CockpitProvider } from './views/cockpit-provider.js'
+import { VisualBuilderProvider } from './views/builder-provider.js'
 import { registerChangesView } from './views/changes-view.js'
 import { registerLauncherView } from './views/launcher-view.js'
 import { DelegationExecutor } from './delegation/executor.js'
@@ -79,6 +80,16 @@ export function activate(context: vscode.ExtensionContext): void {
     context.extensionUri,
     (): Promise<SidecarClient> => ensureClient(provider, cwd),
     cwd ?? '',
+  )
+
+  const visualBuilder = new VisualBuilderProvider(
+    context.extensionUri,
+    (): Promise<SidecarClient> => ensureClient(provider, cwd),
+    cwd ?? '',
+    (promptText) => {
+      provider.openInEditor()
+      return provider.submitPrompt(promptText)
+    },
   )
 
   // 会话变更双面呈现（L2-5）：Explorer 树 + 原生 SCM 资源，两者并存。
@@ -174,6 +185,9 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.commands.registerCommand('tianshu.openInEditor', () => {
       provider.openInEditor()
+    }),
+    vscode.commands.registerCommand('tianshu.openVisualBuilder', (uri?: vscode.Uri) => {
+      void visualBuilder.open(uri)
     }),
     vscode.commands.registerCommand('tianshu.newSession', () => {
       provider.openInEditor()
