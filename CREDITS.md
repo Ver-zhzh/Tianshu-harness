@@ -448,3 +448,4 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 - #452 fix(hooks): hook 子进程环境隔离——复用 #137 sanitizeEnv 剥离密钥与启动即执行类变量（CLOSED）
 - #451 fix(sidecar): 启动期 ACL 加固永不收敛 + 超时致命，数据目录膨胀后本地服务必崩（CLOSED）
 - #449 fix(mcp): stdio 子进程 env 剥离启动即执行类变量（对称 #137）（CLOSED）
+- #457 feat(tui): 支持输入框光标零位移与执行中/上一轮命令置顶条（对标 Codex CLI）（CLOSED）
