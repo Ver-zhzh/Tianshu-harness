@@ -451,3 +451,4 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 - #457 feat(tui): 支持输入框光标零位移与执行中/上一轮命令置顶条（对标 Codex CLI）（CLOSED）
 - #454 fix(tui): 修复 Enter 排队消息提前落 scrollback 产生幽灵气泡缺陷（CLOSED）
 - #475 fix(tui): 修复提问卡与计划审批卡导致对话分层（CLOSED）
+- #474 fix: 修复会话回退事件遗漏与课程文件误判（CLOSED）
