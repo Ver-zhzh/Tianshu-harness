@@ -41,7 +41,7 @@ export interface SessionWorkspaceInput {
   homeDir?: string
 }
 
-function expandTilde(raw: string, home: string): string {
+export function expandTilde(raw: string, home: string): string {
   if (raw === '~') return home
   if (raw.startsWith('~/') || raw.startsWith('~\\')) return join(home, raw.slice(2))
   return raw

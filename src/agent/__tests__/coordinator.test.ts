@@ -20,6 +20,8 @@ import { profileRegistry } from '../profile-registry.js'
 import { ProviderHealthTracker } from '../provider-health.js'
 import { LocalWorkerPolicyError } from '../../api/continuation-prefix.js'
 
+process.env.RIVET_HOME = mkdtempSync(join(tmpdir(), 'coordinator-isolated-home-'))
+
 function fakeTool(name: string): Tool {
   return {
     definition: {
@@ -2009,7 +2011,7 @@ describe('DelegationCoordinator', () => {
     assert.equal(sessionRegistry.acquireClaim('s-main', 'src/blocked-file.ts'), false)
   })
 
-  it('T3: retries failed worker with Pro model when budget allows (Flash→Pro escalation)', async () => {
+  it('failed worker keeps its initial model and never escalates', async () => {
     const escalateCards: ModelCapabilityCard[] = [
       { model: 'cheap-flash', toolUseReliability: 0.7, jsonStability: 0.7, editSuccessRate: 0.5, testRepairRate: 0.5, contextWindow: 1_000_000, cacheEconomics: 'strong', recommendedTasks: ['code_search'] },
       { model: 'deepseek-pro', toolUseReliability: 0.95, jsonStability: 0.95, editSuccessRate: 0.9, testRepairRate: 0.85, contextWindow: 128_000, cacheEconomics: 'medium', recommendedTasks: ['patch_proposal'] },
@@ -2058,19 +2060,13 @@ describe('DelegationCoordinator', () => {
     })
 
     assert.equal(run.status, 'completed')
-    // First call used cheap-flash, retry used deepseek-pro
-    assert.equal(modelsUsed.length, 2)
-    assert.equal(modelsUsed[0], 'cheap-flash')
-    assert.equal(modelsUsed[1], 'deepseek-pro')
-    // Escalation shadow event emitted
-    assert.ok(run.modelTierShadows && run.modelTierShadows.length >= 2, 'expected at least 2 tier shadows')
-    const escShadow = run.modelTierShadows!.find(s => s.actualTier === 'strong' && s.reason.includes('Flash→Pro 升级重试'))
-    assert.ok(escShadow, 'escalation shadow must be emitted')
-    assert.equal(escShadow!.actualModel, 'deepseek-pro')
-    assert.ok(run.selectedModel === 'deepseek-pro', 'selected model should be the Pro model')
+    assert.deepEqual(modelsUsed, ['cheap-flash'])
+    assert.equal(run.results[0]?.terminalFailure, true)
+    assert.equal(run.selectedModel, 'cheap-flash')
+
   })
 
-  it('T3: respects Pro upgrade limit (max 3 per session)', async () => {
+  it('distinct failed tasks each start once; no Pro upgrades', async () => {
     const escalateCards: ModelCapabilityCard[] = [
       { model: 'cheap-flash', toolUseReliability: 0.7, jsonStability: 0.7, editSuccessRate: 0.5, testRepairRate: 0.5, contextWindow: 1_000_000, cacheEconomics: 'strong', recommendedTasks: ['code_search'] },
       { model: 'deepseek-pro', toolUseReliability: 0.95, jsonStability: 0.95, editSuccessRate: 0.9, testRepairRate: 0.85, contextWindow: 128_000, cacheEconomics: 'medium', recommendedTasks: ['patch_proposal'] },
@@ -2115,9 +2111,9 @@ describe('DelegationCoordinator', () => {
     }
 
     // Models used: flash(×4) + pro(×3) = 7 runtimeFactory calls
-    assert.equal(modelsUsed.length, 7)
+    assert.equal(modelsUsed.length, 4)
     // First 3 delegates: flash → pro escalation
-    assert.equal(modelsUsed.filter(m => m === 'deepseek-pro').length, 3)
+    assert.equal(modelsUsed.filter(m => m === 'deepseek-pro').length, 0)
     // 4th delegate: flash only (no escalation)
     assert.equal(modelsUsed.filter(m => m === 'cheap-flash').length, 4)
   })
@@ -2289,7 +2285,7 @@ describe('DelegationCoordinator', () => {
     assert.notEqual(run.results[0]?.status, 'passed')
   })
 
-  it('escalationCap=balanced retries with a balanced card, never the strong card', async () => {
+  it('legacy escalation cap cannot enable worker retries', async () => {
     const cards: ModelCapabilityCard[] = [
       { model: 'cheap-flash', toolUseReliability: 0.7, jsonStability: 0.7, editSuccessRate: 0.5, testRepairRate: 0.5, contextWindow: 1_000_000, cacheEconomics: 'strong', recommendedTasks: ['code_search'] },
       // 名字无 tier 关键词 + 中等能力 → inferModelTierFromCard 判为 balanced
@@ -2340,9 +2336,8 @@ describe('DelegationCoordinator', () => {
     })
 
     assert.equal(run.status, 'completed')
-    assert.equal(modelsUsed.length, 2)
-    assert.equal(modelsUsed[0], 'cheap-flash')
-    assert.equal(modelsUsed[1], 'mid-model', 'retry must use the balanced card')
+    assert.deepEqual(modelsUsed, ['cheap-flash'])
+    assert.equal(run.results[0]?.terminalFailure, true)
     assert.equal(modelsUsed.filter(m => m === 'deepseek-pro').length, 0, 'strong card must not be used under balanced cap')
   })
 
@@ -2773,7 +2768,7 @@ describe('DelegationCoordinator', () => {
   // ── Wave 2: exponential backoff retry ───────────────────────────
 
   describe('exponential backoff retry', () => {
-    it('retries same-model worker on failure and succeeds on second attempt', async () => {
+    it('same-model failure stops immediately despite legacy retries', async () => {
       let calls = 0
       const sleepCalls: number[] = []
       const coordinator = new DelegationCoordinator({
@@ -2812,9 +2807,9 @@ describe('DelegationCoordinator', () => {
       }])
 
       assert.equal(run.status, 'completed')
-      assert.equal(calls, 2, 'runWorker should be called twice (initial + 1 retry)')
-      assert.equal(sleepCalls.length, 1, 'sleep should be called once for first retry')
-      assert.equal(sleepCalls[0], 10000, 'first backoff delay should be 10s (base * 2^0)')
+      assert.equal(calls, 1, 'legacy maxRetries cannot enable automatic worker retries')
+      assert.deepEqual(sleepCalls, [])
+      assert.equal(run.results[0]?.terminalFailure, true)
     })
 
     it('respects maxRetries=0 — no retry, immediate failure', async () => {
@@ -2855,7 +2850,7 @@ describe('DelegationCoordinator', () => {
       assert.equal(sleepCalls.length, 0, 'no sleep calls — retry disabled')
     })
 
-    it('uses exponential delay formula: base * 2^(attempt-1)', async () => {
+    it('legacy backoff does not schedule automatic worker requests', async () => {
       let calls = 0
       const sleepCalls: number[] = []
       const coordinator = new DelegationCoordinator({
@@ -2888,9 +2883,7 @@ describe('DelegationCoordinator', () => {
         budget: { maxRetries: 2, retryBackoffMs: 5000, maxRetryBackoffMs: 60000 },
       }])
 
-      assert.equal(sleepCalls.length, 2, 'two sleep calls for maxRetries=2')
-      assert.equal(sleepCalls[0], 5000, 'first delay: 5000 * 2^0 = 5000')
-      assert.equal(sleepCalls[1], 10000, 'second delay: 5000 * 2^1 = 10000')
+      assert.deepEqual(sleepCalls, [], 'legacy backoff values cannot schedule retries')
     })
   })
 

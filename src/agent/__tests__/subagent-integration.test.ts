@@ -299,7 +299,7 @@ describe('Worker Session Isolation', () => {
       dedupeKey: 'test-dedupe',
       dependencies: [],
       aggregationPolicy: 'primary_decides',
-      budget: { maxTurns: 1, maxTokens: 1024, timeoutMs: 60000, maxRetries: 0, retryBackoffMs: 10000, maxRetryBackoffMs: 300000 }
+      budget: { maxTurns: 2, maxTokens: 1024, timeoutMs: 60000, maxRetries: 0, retryBackoffMs: 10000, maxRetryBackoffMs: 300000 }
     }
 
     const run = await runWorkerSession({
@@ -308,8 +308,8 @@ describe('Worker Session Isolation', () => {
       promptEngine: createMinimalPromptEngine(),
       toolRegistry: new ToolRegistry(),
       cwd: '/tmp',
-      maxTurns: 1,
-      contextWindow: 10000,
+      maxTurns: 2,
+      contextWindow: 64000,
       compact: { enabled: true, autoThreshold: 8000, autoFloor: 5000, model: 'deepseek-v4' }
     })
 
@@ -320,7 +320,7 @@ describe('Worker Session Isolation', () => {
     assert.equal(primarySession.getMessages().length, 0, 'Primary session should have no messages')
   })
 
-  it('should handle invalid schema and attempt repair', async () => {
+  it('invalid schema terminates without using the configured repair client', async () => {
     const invalidResponse = "I can't provide a valid JSON."
     const validResponse = `{
       "workOrderId": "wo-test-2",
@@ -363,7 +363,7 @@ describe('Worker Session Isolation', () => {
       toolRegistry: new ToolRegistry(),
       cwd: '/tmp',
       maxTurns: 1,
-      contextWindow: 10000,
+      contextWindow: 64000,
       compact: { enabled: true, autoThreshold: 8000, autoFloor: 5000, model: 'deepseek-v4' },
       // 修复梯专用用例——钉旧契约（无收尾轮），否则终型轮先把报告救回、
       // repairAttempts 恒为 0。
@@ -377,10 +377,9 @@ describe('Worker Session Isolation', () => {
     // 未验证线索，不得冒充 passed。修复梯的验收点是「确实触发 + 字段保真 +
     // 降级留痕」，而不是 status==='passed'。
     assert.equal(run.result.status, 'blocked', '修复轮产出必须降级，不得冒充 passed')
-    assert.equal(run.result.evidenceStatus, 'unverified')
-    assert.ok(run.result.risks.some(r => r.includes('残片修复')), '降级必须留痕（不得静默）')
-    assert.equal(run.result.summary, 'Repaired response', '字段保真：修复轮的完整报告必须原样解析')
-    assert.equal(run.transcript.repairAttempts, 1)
+    assert.equal(run.result.terminalFailure, true)
+    assert.equal(mockClient.calls.length, 1)
+    assert.equal(run.transcript.repairAttempts, 0)
   })
 })
 

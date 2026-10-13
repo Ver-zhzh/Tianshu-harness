@@ -21,7 +21,8 @@ async function runScenario(outputs: string[], maxTurns = 0, thinking = true, ste
   let beforeFinal = ''
   const client = {
     stream: async (request: OaiChatRequest, cb: StreamCallbacks) => {
-      requests.push(structuredClone(request))
+      const { onExecutionSnapshot: _snapshotCallback, ...wire } = request
+      requests.push(structuredClone(wire))
       const text = outputs[requests.length - 1] ?? ''
       if (thinking) {
         cb.onThinkingDelta('Let me search for the domain definition.')

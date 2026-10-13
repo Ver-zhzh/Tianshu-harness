@@ -42,6 +42,12 @@ export class FallbackStreamClient implements StreamClient {
   consumeWireDivergence(): import('./stream-client.js').WireDivergence | null {
     return this.activeClient.consumeWireDivergence?.() ?? null
   }
+  previewContextRequest(request: OaiChatRequest): OaiChatRequest { return this.activeClient.previewContextRequest?.(request) ?? request }
+  getExecutionPolicy() { return this.activeClient.getExecutionPolicy?.() ?? { singleAttempt: false } }
+  setRuntimeSessionId(id: string): void { this.activeClient.setRuntimeSessionId?.(id) }
+  getMainPrefixProof() { return this.activeClient.getMainPrefixProof?.() }
+  authorizeCacheGeneration(reason: string): void { this.activeClient.authorizeCacheGeneration?.(reason) }
+  restoreExecutionSnapshot(snapshot: import('./continuation-prefix.js').ContinuationPrefixProof): void { this.activeClient.restoreExecutionSnapshot?.(snapshot) }
 
   async stream(
     request: OaiChatRequest,
@@ -57,6 +63,7 @@ export class FallbackStreamClient implements StreamClient {
     } catch (err) {
       lastError = err
       if (signal?.aborted) throw err
+      if (this.activeClient.getMainPrefixProof?.() || this.activeClient.getExecutionPolicy?.().singleAttempt) throw err
 
       const classified = classifyApiError(err)
       if (!this.shouldFallback(classified.category)) throw err

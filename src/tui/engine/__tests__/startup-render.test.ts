@@ -39,7 +39,7 @@ class MockIn {
 
 const CURSOR_UP = /\x1B\[\d*A/
 /** 帧末 caret parking 序列（可选 cursorUp + 定位列，止于 END_SYNC 前）。 */
-const PARK_SEQ = /(\x1B\[\d*A)?\x1B\[\d+G(?=\x1B\[\?2026l)/g
+const PARK_SEQ = /(\x1B\[\d*A)?\x1B\[\d+G(?:\x1B\[\?25h)?(?=\x1B\[\?2026l)/g
 
 test('start() first frame is a clean append (no stale moveToTop after pre-start render + clear)', () => {
   const out = new MockOut()

@@ -36,7 +36,7 @@ function serializeSubmittedReport(input: unknown, orderId: string): string {
   return serialized
 }
 
-/** 校验通过即交给 onAccepted 并结束本轮（endTurn）；不通过把错误回给模型，让它修正后重交。 */
+/** 提交即结束；无效报告保留诊断并终止，不请求模型修复。 */
 export function createSubmitResultTool(orderId: string, onAccepted: (report: string) => void, onRejected?: (reason: string, raw: string) => void): Tool {
   return {
     definition: SUBMIT_RESULT_DEFINITION,
@@ -46,7 +46,7 @@ export function createSubmitResultTool(orderId: string, onAccepted: (report: str
         report = serializeSubmittedReport(input, orderId)
       } catch (err) {
         onRejected?.(String(err), JSON.stringify(input))
-        return { content: `报告未通过校验：${err instanceof Error ? err.message : String(err)}\n修正后重新调用 submit_result。`, isError: true }
+        return { content: `报告未通过校验：${err instanceof Error ? err.message : String(err)}\n任务已终止，不自动重交。`, isError: true, endTurn: true }
       }
       onAccepted(report)
       return { content: '报告已提交。', endTurn: true }
@@ -142,13 +142,16 @@ export interface MainRequestSnapshot {
 
 /** 主轮请求发出时回调（prefixProbe 只在主路径构建上为真，侧路请求都剥掉了它）。用 Proxy
  *  转发其余成员——手工包装对象会把 StreamClient 的可选成员静默丢成 undefined。 */
-export function observeMainRequests(client: StreamClient, onMain: (request: OaiChatRequest) => void): StreamClient {
+export function observeMainRequests(client: StreamClient, onMain: (request: OaiChatRequest) => void, onUsage?: (usage: Partial<Usage> | undefined, reason?: string) => void): StreamClient {
   return new Proxy(client, {
     get(target, prop) {
       if (prop === 'stream') {
         return (request: OaiChatRequest, callbacks: StreamCallbacks, signal?: AbortSignal) => {
           if (request.prefixProbe) onMain(request)
-          return target.stream(request, callbacks, signal)
+          return target.stream(request, { ...callbacks,
+            onStopReason: (reason, usage) => { onUsage?.(usage, reason); callbacks.onStopReason(reason, usage) },
+            onStreamAttemptAborted: info => { onUsage?.(info.usage); callbacks.onStreamAttemptAborted?.(info) },
+          }, signal)
         }
       }
       const value: unknown = Reflect.get(target, prop, target)

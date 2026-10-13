@@ -289,7 +289,7 @@ describe('verifyWorkerEvidence × deliveredOnAbort 豁免', () => {
 // ── GREEN ③：coordinator 全链路 —— 产物落盘的 abort 不再误标 failed ──────
 
 describe('coordinator delegate 全链路（completed-aborted）', () => {
-  it('产物已落盘的 abort worker：delegate 返回 passed + deliveredOnAbort（RED→GREEN）', async () => {
+  it('产物已落盘的 abort worker 保留文件证据，但仍为终态受阻', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'abort-coord-'))
     try {
       const coordinator = makeCoordinator(dir, async config => {
@@ -305,8 +305,10 @@ describe('coordinator delegate 全链路（completed-aborted）', () => {
         scope: { files: ['README.ja.md'] },
       })
       const result = run.results[0]!
-      assert.equal(result.status, 'passed', `产物落盘的 abort 应按已交付计入，got ${result.status}: ${result.summary}`)
-      assert.equal(result.deliveredOnAbort, true)
+      assert.equal(result.status, 'blocked')
+      assert.equal(result.terminalFailure, true)
+      assert.equal(result.deliveredOnAbort, undefined)
+      assert.ok(result.changedFiles.includes('README.ja.md'))
       assert.equal(result.failureReason, 'caller_aborted')
       assert.equal(result.evidenceStatus, 'unverified')
     } finally {
@@ -334,7 +336,7 @@ describe('coordinator delegate 全链路（completed-aborted）', () => {
     }
   })
 
-  it('delegateBatch all_required：升级的 passed 不再被聚合翻 failed（事故链终点修复）', async () => {
+  it('delegateBatch all_required 保留取消任务的产物与失败，不影响正常兄弟任务', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'abort-coord-'))
     try {
       const coordinator = makeCoordinator(dir, async config => {
@@ -380,8 +382,9 @@ describe('coordinator delegate 全链路（completed-aborted）', () => {
       // T4 的升级结果 changedFiles 含产物文件——按它定位（workOrderId 是派生 id）。
       const t4 = run.results.find(r => r.changedFiles.includes('README.ja.md'))
       assert.ok(t4, 'T4 结果必须存在')
-      assert.equal(t4!.status, 'passed', `all_required 不得再把已交付的 abort 翻 failed：${t4!.summary}`)
-      assert.equal(t4!.deliveredOnAbort, true)
+      assert.equal(t4!.status, 'failed')
+      assert.equal(t4!.terminalFailure, true)
+      assert.equal(t4!.deliveredOnAbort, undefined)
       const t3 = run.results.find(r => r !== t4)
       assert.equal(t3!.status, 'passed', '正常通过者不受影响')
     } finally {

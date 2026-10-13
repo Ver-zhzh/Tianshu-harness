@@ -1,3 +1,4 @@
+import { snapshotSessionBinding } from './model/model-binding.js'
 import { resolveDeliveryImpact } from './agent/delivery-impact.js'
 /**
  * bootstrap.ts — 共享初始化层，由 T9 ANSI 唯一生产入口 src/main.ts 调用。
@@ -85,10 +86,8 @@ import { initializePlugins } from './plugins/plugin-loader.js'
 import { loadProModule, proRegistry } from './api/pro-registry.js'
 import { anchorsFromMessages } from './agent/reasoning-anchors.js'
 import { createProviderClient, resolveApiKey } from './api/factory.js'
-import { buildReviewOverrideState } from './agent/review-model-override.js'
-import { buildWorkerRuntime } from './agent/worker-runtime.js'
+import { createWorkerRuntimeFactory } from './agent/worker-runtime.js'
 import { createModeAwareRunner, workerIsolationEnabled, workerIsolationMode } from './agent/worker-process/parent.js'
-import type { ResolvedReviewOverride } from './agent/review-model-override.js'
 import { createAuthProvider } from './auth/registry.js'
 import { resolveCapabilities } from './api/provider.js'
 import { resolveInitialReasoningEffort } from './agent/runtime-effort.js'
@@ -105,7 +104,6 @@ import { emptyObligationStore } from './agent/evidence-obligation.js'
 import { resolvePlanConstraints, resolvePlanContract } from './agent/plan-constraints.js'
 import { profileRegistry } from './agent/profile-registry.js'
 import { starDomainRegistry } from './agent/star-domain-registry.js'
-import type { WorkerRuntimeFactory } from './agent/coordinator.js'
 import { mapWorkOrderKindToCapabilityTask } from './agent/work-order.js'
 import { PlaybookStore } from './agent/playbook-store.js'
 import { resetLegacyMemoryIfNeeded } from './agent/memory-epoch.js'
@@ -242,8 +240,8 @@ export interface BootstrapContext {
   /** Persist the final TUI perf summary through the existing telemetry writer. */
   flushTuiPerfSummary: (summary: TuiPerfSummary) => Promise<void>
   heartbeatInterval: ReturnType<typeof setInterval>
-  /** Token 消耗台账（论坛同步，src/token-ledger/）：tokenLedger.enabled!==false 时
-   *  构造；autoSync+endpoint 齐全才启定时推送，shutdown 时冲刷（有界超时）。 */
+  /** Token 消耗台账：本地记录默认开启；密钥、安全端点与 autoSync 齐全
+   *  才启定时推送，shutdown 有界保存本地用量并按选择上传。 */
   tokenLedger?: import('./token-ledger/service.js').TokenLedgerService
   /** True when first-run template init is pending — TUI layer handles the
    *  AGENTS.md prompt. Set by needsTemplatesInit() during bootstrap. */
@@ -940,6 +938,7 @@ export function createAgentRuntime(deps: {
   refs: RuntimeRefs
   domainKnowledgeStore: DomainKnowledgeStore
   modelId?: string
+  modelKeyId?: string
   session: SessionContext
   /**
    * Wave J: 可选共享 ProviderHealthTracker。sidecar 多 session + switchModel
@@ -950,6 +949,8 @@ export function createAgentRuntime(deps: {
   sharedProviderHealth?: ProviderHealthTracker
   /** I4: optional callback to surface user hook results to the desktop event stream. */
   emitHookResult?: import('./agent/loop-types.js').AgentConfig['emitHookResult']
+  /** #463: optional callback to re-emit a `goal_state` event per goal iteration. */
+  onGoalIteration?: import('./agent/loop-types.js').AgentConfig['onGoalIteration']
   /** 资源压力状态行回调（透传 AgentConfig.onStatusLine；TUI 经 ctx.setStatusLine
    *  晚绑定，sidecar/worker 不传即 no-op）。 */
   onStatusLine?: (text: string | null) => void
@@ -1048,28 +1049,6 @@ export function createAgentRuntime(deps: {
   // Model capability cards（统一口径在 model/capability.ts——v4-flash 特例也在那里）
   const modelCards: ModelCapabilityCard[] = buildModelCards(provider)
 
-  // Review override: pre-resolve each profile's provider/model + validate
-  // credentials eagerly, but defer StreamClient construction to runtimeFactory
-  // so maxTokens/thinkingBudget can be set from per-call isWrite (read vs write
-  // profile). Without this deferral, override workers were hardcoded to 4096
-  // even for write profiles like 'patcher' — half the token budget of normal
-  // workers. Mirrors create-agent-config.ts:162-168 cross-provider client
-  // factory. Skip on credential failure → fall through to primary client.
-  const overrideState = config.agent.review?.profiles
-    ? buildReviewOverrideState(config.agent.review.profiles, config.provider.providers)
-    : { cards: new Map<string, ModelCapabilityCard>(), overrides: new Map<string, ResolvedReviewOverride>() }
-  const reviewOverrideCards = overrideState.cards
-  const reviewOverrides = overrideState.overrides
-  const reviewOverrideApiKeys = new Map<string, string>()
-  for (const [profileName, resolved] of reviewOverrides) {
-    try { reviewOverrideApiKeys.set(profileName, resolveApiKey(resolved.providerConfig)) } catch {
-      debugLog(`[review-override] skip ${profileName}: no API key for ${resolved.providerName}`)
-      reviewOverrides.delete(profileName)
-      reviewOverrideCards.delete(profileName)
-    }
-  }
-
-  // Worker routing
   const workerRouting = config.workers?.profiles && Object.keys(config.workers.profiles).length > 0
     ? { profiles: config.workers.profiles, routing: config.workers.routing, providers: config.provider.providers }
     : undefined
@@ -1085,30 +1064,25 @@ export function createAgentRuntime(deps: {
     for (const name of Object.keys(workerRouting.providers)) providerHealth.registerProvider(name)
   }
 
-  const runtimeFactory: WorkerRuntimeFactory = (_order, card, workerRegistry) => buildWorkerRuntime(
-    {
-      config,
-      cwd,
-      provider,
-      apiKey,
-      auth,
-      currentModelId: currentModel.id,
+  const rootSessionBinding = deps.modelKeyId
+    ? { provider: provider.name, model: currentModel.id, keyId: deps.modelKeyId, baseUrl: provider.baseUrl }
+    : snapshotSessionBinding(provider, currentModel.id, apiKey)
+  let agentForSignals: AgentLoop | undefined
+  const workerRuntime = createWorkerRuntimeFactory(() => {
+    const saved = loadLayeredConfig({ cwd })
+    return {
+      config: { ...config, provider: saved.provider, workers: saved.workers, agent: { ...config.agent, review: saved.agent.review } },
+      cwd, provider, apiKey, auth, currentModelId: currentModel.id, rootSessionBinding: { ...rootSessionBinding, credentialPrincipal: agentForSignals?.config.client.getMainPrefixProof?.()?.credentialScope?.split(':principal:')[1] }, rootSessionId: deps.sessionId,
       listActiveClaims: () => claimStore.listActiveClaims(),
       sessionMemoryBlock: () => persist.buildMemoryBlock(),
       domainKnowledgeStore,
-      reviewOverrides,
-      reviewOverrideApiKeys,
-      workerRouting,
       writeProfiles: profileRegistry.listWriteProfiles(),
-    },
-    _order,
-    card,
-    workerRegistry,
-  )
+    }
+  })
+  const runtimeFactory = workerRuntime.runtimeFactory
 
   // EFE routing pulls per-turn signals from the agent. Build the agent first so
   // its ArtifactStore can be wired into the coordinator for worker artifact fallback.
-  let agentForSignals: AgentLoop | undefined
 
   // Track 1: unified shadow→gated promotion gate. Evidence is evaluated once
   // per session; `banditPromotion.killSwitch` rolls every path back at once.
@@ -1197,6 +1171,8 @@ export function createAgentRuntime(deps: {
       modelRoutingShadowModelCards: modelCards,
       domainKnowledgeStore,
       emitHookResult: deps.emitHookResult,
+      // #463: sidecar wires this to re-emit `goal_state` SSE per goal iteration.
+      onGoalIteration: deps.onGoalIteration,
       // 多会话隔离：turn-end 任务进度回灌与 todo-reminder 快照统一读本会话 store。
       // TUI 下 refs.todoStore 即全局 defaultStore（行为不变）；server 下每会话独立。
       // 闭包绑定 refs（switchModel 重建 loop 时复用同一 refs/todoStore）→ 守住缓存不变量。
@@ -1217,7 +1193,7 @@ export function createAgentRuntime(deps: {
     // worker 冻结/爆内存（/scout 蜂群卡死事故的结构解；协议与回退见
     // worker-process/parent.ts）。review 是针对「审查 worker 卡死连累主 TUI」的
     // 窄口径开关——不动其余 worker 的成熟进程内路径。
-    // entry 缺失自动回退进程内——公开仓裁剪与 dev 场景零破坏。
+    // entry 缺失终态受阻，不自动转进程内执行。
     ...(workerIsolationEnabled()
       ? { runWorker: createModeAwareRunner(workerIsolationMode(), { getMemoryBlock: () => persist.buildMemoryBlock() }) }
       : {}),
@@ -1228,7 +1204,8 @@ export function createAgentRuntime(deps: {
     ...resolveCoordinatorPoolCaps(config),
     providers: config.provider.providers,
     runtimeFactory,
-    routing: workerRouting,
+    selectModel: workerRuntime.selectModel,
+    allowAutomaticModelRotation: () => loadLayeredConfig({ cwd }).workers.defaultStrategy === 'auto',
     providerHealth,
     domainKnowledgeStore,
     modelTierShadowStore: refs.meridianIndexer?.getDb(),
@@ -1261,7 +1238,7 @@ export function createAgentRuntime(deps: {
       }
     },
     resumeEnabled: true,
-    reviewOverrideCards: reviewOverrideCards.size > 0 ? reviewOverrideCards : undefined,
+
     maxDelegationDepth: config.agent.maxDelegationDepth,
     // Shared-worktree mode: write workers run directly in the controller's single
     // shared cwd/branch (no per-worker git worktree, no diff回流/apply_patch merge).
@@ -1554,6 +1531,7 @@ export function switchAgentRuntime(ctx: BootstrapContext, modelId: string, targe
       domainKnowledgeStore: ctx.domainKnowledgeStore,
       modelId: resolved.modelId,
       session: ctx.session,
+      inheritFrozenFrom: { ...ctx.agent.config.promptEngine.exportFrozenSnapshot(), executionSnapshot: undefined },
       onStatusLine: text => ctx.setStatusLine?.(text),
     })
 
@@ -1564,6 +1542,8 @@ export function switchAgentRuntime(ctx: BootstrapContext, modelId: string, targe
     const carriedJobs = ctx.agent.jobs
     if (carriedJobs) { try { agent.setJobs(carriedJobs) } catch { /* best-effort */ } }
 
+    agent.config.client.authorizeCacheGeneration?.('explicit_user_model')
+    ctx.setStatusLine?.('模型已更换，后续请求可能重建缓存')
     ctx.agent = agent
     ctx.onAgentRuntimeChanged?.()
     ctx.refs.promptEngine = agent.config.promptEngine
@@ -2177,7 +2157,7 @@ export async function bootstrapInteractiveSession(opts: BootstrapOptions = {}): 
   const existingMessages = persist.loadOai()
   // resume 缓存继承的读侧：冻结前缀快照随会话落盘（<id>.frozen.json），
   // 有则经 inheritFrozenFrom 喂给新引擎——历史 user 消息恢复原始字节，
-  // 服务商缓存 TTL 内不再 byte-0 全 miss；无快照/坏文件降级为旧行为。
+  // 缺少实际执行证据时受阻，禁止静默冷启动。
   const resumedFrozen = wasSessionResumed() ? persist.readFrozenSnapshot() : undefined
   if (existingMessages.length > 0) {
     session.replaceMessages(existingMessages)
@@ -2310,13 +2290,14 @@ export async function bootstrapInteractiveSession(opts: BootstrapOptions = {}): 
   // 启动 resume 模型亲和（决策见 decideStartupResumeModel 注释）。
   const startupResume = decideStartupResumeModel({
     resumed: wasSessionResumed(),
-    explicitModel: effectiveModelId,
+    explicitModel: opts.modelId,
     explicitProvider: opts.providerName,
     originalModel: wasSessionResumed() ? persist.loadMetadata()?.model : undefined,
     fallbackModelId: config.agent?.resumeFallbackModel,
     resolve: modelId => resolveProviderForModel({ config, provider, apiKey, auth }, modelId),
   })
   if (startupResume.degradedWarning) console.error(startupResume.degradedWarning)
+  const explicitStartupGeneration = wasSessionResumed() && !!(opts.modelId || opts.providerName)
   const { agent } = createAgentRuntime({
     provider: startupResume.target?.provider ?? provider,
     apiKey: startupResume.target?.apiKey ?? apiKey,
@@ -2325,11 +2306,15 @@ export async function bootstrapInteractiveSession(opts: BootstrapOptions = {}): 
     toolRegistry, persist, claimStore, fileHistory, refs,
     domainKnowledgeStore, modelId: startupResume.target?.modelId ?? effectiveModelId,
     session,
-    inheritFrozenFrom: resumedFrozen,
+    inheritFrozenFrom: explicitStartupGeneration && resumedFrozen ? { ...resumedFrozen, executionSnapshot: undefined } : resumedFrozen,
     // 晚绑定：ctx.setStatusLine 由 TUI 层在 TuiApp 创建后回填（agent 早于
     // TUI 创建，资源压力提醒发生在运行期，届时已就绪）。
     onStatusLine: text => ctx.setStatusLine?.(text),
   })
+  if (explicitStartupGeneration) {
+    agent.config.client.authorizeCacheGeneration?.('explicit_user_model')
+    console.error('模型已按显式启动参数选择；后续请求进入新的缓存代次，可能重建缓存。')
+  }
   refs.promptEngine = agent.config.promptEngine
   runtimeAgent = agent
   // 记忆回填（opt-in：RIVET_MEMORY_BACKFILL=1，对齐 dsh memory-pipeline）：
@@ -2487,14 +2472,12 @@ export async function bootstrapInteractiveSession(opts: BootstrapOptions = {}): 
   // （sidecar 时序缝隙：先查后载则合并视图查不到注册项）。
   await loadProModule()
 
-  // 14a. Token 消耗台账（论坛同步）：本地累计默认开，endpoint+autoSync 齐全才启
+  // 14a. Token 消耗台账（论坛同步）：本地累计默认开，密钥+端点+autoSync 齐全才启
   // 定时推送。台账是旁路观测面，任何构造失败都不得影响启动。
   let tokenLedger: TokenLedgerService | undefined
   try {
-    if (config.tokenLedger?.enabled !== false) {
-      tokenLedger = new TokenLedgerService(config)
-      tokenLedger.startAutoSync()
-    }
+    tokenLedger = new TokenLedgerService(config)
+    tokenLedger.startAutoSync()
   } catch { /* best-effort */ }
 
   // 14. Shutdown handler

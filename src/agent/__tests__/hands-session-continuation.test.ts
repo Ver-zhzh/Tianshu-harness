@@ -99,7 +99,7 @@ describe('runHandsSession × 预算耗尽在 worktree 内续跑 (Wave 7)', () =>
     }
   }
 
-  it('撞轮次预算 → 同一工作树内续一轮 → 结果转 passed 且写闸门跑得起来', async () => {
+  it('预算耗尽即终止，保留部分 diff，不自动续跑或进写闸门', async () => {
     const order = testOrder({ id: 'wo-cont-basic' })
     const seen: Array<{ cwd: string; options?: HandsRunAgentOptions }> = []
     let gateRuns = 0
@@ -112,16 +112,12 @@ describe('runHandsSession × 预算耗尽在 worktree 内续跑 (Wave 7)', () =>
       evaluateWriteGate: async () => { gateRuns++; return report('passed') },
     }))
 
-    assert.equal(seen.length, 2, '首轮 + 一轮续跑')
-    assert.equal(seen[0]!.options, undefined, '首轮不带续跑选项')
-    assert.equal(seen[1]!.options?.continueSession, true, '续跑轮承接上一轮会话')
-    assert.match(seen[1]!.options?.objective ?? '', /继续未完成的任务/)
-    assert.match(seen[1]!.options?.objective ?? '', /实现 src\/output\.ts 并自验/, '续跑目标带上原始目标')
-    assert.equal(seen[0]!.cwd, seen[1]!.cwd, '续跑跑在同一个工作树里——上一轮的改动还在')
+    assert.equal(seen.length, 1)
+    assert.equal(run.result.status, 'blocked')
+    assert.equal(run.result.terminalFailure, true)
+    assert.equal(gateRuns, 0)
+    assert.ok(run.result.artifacts.some(a => a.kind === 'diff' || a.title.includes('diff') || a.content.includes('diff --git')), 'partial diff is retained without a continuation')
 
-    assert.equal(run.result.status, 'passed')
-    assert.equal(gateRuns, 1, '续跑把 blocked 转成 passed，写闸门才跑得起来')
-    assert.ok(run.result.risks.some(r => r.includes('budget-continuation')), '续跑留痕')
   })
 
   it('不续跑的话写工连闸门都过不去——续跑是闸门的前置', async () => {
@@ -136,7 +132,7 @@ describe('runHandsSession × 预算耗尽在 worktree 内续跑 (Wave 7)', () =>
     }))
     assert.equal(run.result.status, 'blocked', '续满上限仍未收敛 → 诚实交回 blocked')
     assert.equal(gateRuns, 0, 'blocked 不进闸门（这正是必须先续跑的原因）')
-    assert.ok(run.result.risks.some(r => r.includes('budget-continuation')))
+    assert.ok(!run.result.risks.some(r => r.includes('budget-continuation')))
   })
 
   it('续跑次数封顶，不会无限续', async () => {
@@ -166,7 +162,7 @@ describe('runHandsSession × 预算耗尽在 worktree 内续跑 (Wave 7)', () =>
       evaluateWriteGate: async () => { evaluations++; return evaluations === 1 ? report('failed') : report('passed') },
     }))
     assert.equal(runs, 1 + MAX_HANDS_EXTRA_RUNS, '首轮 + 总账额度，续跑没把闸门修复的额度吃掉')
-    assert.equal(evaluations, 2, '闸门修复仍跑得起来')
+    assert.equal(evaluations, 1, 'write gate failure does not schedule a repair')
   })
 
   it('父信号断开时不再续', async () => {
@@ -183,7 +179,7 @@ describe('runHandsSession × 预算耗尽在 worktree 内续跑 (Wave 7)', () =>
         return exhaustedJson(order)
       },
     }))
-    assert.equal(runs, 2, '第一轮续跑被中止后不再起第二轮')
+    assert.equal(runs, 1, 'budget failure is terminal before a second run')
     assert.equal(run.result.status, 'blocked', '保留上一轮的部分成果，不拿半截输出覆盖')
   })
 
@@ -199,9 +195,9 @@ describe('runHandsSession × 预算耗尽在 worktree 内续跑 (Wave 7)', () =>
         return exhaustedJson(order, 'timeout')
       },
     }))
-    assert.equal(beats.length, MAX_BUDGET_CONTINUATIONS, '续几轮就播报几条')
-    assert.match(beats[0]!, /续跑 1\/\d+ · 时间预算耗尽 · 工作树内/)
-    assert.match(beats[beats.length - 1]!, new RegExp(`续跑 ${MAX_BUDGET_CONTINUATIONS}/`))
+    assert.equal(runs, 1)
+    assert.deepEqual(beats, [], 'no continuation lifecycle or model run')
+
   })
 
   it('续跑后 worktree 仍被正常销毁，不泄漏', async () => {

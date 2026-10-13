@@ -9,6 +9,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { extname, isAbsolute, join, win32 } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { ANTI_INTERACTIVE_ENV } from '../tools/resolved-env.js'
+import { sanitizeEnv } from '../tools/bash.js'
 import { isProjectTrusted, notifyUntrustedOnce } from '../config/project-trust.js'
 
 export type HookEvent =
@@ -192,8 +193,12 @@ export function runHooksForEvent(cwd: string, ctx: HookContext, pluginHooks?: Pl
     }
 
     const timeoutMs = entry.timeoutMs ?? 5000
+    // 与 bash 工具同族（issue #137）：hook 脚本经 shell 运行、拿用户权限，
+    // 绝不能把父进程的密钥类变量或启动即执行类变量（NODE_OPTIONS / LD_PRELOAD
+    // 等，见 sanitizeEnv 的白名单排除）泄漏给子进程——否则 .rivet/hooks.json
+    // 的脚本成为凭据外泄与代码注入的旁路。
     const env = {
-      ...process.env,
+      ...sanitizeEnv(process.env),
       ...ANTI_INTERACTIVE_ENV,
       RIVET_HOOK_EVENT: ctx.event,
       RIVET_SESSION_ID: ctx.sessionId ?? '',

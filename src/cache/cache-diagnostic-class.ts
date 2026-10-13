@@ -2,6 +2,7 @@
 export function cacheDiagnosticClass(entry: Record<string, unknown>): string {
   const fields = entry.usageFields as Record<string, unknown> | undefined
   if (fields && (!fields.input_tokens || !fields.cache_read_input_tokens)) return 'usage_unknown'
+  if (['generation_changed', 'configuration_changed'].includes((entry.wire as { comparison?: string } | undefined)?.comparison ?? '')) return 'model_or_config_change'
   if (entry.archiveId) return 'explicit_compaction'
   if (entry.toolsUpdated || (entry.wireDiverged as { role?: string } | undefined)?.role === 'tools') return 'model_or_config_change'
   if (entry.frozenRestoreReason) return 'restore_rebuild'

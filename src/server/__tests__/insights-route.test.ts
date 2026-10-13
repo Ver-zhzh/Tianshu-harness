@@ -155,6 +155,17 @@ test('GET /sessions/:id/insights returns 404 for unknown session', async () => {
   assert.equal(res.status, 404)
 })
 
+test('worker failure with unobserved usage is explicitly unknown, not a free request', async () => {
+  const { agents, router } = setup()
+  const created = await router('POST', '/sessions', { prompt: 'go' }, AUTH)
+  const id = (created.body as { id: string }).id
+  agents[0]!.callbacks!.onDelegationActivity?.({ workOrderId: 'unknown-worker', parentToolId: 'tool', profile: 'code_scout', status: 'failed', terminalFailure: true, usageKnown: false, model: 'deepseek-v4-pro', provider: 'deepseek' })
+  const response = await router('GET', `/sessions/${id}/insights`, {}, AUTH)
+  const body = response.body as { workers: Array<{ costKnown: boolean }>; totals: { costKnown: boolean } }
+  assert.equal(body.workers[0]?.costKnown, false)
+  assert.equal(body.totals.costKnown, false)
+})
+
 test('insights: 累计快照口径 — 不求和（同一 worker 重复上报也只记一次）', async () => {
   // 2026-09-23：main session 的 usage 与 worker 的 usage 都是**累计快照**。
   // 求和 = 把同一批 token 按事件数记 N 次；实测真实会话放大 19×

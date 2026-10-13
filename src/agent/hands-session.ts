@@ -12,20 +12,11 @@ import {
 import { buildWorkerPrompt } from './worker-prompts.js'
 import {
   applyWriteGateToResult,
-  buildWorkerVerifyRepairPrompt,
   evaluateWorkerWriteGate,
   workerWriteGateEnabled,
   type EvaluateWorkerWriteGateInput,
   type WorkerWriteGateReport,
 } from './worker-write-gate.js'
-import {
-  buildContinuationObjective,
-  decideHandsContinuation,
-  markContinued,
-  mergeUsage,
-  MAX_HANDS_EXTRA_RUNS,
-  MAX_BUDGET_CONTINUATIONS,
-} from './worker-continuation.js'
 import { provisionSnapshotDeps } from './snapshot-deps.js'
 import { buildWorkerKnowledgeBlock } from './worker-knowledge.js'
 import { buildDomainKnowledgeBlock } from './domain-knowledge-block.js'
@@ -195,7 +186,6 @@ export async function runHandsSession(config: HandsSessionConfig): Promise<Hands
     let apiError: string | undefined
     let turnUsage: Partial<Usage> = {}
     // 首轮之外的 agent 轮次总账——执行续跑 / 写闸门修复共用，避免叠乘。
-    let extraRuns = 0
     // 预算回馈的实际用量信号：跨轮（首轮/续跑/修复）累计的工具调用数。
     let toolUses = 0
 
@@ -222,72 +212,15 @@ export async function runHandsSession(config: HandsSessionConfig): Promise<Hands
       result = parseWorkerResult(text, config.order.id)
    } catch (parseError) {
       const message = parseError instanceof Error ? parseError.message : String(parseError)
-      // Report repair belongs to worker-session; never re-enter execution here.
+      // Local salvage keeps partial evidence; it never starts another model request.
       result = salvageWorkerResult(text, config.order.id)
         ?? buildBlockedWorkerResult(config.order, message, 'json_parse')
    }
 
-    // ── Wave 7: 预算耗尽时在工作树内续跑 ─────────────────────────────────
-    // 写工撞 max-turns / 墙钟超时会**正常返回**一个 blocked 结果，而下面写闸门的
-    // 触发条件含 `status !== 'blocked'`——不续跑的话写工一旦撞预算连闸门都不过，
-    // 改动躺在工作树里没人验就随 finally 一起销毁。
-    //
-    // 落点必须在这里（解析之后、闸门之前）：worktree 还活着，上一轮的改动还在，
-    // 续跑是真的「接着干」。coordinator 层对写工一律 skip，避免双重续跑。
-    let continuationRounds = 0
-    let continuationReason: 'max_turns' | 'timeout' | undefined
-    while (true) {
-      const decision = decideHandsContinuation({
-        result,
-        attempt: continuationRounds,
-        extraRunsUsed: extraRuns,
-        aborted: apiError !== undefined,
-      })
-      if (!decision.proceed) break
-      continuationRounds++
-      extraRuns++
-      continuationReason = decision.reason
-      try {
-        config.onLifecycle?.(`续跑 ${continuationRounds}/${MAX_BUDGET_CONTINUATIONS} · ${decision.reason === 'timeout' ? '时间预算耗尽' : '轮次预算耗尽'} · 工作树内`)
-      } catch { /* 播报失败不影响续跑 */ }
-      const objective = buildContinuationObjective(config.order.objective, decision.reason, continuationRounds)
-      let continuedText = ''
-      try {
-        continuedText = await config.runAgent(objective, {
-          onTextDelta: (delta) => { continuedText += delta },
-          onThinkingDelta: () => {},
-          onToolUse: () => { toolUses++ },
-          onToolResult: () => {},
-          onTurnComplete: (usage) => { turnUsage = mergeUsage(turnUsage, usage) ?? turnUsage },
-          onError: (err) => { apiError = err.message },
-          onAbort: () => { apiError = 'aborted' },
-          onApprovalRequired: async () => false,
-        }, wt.path, { objective, continueSession: true })
-      } catch {
-        // 续跑本身抛错——保留上一轮的部分成果，不把它换成一份更差的报告。
-        break
-      }
-      // 父信号断开 / API 报错：不再续，也不拿这一轮半截输出覆盖上一轮结果。
-      if (apiError) break
-      let continued: WorkerResult | undefined
-      try {
-        continued = parseWorkerResult(continuedText, config.order.id)
-      } catch {
-        continued = salvageWorkerResult(continuedText, config.order.id) ?? undefined
-      }
-      if (!continued) break
-      result = continued
-    }
-    if (continuationRounds > 0 && continuationReason) {
-      result = markContinued(result, continuationRounds, continuationReason)
-    }
-
     // ── W4-D1: main-side write gate ──────────────────────────────────────
     // Workers self-report verification, but the main controller re-runs it
     // against the worker's actual tree (reusing wave-gate: scoped typecheck +
-    // whitelisted declared command). Gate failure gives the SAME worker one
-    // bounded repair round; a second failure returns 'failed' to the primary.
-    // Blocked (env) is environment-neutral: no repair, no capability penalty.
+    // whitelisted declared command). A failed or blocked gate is terminal.
     let writeGate: HandsSessionRun['writeGate']
     const gateOn = config.writeGateEnabled ?? workerWriteGateEnabled()
     if (gateOn && result.changedFiles.length > 0 && result.status !== 'blocked' && !apiError) {
@@ -297,39 +230,17 @@ export async function runHandsSession(config: HandsSessionConfig): Promise<Hands
       if (!inPlace) {
         try { provisionSnapshotDeps(config.cwd, wt.path) } catch { /* gate will report unverifiable */ }
       }
-      let report = await evaluate({ cwd: wt.path, result })
-      let repairCount = 0
-      if (report.outcome === 'failed' && extraRuns < MAX_HANDS_EXTRA_RUNS) {
-        repairCount = 1
-        extraRuns++
-        try {
-          const objective = buildWorkerVerifyRepairPrompt(config.order, report)
-          const repairText = await config.runAgent(objective, {
-            onTextDelta: () => {},
-            onThinkingDelta: () => {},
-            onToolUse: () => { toolUses++ },
-            onToolResult: () => {},
-            onTurnComplete: (usage) => { turnUsage = mergeUsage(turnUsage, usage) ?? turnUsage },
-            onError: (err) => { apiError = err.message },
-            onAbort: () => { apiError = 'aborted' },
-            onApprovalRequired: async () => false,
-          }, wt.path, { objective, continueSession: true })
-          if (!apiError) {
-            result = parseWorkerResult(repairText, config.order.id)
-            report = await evaluate({ cwd: wt.path, result })
-          }
-        } catch {
-          // Repair output unparseable — keep the failing report; result is
-          // marked failed below and adjudication returns to the primary.
-        }
-      }
+      const report = await evaluate({ cwd: wt.path, result })
+      const repairCount = 0
       result = applyWriteGateToResult(result, report, repairCount)
       writeGate = { report, repairCount }
     }
 
+    if (result.status !== 'passed' || apiError || result.failureReason) result = { ...result, terminalFailure: true }
+
     // Collect diff only when running in a real worktree (in-place mode has no
     // isolated worktree and no base ref, so diff is meaningless). Collected
-    // AFTER the write gate so bounded-repair changes are included.
+    // AFTER the write gate so the result and diff describe the same tree.
     const baseRef = inPlace ? undefined : (config.baseRef ?? getCurrentGitRef(config.cwd))
     // Materialized scope files are inputs copied from the base repo, not worker
     // output — exclude them so the patch applies back onto the base repo.

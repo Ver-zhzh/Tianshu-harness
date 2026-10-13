@@ -28,7 +28,8 @@ describe('sub-agent / review routing config', () => {
     assert.equal(review.skipAuto, false)
     assert.equal(review.mechanicalFastPath, true)
     // workers has built-in defaults (default.ts)
-    assert.equal(workers.routing.code_edit, 'cheap-flash')
+    assert.equal(workers.defaultStrategy, 'session')
+    assert.deepEqual(workers.routing, {})
     assert.deepEqual(workers.profiles['cheap-flash'], { provider: 'deepseek', model: 'deepseek-flash' })
   })
 
@@ -73,7 +74,7 @@ describe('sub-agent / review routing config', () => {
     const cfg = loadConfig()
     assert.equal(cfg.agent.review.skipAuto, true)
     // workers untouched → still has default routing
-    assert.equal(cfg.workers.routing.code_edit, 'cheap-flash')
+    assert.deepEqual(cfg.workers.routing, {})
   })
 
   it('rejects an invalid review payload (missing model) without writing', () => {
@@ -135,4 +136,30 @@ describe('sub-agent / review routing config', () => {
     assert.deepEqual(loadConfig().agent.review.profiles.reviewer, { provider: 'deepseek', model: 'deepseek-v4-pro' })
     assert.equal(loadConfig().agent.council.seats.length, 1)
   })
+})
+
+it('explicit session/auto policies and legacy fixed bindings round-trip without changing model definitions', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rivet-routing-policies-'))
+  const previous = process.env.RIVET_CONFIG_PATH
+  process.env.RIVET_CONFIG_PATH = join(dir, 'config.json')
+  try {
+    const before = loadConfig().provider.providers
+    const saved = setRoutingConfig({
+      review: { profiles: { reviewer: { strategy: 'session' }, verifier: { strategy: 'auto' }, patcher: { provider: 'custom', model: 'same', keyId: 'second' } } },
+      workers: { defaultStrategy: 'session', profiles: { legacy: { provider: 'custom', model: 'same', keyId: 'second' } }, routing: { planning: 'legacy', repo_summarization: { strategy: 'session' }, code_edit: { strategy: 'auto' } } },
+      council: { seats: [{ authority: 'tianfu', modelStrategy: 'session', provider: 'custom', model: 'same', keyId: 'second' }] },
+    })
+    const reread = getRoutingConfig()
+    assert.deepEqual(reread.review, saved.review)
+    assert.deepEqual(reread.council, saved.council)
+    assert.deepEqual(reread.workers.routing, saved.workers.routing)
+    assert.deepEqual(reread.workers.profiles.legacy, saved.workers.profiles.legacy)
+    assert.deepEqual(loadConfig().provider.providers, before)
+    assert.equal(reread.workers.routing.planning, 'legacy')
+    assert.deepEqual(reread.review.profiles.reviewer, { strategy: 'session' })
+    assert.equal(reread.council.seats[0]?.keyId, 'second')
+  } finally {
+    if (previous === undefined) delete process.env.RIVET_CONFIG_PATH; else process.env.RIVET_CONFIG_PATH = previous
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

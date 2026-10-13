@@ -103,7 +103,7 @@ function exhaustThenFinishClient(trace: Trace): StreamClient {
 }
 
 describe('预算耗尽自动续跑（接线）', () => {
-  it('只读 worker 撞满轮次预算后自动续跑，并在结果上留痕', async () => {
+  it('只读 worker 撞满轮次预算后终态失败，禁止续跑', async () => {
     const tmp = mkdtempSync(join(tmpdir(), 'rivet-continuation-'))
     const trace: Trace = { lastUserMessages: [] }
     try {
@@ -143,25 +143,10 @@ describe('预算耗尽自动续跑（接线）', () => {
 
       const result = run.results[0]
       assert.ok(result, '应当有一个 worker 结果')
-      assert.equal(result.status, 'passed', '续跑轮产出的终局报告应当成为最终结果')
-      assert.ok(
-        result.risks.some(r => r.includes('budget-continuation')),
-        `续跑应在 risks 上留痕，实际：${JSON.stringify(result.risks)}`,
-      )
-      assert.ok(
-        trace.lastUserMessages.some(m => m.includes('继续未完成的任务')),
-        '续跑轮应当带着「接着干」的 objective 出场',
-      )
-      assert.ok(
-        trace.lastUserMessages.some(m => m.includes('不要重做')),
-        '续跑 objective 应当明确要求不重做已完成的工作',
-      )
-      // Wave 10：补偿轮要看得见。不发事件的话，面板上只有一个 worker 长时间"还在跑"，
-      // 用户无从判断它是卡住了还是已经进了第二次续跑。
-      // B 终轮定型后每次收尾轮也会上行 'finalizing report' lifecycle——计数只看续跑事件。
-      const continuations = activity.filter(a => a.kind === 'lifecycle' && /续跑/.test(a.detail ?? ''))
-      assert.equal(continuations.length, 1, `续跑一轮应当上行一条续跑 lifecycle 事件，实际：${JSON.stringify(activity.filter(a => a.kind === 'lifecycle').map(a => a.detail))}`)
-      assert.match(continuations[0]!.detail ?? '', /续跑 1\/\d+ · 轮次预算耗尽/)
+      assert.equal(result.status, 'blocked')
+      assert.equal(result.terminalFailure, true)
+      assert.ok(!trace.lastUserMessages.some(m => m.includes('继续未完成的任务')))
+      assert.equal(activity.filter(a => a.kind === 'lifecycle' && /续跑/.test(a.detail ?? '')).length, 0)
     } finally {
       // Windows：句柄释放竞态（EPERM）——异步重试等待期间推进事件循环。
       await rm(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })

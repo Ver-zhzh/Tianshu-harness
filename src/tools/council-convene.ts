@@ -200,6 +200,8 @@ export function createCouncilConveneTool(
         ...(s.charter ? { charter: s.charter } : {}),
         ...(s.tierHint ? { tierHint: s.tierHint } : {}),
         ...(s.noDowngrade !== undefined ? { noDowngrade: s.noDowngrade } : {}),
+        ...(s.modelStrategy ? { modelStrategy: s.modelStrategy } : {}),
+        ...(s.keyId ? { keyId: s.keyId } : {}),
         // Per-seat provider/model → threaded as modelOverride by the orchestrator.
         ...(s.provider && s.model ? { provider: s.provider, model: s.model } : {}),
       }))

@@ -9,6 +9,7 @@
  */
 
 export interface FrozenSnapshotData {
+  executionSnapshot?: import('../api/continuation-prefix.js').ContinuationPrefixProof
   v: 1 | 2
   userKeys?: string[]
   anchors?: import('./frozen-anchors.js').FrozenAnchor[]

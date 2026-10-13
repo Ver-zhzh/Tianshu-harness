@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { z } from 'zod'
+import { modelTargetSchema, type ModelTarget } from '../config/schema.js'
 import type { CapabilityTask } from '../model/capability.js'
 import type { VerificationMetadata } from '../tools/types.js'
 import { profileRegistry, tierTimeoutMultiplier } from './profile-registry.js'
@@ -196,7 +197,7 @@ const workOrderSchema = z.object({
    *  the worker runs on this exact provider/model with its own client/cache —
    *  used by heterogeneous council seats. Silently ignored if the provider is
    *  unknown or lacks credentials (runtimeFactory falls back to the session model). */
-  modelOverride: z.object({ provider: z.string().min(1), model: z.string().min(1) }).optional(),
+  modelOverride: modelTargetSchema.optional(),
   /** 瑶光门 tier 下限：路由结果不得低于此档（council 席位 tierHint+noDowngrade
    *  等场景）。只抬升不降级；modelOverride 仍然最高优先。 */
   tierFloor: z.enum(['cheap', 'balanced', 'strong']).optional(),
@@ -304,23 +305,12 @@ export const workerResultSchema = z.object({
   /**
    * Why the worker failed — enables recovery-strategy differentiation.
    *
-   * status × failureReason 消费矩阵（2026-08-25 收口）：
-   * - caller_aborted → status 'blocked'：父会话主动取消，消费方不得重试。
-   *   例外（2026-09-05 completed-aborted）：abort 收尾时产物已按 scope 声明
-   *   落盘的，coordinator 升级为 status 'passed' + deliveredOnAbort:true
-   *   （证据钉死 unverified）——failureReason 保留 caller_aborted/timeout
-   *   供下游区分「被 abort 杀掉的已交付」与「干净通过」。见 upgradeAbortedDelivery。
-   * - timeout / max_turns → 预算耗尽：可续跑信号（hands-session 内部先续跑，
-   *   放弃后才对外；消费方见二者不应自动再续）。
-   * - worker_blocked → 环境/闸门阻断：环境中性，不计能力惩罚。
-   * - circuit_open → 熔断：应退避而非立即重试。
-   * - claim_conflict → 文件归属冲突：换文件集或等待，重试同一集合无意义。
-   * - json_parse / schema_mismatch → 结果契约失败：已走 salvage 恢复，恢复
-   *   内容可信度降级（parseErrorKind 细分）。
-   * - stalled → 空转（几乎无工具调用耗尽预算）：诊断信号，非普通失败。
-   * - worker_crash → 进程级崩溃：coordinator 兜底归类（classifyWorkerError）。
-   * - policy_short_circuit → 策略短路；unknown → 无法归类。
+   * 所有执行、报告、验证或预算失败都是终态；本地打捞只保留证据，
+   * 不把失败升级为成功，也不允许自动续跑或修复请求。
    */
+  usageKnown: z.boolean().optional(),
+  terminalFailure: z.boolean().optional(),
+  failureStage: z.enum(['binding', 'transport', 'report', 'budget', 'process', 'verification', 'continuity', 'dispatch']).optional(),
   failureReason: z.enum(['caller_aborted', 'circuit_open', 'claim_conflict', 'timeout', 'max_turns', 'stalled', 'json_parse', 'schema_mismatch', 'worker_crash', 'worker_blocked', 'policy_short_circuit', 'unknown']).optional(),
   /** Runtime metadata: 派发时的 objective，由 coordinator 盖章。
    *
@@ -410,6 +400,9 @@ const workerResultIngestSchema = z.object({
    *  `JSON.stringify` 后交给 `parseWorkerResult` 再解一次——不收这个键的话，
    *  写工的失败原因（含续跑判据依赖的 max_turns / timeout）会在这道内部序列化
    *  边界上被静默剥掉，主控只看到一个没有原因的 blocked。 */
+  usageKnown: z.boolean().optional(),
+  terminalFailure: z.boolean().optional(),
+  failureStage: z.enum(['binding', 'transport', 'report', 'budget', 'process', 'verification', 'continuity', 'dispatch']).optional(),
   failureReason: z.enum(['caller_aborted', 'circuit_open', 'claim_conflict', 'timeout', 'max_turns', 'stalled', 'json_parse', 'schema_mismatch', 'worker_crash', 'worker_blocked', 'policy_short_circuit', 'unknown']).optional(),
   /** D 度量细分，同 failureReason 的内部往返纪律（见 workerResultSchema 同名注释）。 */
   parseErrorKind: z.enum(['no_json', 'json_syntax', 'schema_field', 'truncated']).optional(),
@@ -483,7 +476,7 @@ export interface CreateReadOnlyWorkOrderInput {
   /** B2: current session turn for progressive timeout calculation. */
   sessionTurn?: number
   /** Per-order provider/model override (highest routing precedence). */
-  modelOverride?: { provider: string; model: string }
+  modelOverride?: ModelTarget
   /** 瑶光门 tier 下限：路由结果不得低于此档。只抬升不降级。 */
   tierFloor?: 'cheap' | 'balanced' | 'strong'
   /** 写工显式 opt-in 批级共享信息素（星河收编 #3）。 */
@@ -556,7 +549,7 @@ export function createReadOnlyWorkOrder(input: CreateReadOnlyWorkOrderInput): Wo
         ?? profileRegistry.get(input.profile)?.defaultTimeoutMs
         ?? progressiveTimeout(input.sessionTurn))
         * tierTimeoutMultiplier(input.tierFloor)),
-      maxRetries: input.budget?.maxRetries ?? 2,
+      maxRetries: 0,
       retryBackoffMs: input.budget?.retryBackoffMs ?? 10000,
       maxRetryBackoffMs: input.budget?.maxRetryBackoffMs ?? 300000,
     },
@@ -619,7 +612,7 @@ export function createWriteWorkOrder(input: CreateWriteWorkOrderInput): WorkOrde
         ?? profileRegistry.get(input.profile ?? 'patcher')?.defaultTimeoutMs
         ?? progressiveTimeout(input.sessionTurn))
         * tierTimeoutMultiplier(input.tierFloor)),
-      maxRetries: input.budget?.maxRetries ?? 1,
+      maxRetries: 0,
       retryBackoffMs: input.budget?.retryBackoffMs ?? 10000,
       maxRetryBackoffMs: input.budget?.maxRetryBackoffMs ?? 300000,
     },
@@ -1044,7 +1037,7 @@ export function salvageWorkerResult(text: string, expectedWorkOrderId: string, p
     }],
     changedFiles: [],
     risks: [`parse-salvaged: ${findings.length} finding(s) recovered from a malformed report — verify before trusting`],
-    nextActions: ['Weigh salvaged findings as unverified leads; re-dispatch with resume if full fidelity is needed'],
+    nextActions: ['Weigh salvaged findings as unverified leads; inspect the failed runtime path instead of retrying this task'],
     evidenceStatus: 'unverified',
     failureReason: 'json_parse',
     reportSource: 'salvaged',

@@ -5,7 +5,11 @@
  */
 import { loadConfig, saveConfig } from './manager.js'
 import { rivetHome } from './paths.js'
+import { existsSync, realpathSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { isAbsolute, relative, resolve } from 'node:path'
+import { isProtectedDirectory } from '../server/workspace-roots.js'
+import { expandTilde } from '../server/workspace.js'
 
 export interface WorkspaceConfigSnapshot {
   /** 未指定目录的新会话落点；null = 未配置。 */
@@ -51,6 +55,39 @@ export function assertScratchDirInDataRoot(dir: string): void {
 }
 
 /**
+ * `defaultDir` 未校验 → 已注册工作区投毒（2026-10-12 安全审计）。
+ *
+ * `registeredWorkspaces()`（workspace-guard.ts，issue #221 守卫的 allowlist
+ * 来源之一）把 defaultDir 直接纳入"已注册工作区"，进而放行 /project-docs、
+ * /project-templates/*、/project/trust 等路由的 cwd 参数。defaultDir 零校验 =
+ * 任何能写配置的一方（Bearer 鉴权 ≠ 用户同意，见 #221）都能把任意目录
+ * （如 /etc）注册进来，绕过 #221 守卫：PUT /project-docs {cwd:"/etc"} 可往
+ * /etc 写 AGENTS.md，POST /project/trust {cwd:"/etc"} 可自我授信；mode=default
+ * 的新会话也会落进去。与 scratchDir 的 assertScratchDirInDataRoot
+ * （issue #223）同族缺口。
+ *
+ * 只拦系统保护目录（与 validateWorkspaceRoots 同一名单）：普通目录仍视为
+ * 用户意图，不做存在性等限制，保持最小改动。
+ *
+ * @throws Error —— 路由层（workspace-route.ts 的 PUT /config/workspace）转 400。
+ */
+function assertDefaultDirSafe(dir: string): void {
+  // 审查 L2：复用 server/workspace.ts 的 expandTilde 单一实现，避免两处 ~ 语义
+  // 长期手工同步（它一改、这里就漂移，校验与真实落点会分家）。
+  const expanded = expandTilde(dir, homedir())
+  if (isProtectedDirectory(expanded)) {
+    throw new Error('Invalid "defaultDir" — system-protected folder cannot be a workspace')
+  }
+  // 审查 M1：上面只按字面路径查名单，`~/mylink → /etc` 这类 symlink 的名字
+  // 不像受保护目录，会被放行，落点却仍是 /etc。路径存在时用 realpath 解析后
+  // 再判一次，与 validateWorkspaceRoots（先 realpathSync 再判）的强度对齐。
+  // 仍不做存在性限制：路径不存在时跳过（悬空 symlink 逃逸不到受保护目录）。
+  if (existsSync(expanded) && isProtectedDirectory(realpathSync(expanded))) {
+    throw new Error('Invalid "defaultDir" — system-protected folder cannot be a workspace')
+  }
+}
+
+/**
  * 写入用户全局配置——**部分更新语义**（2026-09-15 审查跟进）：
  *   undefined = 不改该字段（设置页每个控件独立提交，漏传 ≠ 清除）；
  *   null / 空白字符串 = 清除该字段（回到旧行为）；
@@ -69,7 +106,10 @@ export function setWorkspaceConfig(input: { defaultDir?: unknown; scratchDir?: u
   const next = { ...(cfg.workspace ?? {}) }
   if (input.defaultDir !== undefined) {
     const v = readPath(input.defaultDir, 'defaultDir')
-    if (v) next.defaultDir = v
+    if (v) {
+      assertDefaultDirSafe(v)
+      next.defaultDir = v
+    }
     else delete next.defaultDir
   }
   if (input.scratchDir !== undefined) {

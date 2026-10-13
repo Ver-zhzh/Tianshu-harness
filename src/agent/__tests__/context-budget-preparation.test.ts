@@ -5,7 +5,7 @@ import { compactBudgetHistory } from '../budget-compaction.js'
 import type { OaiMessage } from '../../api/oai-types.js'
 
 const policy = { windowTokens: 1_048_576, maxOutputTokens: 393_216 }
-test('actual request preparation compacts when input exceeds 90% of the realistic input budget', async () => {
+test('actual request preparation compacts only when input exceeds the hard input budget', async () => {
   let content = 'x'.repeat(850_000 * 4), compacts = 0
   const states: string[] = []
   const req = await prepareContextRequest({ policy,
@@ -24,7 +24,7 @@ test('unproductive compaction has a finite budget and cannot send an oversized r
     build: () => ({ model: 'deepseek-flash', max_tokens: 384_000, messages: [{ role: 'user', content: 'x'.repeat(4_000_000) }], stream: true }),
     compact: async () => { compacts++; return true }, publish: () => {},
   }), { name: 'ContextBudgetExceededError' })
-  assert.equal(compacts, 2)
+  assert.equal(compacts, 1)
 })
 
 function history(): OaiMessage[] {

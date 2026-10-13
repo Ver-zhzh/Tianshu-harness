@@ -1,3 +1,4 @@
+import { isCompleteExecutionSnapshot, LocalWorkerPolicyError } from '../api/continuation-prefix.js'
 import { readHandoffWithCoverage, writeHandoffCoverage, writeHandoffTail } from './handoff-coverage.js'
 import { readFile } from 'node:fs/promises'
 import { setImmediate as yieldToLoop } from 'node:timers/promises'
@@ -687,15 +688,31 @@ export class SessionPersist {
    * 不存在 / 坏 JSON / 形状校验失败一律 undefined——调用方降级为全量重建。
    */
   readFrozenSnapshot(): FrozenSnapshotData | undefined {
-    if (!existsSync(this.frozenPath)) return undefined
+    const logPath = join(getSessionDir(this.cwd), this.sessionId, 'cache-log.jsonl')
+    const hasLog = existsSync(logPath) && statSync(logPath).size > 0
+    const hasRequests = hasLog || (existsSync(this.filePath) && statSync(this.filePath).size > 0 && this.loadOai().length > 0)
+    let data: FrozenSnapshotData | undefined
     try {
-      const data = parseFrozenSnapshotData(JSON.parse(readFileSync(this.frozenPath, 'utf-8')))
-      if (!data) this.frozenSaveError = 'snapshot_corrupt'
-      return data
-    } catch {
-      this.frozenSaveError = 'snapshot_corrupt'
-      return undefined
+      if (existsSync(this.frozenPath)) data = parseFrozenSnapshotData(JSON.parse(readFileSync(this.frozenPath, 'utf8')))
+    } catch { this.frozenSaveError = 'snapshot_corrupt' }
+    if (!hasRequests) return data
+    if (!data) throw new LocalWorkerPolicyError('历史会话缺少完整冻结快照；本次请求受阻，请显式开始新会话')
+    if (!isCompleteExecutionSnapshot(data.executionSnapshot)) {
+      // Diagnostics contain hashes and normalized options only, never credentials or request bodies.
+      const lines = hasLog ? readFileSync(logPath, 'utf8').trim().split('\n') : []
+      for (let i = lines.length - 1; i >= 0; i--) {
+        try {
+          const row = JSON.parse(lines[i]!)
+          if (row.event || (row.status && row.status !== 'complete')) continue
+          if (isCompleteExecutionSnapshot(row.executionSnapshot)) {
+            data = { ...data, executionSnapshot: row.executionSnapshot }
+            break
+          }
+        } catch { /* incomplete trailing row */ }
+      }
     }
+    if (!isCompleteExecutionSnapshot(data.executionSnapshot)) throw new LocalWorkerPolicyError('历史请求的模型、凭据归属或执行选项证据不足；禁止静默冷启动，请显式开始新会话')
+    return data
   }
 
   loadMemory(): SessionMemoryState {

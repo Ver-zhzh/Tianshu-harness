@@ -23,6 +23,7 @@
 import { fetchCauseDetail } from './error-classifier.js'
 import { beginCallAudit, auditConfigFingerprint, type CallAuditContext } from './call-audit.js'
 import { observeAuditResponse } from './transport-audit.js'
+import { checkExecutionSend, credentialPrincipal, currentExecutionScope } from './execution-continuity.js'
 
 const DEFAULT_TIMEOUT_MS = 45_000
 
@@ -35,12 +36,32 @@ export async function fetchWithTimeout(
   auditContext?: CallAuditContext,
 ): Promise<Response> {
   const userSignal = init.signal
+  const execution = currentExecutionScope()
+  if (execution && auditContext?.requestId) execution.requestId = auditContext.requestId
+  if (execution && typeof init.body === 'string') {
+    const body = JSON.parse(init.body) as Record<string, unknown>
+    checkExecutionSend(String(url), body, credentialPrincipal(init.headers))
+  }
+  if (execution?.sessionId) {
+    const headers = new Headers(init.headers)
+    headers.set('X-Request-Session', execution.sessionId)
+    for (const name of ['x-grok-conv-id', 'x-opencode-session']) if (headers.has(name)) headers.set(name, execution.sessionId)
+    if (init.headers && !(init.headers instanceof Headers) && !Array.isArray(init.headers)) {
+      const original = { ...init.headers } as Record<string, string>
+      for (const name of ['X-Request-Session', 'x-grok-conv-id', 'x-opencode-session']) {
+        const key = Object.keys(original).find(key => key.toLowerCase() === name.toLowerCase())
+        if (key || name === 'X-Request-Session') original[key ?? name] = execution.sessionId
+      }
+      init = { ...init, headers: original }
+    } else init = { ...init, headers }
+  }
   let model: string | undefined
   let wireOptions: Record<string, unknown> = {}
   try { const body = typeof init.body === 'string' ? JSON.parse(init.body) : {}; model = body.model; wireOptions = Object.fromEntries(['thinking', 'reasoning', 'reasoning_effort', 'max_tokens', 'max_output_tokens', 'temperature', 'tool_choice', 'response_format'].map(key => [key, body[key]])) } catch { /* non-model request */ }
   // OpenAI chat has a richer attempt observer; other protocols use this transport observer.
   const context = { ...auditContext, configFingerprint: auditConfigFingerprint(wireOptions), model, provider: auditContext?.provider ?? (() => { try { return new URL(url).hostname } catch { return undefined } })(), purpose: auditContext?.purpose ?? 'transport_completion', sessionId: auditContext?.sessionId ?? new Headers(init.headers).get('X-Request-Session') ?? undefined }
-  const audit = model && !String(url).includes('/chat/completions') ? beginCallAudit(context) : undefined
+  const audit = (model ?? execution?.model) && !String(url).includes('/chat/completions') ? beginCallAudit({ ...context, model: model ?? execution?.model }) : undefined
+  if (audit && execution) execution.usageFields = {}
   // Own controller + timer instead of AbortSignal.timeout: AbortSignal.timeout
   // cannot be disarmed, so merging it into the fetch signal would keep counting
   // down through the entire body stream. A clearable timer lets us cover only

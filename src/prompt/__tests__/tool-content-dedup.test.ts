@@ -4,7 +4,7 @@ import { PromptEngine } from '../engine.js'
 import type { OaiMessage } from '../../api/oai-types.js'
 
 // A prefix-only hash collision must never replace the earlier distinct file.
-test('request dedup retains different equal-length tool output tails and removes exact duplicates', () => {
+test('request dedup preserves both distinct tails and exact duplicates once rendered', () => {
   const engine = new PromptEngine({ model: 'fictional', maxTokens: 100, staticCtx: { tools: [] }, volatileCtx: { cwd: '/fictional' } })
   const header = '// shared header\n'.repeat(200)
   const outputs = [header + 'AAAA', header + 'BBBB', header + 'AAAA']
@@ -15,7 +15,9 @@ test('request dedup retains different equal-length tool output tails and removes
   }
   const request = engine.buildOaiRequest(messages, undefined, 128_000)
   const tools = request.messages.filter(m => m.role === 'tool')
-  assert.equal(tools[0]?.content, '[duplicate content, see later tool result]')
+  assert.equal(tools[0]?.content, header + 'AAAA')
+  const again = engine.buildOaiRequest(messages, undefined, 1_000_000)
+  assert.deepEqual(again.messages.filter(m => m.role === 'tool'), tools, 'full/light or window changes cannot restore or hide old content')
   assert.equal(tools[1]?.content, header + 'BBBB')
   assert.equal(tools[2]?.content, header + 'AAAA')
   assert.equal(messages[2]?.content, header + 'AAAA', 'source history stays intact')

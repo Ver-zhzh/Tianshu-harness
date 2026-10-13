@@ -8,6 +8,7 @@ import { createVolatileSnapshot } from '../volatile-snapshot.js'
 import { stableStringify } from '../../api/stable-json.js'
 import { latestUserTrailer } from './helpers/message-selectors.js'
 import type { OaiChatRequest, OaiMessage } from '../../api/oai-types.js'
+import { proveWirePrefix } from '../../api/continuation-prefix.js'
 
 function makeEngine() {
   return new PromptEngine({
@@ -31,6 +32,22 @@ function canonicalOaiBody(request: OaiChatRequest): Record<string, unknown> {
 }
 
 describe('PromptEngine OpenAI-native request building', () => {
+  it('published execution snapshot freezes late tool registration without changing the request', () => {
+    const engine = makeEngine()
+    const messages: OaiMessage[] = [{ role: 'user', content: 'inspect' }]
+    const first = engine.buildOaiRequest(messages)
+    const proof = proveWirePrefix(canonicalOaiBody(first), 'fixture', 'first', 'https://fixture.invalid')
+    proof.cacheGenerationId = 'fixture-generation'; proof.credentialScope = 'fixture:default'
+    first.onExecutionSnapshot!(proof)
+    engine.updateTools([{ name: 'new_mcp', description: 'late tool', input_schema: { type: 'object', properties: {} } }])
+    const next = engine.buildOaiRequest(messages)
+    assert.deepEqual(next.tools, first.tools)
+    assert.equal(next.messages[0]?.content, first.messages[0]?.content)
+    assert.equal(engine.exportFrozenSnapshot().executionSnapshot, proof)
+    engine.authorizeCacheGeneration()
+    engine.updateTools([{ name: 'another_mcp', description: 'late after user effort change', input_schema: { type: 'object', properties: {} } }])
+    assert.deepEqual(engine.buildOaiRequest(messages).tools, first.tools, 'an authorized effort generation cannot reopen late tool registration')
+  })
   it('message selector parses latest user trailer', () => {
     const parsed = latestUserTrailer([{ role: 'user', content: 'fresh\n---\nhello' }])
     assert.equal(parsed.fresh, 'fresh')
@@ -404,8 +421,7 @@ describe('PromptEngine active claims projection', () => {
     const maskedCountWithoutCW = reqWithoutCW.messages.filter(
       (m: any) => m.role === 'tool' && m.content.startsWith('[observation masked')
     ).length
-    assert.ok(maskedCountWithoutCW > 0,
-      'old tool results should be masked without contextWindow')
+    assert.equal(maskedCountWithoutCW, 0, 'unknown windows preserve previously published observations')
 
     // With contextWindow >= 1M: NO masking even at 85 turns (>> MASK_WINDOW=10)
     const reqWith1M = engine.buildOaiRequest(messages, undefined, 1_000_000)
@@ -796,7 +812,7 @@ describe('T7 watermark collapse (P0-2)', () => {
     const history = bigHistory(12, 200_000)
     engine.buildOaiRequest([...history], undefined, 1_000_000)
     const wm1 = engine.getCacheEventStats().collapseWatermark
-    assert.ok(wm1 > 0, 'watermark set above gate')
+    assert.equal(wm1, 0, 'request-time collapse is disabled at every fill ratio')
 
     // Same token step: repeated request — watermark must NOT move.
     engine.buildOaiRequest([...history], undefined, 1_000_000)
@@ -819,7 +835,7 @@ describe('T7 watermark collapse (P0-2)', () => {
     engine.buildOaiRequest(crossed, undefined, 1_000_000)
     const wm2 = engine.getCacheEventStats().collapseWatermark
     assert.ok(wm2 >= wm1, 'watermark only moves forward')
-    assert.notEqual(wm2, wm1, 'crossing a 50K step advances the watermark')
+    assert.equal(wm2, wm1, 'growth cannot authorize a request-time history rewrite')
   })
 })
 

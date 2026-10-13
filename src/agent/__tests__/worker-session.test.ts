@@ -598,9 +598,9 @@ describe('worker finalization turn (B：终轮定型)', () => {
     ])
     const run = await runWorkerSession(finalizeConfig(order, client, { maxTurns: 1 }))
 
-    assert.equal(run.result.status, 'passed', '终型成功即正常返回')
-    assert.equal(run.result.failureReason, undefined, '不再盖章 max_turns')
-    assert.equal(requests.length, 2, '探索一次 + 同前缀收尾一次')
+    assert.equal(run.result.status, 'blocked')
+    assert.equal(run.result.failureReason, 'max_turns')
+    assert.equal(requests.length, 1, 'budget failure cannot issue a closing request')
   })
 
   it('max-turns 非自愿耗尽 + 终型失败 → 回退确定性 max-turns 阶梯', async () => {
@@ -614,7 +614,7 @@ describe('worker finalization turn (B：终轮定型)', () => {
     assert.equal(run.result.status, 'blocked')
     assert.equal(run.result.failureReason, 'max_turns')
     assert.match(run.result.summary, /max-turns: exhausted without a final turn/)
-    assert.equal(requests.length, 2, '探索 + 一次同前缀收尾；不进修复梯')
+    assert.equal(requests.length, 1, 'no closing or repair after budget failure')
   })
 
   it('abort → 不发起终型调用（abort 绝对优先）', async () => {
@@ -651,7 +651,6 @@ describe('worker finalization turn (B：终轮定型)', () => {
   it('收尾请求经 submit_result 交报告：唯一工具调用参数过权威校验即成功，伴随散文忽略', async () => {
     const order = scoutOrder('wo_submit')
     const { client, requests } = blockClient([
-      'exploration prose',
       { blocks: [
         textBlock('Ignored prose next to the tool call.'),
         { type: 'tool_use', id: 'tu_submit', name: 'submit_result', input: toolPacket('wo_submit') } as ContentBlock,
@@ -661,8 +660,8 @@ describe('worker finalization turn (B：终轮定型)', () => {
 
     assert.equal(run.result.status, 'passed')
     assert.equal(run.result.summary, 'Report submitted via submit_result tool.', '结果来自工具参数而非散文')
-    assert.equal(requests.length, 2, '工具路径成功：探索 + 收尾请求，无 fallback 轮')
-    const finalizeReq = requests[1]!
+    assert.equal(requests.length, 1, 'report submitted during normal execution')
+    const finalizeReq = requests[0]!
     const tool = (finalizeReq.tools as Array<{ function: { name: string; parameters: Record<string, unknown> } }>)
       .find(t => t.function.name === 'submit_result')!
     const params = tool.function.parameters as { type: string; properties: Record<string, unknown>; required?: string[] }
@@ -670,28 +669,21 @@ describe('worker finalization turn (B：终轮定型)', () => {
     assert.ok(params.properties.workOrderId, 'parameters 是 ingest 同源 JSON Schema（含 workOrderId）')
     assert.ok(params.properties.status, 'parameters 含 status 枚举')
     assert.equal(finalizeReq.tool_choice, 'auto')
-    // 收尾指令照发 + 逐字节延续探索轮请求
-    assert.ok(String(finalizeReq.messages.at(-1)!.content).includes('工单 ID（原样复制）：wo_submit'))
-    assert.deepEqual(finalizeReq.messages.slice(0, requests[0]!.messages.length), requests[0]!.messages)
   })
 
-  it('多轮探索后收尾请求仍逐字节延续最后一次探索请求，工具表三处一致', async () => {
+  it('工具交互后的正常报告仍保留历史前缀和工具表', async () => {
     const order = scoutOrder('wo_submit_prefix')
     const { client, requests } = blockClient([
       { blocks: [{ type: 'tool_use', id: 'tu_grep', name: 'grep', input: { pattern: 'seam' } } as ContentBlock] },
-      'exploration done',
       { blocks: [{ type: 'tool_use', id: 'tu_submit', name: 'submit_result', input: toolPacket('wo_submit_prefix') } as ContentBlock] },
     ])
     const run = await runWorkerSession(finalizeConfig(order, client))
 
     assert.equal(run.result.status, 'passed')
-    assert.equal(requests.length, 3, '两轮探索 + 收尾请求')
-    const [first, lastLoop, closing] = requests as [CapturedRequest, CapturedRequest, CapturedRequest]
-    assert.equal(closing.messages[0]!.role, 'system', '收尾请求带 system——旧形态缺它，整段前缀失配')
-    assert.deepEqual(closing.messages.slice(0, lastLoop.messages.length), lastLoop.messages)
-    assert.equal(closing.messages.length, lastLoop.messages.length + 2, '只多出探索末轮的回答与收尾指令')
-    assert.deepEqual(closing.tools, lastLoop.tools)
-    assert.deepEqual(lastLoop.tools, first.tools)
+    assert.equal(requests.length, 2)
+    const [first, final] = requests as [CapturedRequest, CapturedRequest]
+    assert.deepEqual(final.messages.slice(0, first.messages.length), first.messages)
+    assert.deepEqual(final.tools, first.tools)
   })
 
   it('探索循环内 submit_result：报告直接收下，不再发收尾请求', async () => {
@@ -710,7 +702,7 @@ describe('worker finalization turn (B：终轮定型)', () => {
     assert.ok(!activities.some(([k, d]) => k === 'lifecycle' && d === 'finalizing report'), '没有收尾请求')
   })
 
-  it('探索循环内 submit_result 参数不合格：错误回给模型，修正后重交', async () => {
+  it('无效 submit_result 终态受阻，不请求修正重交', async () => {
     const order = scoutOrder('wo_submit_retry')
     const { client, requests } = blockClient([
       { blocks: [{ type: 'tool_use', id: 'tu_bad', name: 'submit_result', input: { summary: 'done', status: 'passed' } } as ContentBlock] },
@@ -718,22 +710,21 @@ describe('worker finalization turn (B：终轮定型)', () => {
     ])
     const run = await runWorkerSession(finalizeConfig(order, client))
 
-    assert.equal(run.result.status, 'passed')
-    assert.equal(requests.length, 2, '重交成功即结束，不发收尾请求')
-    const toolResult = requests[1]!.messages.find(m => m.role === 'tool')
-    assert.ok(String(toolResult?.content).includes('报告未通过校验'), '校验错误作为工具结果回给模型')
+    assert.equal(run.result.status, 'blocked')
+    assert.equal(run.result.terminalFailure, true)
+    assert.equal(requests.length, 1, 'no resubmission after invalid report')
+    assert.ok(run.transcript.reportDiagnostics?.length)
   })
 
   it('收尾请求的用量记进 worker 总账（此前整段不计）', async () => {
     const order = scoutOrder('wo_submit_usage')
     const { client } = blockClient([
-      'exploration prose',
       { blocks: [{ type: 'tool_use', id: 'tu_submit', name: 'submit_result', input: toolPacket('wo_submit_usage') } as ContentBlock] },
     ])
     const run = await runWorkerSession(finalizeConfig(order, client))
 
-    assert.equal(run.usage.input_tokens, 20, '探索 10 + 收尾 10')
-    assert.equal(run.usage.output_tokens, 10)
+    assert.equal(run.usage.input_tokens, 10, 'only the normal report request is billed')
+    assert.equal(run.usage.output_tokens, 5)
   })
 
 
@@ -746,7 +737,6 @@ describe('worker finalization turn (B：终轮定型)', () => {
     input.changedFiles = ['src/fabricated.ts']
     input.evidenceStatus = 'verified'
     const { client, requests } = blockClient([
-      'exploration prose',
       { blocks: [
         { type: 'tool_use', id: 'tu_submit', name: 'submit_result', input } as ContentBlock,
       ] },
@@ -754,7 +744,7 @@ describe('worker finalization turn (B：终轮定型)', () => {
     const run = await runWorkerSession(finalizeConfig(order, client))
 
     assert.equal(run.result.status, 'passed')
-    assert.equal(requests.length, 2, '工具路径成功（reconcile 不触发 fallback）')
+    assert.equal(requests.length, 1, 'evidence reconciliation does not issue another request')
     assert.equal(run.result.evidenceStatus, 'unverified', '自报 verified 但 changedFiles 无工具调用痕迹 → 对账降级，证据门未被绕过')
     assert.ok(run.result.risks.some((r) => String(r).includes('src/fabricated.ts')), '无痕迹文件被记 risk')
   })
@@ -790,13 +780,6 @@ describe('finalize truncation (2026-09-13 json_parse 事故)', () => {
     const client = {
       stream: mock.fn(async (_req: unknown, cb: StreamCallbacks) => {
         call++
-        if (call === 1) {
-          // 探索轮：无 JSON 散文
-          cb.onTextDelta('Let me read the diff first.')
-          cb.onContentBlock(textBlock('Let me read the diff first.'))
-          cb.onStopReason('end_turn', { input_tokens: 10, output_tokens: 5 })
-          return
-        }
         // 终型阶段 2：输出在 max_tokens 处被截断
         cb.onTextDelta(truncatedJson)
         cb.onContentBlock(textBlock(truncatedJson))
@@ -944,19 +927,13 @@ describe('worker long-tool keepalive（P0-3：tool_use→tool_result 静默窗�
     }
   })
 
-  it('收尾请求静默期间也发 lifecycle 心跳（报告写进工具参数时没有文本可上行）', async () => {
+  it('正常报告请求静默期间发 lifecycle 心跳，无补偿收尾轮', async () => {
     __setToolKeepaliveMs(15)
     try {
       let call = 0
       const client = {
         stream: mock.fn(async (_req: unknown, cb: StreamCallbacks) => {
           call++
-          if (call === 1) {
-            cb.onTextDelta('exploration prose')
-            cb.onContentBlock(textBlock('exploration prose'))
-            cb.onStopReason('end_turn', { input_tokens: 10, output_tokens: 5 })
-            return
-          }
           await new Promise(resolve => setTimeout(resolve, 120))
           cb.onContentBlock({ type: 'tool_use', id: 'tu_submit', name: 'submit_result', input: JSON.parse(validPacket('wo_fin_keep')) } as ContentBlock)
           cb.onStopReason('tool_use', { input_tokens: 10, output_tokens: 5 })
@@ -974,7 +951,7 @@ describe('worker long-tool keepalive（P0-3：tool_use→tool_result 静默窗�
         onActivity: (kind, detail) => activities.push([kind, detail]),
       })
       assert.equal(run.result.status, 'passed')
-      const beats = activities.filter(([k, d]) => k === 'lifecycle' && String(d).startsWith('finalizing report still running'))
+      const beats = activities.filter(([k, d]) => k === 'lifecycle' && String(d).startsWith('model request still running'))
       assert.ok(beats.length >= 2, `120ms 收尾请求 + 15ms 节拍应产出多次心跳，实际 ${beats.length} 次`)
     } finally {
       __setToolKeepaliveMs(30_000)

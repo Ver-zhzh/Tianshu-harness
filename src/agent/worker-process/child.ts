@@ -1,4 +1,4 @@
-import { createReportClientFactory } from '../../api/report-client.js'
+import { resolveModelBinding } from '../../model/model-binding.js'
 import { isLocalWorkerPolicyError } from '../../api/continuation-prefix.js'
 import { withWorkspaceRoots } from '../../tools/workspace-context.js'
 /**
@@ -23,8 +23,7 @@ import { withWorkspaceRoots } from '../../tools/workspace-context.js'
 import { createInterface } from 'node:readline'
 import { join } from 'node:path'
 import { loadConfig } from '../../config/manager.js'
-import { createProviderClient, resolveApiKey } from '../../api/factory.js'
-import { createAuthProvider } from '../../auth/registry.js'
+import { createProviderClient } from '../../api/factory.js'
 import { resolveCapabilities } from '../../api/provider.js'
 import { PromptEngine } from '../../prompt/engine.js'
 import { subagentPromptBlocks } from '../../prompt/block-policy.js'
@@ -34,18 +33,16 @@ import { filterToolRegistry } from '../../tools/registry.js'
 import { TodoStore } from '../../tools/todo-store.js'
 import { DelegationCoordinator } from '../coordinator.js'
 import { buildModelCards } from '../headless-coordinator.js'
-import { buildReviewOverrideState, type ResolvedReviewOverride } from '../review-model-override.js'
-import { buildWorkerRuntime } from '../worker-runtime.js'
+import { buildWorkerRuntime, createWorkerRuntimeFactory } from '../worker-runtime.js'
 import { deriveWorkerSessionId } from '../work-order.js'
 import { DomainKnowledgeStore } from '../domain-knowledge-store.js'
 import { profileRegistry } from '../profile-registry.js'
 import { runWorkerSession, type WorkerSessionConfig, type WorkerSessionRun } from '../worker-session.js'
 import type { ApprovalMode } from '../loop-types.js'
-import type { ModelCapabilityCard } from '../../model/capability.js'
 import type { WorkerMailbox } from '../worker-mailbox.js'
 import {
   encodeFrame, createFrameDecoder, CHILD_TICK_INTERVAL_MS,
-  type ParentMessage, type WorkerChildInitPayload,
+  type WorkerChildInitPayload,
 } from './protocol.js'
 
 function writeFrame(msg: Parameters<typeof encodeFrame>[0]): void {
@@ -79,13 +76,16 @@ function buildChildCoordinator(
   config: Parameters<typeof buildWorkerRuntime>[0]['config'],
   parentApprovalMode: ApprovalMode | undefined,
 ): DelegationCoordinator {
+  const runtime = createWorkerRuntimeFactory(() => ({ ...deps, config: loadConfig({ cwd: deps.cwd }) }))
   return new DelegationCoordinator({
     baseToolRegistry: registry,
+    sessionId: deps.rootSessionId,
     modelCards: buildModelCards(deps.provider),
     maxWorkers: resolveMaxWorkers(config),
     providers: config.provider.providers,
-    runtimeFactory: (order, card, workerRegistry) => buildWorkerRuntime(deps, order, card, workerRegistry),
-    routing: deps.workerRouting,
+    runtimeFactory: runtime.runtimeFactory,
+    selectModel: runtime.selectModel,
+    allowAutomaticModelRotation: () => loadConfig({ cwd: deps.cwd }).workers.defaultStrategy === 'auto',
     sharedWorktree: true,
     patcherTier: config.workers.patcherTier,
     escalationCap: config.workers.escalationCap,
@@ -148,26 +148,11 @@ async function bootAndRunInWorkspace(
 
     // 2) 运行时重建（全部从落盘 config + init 快照来，无父进程内存态）。
     const config = loadConfig({ cwd })
-    const providerName = cfg.providerName ?? config.provider.default
-    const provider = config.provider.providers[providerName] ?? config.provider.providers[config.provider.default]!
-    let apiKey = ''
-    try { apiKey = resolveApiKey(provider) } catch { apiKey = '' }
-    const auth = provider.auth ? createAuthProvider(provider.auth, process.env) : undefined
-
-    const overrideState = config.agent.review?.profiles
-      ? buildReviewOverrideState(config.agent.review.profiles, config.provider.providers)
-      : { cards: new Map<string, ModelCapabilityCard>(), overrides: new Map<string, ResolvedReviewOverride>() }
-    const reviewOverrides = overrideState.overrides
-    const reviewOverrideApiKeys = new Map<string, string>()
-    for (const [profileName, resolved] of reviewOverrides) {
-      try { reviewOverrideApiKeys.set(profileName, resolveApiKey(resolved.providerConfig)) } catch {
-        reviewOverrides.delete(profileName)
-      }
-    }
-
-    const workerRouting = config.workers?.profiles && Object.keys(config.workers.profiles).length > 0
-      ? { profiles: config.workers.profiles, routing: config.workers.routing, providers: config.provider.providers }
-      : undefined
+    const decision = cfg.runtimeDecision
+    if (!decision?.rootSessionBinding) throw new Error('Missing root session binding')
+    const rootSessionBinding = decision.rootSessionBinding
+    const root = resolveModelBinding(config.provider.providers, rootSessionBinding)
+    const { provider, apiKey, auth } = root
 
     const domainKnowledgeStore = new DomainKnowledgeStore(join(cwd, '.rivet', 'knowledge'))
 
@@ -177,13 +162,11 @@ async function bootAndRunInWorkspace(
       provider,
       apiKey,
       auth,
-      currentModelId: config.provider.default,
+      currentModelId: rootSessionBinding.model,
+      rootSessionBinding, rootSessionId: decision.rootSessionId,
       listActiveClaims: () => init.activeClaims,
       sessionMemoryBlock: () => init.memoryBlock,
       domainKnowledgeStore,
-      reviewOverrides,
-      reviewOverrideApiKeys,
-      workerRouting,
       writeProfiles: profileRegistry.listWriteProfiles(),
     }
 
@@ -214,29 +197,31 @@ async function bootAndRunInWorkspace(
     const { registry } = createInteractiveToolRegistry(refs, config, cwd)
     refs.coordinator = buildChildCoordinator(deps, registry, config, cfg.parentApprovalMode as ApprovalMode | undefined)
 
-    const decision = cfg.runtimeDecision
-    if (!decision) throw new Error('init 缺 runtimeDecision——父进程 buildWorkerRuntime 未盖戳（版本不匹配？）')
     const presentTools = cfg.order.allowedTools.filter(name => registry.has(name))
     const missing = cfg.order.allowedTools.filter(name => !registry.has(name))
-    if (missing.length > 0) childLog(`[worker-child] dropping ${missing.length} unregistered tool(s): ${missing.join(',')}`)
+    if (missing.length > 0) throw new Error(`Isolated worker tool catalog unavailable: ${missing.join(',')}`)
     const workerRegistry = filterToolRegistry(registry, presentTools)
 
     // 4) client/promptEngine 按 runtimeDecision 忠实重建（不重跑路由）。
-    const providerForDecision = config.provider.providers[decision.providerName] ?? provider
-    const modelSpec = providerForDecision.models.find(m => m.id === decision.model)
+    const actual = resolveModelBinding(config.provider.providers, { provider: decision.providerName, model: decision.model, keyId: decision.keyId, baseUrl: decision.baseUrl })
+    const providerForDecision = actual.provider
+    const modelSpec = actual.spec
     const capabilities = resolveCapabilities(decision.providerName, providerForDecision.capabilities, modelSpec?.capabilities)
     const blocks = subagentPromptBlocks()
     const client = createProviderClient(providerForDecision, capabilities, {
-      apiKey,
+      singleAttempt: true,
+      credentialScope: `${decision.providerName}:${decision.keyId ?? 'default'}`,
+      expectedPrincipal: decision.expectedPrincipal,
+      apiKey: actual.apiKey,
       model: decision.model,
       reasoningEffort: undefined,
       maxTokens: decision.maxTokens,
       thinkingBudget: decision.thinkingBudget,
-      auth,
+      auth: actual.auth,
       // 与父进程 buildWorkerRuntime 用同一公式（只取 order.id，不带 nonce）：
       // 子进程重建 client 时若落回 factory 的进程兜底，同一 work order 会在父子
       // 进程各拿一个 ID，上游会当成两段对话。
-      sessionId: deriveWorkerSessionId(cfg.order.id),
+      sessionId: deriveWorkerSessionId(cfg.order.id, cfg.sessionNonce),
     })
     const promptEngine = new PromptEngine({
       model: decision.model,
@@ -245,7 +230,6 @@ async function bootAndRunInWorkspace(
       volatileCtx: { cwd, sessionMemoryBlock: init.memoryBlock, blockCaps: blocks.caps },
       // 续跑/复核/重试继承上一轮冻结快照——历史 user 消息恢复原始字节，
       // 前缀缓存只在新 user 边界断尾（缺省/坏数据引擎内降级为冷启动）。
-      inheritFrozenFrom: cfg.priorFrozenSnapshot,
     })
 
     // 5) 组装 WorkerSessionConfig（v1 降级项不注入）并执行。
@@ -253,7 +237,6 @@ async function bootAndRunInWorkspace(
       workspaceRoots: cfg.workspaceRoots,
       order: cfg.order,
       client,
-      reportRepairClient: createReportClientFactory(providerForDecision, capabilities, { apiKey, model: decision.model, auth, sessionId: deriveWorkerSessionId(cfg.order.id) }),
       promptEngine,
       toolRegistry: workerRegistry,
       cwd,
@@ -281,6 +264,7 @@ async function bootAndRunInWorkspace(
       routeReason: cfg.routeReason,
       priorUsage: cfg.priorUsage,
       sessionNonce: cfg.sessionNonce,
+      policyLeaseId: cfg.policyLeaseId,
       mailbox: createBridgedMailbox(),
       abortSignal: abortController.signal,
     }

@@ -118,6 +118,18 @@ test('POST with decision "deny" resolves the pending approval as denied', async 
   assert.deepEqual(await pending, { approved: false })
 })
 
+test('POST with decision "reject" (desktop/mobile client wording) resolves as denied — issue #472', async () => {
+  const { agents, router } = setup()
+  const { id, pending } = await startPending(router, agents)
+
+  const res = await router(
+    'POST', `/sessions/${id}/interventions/req-1/answer`,
+    { decision: 'reject' }, AUTH,
+  )
+  assert.equal(res.status, 200, 'reject is the deny alias used by desktop/mobile clients')
+  assert.deepEqual(await pending, { approved: false }, 'reject must DENY, never approve')
+})
+
 test('POST with decision "approve" still resolves the pending approval as approved', async () => {
   const { agents, router } = setup()
   const { id, pending } = await startPending(router, agents)

@@ -1052,7 +1052,7 @@ export function createGalaxyTool(coordinator: GalaxyCoordinator): Tool {
               taskShape: normalizeTaskShape(dim.name),
               // escalated 视同 blocked：结论不可采信，不记作通过
               status: result.status === 'escalated' ? 'blocked' : result.status,
-              model: modelByWorkOrder.get(workerOrderId(req.parentTurnId)) ?? req.modelOverride?.model,
+              model: modelByWorkOrder.get(workerOrderId(req.parentTurnId)) ?? (req.modelOverride && 'model' in req.modelOverride ? req.modelOverride.model : undefined),
               // L3：token 成本入账——胜率之外的「每通过成本」维度
               costTokens: result.usage
                 ? (result.usage.input_tokens ?? 0) + (result.usage.output_tokens ?? 0)
@@ -1104,7 +1104,7 @@ export function createGalaxyTool(coordinator: GalaxyCoordinator): Tool {
 
       const targets = requests.map(request => {
         const dimensionIndex = dimensionIndexByParentTurnId.get(request.parentTurnId)
-        if (dimensionIndex === undefined) return { workOrderId: workerOrderId(request.parentTurnId), label: '全局审查', requestedModel: request.modelOverride?.model }
+        if (dimensionIndex === undefined) return { workOrderId: workerOrderId(request.parentTurnId), label: '全局审查', requestedModel: (request.modelOverride && 'model' in request.modelOverride ? request.modelOverride.model : undefined) }
         const dimension = dimensions[dimensionIndex]!
         const stars = dimension.authorities ?? (dimension.authority ? [dimension.authority] : [])
         const authorityIndex = stars.indexOf(request.authority ?? '')
@@ -1115,7 +1115,7 @@ export function createGalaxyTool(coordinator: GalaxyCoordinator): Tool {
         return {
           workOrderId: workerOrderId(request.parentTurnId),
           label: `${dimension.name}${perspective}${replica} ${star?.name ?? request.authority ?? authorityIndex}`,
-          requestedModel: request.modelOverride?.model,
+          requestedModel: (request.modelOverride && 'model' in request.modelOverride ? request.modelOverride.model : undefined),
         }
       })
       // 结构化结果（galaxyGate 消费侧字段）：与 formatGalaxyResult 的

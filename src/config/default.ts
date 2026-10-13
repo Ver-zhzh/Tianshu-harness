@@ -217,14 +217,8 @@ export const DEFAULT_CONFIG: Config = {
       'mimo-pro': { provider: 'mimo', model: 'mimo-v2.5-pro' },
       'mimo-ultra': { provider: 'mimo-api', model: 'mimo-v2.5-pro-ultraspeed' },
     },
-    routing: {
-      repo_summarization: 'cheap-flash',
-      code_edit: 'cheap-flash',
-      test_failure_diagnosis: 'cheap-flash',
-      risky_refactor: 'cheap-flash',
-      // planning 走 cheap-flash。2026-10-04 起该档的官方模型是 deepseek-flash（DeepSeek 4.1 Flash）。
-      planning: 'cheap-flash',
-    },
+    defaultStrategy: 'session',
+    routing: {},
     patcherTier: 'cheap',
     escalationCap: 'off',
   },

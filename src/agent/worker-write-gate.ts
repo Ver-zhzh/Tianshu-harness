@@ -145,10 +145,11 @@ export function applyWriteGateToResult(result: WorkerResult, report: WorkerWrite
     return {
       ...result,
       status: 'failed',
+      terminalFailure: true,
       evidenceStatus: 'failed',
       risks: [
         ...result.risks,
-        `primary write gate failed after ${repairCount} bounded repair round(s): ${evidenceLines.join(' | ')}`,
+        `primary write gate failed; no automatic repair (${repairCount} legacy repair rounds): ${evidenceLines.join(' | ')}`,
         ...(report.falseGreen ? ['falseGreen: worker claimed passed but primary gate failed'] : []),
       ],
     }
@@ -156,6 +157,7 @@ export function applyWriteGateToResult(result: WorkerResult, report: WorkerWrite
   return {
     ...result,
     status: 'blocked',
+    terminalFailure: true,
     evidenceStatus: 'blocked',
     risks: [
       ...result.risks,

@@ -23,7 +23,7 @@ describe('/token-ledger routes', () => {
 
   const fetchImpl: FetchLike = async (url, init) => {
     pushed.push({ url, body: JSON.parse(init?.body ?? '{}') })
-    return { status: 200, text: async () => '{}' }
+    return { status: 200, text: async () => '{"ok":true,"stale":false}' }
   }
 
   const makeService = () => new TokenLedgerService(configSchema.parse({
@@ -121,5 +121,77 @@ describe('/token-ledger routes', () => {
     const res = await createRouter(buildTokenLedgerRoutes({ apiToken: TOKEN, service: svc }))('POST', '/token-ledger/sync', {}, AUTH)
     assert.equal(res.status, 400)
     assert.match((res.body as { hint?: string }).hint ?? '', /tokenLedger\.forum\.endpoint/)
+  })
+})
+
+
+describe('Token ledger settings routes', () => {
+  it('requires authorization for reads and writes and never returns a key', async () => {
+    let config = configSchema.parse({ provider: { default: 'deepseek', providers: {} }, tokenLedger: { forum: { apiKey: 'tsu_fixture_only', endpoint: 'https://tianshuharness.com/token/v1/token-usage' } } })
+    const base = mkdtempSync(join(tmpdir(), 'ledger-settings-routes-'))
+    try {
+      const service = new TokenLedgerService(config, { statePath: join(base, 'ledger.json'), sessionsRoot: join(base, 'sessions') })
+      const routes = buildTokenLedgerRoutes({ apiToken: TOKEN, service, settingsDeps: { load: () => structuredClone(config), save: next => { config = next } } })
+      const router = createRouter(routes)
+      assert.equal((await router('GET', '/token-ledger/settings', {}, {})).status, 401)
+      assert.equal((await router('PUT', '/token-ledger/settings', { forum: { apiKey: '' } }, {})).status, 401)
+      const read = await router('GET', '/token-ledger/settings', {}, AUTH)
+      assert.equal(read.status, 200)
+      assert.equal(JSON.stringify(read.body).includes('tsu_fixture_only'), false)
+      const bad = await router('PUT', '/token-ledger/settings', { forum: { apiKey: 'candidate-secret', endpoint: 'bad' } }, AUTH)
+      assert.equal(bad.status, 400)
+      assert.equal(JSON.stringify(bad.body).includes('candidate-secret'), false)
+      const write = await router('PUT', '/token-ledger/settings', { forum: { autoSync: true } }, AUTH)
+      assert.equal(write.status, 200)
+      assert.equal(service.status().autoSync, true)
+      await router('PUT', '/token-ledger/settings', { forum: { apiKey: '' } }, AUTH)
+      assert.equal(service.status().autoSync, false)
+    } finally { rmSync(base, { recursive: true, force: true }) }
+  })
+})
+
+
+describe('Token ledger environment key precedence', () => {
+  it('clearing a saved key stops automatic upload while reporting and retaining the environment override', async () => {
+    const previous = process.env.RIVET_FORUM_TOKEN
+    const base = mkdtempSync(join(tmpdir(), 'ledger-env-settings-routes-'))
+    try {
+      process.env.RIVET_FORUM_TOKEN = 'fixture-environment-key'
+      let config = configSchema.parse({ provider: { default: 'deepseek', providers: {} }, tokenLedger: { forum: { apiKey: 'fixture-saved-key', autoSync: true } } })
+      const keys: string[] = []
+      const service = new TokenLedgerService(config, {
+        statePath: join(base, 'ledger.json'), sessionsRoot: join(base, 'sessions'),
+        fetchImpl: async (_url, init) => {
+          keys.push(init?.headers?.Authorization ?? '')
+          return { status: 200, text: async () => '{"ok":true,"stale":false}' }
+        },
+      })
+      service.startAutoSync()
+      const router = createRouter(buildTokenLedgerRoutes({ apiToken: TOKEN, service, settingsDeps: { load: () => structuredClone(config), save: next => { config = next } } }))
+      const clear = await router('PUT', '/token-ledger/settings', { forum: { apiKey: '' } }, AUTH)
+      assert.equal(clear.status, 200)
+      const dto = clear.body as { forum: { autoSync: boolean; apiKeyConfigured: boolean; apiKeySource: string } }
+      assert.equal(dto.forum.autoSync, false)
+      assert.equal(dto.forum.apiKeyConfigured, true)
+      assert.equal(dto.forum.apiKeySource, 'environment')
+      assert.equal(JSON.stringify(dto).includes('fixture-environment-key'), false)
+      assert.equal(service.status().autoSync, false)
+      await router('PUT', '/token-ledger/settings', { forum: { apiKey: 'fixture-rotated-key' } }, AUTH)
+      assert.equal((await service.syncNow()).ok, true)
+      assert.deepEqual(keys, ['Bearer fixture-environment-key'])
+      process.env.RIVET_FORUM_TOKEN = '   '
+      const read = await router('GET', '/token-ledger/settings', {}, AUTH)
+      assert.equal((read.body as { forum: { apiKeySource: string } }).forum.apiKeySource, 'none')
+      assert.equal((await service.syncNow()).skipped, 'no_key')
+      process.env.RIVET_FORUM_TOKEN = ''
+      const fallback = await router('GET', '/token-ledger/settings', {}, AUTH)
+      assert.equal((fallback.body as { forum: { apiKeySource: string } }).forum.apiKeySource, 'saved')
+      assert.equal((await service.syncNow()).ok, true)
+      assert.deepEqual(keys, ['Bearer fixture-environment-key', 'Bearer fixture-rotated-key'])
+    } finally {
+      if (previous === undefined) delete process.env.RIVET_FORUM_TOKEN
+      else process.env.RIVET_FORUM_TOKEN = previous
+      rmSync(base, { recursive: true, force: true })
+    }
   })
 })

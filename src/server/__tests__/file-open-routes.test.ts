@@ -103,3 +103,28 @@ test('concurrent opens share one resource, expiry invalidates identity, and sess
     await assert.rejects(fetch(reopened.url))
   } finally { t.mock.timers.reset(); disposeSessionFilePreviews('life'); await rm(root, { recursive: true, force: true }) }
 })
+
+test('answer-me-with-html output under .am/pages is previewable while other hidden paths stay forbidden', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'file-preview-am-'))
+  const manager = { listSessions: () => [{ id: 's', cwd: root }] } as unknown as RuntimeSessionManager
+  const call = createRouter(buildFileOpenRoutes(manager, 'fixture'))
+  const auth = { authorization: 'Bearer fixture' }
+  const page = '.am/pages/Oracle-分页查询-取-10-条数据-20261010-114624.html'
+  try {
+    await mkdir(join(root, '.am', 'pages'), { recursive: true })
+    await writeFile(join(root, page), '<link href="style.css"><h1>answer</h1>')
+    await writeFile(join(root, '.am', 'pages', 'style.css'), 'h1{color:red}')
+    await writeFile(join(root, '.am', 'runtime.json'), '{"internal":true}')
+    await mkdir(join(root, '.notes'))
+    await writeFile(join(root, '.notes', 'draft.html'), 'private')
+    const opened = await call('POST', '/file-open', { sessionId: 's', cwd: root, path: page, action: 'preview' }, auth)
+    assert.equal(opened.status, 200)
+    const data = opened.body as { url: string }
+    const served = await fetch(data.url)
+    assert.equal(served.status, 200)
+    assert.match(await served.text(), /<h1>answer<\/h1>/)
+    assert.equal(await (await fetch(new URL('style.css', data.url))).text(), 'h1{color:red}')
+    assert.equal((await fetch(new URL('../runtime.json', data.url))).status, 403)
+    assert.equal((await fetch(new URL('../../.notes/draft.html', data.url))).status, 403)
+  } finally { disposeSessionFilePreviews('s'); await rm(root, { recursive: true, force: true }) }
+})

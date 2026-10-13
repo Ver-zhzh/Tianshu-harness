@@ -212,7 +212,7 @@ describe('request-build hashing caches (issue #139)', () => {
     const sigDelta1 = signatureCacheStats.computations - sigBefore1
     const estDelta1 = estimateCacheStats.computations - estBefore1
     assert.ok(sigDelta1 >= 100, `first build should hash the full history, got ${sigDelta1}`)
-    assert.ok(estDelta1 >= 100, `first build should estimate the full history, got ${estDelta1}`)
+    assert.equal(estDelta1, 0, 'request rendering no longer estimates history for automatic collapse')
 
     // Steady state (one appended turn): bounded by the new messages, not by
     // history size. This is the issue #139 regression guard.
@@ -225,7 +225,7 @@ describe('request-build hashing caches (issue #139)', () => {
     assert.ok(sigDelta2 <= 8, `steady-state signature hashing must be O(new), got ${sigDelta2} for 4 new messages`)
     assert.ok(estDelta2 <= 8, `steady-state token estimating must be O(new), got ${estDelta2} for 4 new messages`)
     assert.ok(sigDelta2 < sigDelta1 / 4, `signature cache must decouple cost from history size (${sigDelta2} vs ${sigDelta1})`)
-    assert.ok(estDelta2 < estDelta1 / 4, `estimate cache must decouple cost from history size (${estDelta2} vs ${estDelta1})`)
+    assert.equal(estDelta2, 0, 'ordinary rendering performs no collapse token scan')
   })
 })
 

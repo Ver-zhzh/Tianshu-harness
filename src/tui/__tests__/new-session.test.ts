@@ -23,12 +23,14 @@ function makeHarness(opts: {
   let clears = 0
   let highWater = 0
   let flushed = 0
+  let pinnedClears = 0
 
   const app = {
     busy: opts.busy ?? false,
     queueLane: ['攒着的旧会话消息'] as string[],
     commitStatic: (text: string) => { lines.push(text) },
     clearScreen: () => { clears++ },
+    clearPinnedPrompt: () => { pinnedClears++ },
     setStreamingState: () => {},
     resetLiveHighWater: () => { highWater++ },
     setSidePanelOpen: () => {},
@@ -62,6 +64,7 @@ function makeHarness(opts: {
     get clears() { return clears },
     get highWater() { return highWater },
     get flushed() { return flushed },
+    get pinnedClears() { return pinnedClears },
   }
 }
 
@@ -83,6 +86,7 @@ test('/new：成功路径的顺序契约 —— flush → 切会话 → 清队�
 
   assert.equal(h.flushed, 1, '切换前必须 flush：切换整体替换 persist 实例，仍排队的末几条消息会随之丢失')
   assert.equal(h.highWater, 1, '会话边界要重置定高视口高水位——旧会话的峰值空白不带进新会话')
+  assert.equal(h.pinnedClears, 1, '新会话不能显示旧会话的指令摘要')
   assert.equal(h.clears, 1, '清屏是「上下文已重置」的视觉断点')
   assert.equal(h.app.queueLane.length, 0, '队列 lane 属于旧上下文，不该被带进新会话')
 

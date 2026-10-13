@@ -12,6 +12,8 @@ test('desktop real assembly persists image anchors and restores dispatched histo
   const oldHome = process.env.RIVET_HOME, oldDir = process.env.RIVET_SESSION_DIR
   process.env.RIVET_HOME = join(dir, 'home'); process.env.RIVET_SESSION_DIR = join(dir, 'sessions')
   const agents: import('../../agent/loop.js').AgentLoop[] = []
+  const previousFetch = globalThis.fetch
+  globalThis.fetch = async () => new Response('data: {"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } })
   try {
     const { buildAgentLoop } = await import('../serve-agent.js')
     const config = structuredClone(DEFAULT_CONFIG)
@@ -25,6 +27,7 @@ test('desktop real assembly persists image anchors and restores dispatched histo
     first.config.promptEngine.setCrossSessionMemoryBlock('unique-saved-appendix')
     const request = first.config.promptEngine.buildOaiRequest([image])
     assert.ok(JSON.stringify(request.messages[1]).includes('unique-saved-appendix'))
+    await first.config.client.stream(request, { onTextDelta() {}, onThinkingDelta() {}, onContentBlock() {}, onStopReason() {}, onError(error: Error) { throw error } })
     const persist = new SessionPersist('frozen-desktop', dir)
     await persist.appendOaiWithChecksum(image); await persist.flushSessionBuffer()
     await first.drainPersistWrites()
@@ -37,6 +40,7 @@ test('desktop real assembly persists image anchors and restores dispatched histo
     const restored = second.config.promptEngine.buildOaiRequest([image, { role: 'user', content: 'continue' }])
     assert.deepEqual(restored.messages[1], request.messages[1], 'actual consumer must inherit disk snapshot')
   } finally {
+    globalThis.fetch = previousFetch
     for (const agent of agents) { agent.abort(); await agent.cancelIdleCompaction(); await agent.drainPersistWrites(); agent.config.coordinatorRef?.()?.shutdown() }
     if (oldHome === undefined) delete process.env.RIVET_HOME; else process.env.RIVET_HOME = oldHome
     if (oldDir === undefined) delete process.env.RIVET_SESSION_DIR; else process.env.RIVET_SESSION_DIR = oldDir

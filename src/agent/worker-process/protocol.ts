@@ -48,6 +48,7 @@ export interface SerializedWorkerConfig {
   continuationSource?: string
   routeReason?: string
   priorFrozenSnapshot?: FrozenSnapshotData
+  policyLeaseId?: string
   sessionNonce?: string
   checkpoint?: WorkerCheckpoint
 }

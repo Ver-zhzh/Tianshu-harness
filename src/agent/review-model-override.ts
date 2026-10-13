@@ -11,7 +11,7 @@
  * from the session's primary prefix cache.
  */
 
-import type { ProviderConfig } from '../config/schema.js'
+import type { ModelTarget, ProviderConfig } from '../config/schema.js'
 import type { WorkerProfile } from './work-order.js'
 import type { ModelCapabilityCard } from '../model/capability.js'
 // 模型引用判据收在 api/model-aliases.ts 的 modelRefMatches（精确优先，再经同义表把
@@ -41,11 +41,11 @@ export interface ResolvedReviewOverride {
  */
 export function resolveReviewOverride(
   profile: WorkerProfile,
-  reviewProfiles: Record<string, { provider: string; model: string }>,
+  reviewProfiles: Record<string, ModelTarget>,
   providers: Record<string, ProviderConfig>,
 ): ResolvedReviewOverride | undefined {
   const override = reviewProfiles[profile]
-  if (!override) return undefined
+  if (!override || !('provider' in override)) return undefined
 
   const providerConfig = providers[override.provider]
   if (!providerConfig) return undefined
@@ -128,7 +128,7 @@ export interface ReviewOverrideState {
  * are dropped — bootstrap logs and falls through.
  */
 export function buildReviewOverrideState(
-  reviewProfiles: Record<string, { provider: string; model: string }>,
+  reviewProfiles: Record<string, ModelTarget>,
   providers: Record<string, ProviderConfig>,
 ): ReviewOverrideState {
   const cards = new Map<string, ModelCapabilityCard>()

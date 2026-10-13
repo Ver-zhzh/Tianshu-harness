@@ -1,3 +1,4 @@
+import type { ModelTarget } from '../../config/schema.js'
 import { extractJsonCandidates, type WorkerResult } from '../work-order.js'
 import type { IdentifiedWorkerResult } from '../coordinator.js'
 import { aggregateCouncil, applyResolutionsToMergedItems, resolveConflictsWithRebuttals, type CouncilDraft, type CouncilPlan, type SeatChallenge, type SeatContribution, type SeatRebuttal } from './council-plan.js'
@@ -21,7 +22,7 @@ export interface CouncilFanoutRequest {
   /** Per-seat provider/model override (highest routing precedence). Set when the
    *  seat declares both provider+model; threaded to the worker so this seat runs
    *  on an isolated provider/model — enables heterogeneous councils. */
-  modelOverride?: { provider: string; model: string }
+  modelOverride?: ModelTarget
   /** 瑶光门 tier 下限（席位 tierHint+noDowngrade）——接线到真实派发，
    *  coordinator 的 preferredTier 不得低于此档。曾只在 shadow 记录，
    *  导致天府护栏席声明 strong 却实际跑 flash（事故链缺口 1）。 */
@@ -242,8 +243,9 @@ export function councilQuorum(totalSeats: number): number {
  *  provider+model. Spread into the fanout request so heterogeneous seats run on
  *  their own provider/model. */
 function seatModelOverride(seat: CouncilSeat): Pick<CouncilFanoutRequest, 'modelOverride'> {
+  if (seat.modelStrategy) return { modelOverride: { strategy: seat.modelStrategy } }
   return seat.provider && seat.model
-    ? { modelOverride: { provider: seat.provider, model: seat.model } }
+    ? { modelOverride: { provider: seat.provider, model: seat.model, ...(seat.keyId ? { keyId: seat.keyId } : {}) } }
     : {}
 }
 

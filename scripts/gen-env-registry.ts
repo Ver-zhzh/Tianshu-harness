@@ -102,30 +102,16 @@ function readExistingDescriptions(regPath: string): Map<string, string> {
 
 function generateRegistry(entries: EnvEntry[], descriptions: Map<string, string>): string {
   const lines: string[] = [
-    '/**',
-    ' * env-registry.ts — RIVET_* 环境变量注册表（自动生成）。',
-    ' *',
-    ' * name/defaultHint/files 由 scripts/gen-env-registry.ts 生成，勿手改；',
-    ' * description 字段人工维护，重新生成时按 name 保留。',
-    ` * 最后生成：${new Date().toISOString()}`,
-    ` * 共 ${entries.length} 个变量。`,
-    ' *',
-    ' * 每个条目含：名称 / 默认值提示 / 引用文件 / 简要说明。',
-    ' * 当源码中新增 RIVET_* 引用但注册表未同步时，',
-    ' * assembly-audit.test.ts 的 env completeness 测试会失败（双向检查）。',
+    `/** RIVET_* 环境变量注册表（自动生成于 ${new Date().toISOString()}，共 ${entries.length} 个变量）。`,
+    ' * name/defaultHint/files 由 scripts/gen-env-registry.ts 生成；description 人工维护，重生成时按 name 保留。',
+    ' * 默认值提示来自源码 ??/||；引用路径相对 src/；assembly-audit.test.ts 双向校验完整性。',
     ' */',
-    '',
     'export interface EnvRegistryEntry {',
-    '  /** 环境变量名（含 RIVET_ 前缀） */',
     '  name: string',
-    '  /** 从源码 ??/|| 推断的默认值，若无则为空 */',
     '  defaultHint: string',
-    '  /** 引用该变量的源文件列表（相对 src/） */',
     '  files: string[]',
-    '  /** 简要说明（人工维护，重新生成时保留） */',
     '  description: string',
     '}',
-    '',
     `export const ENV_REGISTRY: EnvRegistryEntry[] = [`,
   ]
 

@@ -485,12 +485,12 @@ export class TurnStepProducer {
     )
 
     // Plan mode 强制使用 max reasoning effort，不受 autoReasoning 动态选择影响。
-    if (this.self.planModeState === 'planning') {
+    if (this.self.planModeState === 'planning' && !this.self.config.promptEngine.getExecutionSnapshot()) {
       this.self.config.reasoningEffort = 'max'
       this.self.config.client.setReasoningEffort?.('max')
     }
 
-    if (this.self.config.autoReasoning && turnMode === 'task' && !this.self.userReasoningOverride && this.self.planModeState !== 'planning') {
+    if (!this.self.config.promptEngine.getExecutionSnapshot() && this.self.config.autoReasoning && turnMode === 'task' && !this.self.userReasoningOverride && this.self.planModeState !== 'planning') {
       // autoReasoning 自动按输入复杂度选 effort——但用户显式 /effort <档位> 后
       // （userReasoningOverride=true）不再覆盖，尊重用户选择直到 /effort auto 交还。
       // Plan mode 已在上方强制 max，此处跳过避免覆盖。

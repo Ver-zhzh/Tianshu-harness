@@ -96,7 +96,7 @@ function makeRegistry() {
 }
 
 describe('Zen Mode — AgentLoop 接线（真实 loop + mock LLM）', () => {
-  it('① 新会话首轮工具定义 = 读面（不含 edit_file/bash，含 read_file）', () => {
+  it('① 首轮声明完整工具集合，相位仍为 zen', () => {
     const session = new SessionContext()
     const agent = new AgentLoop(
       { client: zenClient([]), promptEngine: makeEngine(), toolRegistry: makeRegistry(), ...makeBaseConfig(makeZenConfig()) },
@@ -106,8 +106,8 @@ describe('Zen Mode — AgentLoop 接线（真实 loop + mock LLM）', () => {
 
     const names = agent.getActiveToolNames()
     assert.ok(names.includes('read_file'), `读面必须含 read_file，实际 ${names.join(', ')}`)
-    assert.ok(!names.includes('edit_file'), `读面不得含 edit_file，实际 ${names.join(', ')}`)
-    assert.ok(!names.includes('bash'), `读面不得含 bash，实际 ${names.join(', ')}`)
+    assert.ok(names.includes('edit_file') && names.includes('bash'))
+    assert.equal(agent.zenController.isZen, true)
   })
 
   it('①b 防御：直构传未物化 zen（{enabled:true} 缺 face）→ 二次物化补默认读面，不落空面', () => {
@@ -123,7 +123,7 @@ describe('Zen Mode — AgentLoop 接线（真实 loop + mock LLM）', () => {
     assert.equal(agent.zenController.isZen, true, 'enabled:true 必须 arm')
     const names = agent.getActiveToolNames()
     assert.ok(names.includes('read_file'), `缺 face 的配置必须物化出默认读面，实际 ${names.join(', ')}`)
-    assert.ok(!names.includes('edit_file'), 'arm 后仍为读面')
+    assert.ok(names.includes('edit_file'), 'wire declarations remain full while the execution phase is zen')
   })
 
   it('② 首轮模型调 read_file → 不晋升（相位保持 zen）', async () => {
@@ -140,7 +140,7 @@ describe('Zen Mode — AgentLoop 接线（真实 loop + mock LLM）', () => {
 
     assert.equal(agent.zenController.isZen, true, '读工具调用不得触发晋升')
     const names = agent.getActiveToolNames()
-    assert.ok(!names.includes('edit_file'), '读工具调用后工具面必须仍为读面')
+    assert.ok(names.includes('edit_file'), 'read execution cannot shrink wire declarations')
   })
 
   it('③ 首轮模型调 edit_file → 晋升 full 且该调用执行成功（放行语义）', async () => {
@@ -314,7 +314,7 @@ describe('Zen Mode — AgentLoop 接线（真实 loop + mock LLM）', () => {
 
     assert.equal(agent.zenController.isZen, true, 'resume zen 必须恢复读面')
     const names = agent.getActiveToolNames()
-    assert.ok(!names.includes('edit_file'), `resume zen 必须读面（不含 edit_file），实际 ${names.join(', ')}`)
+    assert.ok(names.includes('edit_file'), 'resume restores execution phase without shrinking the wire catalog')
   })
 
   it('⑩c resume：meta 记录 zen 且 zenTurns 已到预算 → 立即 timeout 晋升（不无限续期）', async () => {
@@ -443,7 +443,7 @@ describe('Zen Mode — AgentLoop 接线（真实 loop + mock LLM）', () => {
     assert.equal(readFileSync(filePath, 'utf8'), 'bar', 'edit_file 必须真实生效')
   })
 
-  it('⑬ 读面含 zen_unlock（解锁声明工具恒可见），不含 edit_file/bash', () => {
+  it('⑬ zen 相位声明完整工具和 zen_unlock', () => {
     const session = new SessionContext()
     const agent = new AgentLoop(
       { client: zenClient([]), promptEngine: makeEngine(), toolRegistry: makeRegistry(), ...makeBaseConfig(makeZenConfig()) },
@@ -455,11 +455,10 @@ describe('Zen Mode — AgentLoop 接线（真实 loop + mock LLM）', () => {
     const names = agent.getActiveToolNames()
     assert.ok(names.includes('zen_unlock'), `读面必须含 zen_unlock（动手表达通道），实际 ${names.join(', ')}`)
     assert.ok(names.includes('read_file'), `读面必须含 read_file，实际 ${names.join(', ')}`)
-    assert.ok(!names.includes('edit_file'), `读面不得含 edit_file，实际 ${names.join(', ')}`)
-    assert.ok(!names.includes('bash'), `读面不得含 bash，实际 ${names.join(', ')}`)
+    assert.ok(names.includes('edit_file') && names.includes('bash'))
   })
 
-  it('⑭ full 面不含 zen_unlock（解锁已完成，虚拟工具消失）', () => {
+  it('⑭ 晋升 full 保留 zen_unlock 声明，工具表不变化', () => {
     const session = new SessionContext()
     const agent = new AgentLoop(
       { client: zenClient([]), promptEngine: makeEngine(), toolRegistry: makeRegistry(), ...makeBaseConfig(makeZenConfig()) },
@@ -470,7 +469,7 @@ describe('Zen Mode — AgentLoop 接线（真实 loop + mock LLM）', () => {
     agent.promoteZen('user')
     assert.equal(agent.zenController.isZen, false)
     const names = agent.getActiveToolNames()
-    assert.ok(!names.includes('zen_unlock'), `full 面不得含 zen_unlock，实际 ${names.join(', ')}`)
+    assert.ok(names.includes('zen_unlock'), 'unlock declaration remains stable after promotion')
     assert.ok(names.includes('edit_file'), `full 面必须含 edit_file，实际 ${names.join(', ')}`)
   })
 
@@ -622,8 +621,8 @@ after(async () => {
     const afterArm = staticCtx.tools.map(t => t.name).sort()
     assert.deepEqual(
       afterArm,
-      ['read_file', 'zen_unlock'],
-      `arm 后 engine 持有的必须是读面（含 zen_unlock 解锁入口），实际 [${afterArm.join(', ')}]`,
+      ['bash', 'edit_file', 'read_file', 'zen_unlock'],
+      'engine holds the full catalog from the first request',
     )
 
     agent.promoteZen('tool')
@@ -632,7 +631,7 @@ after(async () => {
       afterPromote.includes('edit_file') && afterPromote.includes('bash'),
       `promote 后 engine 持有的必须恢复全量，实际 [${afterPromote.join(', ')}]`,
     )
-    assert.ok(!afterPromote.includes('zen_unlock'), 'promote 后 zen_unlock 必须从工具面消失')
+    assert.deepEqual(afterPromote, afterArm, 'phase changes cannot rewrite model-facing definitions')
   })
 
   it('㉑ zen_unlock 的结果必须带终态标记（isError=false）——缺参会让 UI 永久占用 live 卡', async () => {

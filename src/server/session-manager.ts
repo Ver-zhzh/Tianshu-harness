@@ -132,7 +132,6 @@ import { MAX_ARCHIVES, MAX_ARCHIVE_BYTES, MAX_DOCUMENTS, MAX_IMAGES } from './at
 import type { SessionArchivePayload } from './attachment-validation.js'
 import { applyRingLimits } from './session-ring-limits.js'
 import { resolveSessionDefaults } from './session-defaults.js'
-
 // The session wire contract (event types, records, statuses) lives in
 // protocol.ts so the desktop can share it type-only. Re-export so existing
 // server-side importers keep working unchanged.
@@ -145,7 +144,6 @@ export type {
   PlanDraft,
   ForkDestination,
 } from './protocol.js'
-
 // Compile-time drift guards: the wire copies of ApprovalMode / PlanModeState in
 // protocol.ts must stay identical to the runtime definitions. If either side
 // changes, these aliases stop typechecking.
@@ -154,7 +152,6 @@ type Assert<T extends true> = T
 export type _ApprovalModeInSync = Assert<Equals<ApprovalMode, WireApprovalMode>>
 export type _PlanModeStateInSync = Assert<Equals<PlanModeState, WirePlanModeState>>
 export type _AskModeStateInSync = Assert<Equals<AskModeState, WireAskModeState>>
-
 /** Structured approval outcome — routes surface `reason` instead of a blind 409. */
 export type PlanApprovalOutcome =
   | { ok: true }
@@ -163,7 +160,6 @@ export type PlanApprovalOutcome =
       code: 'session-missing' | 'session-running' | 'plan-not-found' | 'invalid-content' | 'bad-approach'
       reason: string
     }
-
 /** Structured plan-edit outcome (PUT /plans/:slug). */
 export type PlanUpdateOutcome =
   | { ok: true }
@@ -172,7 +168,6 @@ export type PlanUpdateOutcome =
       code: 'session-missing' | 'plan-not-found' | 'not-editable' | 'empty-content' | 'conflict'
       reason: string
     }
-
 /** PlusMenu — a selectable model across all configured providers. */
 export interface ModelOption {
   id: string
@@ -189,12 +184,10 @@ export interface ModelOption {
   /** 多 key：用户给 key 起的名称（未起名缺省）。 */
   keyLabel?: string
 }
-
 /** PlusMenu — a model option annotated with whether it's the session's current. */
 export interface ModelEntry extends ModelOption {
   current: boolean
 }
-
 /** 记录形态匹配：三段式 provider:keyId:modelId（多 key 切换产物）精确到 key；
  *  两段式 / 裸 id（旧会话、未迁移 provider）兜底。listModels 的 current 判定与
  *  enrichRecord 的 contextWindow 回落共用同一判据（调用方保证首个命中胜出）。 */
@@ -210,7 +203,6 @@ function modelOptionMatches(current: string | undefined, m: ModelOption): boolea
     || current === m.alias
   )
 }
-
 /** PlusMenu — a skill's per-session enablement status. */
 export interface SkillStatus {
   name: string
@@ -220,7 +212,6 @@ export interface SkillStatus {
   /** True when a backing file exists that the editor can open (not built-in/plugin). */
   editable?: boolean
 }
-
 /** Minimal agent surface the manager needs — decoupled from AgentLoop for tests. */
 /** User-dispatched background worker request (from POST /sessions/:id/delegate). */
 export interface DelegateWorkerInput {
@@ -262,8 +253,11 @@ export interface DelegateActivityUpdate {
   eventDetail?: string
   /** Terminal failure classification (blocked/failed 终态事件携带)。 */
   failureReason?: string
+  modelSelection?: DelegationActivity['modelSelection']
   model?: string
   provider?: string
+  terminalFailure?: boolean
+  usageKnown?: boolean
   usage?: DelegationActivity['usage']
   artifactId?: string
   changedFiles?: string[]
@@ -717,6 +711,8 @@ export interface SessionPersistenceAdapter {
    */
   loadRecords?(): SessionRecord[]
   loadEvents?(sessionId: string): SessionEvent[]
+  /** Local accepted snapshot including pending writes, only for rewind anchors. */
+  loadEventsForRewind?(sessionId: string): SessionEvent[]
   /**
    * Return the maximum valid sequence already durable for one session. This
    * is the allocation high-water mark; `SessionRecord.lastSeq` is only a
@@ -1663,7 +1659,13 @@ export class RuntimeSessionManager {
         continue
       }
       if (this.syncExternalRecord(existing, rawRecord)) recordMerged = true
-      if (!existing.running && existing.eventsLoaded && !existing.tombstoned) {
+      // 漂移合并资格：已加载的会话（原有），或**有活 listener 的已淘汰会话**。
+      // issue #445 rework 后 watched-idle 超 TTL 会被淘汰（eventsLoaded=false
+      // 但 listeners 保留），若此处仍只看 eventsLoaded，活着的 SSE 连接永远
+      // 收不到外部新事件（回归）。无 listener 的已淘汰会话保持原样：内存已
+      // 释放，无外部进度时不做任何重读。
+      const mergeEligible = existing.eventsLoaded || existing.listeners.size > 0
+      if (!existing.running && mergeEligible && !existing.tombstoned) {
         const merge = this.maybeSyncExternalEvents(existing)
         if (merge) eventMerges.push(merge)
       }
@@ -1752,8 +1754,12 @@ export class RuntimeSessionManager {
     // 水位只在读成功后前进——读失败下轮重试
     session.externalSyncSize = stat.size
     session.externalSyncMtimeMs = stat.mtimeMs
-    // 等待期间会话被逐出/卸载/替换 → 丢弃这份陈旧磁盘快照（同 ensureEventsAsync 的守卫）
-    if (this.sessions.get(id) !== session || !session.eventsLoaded || session.tombstoned) return
+    // 等待期间会话被逐出/卸载/替换 → 丢弃这份陈旧磁盘快照（同 ensureEventsAsync 的守卫）。
+    // 资格判定与 adoptExternalSessions 对齐：已加载，或有活 listener 的已淘汰会话
+    // （evicted-watched：eventsLoaded=false 但 listeners 保留）都仍是有效合并目标；
+    // 二者皆无才是真正失效的快照。novel 过滤（seq > session.seq）保证只合并尾部
+    // 新事件，不把全量历史重新常驻内存。
+    if (this.sessions.get(id) !== session || (!session.eventsLoaded && session.listeners.size === 0) || session.tombstoned) return
     if (artifactIds) for (const a of artifactIds) session.knownArtifacts.add(a)
     if (diskFirst !== undefined && diskFirst > (session.diskFirstSeq ?? 1)) session.diskFirstSeq = diskFirst
     const novel = candidates.filter((e) => e.seq > session.seq).sort((a, b) => a.seq - b.seq)
@@ -1771,6 +1777,12 @@ export class RuntimeSessionManager {
     }
     session.seq = Math.max(session.seq, loadedTail?.lastSeq ?? 0)
     this.enforceRingLimits(session)
+    // Unloaded viewers receive live progress without rebuilding a resident ring
+    // outside loadedOrder. Explicit replay will load the persisted tail again.
+    if (!session.eventsLoaded) {
+      session.events = []
+      session.knownArtifacts.clear()
+    }
     session.record.lastSeq = session.seq
     for (const e of novel) {
       for (const listener of session.listeners) {
@@ -2009,7 +2021,7 @@ export class RuntimeSessionManager {
       this.sweepStaleDelegationNodes(session, 'caller_aborted')
     }
     this.touchLoaded(session)
-    this.evictLoadedBeyondCap()
+    this.evictLoadedBeyondCap(session.record.id)
   }
 
   /** Fold a freshly-read on-disk log into the session (shared by the sync and
@@ -2105,7 +2117,7 @@ export class RuntimeSessionManager {
       await session.eventsLoadPromise
     }
     this.touchLoaded(session)
-    this.evictLoadedBeyondCap()
+    this.evictLoadedBeyondCap(session.record.id)
   }
 
   /** Async twin of getEvents — reconnect/replay entry point for HTTP routes. */
@@ -2260,16 +2272,37 @@ export class RuntimeSessionManager {
 
   /**
    * Drop event logs of idle LRU sessions to bound resident memory. Never unloads
-   * a session that's live (agent built or running) or being watched (SSE
-   * listeners) — its in-memory log is the source of truth for in-flight appends
-   * and replay; those reload cleanly from disk once idle.
+   * a session that's live (agent built or running). Watched-but-idle sessions
+   * (SSE listeners, no agent/run) are the issue #445 leak: listeners only drop
+   * when the client disconnects, so a couple of long-lived tabs pin their full
+   * ring forever. Past the idle TTL, a watched log with a persistence reader
+   * can be dropped: reconnect loads history via getEvents→ensureEvents.
+   * Memory-only viewers remain pinned; idleAgentTtlMs <= 0 disables eviction
+   * of watched sessions. Persistence retains its own queued writes separately.
+   *
+   * `exceptId` shields the session being opened by the current ensureEvents
+   * call: without it a just-loaded watched-idle log would be dropped by the
+   * same call that read it, and getEvents would hand back an empty log.
    */
-  private evictLoadedBeyondCap(): void {
+  private evictLoadedBeyondCap(exceptId?: string): void {
     let i = 0
     while (i < this.loadedOrder.length && this.loadedOrder.length > this.maxLoadedSessions) {
       const id = this.loadedOrder[i]!
       const s = this.sessions.get(id)
-      if (!s || s.agent || s.running || s.listeners.size > 0) { i++; continue }
+      if (!s || s.agent || s.running) { i++; continue }
+      if (id === exceptId) { i++; continue }
+      const watched = s.listeners.size > 0
+      const replayable = this.persistence?.loadEvents || this.persistence?.loadEventsAsync || this.persistence?.loadEventsTailAsync
+      if (watched && !replayable) { i++; continue }
+      if (watched && (this.idleAgentTtlMs <= 0 || this.now() - s.record.updatedAt < this.idleAgentTtlMs)) {
+        i++
+        continue
+      }
+      // Unflushed coalesced deltas live only in memory — flush before dropping
+      // so the replay they came from keeps every event (same guard unloadSession
+      // uses).
+      this.flushDeltaBuf(s)
+      this.flushToolResultBuf(s)
       s.events = []
       s.knownArtifacts = new Set()
       s.eventsLoaded = false
@@ -3970,6 +4003,21 @@ export class RuntimeSessionManager {
     return snapshotGoal(this.getSessionGoalTracker(id))
   }
 
+  /**
+   * #463: re-emit a `goal_state` snapshot each time the goal tracker advances
+   * an iteration. Previously the snapshot was only emitted on create/pause/
+   * resume/cancel, so the desktop iteration counter stayed at the creation
+   * snapshot (0/maxIterations) for the entire run.
+   */
+  emitGoalIteration(
+    id: string,
+    tracker: import('../agent/goal-tracker.js').GoalTracker,
+  ): void {
+    const s = this.sessions.get(id)
+    if (!s) return
+    this.append(s, 'goal_state', snapshotGoal(tracker) as unknown as Record<string, unknown>)
+  }
+
   private mutateGoal(id: string, fn: (t: import('../agent/goal-tracker.js').GoalTracker) => void): GoalSnapshot | null {
     const session = this.sessions.get(id)
     if (!session) return null
@@ -5614,15 +5662,16 @@ export class RuntimeSessionManager {
    * `user` 事件列表（seq/ts/原文），rewind 锚点解析用。内存环被截尾（首事件
    * seq > 1）时改读磁盘全量——长会话的早期 user 事件不在环里，只按环配对会
    * 让 anchorSeq 静默缺失（前端退到文本回退，prompt 也只能靠剥离注入兜底）。
-   * rewind 是低频人工操作，同步读一次的代价可接受；读失败退回环。
+   * 写链在途时需包含已接受的待写事件；该快照不表示持久化完成。读失败退回环。
    */
   private userEventListFor(s: InternalSession): { seq: number; ts: number; text: string }[] {
     const ringTrimmed = s.events.length > 0 && s.events[0]!.seq > 1
     let src: SessionEvent[] = s.events
     const p = this.persistence
-    if (ringTrimmed && p?.loadEvents) {
+    const loader = p?.loadEventsForRewind ?? p?.loadEvents
+    if (ringTrimmed && loader) {
       try {
-        src = p.loadEvents.call(p, s.record.id)
+        src = loader.call(p, s.record.id)
       } catch {
         src = s.events
       }
@@ -6042,8 +6091,11 @@ export class RuntimeSessionManager {
       eventKind?: 'text' | 'thinking' | 'tool_use' | 'tool_result' | 'turn' | 'retry' | 'lifecycle'
       eventDetail?: string
       failureReason?: string
+      modelSelection?: DelegationActivity['modelSelection']
       model?: string
       provider?: string
+      terminalFailure?: boolean
+      usageKnown?: boolean
       usage?: DelegationActivity['usage']
       artifactId?: string
       changedFiles?: string[]
@@ -6088,7 +6140,10 @@ export class RuntimeSessionManager {
       eventKind: a.eventKind,
       eventDetail: a.eventDetail ? redactText(a.eventDetail) : undefined,
       failureReason: a.failureReason,
+      terminalFailure: a.terminalFailure,
+      usageKnown: a.usageKnown,
       model: a.model,
+      modelSelection: a.modelSelection,
       provider: a.provider,
       usage: a.usage,
       artifactId: a.artifactId,

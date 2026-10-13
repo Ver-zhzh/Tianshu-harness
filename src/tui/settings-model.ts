@@ -223,7 +223,6 @@ const REVIEW_PROFILE_HINTS: Record<string, string> = {
 }
 
 const INHERIT = ''
-const INHERIT_LABEL = '（继承会话模型）'
 const UNSET_LABEL = '（未设置）'
 const OFF_LABEL = '（关闭）'
 
@@ -373,6 +372,7 @@ function modelField(input: {
   visionOnly?: boolean
   /** Sentinel option offered above the models (inherit / unset). */
   sentinel?: { id: string; label: string }
+  extraOptions?: SettingsOption[]
   get: (draft: SettingsDraft) => string
   set: (draft: SettingsDraft, ref: string) => SettingsDraft
   /** Refuse the edit with a reason (e.g. depends on another field being set). */
@@ -388,17 +388,20 @@ function modelField(input: {
     display: draft => {
       const ref = input.get(draft)
       if (!ref) return input.sentinel?.label ?? UNSET_LABEL
+      const extra = input.extraOptions?.find(option => option.id === ref)
+      if (extra) return extra.label
       const parts = splitModelRef(ref)
       return parts ? `${parts.provider} · ${parts.model}` : ref
     },
     options: (_draft, env) => {
-      const list = modelOptions(env, { visionOnly: input.visionOnly })
+      const list = [...(input.extraOptions ?? []), ...modelOptions(env, { visionOnly: input.visionOnly })]
       return input.sentinel ? [{ id: input.sentinel.id, label: input.sentinel.label }, ...list] : list
     },
     selectedId: input.get,
     apply: (draft, value) => {
       const blocked = input.guard?.(draft)
       if (blocked) return { error: blocked }
+      if (input.extraOptions?.some(option => option.id === value)) return input.set(draft, value)
       if (value === INHERIT) return input.set(draft, INHERIT)
       if (!splitModelRef(value)) return { error: '模型格式需为 provider:modelId' }
       return input.set(draft, value)
@@ -425,7 +428,7 @@ function withNet(draft: SettingsDraft, patch: Partial<NetDraft>): SettingsDraft 
 /** Profile names available as routing targets, plus anything already referenced. */
 function profileOptions(draft: SettingsDraft): SettingsOption[] {
   const names = new Set(Object.keys(draft.workers.profiles))
-  for (const target of Object.values(draft.workers.routing)) names.add(target)
+  for (const target of Object.values(draft.workers.routing)) if (typeof target === 'string') names.add(target)
   return [...names].sort().map(name => {
     const p = draft.workers.profiles[name]
     return { id: name, label: p ? `${name} → ${p.provider} · ${p.model}` : `${name}（未定义）` }
@@ -433,7 +436,7 @@ function profileOptions(draft: SettingsDraft): SettingsOption[] {
 }
 
 /**
- * 推荐路由目标探测（desktop 一键推荐同逻辑）：模型 id/alias 含 flash 优先，
+ * CLI 显式推荐按钮的目标探测：模型 id/alias 含 flash 优先，
  * 其次 deepseek 系，最后第一个已配置模型。只在已配置 provider 里找——
  * 没有任何已配置模型时返回 null（调用方转空态引导）。
  */
@@ -481,10 +484,19 @@ function workerCategory(draft: SettingsDraft, env: SettingsEnv): SettingsCategor
     block: 'workers' as const,
     effect: 'next-session' as const,
     hint: WORKER_TASK_HINTS[task] ?? `「${task}」类子代理任务走哪个档位`,
-    display: d => d.workers.routing[task] ?? UNSET_LABEL,
-    options: d => profileOptions(d),
-    selectedId: d => d.workers.routing[task] ?? '',
-    apply: (d, value) => withWorkers(d, { ...d.workers, routing: { ...d.workers.routing, [task]: value } }),
+    display: d => { const route = d.workers.routing[task]; return typeof route === 'string' ? route : route ? 'strategy' in route ? route.strategy === 'session' ? '跟随主会话' : '自动选择' : `${route.provider} · ${route.model}` : UNSET_LABEL },
+    options: d => {
+      const route = d.workers.routing[task]
+      return [{ id: '', label: '使用默认策略' }, ...profileOptions(d), ...(route && typeof route !== 'string' ? [{ id: JSON.stringify(route), label: 'strategy' in route ? route.strategy === 'session' ? '跟随主会话' : '自动选择' : `${route.provider} · ${route.model}` }] : [])]
+    },
+    selectedId: d => { const route = d.workers.routing[task]; return typeof route === 'string' ? route : route ? JSON.stringify(route) : '' },
+    apply: (d, value) => {
+      const routing = { ...d.workers.routing }
+      if (!value) delete routing[task]
+      else if (value === JSON.stringify(d.workers.routing[task]) && typeof d.workers.routing[task] !== 'string') return d
+      else routing[task] = value
+      return withWorkers(d, { ...d.workers, routing })
+    },
   }))
 
   // Editing an existing profile's model. Adding/removing profiles is out of
@@ -492,7 +504,7 @@ function workerCategory(draft: SettingsDraft, env: SettingsEnv): SettingsCategor
   for (const name of Object.keys(draft.workers.profiles).sort()) {
     const p = draft.workers.profiles[name]
     const broken = p && !routingTargetResolves(env, p.provider, p.model)
-      ? ` ⚠ ${p.provider} 未配置或无此模型——当前会静默回退主模型`
+      ? ` ⚠ ${p.provider} 未配置或无此模型——派发时回退主会话并提示`
       : ''
     fields.push(modelField({
       id: `workers.profiles.${name}`,
@@ -569,8 +581,8 @@ function reviewCategory(draft: SettingsDraft, env: SettingsEnv): SettingsCategor
   const names = [...new Set([...REVIEW_PROFILE_KEYS, ...Object.keys(draft.review.profiles)])]
   const fields: SettingsField[] = names.map(name => {
     const p = draft.review.profiles[name]
-    const broken = p && !routingTargetResolves(env, p.provider, p.model)
-      ? ` ⚠ ${p.provider} 未配置或无此模型——当前会静默回退主模型`
+    const broken = p && 'provider' in p && !routingTargetResolves(env, p.provider, p.model)
+      ? ` ⚠ ${p.provider} 未配置或无此模型——派发时回退主会话并提示`
       : ''
     return modelField({
       id: `review.profiles.${name}`,
@@ -578,15 +590,18 @@ function reviewCategory(draft: SettingsDraft, env: SettingsEnv): SettingsCategor
       block: 'review',
       effect: 'next-session',
       hint: (REVIEW_PROFILE_HINTS[name] ?? `「${name}」类子代理用哪个模型；留空回退主控`) + broken,
-      sentinel: { id: INHERIT, label: INHERIT_LABEL },
+      sentinel: { id: INHERIT, label: '使用默认策略' },
+      extraOptions: [{ id: '__session__', label: '跟随主会话' }, { id: '__auto__', label: '自动选择' }],
       get: d => {
         const p = d.review.profiles[name]
-        return p ? modelRef(p.provider, p.model) : INHERIT
+        return p && 'provider' in p ? modelRef(p.provider, p.model) : p && 'strategy' in p ? p.strategy === 'session' ? '__session__' : '__auto__' : INHERIT
       },
       set: (d, ref) => {
         const next = { ...d.review.profiles }
         const parts = ref ? splitModelRef(ref) : null
-        if (parts) next[name] = { provider: parts.provider, model: parts.model }
+        if (ref === '__session__') next[name] = { strategy: 'session' }
+        else if (ref === '__auto__') next[name] = { strategy: 'auto' }
+        else if (parts) next[name] = { provider: parts.provider, model: parts.model }
         else delete next[name]
         return withReview(d, { ...d.review, profiles: next })
       },

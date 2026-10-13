@@ -100,4 +100,9 @@ export interface StreamClient {
   /** Consume-once accessor for the latest wire-level prefix divergence. Optional. */
   consumeWireDivergence?(): WireDivergence | null
   getMainPrefixProof?(): import('./continuation-prefix.js').ContinuationPrefixProof | undefined
+  authorizeCacheGeneration?(reason: string): void
+  restoreExecutionSnapshot?(snapshot: import('./continuation-prefix.js').ContinuationPrefixProof): void
+  restoreExecutionOptions?(options: Record<string, unknown>): void
+  setRuntimeSessionId?(id: string): void
+  getExecutionPolicy?(): { singleAttempt: boolean }
 }

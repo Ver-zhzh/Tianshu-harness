@@ -1,3 +1,4 @@
+import { withExecutionContinuity } from '../api/execution-continuity.js'
 import { CourseEpisodes } from './course-episodes.js'
 import { WorkProgressFacts, computeRepeatedVerificationSignal } from './work-progress-facts.js'
 import { recordConvergenceInput, type RecordedConvergenceInput } from './convergence-replay.js'
@@ -821,7 +822,12 @@ export class AgentLoop {
     session: SessionContext,
     cwd?: string,
   ) {
-      this.config = config; this.session = session;
+    if (!config.client.getExecutionPolicy) {
+      const raw = config.client
+      config.client = withExecutionContinuity(raw, { provider: config.providerName ?? 'unknown', model: config.promptEngine.getModel(), credentialScope: `${config.providerName ?? 'unknown'}:default`, singleAttempt: config.inputOrigin === 'worker_task', sessionId: config.sessionId })
+      if (config.primaryClient === raw) config.primaryClient = config.client
+    }
+    this.config = config; this.session = session;
     if (config.sessionId) config.promptEngine.setSkillRegistry(sessionSkillSnapshot(cwd ?? process.cwd(), config.sessionId))
     if (!this.config.permissionsOverlay) {
       this.config.permissionsOverlay = createPermissionOverlay()
@@ -1597,10 +1603,20 @@ export class AgentLoop {
   ): void {
     if (effort === 'auto') {
       // 用户显式选 auto → autoReasoning 接管后续每轮 effort，清除 override 标志。
-      if (source === 'user') this.userReasoningOverride = false
+      if (source === 'user') {
+        this.userReasoningOverride = false
+        this.config.client.authorizeCacheGeneration?.('explicit_user_effort_auto')
+        this.config.promptEngine.authorizeCacheGeneration()
+        this.zenPhaseCallbacks?.onPhaseChange?.('cache-generation', { reason: 'explicit_user_effort_auto', suggestion: '下一请求重新确定档位并固定，可能重建缓存' })
+      }
       return
     }
     if (source === 'user') this.userReasoningOverride = true
+    if (source === 'user') {
+      this.config.client.authorizeCacheGeneration?.('explicit_user_effort')
+      this.config.promptEngine.authorizeCacheGeneration()
+      this.zenPhaseCallbacks?.onPhaseChange?.('cache-generation', { reason: 'explicit_user_effort', suggestion: '推理档位已明确更改，后续请求可能重建缓存' })
+    } else if (this.config.promptEngine.getExecutionSnapshot()) return
     // 用户已显式选档（/effort max 等）→ 程序化调整（perception strategy、
     // autoReasoning 档位）不得覆盖，保护显式用户意图。
     if (source === 'programmatic' && this.userReasoningOverride) return
@@ -1660,11 +1676,10 @@ export class AgentLoop {
       : applyDescriptionMode(all, toolDescriptions)
     // Zen 相位：工具面收窄到读面 ∩ 已门控集；晋升 full 后回落到门控全集，
     // 二者是叠加关系。
-    if (this.zenController.isZen) {
-      const face = this.zenController.face
+    if (this.config.zen?.enabled) {
       // 解锁声明工具恒注入：物理收窄切断模型调用面外工具的通道，zen_unlock
       // 是可见的动手意图入口（虚拟——不在 registry，执行由 ToolExecutionController 拦截）。
-      return [...gated.filter(d => face.has(d.name)), ...applyDescriptionMode([zenUnlockDefinition()], toolDescriptions)]
+      return [...gated, ...applyDescriptionMode([zenUnlockDefinition()], toolDescriptions)]
     }
     return gated
   }
@@ -2522,7 +2537,7 @@ export class AgentLoop {
   private async runPostSessionWith(ctx: RuntimeHookContext): Promise<void> {
     // P0-1: drain pending async persist writes so tool results survive abort/Ctrl+C.
     await this.drainPersistWrites()
-    await this.runtimeHooks.runPostSession(ctx)
+    if (this.config.inputOrigin !== 'worker_task') await this.runtimeHooks.runPostSession(ctx)
     if (this.config.sessionRegistry) {
       try { this.config.sessionRegistry.cleanupOldEvents(2 * 60 * 60 * 1000) } catch { /* ignore */ }
     }
@@ -3306,10 +3321,7 @@ export class AgentLoop {
     if (convergenceCheck.shouldForceSplit) {
       // Level 3: force session split to reset context and break the loop
       debugLog(`[convergence] turn=${turn} force-split score=${convergenceCheck.score.toFixed(2)}`)
-      if (await this.compaction.trySessionSplit()) {
-        // split succeeded — reset turn counter and continue
-        debugLog(`[convergence] turn=${turn} split-succeeded`)
-      }
+      // Keep history intact; convergence suggestions cannot authorize a cache generation.
     }
 
     if (convergenceCheck.shouldAbort) {

@@ -1,3 +1,4 @@
+import { deriveWorkerSessionId } from '../work-order.js'
 import { currentWorkspaceRoots } from '../../tools/workspace-context.js'
 /**
  * worker-process parent — OOP（out-of-process）运行器，worker 子进程隔离 v1。
@@ -6,13 +7,12 @@ import { currentWorkspaceRoots } from '../../tools/workspace-context.js'
  * 配置 → spawn 子进程（stdio NDJSON）→ 桥接四回调（activity/nested/mailbox/
  * steer）+ abort 下行 → watchdog（activity/tick 任一重置）→ 终态映射回
  * WorkerSessionRun。子进程崩溃/停摆合成 failed WorkerResult（failureReason
- * worker_crash/stalled），coordinator 既有重派与断路器接管恢复。
+ * worker_crash/stalled），保留终态失败，不自动重派。
  *
  * 击杀梯度对齐 ZCode 实证方案：SIGTERM → 300ms 宽限 → SIGKILL（经
  * killProcessTree 整树击杀，Windows taskkill /T /F）。
  *
- * 入口缺失 / spawn 失败 → 抛 WorkerOopUnavailable，bootstrap 接线处捕获并
- * 回退进程内 runWorkerSession（灰度期零破坏）。
+ * 入口缺失 / spawn 失败直接受阻，不改为进程内执行。
  */
 
 import { spawn, type ChildProcess } from 'node:child_process'
@@ -23,7 +23,7 @@ import { track } from '../../tools/process-tracker.js'
 import { deriveWorkerStallMs } from '../worker-liveness.js'
 import type { WorkerSessionConfig, WorkerSessionRun } from '../worker-session.js'
 import type { SessionContext } from '../context.js'
-import type { OaiMessage, Usage } from '../../api/types.js'
+import type { OaiMessage } from '../../api/types.js'
 import type { WorkerResult } from '../work-order.js'
 import { debugLog } from '../../utils/debug.js'
 import {
@@ -62,25 +62,14 @@ export function isReviewWorkerProfile(profile: string | undefined): boolean {
   return profile !== undefined && REVIEW_WORKER_PROFILES.has(profile)
 }
 
-/** OOP runner 工厂（含回退）：WorkerOopUnavailable（entry 缺失/spawn 失败/
- *  决策未盖戳）时回退进程内 runWorkerSession——灰度期零破坏。 */
+/** OOP runner 工厂。保留旧导出名；隔离入口不可用直接终态失败。 */
 export function createOopRunnerWithFallback(
   opts: WorkerOopOptions,
 ): (config: WorkerSessionConfig) => Promise<WorkerSessionRun> {
-  return async (config) => {
-    try {
-      return await runWorkerSessionOop(config, opts)
-    } catch (err) {
-      if (err instanceof WorkerOopUnavailable) {
-        debugLog(`[worker-oop] unavailable: ${err.message} — falling back to in-process runWorkerSession`)
-        return runWorkerSession(config)
-      }
-      throw err
-    }
-  }
+  return (config) => runWorkerSessionOop(config, opts)
 }
 
-/** 子进程不可用（entry 缺失/spawn 失败）——接线处据此回退进程内。 */
+/** 子进程不可用（entry 缺失/spawn 失败）——直接受阻，不自动改成进程内。 */
 export class WorkerOopUnavailable extends Error {
   constructor(reason: string) {
     super(reason)
@@ -141,7 +130,7 @@ export async function runWorkerSessionOop(
   const decision = config.runtimeDecision
   const initPayload: WorkerChildInitPayload = {
     config: {
-      order: config.order,
+      order: { ...config.order, allowedTools: config.toolRegistry.getDefinitions().map(tool => tool.name) },
       cwd: config.cwd,
       workspaceRoots: config.workspaceRoots ?? [...currentWorkspaceRoots(config.cwd)],
       maxTurns: config.maxTurns,
@@ -162,6 +151,7 @@ export async function runWorkerSessionOop(
       continuationSource: config.continuationSource,
       routeReason: config.routeReason,
       sessionNonce: config.sessionNonce,
+      policyLeaseId: config.policyLeaseId,
       checkpoint: config.checkpoint,
     },
     memoryBlock: opts.getMemoryBlock(),
@@ -276,7 +266,7 @@ export async function runWorkerSessionOop(
           risks: [],
           nextActions: [],
           evidenceStatus: 'skipped',
-          failureReason,
+          failureReason, terminalFailure: true, failureStage: 'process', usageKnown: false,
           objective: config.order.objective,
           profile: config.order.profile,
         },
@@ -284,7 +274,7 @@ export async function runWorkerSessionOop(
         // SessionContext 是宽接口，消费方（coordinator.ts:2643/2617）只 duck-type
         // getMessages——OOP 场景没有活 context，投影成最小面。
         session: { getMessages: () => [] as OaiMessage[] } as unknown as SessionContext,
-        usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+        usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, observation: { requestId: deriveWorkerSessionId(config.order.id, config.sessionNonce), attemptId: 'unknown-process', status: 'aborted', fields: {} } },
       })
     }
 

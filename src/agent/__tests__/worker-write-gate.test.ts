@@ -112,7 +112,8 @@ describe('worker-write-gate (W4-D1)', () => {
     const failed = applyWriteGateToResult(original, failedReport, 1)
     assert.equal(failed.status, 'failed')
     assert.equal(failed.evidenceStatus, 'failed')
-    assert.ok(failed.risks.some(r => r.includes('1 bounded repair round')))
+    assert.equal(failed.terminalFailure, true)
+    assert.ok(failed.risks.some(r => r.includes('no automatic repair')))
     assert.ok(failed.risks.some(r => r.includes('falseGreen')))
     assert.equal(original.status, 'passed', 'input result must not be mutated')
 

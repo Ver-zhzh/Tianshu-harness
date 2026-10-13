@@ -14,6 +14,7 @@ import { workerDispatchKey } from '../../tools/worker-identity.js'
 
 import { DecisionController, type PlanDecision, type PlanDecisionResult, type PlanReviewView } from './decision-controller.js'
 import { renderDecisionCard } from '../format/decision-card.js'
+import { formatPinnedPrompt } from '../format/pinned-prompt.js'
 import type { WriteStream, ReadStream } from 'node:tty'
 import { CommitEngine } from './commit-engine.js'
 import { LiveEngine, padDynamicRegion, thinkingRowBudgetFor, type LiveRegionLine } from './live-engine.js'
@@ -141,6 +142,7 @@ import { renderPager, renderStarmap, renderCommandPalette, followListWindow, ren
 import type { PagerData, StarmapData, PaletteData, ChronicleData, TasksData, TasksGroup, TasksWorkerRow, DomainPickerData, ModelPickerData, ThemePickerData, ChoicePanelData, PlanPickerData, ChoiceEntry, ConnectOverlayData, InitOverlayData } from '../format/overlay.js'
 import { ConnectFlow, DIY_PENDING_KEY_REF, type ConnectCommit, type ConnectProviderRef, type ConnectStepResult } from '../connect-flow.js'
 import { VisionOnboardingFlow, type VisionCandidate, type VisionOnboardingRequest, type VisionOnboardingResult } from '../vision-onboarding-flow.js'
+import { TokenLedgerConnect } from '../token-ledger-connect.js'
 import { dismissOnboarding } from '../../onboarding.js'
 import { readConnectDraft, saveConnectDraft, clearConnectDraft } from '../connect-draft.js'
 import { readSecret, writeSecret, deleteSecret } from '../../config/secrets-store.js'
@@ -474,6 +476,7 @@ export class TuiApp {
   private connectBlinkTimer: ReturnType<typeof setInterval> | null = null
   /** /vision 独立识图桥向导：只发 discover/onboard 请求，不复用通用 provider onboarding。 */
   private visionOnboardingFlow?: VisionOnboardingFlow
+  private tokenLedgerConnect?: TokenLedgerConnect
   private visionInput = ''
   private visionError?: string
   private visionExec?: (request: VisionOnboardingRequest) => Promise<{ candidates?: VisionCandidate[] }>
@@ -654,10 +657,13 @@ export class TuiApp {
    * 现在暂存到这里，随下一条 prompt 一并发出，并即时告知用户去向。
    */
   private deferredImages: string[] = []
+  /** 置顶上一轮/执行中指令条状态（对标 Codex CLI prompt_header 契约） */
+  private pinnedPrompt: { text: string; status: 'running' | 'completed' } | null = null
 
   /** 测试断言用：暂存待随下一条 prompt 发送的附件数。 */
   getDeferredImagesCount(): number {
-    return this.deferredImages.length
+    const queueImages = this.steerBuffer.getPendingEntries().reduce((sum, e) => sum + (e.images?.length ?? 0), 0)
+    return queueImages + this.deferredImages.length
   }
   /**
    * /queue 显式排队 lane：简单 FIFO（不走 steer 的优先级/意图分类）。
@@ -933,6 +939,7 @@ export class TuiApp {
       // 检出污染（外来写入移动光标）→ 重渲染走恢复路径重锚帧。
       onProbeRequest: () => { options.stdout.write(QUERY_CURSOR_POS) },
       onPolluted: () => { this.renderLive() },
+      hardwareCursorVisible: true,
     })
     this.overlay = new OverlayEngine({
       stdout: options.stdout,
@@ -1088,6 +1095,7 @@ export class TuiApp {
       const mode = this.input.getMode()
       if (mode !== 'input') return
       if (!this.overlay.isActive() && !this.approvalIntentController.approvalPending && this.decisions.paste(text)) return
+      if (this.overlay.activeId() === 'token-ledger-connect') { this.tokenLedgerConnect?.paste(text); this.overlay.rerender(); return }
       // Connect overlay active → route paste into connectInput, not the main input box
       if (this.overlay.activeId() === 'connect' && this.connectFlow) {
         const view = this.connectFlow.view()
@@ -1529,9 +1537,12 @@ export class TuiApp {
       }
       // ── W4a: Up 箭头取回最近 queued 消息到输入框编辑 ─────────
       if (key.name === 'up' && !this.inputLine.value && this.steerBuffer.hasPending()) {
-        const msg = this.steerBuffer.popLast()
-        if (msg) {
-          this.inputLine.setValue(msg)
+        const entry = this.steerBuffer.popLastEntry()
+        if (entry) {
+          this.inputLine.setValue(entry.text)
+          if (entry.images?.length) {
+            for (const img of entry.images) this.inputLine.addImage(img)
+          }
           this.renderLive()
         }
         return
@@ -1654,7 +1665,14 @@ export class TuiApp {
       onAutonomyCheckpoint: (info) => this.handleAutonomyCheckpoint(info),
       // 工具边界只注入紧急意图（halt=now / redirect=next）：普通消息（later）
       // 留在队列，等本轮结束后自动作为下一轮发出——不混进当前轮 [User guidance]。
-      onHumanGuidanceDrain: () => this.steerBuffer.drainHuman('next'),
+      onHumanGuidanceDrain: () => {
+        for (const entry of this.steerBuffer.getPendingEntries()) {
+          if (entry.priority === 'later') continue
+          if (!entry.bubbleCommitted) { this.commitUserPrompt(entry.text, entry.images); entry.bubbleCommitted = true }
+          if (entry.images?.length) { this.deferredImages.push(...entry.images); entry.images = undefined }
+        }
+        return this.steerBuffer.drainHuman('next')
+      },
       onDelegationActivity: (activity) => this.handleDelegationActivity(activity),
       // issue #247 第 1–3 条：CVM 拦截发生时提示（分级/文案在 agent/cvm-notice.ts）
       onCvmInterception: (notice) => this.handleCvmInterception(notice),
@@ -1931,6 +1949,9 @@ export class TuiApp {
     // 入口先规范化图片数组，后续气泡/渲染/回调看到的是同一份。
     images = normalizeSubmitImages(images)
     let trimmed = text.trim()
+    if (/^\/(?:token-ledger|usage)(?:\s|$)/.test(trimmed) && this.slashRegistry.has(trimmed.split(/\s+/)[0]!)) {
+      this.inputLine.clearAll(); await this.tryDispatchSlash(trimmed); return
+    }
     const hasImages = images && images.length > 0
     // 允许只发图片：空文本时补一个占位 prompt，让后端能触发 run。
     if (!trimmed && hasImages) {
@@ -2011,19 +2032,24 @@ export class TuiApp {
       return
     }
 
-    // W4a: agent 执行中 → 入队（turn 边界 drain 注入）。
-    // 同时立即 commit 用户气泡到 scrollback，确保用户始终能看到自己说了什么。
+    // W4a: agent 执行中 → 显式插队（Alt+Enter / /steer）或 普通排队（Enter）。
     if (this.agentBusy && trimmed) {
-      // 显式插队（Alt+Enter / /steer）→ now 优先级，本轮工具边界立即注入；
-      // 普通 Enter → later，本轮结束后自动作为下一轮发出（见 onSteerDrain 注释）。
-      await this.awaitUserCommit(steer ? `[⚡ 插队引导] ${trimmed}` : trimmed, images, questionRequestId)
-      if (steer) this.steerBuffer.pushNow(trimmed)
-      else this.steerBuffer.push(trimmed)
-      // 插话只走文本：图片暂存到下一轮随 prompt 发出，并明确告知去向。此前这里是
-      // 静默丢弃——气泡里图已经显示出来了，用户以为模型看到了，实际从未收到。
-      if (images?.length) {
-        this.deferredImages.push(...images)
-        this.commitStatic(color(`📎 ${images.length} 张图片已保留，将随下一条消息发送（插话通道仅能传文本）`, this.theme.muted))
+      if (steer) {
+        // 显式插队（Alt+Enter / /steer）→ now 优先级，本轮工具边界立即注入；
+        // 仅插队消息立即 commit 气泡到 scrollback（带 [⚡ 插队引导] 标识）。
+        await this.awaitUserCommit(`[⚡ 插队引导] ${trimmed}`, images, questionRequestId)
+        this.steerBuffer.pushNow(trimmed, true, images)
+        if (images?.length) {
+          this.commitStatic(color(`📎 ${images.length} 张图片已保留，将随下一条消息发送（插话通道仅能传文本）`, this.theme.muted))
+        }
+      } else {
+        // 普通 Enter → later 优先级，排队等待当前轮次彻底结束（settle）后逐条作为新 run 发出。
+        // 排队消息不立即 commit 气泡，固定在输入框上方横幅展示等待（支持多条 FIFO），
+        // 附件与消息粒度绑定（entry.images）；待轮末 dispatch 时再 commit 用户气泡并连带专属图片发出。
+        this.steerBuffer.push(trimmed, 'later', false, images)
+        if (images?.length) {
+          this.commitStatic(color(`📎 ${images.length} 张图片已保留，将随下一条消息发送（排队通道仅能传文本）`, this.theme.muted))
+        }
       }
       this.renderLive()
       return
@@ -2038,15 +2064,21 @@ export class TuiApp {
     // 注意：steer 路径已为每条 queued 消息单独 commit 了用户气泡，
     // 此处不再重复 commit，仅输出合并提示并归并文本。
     let submitText = text
-    let steerMerged = false
+    let commitText = text
+    const mergedImages: string[] = []
+    const uncommittedImages: string[] = []
     if (trimmed && (this.steerBuffer.hasPending() || this.queueLane.length > 0)) {
       const pendingEntries = [...this.steerBuffer.getPendingEntries()]
       this.steerBuffer.clear()
       const pending = pendingEntries.map(entry => entry.text)
+      for (const entry of pendingEntries) {
+        if (entry.images?.length) mergedImages.push(...entry.images)
+      }
       const lane = this.queueLane.splice(0)
+      commitText = [...pendingEntries.filter(entry => !entry.bubbleCommitted).map(entry => entry.text), ...lane, trimmed].join('\n\n')
+      for (const entry of pendingEntries) if (!entry.bubbleCommitted && entry.images) uncommittedImages.push(...entry.images)
       const mergedCount = pending.length + lane.length
       submitText = [...pending, ...lane, trimmed].join('\n\n')
-      steerMerged = true
       this.commitAbove(() => {
         this.commit.write({
           text: color(`↳ ${mergedCount} queued message${mergedCount > 1 ? 's' : ''} merged into this prompt`, this.theme.muted),
@@ -2055,12 +2087,11 @@ export class TuiApp {
         this.state.committedCount++
       })
     }
-
-    // Commit user message to scrollback（steer 已单独 commit 时跳过）
+    // Commit user message to scrollback
     if (trimmed) {
-      if (!steerMerged) {
-        await this.awaitUserCommit(submitText.trim(), images, questionRequestId, true)
-      }
+      const allSubmitImages = [...uncommittedImages, ...(images ?? [])]
+      const outgoingCommitImages = allSubmitImages.length > 0 ? allSubmitImages : undefined
+      await this.awaitUserCommit(commitText.trim(), outgoingCommitImages, questionRequestId, true)
       // 新 run 启动前丢弃上一 run 未 finalize 的流式残留：blockWriter 缓冲
       // 与 streamRenderer pending 若不清，会把上一轮文字追加进新轮输出。
       this.blockWriter.discard()
@@ -2069,6 +2100,7 @@ export class TuiApp {
       this.agentBusy = true
       this.decisions.setBusy(true)
       this.todosWrittenThisRun = false
+      this.pinnedPrompt = { text: submitText.trim(), status: 'running' }
       // 新 run 开始，上一轮的 thinking 回看作废——否则 ctrl+t 会重印出陈旧思考。
       this.thinkingReview.clear()
     }
@@ -2077,10 +2109,13 @@ export class TuiApp {
     this.streamRenderController.lastActivityMs = Date.now()
     // 上一 run 期间暂存的附件（插话送不出去的图片）随本次 prompt 一次性发出：
     // 顺序按时间序——暂存在前、本次提交的图在后（与文本归并同序）。
-    const outgoingImages = this.deferredImages.length > 0
-      ? [...this.deferredImages, ...(images ?? [])]
-      : images
+    const allOutgoing = [
+      ...mergedImages,
+      ...(this.deferredImages.length > 0 ? this.deferredImages : []),
+      ...(images ?? [])
+    ]
     if (this.deferredImages.length > 0) this.deferredImages = []
+    const outgoingImages = allOutgoing.length > 0 ? allOutgoing : undefined
     try {
       await this.onSubmitCallback?.(submitText, outgoingImages, decision ? { origin: 'human', literalText: true } : undefined)
       // 投递成功才归档「已提交回答」：失败时提问卡仍是挂起态（面板保留错误可重试），
@@ -2088,8 +2123,8 @@ export class TuiApp {
       if (questionRequestId) this.archiveAskCards(questionRequestId, 'answered')
     }
     catch (error) { this.rejectSubmit(); throw error }
+    this.renderLive()
   }
-
   /** Contract 预览按键：Enter 确认 / e 返回编辑 / Esc 取消。返回是否已消费。 */
   private handleContractPreviewKey(key: KeyPress): boolean {
     if (!this.contractPreview) return false
@@ -2160,6 +2195,7 @@ export class TuiApp {
     this.agentBusy = false
     this.decisions.setBusy(false)
     this.setPhase('idle')
+    if (this.pinnedPrompt?.status === 'running') this.pinnedPrompt.status = 'completed'
     this.renderLive()
   }
 
@@ -2235,6 +2271,11 @@ export class TuiApp {
     const entries = [...this.steerBuffer.getPendingEntries()]
     this.steerBuffer.clear()
     this.inputLine.setValue(entries.map(entry => entry.text).join('\n\n'))
+    for (const entry of entries) {
+      if (entry.images?.length) {
+        for (const img of entry.images) this.inputLine.addImage(img)
+      }
+    }
     this.commitAbove(() => {
       this.commit.write({
         text: color(`⏮ 已把 ${entries.length} 条排队消息拉回输入框`, this.theme.muted),
@@ -2257,22 +2298,37 @@ export class TuiApp {
     if (this.turnCompleteInFlight > 0) return
     if (this.agentBusy) return
     this.pendingQueueDispatch = false
-    this.dispatchQueuedAfterSettle()
+    void this.dispatchQueuedAfterSettle()
   }
 
-  private dispatchQueuedAfterSettle(): void {
+  private async dispatchQueuedAfterSettle(): Promise<void> {
     if (this.inputLine.value.trim().length > 0) return
-    const text = this.steerBuffer.shift()
-    if (!text) return
-    this.blockWriter.discard()
-    this.streamRenderer.reset()
-    this.streamRenderController.assistantHeaderDone = false
+    const entry = this.steerBuffer.shiftEntry()
+    if (!entry) return
+    const text = entry.text
+    const combinedImages = [...this.deferredImages.splice(0), ...(entry.images ?? [])]
+    const outgoingImages = combinedImages.length ? combinedImages : undefined
     this.agentBusy = true
     this.decisions.setBusy(true)
-    this.todosWrittenThisRun = false
-    this.state.turnStartMs = Date.now()
-    this.streamRenderController.lastActivityMs = Date.now()
-    this.onSubmitCallback?.(text)
+    this.pinnedPrompt = { text: text.trim(), status: 'running' }
+    try {
+      if (!entry.bubbleCommitted) {
+        await this.awaitUserCommit(text, outgoingImages)
+        entry.bubbleCommitted = true
+      }
+      if (!this.agentBusy) { entry.images = outgoingImages; this.steerBuffer.restoreEntry(entry); return }
+      this.blockWriter.discard()
+      this.streamRenderer.reset()
+      this.streamRenderController.assistantHeaderDone = false
+      this.todosWrittenThisRun = false
+      this.state.turnStartMs = Date.now()
+      this.streamRenderController.lastActivityMs = Date.now()
+      await this.onSubmitCallback?.(text, outgoingImages)
+    } catch {
+      entry.images = outgoingImages
+      this.steerBuffer.restoreEntry(entry)
+      this.rejectSubmit()
+    }
     this.renderLive()
   }
 
@@ -2287,6 +2343,7 @@ export class TuiApp {
     this.agentBusy = false
     this.decisions.setBusy(false)
     this.currentTaskTitle = ''
+    if (this.pinnedPrompt?.status === 'running') this.pinnedPrompt.status = 'completed'
     this.frontend.record({ kind: 'error', text: '上一轮尚未收尾，这条没有发出 — 请重新发送' })
     this.setPhase('idle')
     this.commitAbove(() => {
@@ -2423,6 +2480,7 @@ export class TuiApp {
   /** 激活 overlay */
   activateOverlay(id: string): boolean {
     if (this.terminalRestored) return false
+    if (id !== 'token-ledger-connect') { this.tokenLedgerConnect?.clear(); this.tokenLedgerConnect = undefined }
     this.inputHandoffGeneration++
     this.historyOpenGeneration++
     if (this.historyOpening) { this.historyOpening = false; this.frontend.closeHistory() }
@@ -2452,6 +2510,7 @@ export class TuiApp {
       case 'chronicle':
       case 'connect':
       case 'vision-onboarding':
+      case 'token-ledger-connect':
       case 'init':
       case 'settings':
       case 'jobs':
@@ -2544,6 +2603,7 @@ export class TuiApp {
     const wasActive = this.overlay.isActive()
     if (!wasActive) return
     const closingId = this.overlay.activeId()
+    if (closingId === 'token-ledger-connect') { this.tokenLedgerConnect?.clear(); this.tokenLedgerConnect = undefined }
     if (closingId === 'ui-history') this.frontend.closeHistory()
     const preview = this.planPreview
     if (closingId === 'pager') this.detailPager = null
@@ -2588,11 +2648,17 @@ export class TuiApp {
     this.inputHandoffGeneration++
     this.historyOpenGeneration++
     if (this.historyOpening) { this.historyOpening = false; this.frontend.closeHistory() }
+    const wasActive = this.overlay.isActive()
     const returnTo = this.overlay.activeId() === 'pager' ? this.detailReturn : undefined
     this.detailReturn = undefined
     // 统一收口：suppress 窗口让回放只写 scrollback，最后由本方法
     // 统一 renderLive 画唯一帧，避免两层框体叠影。
     this.exitOverlayCore()
+    // 内联决策卡（提问 / 计划审批）可在无 overlay 时 reveal——首个决策到达时
+    // decision-controller 调 host.reveal() → 本方法。此时不得执行 overlay 退出
+    // 清理（\r\x1B[0J + live.reset()）：那会丢弃 live 增量绘制锚点，旧 chrome
+    // 残留、卡片从输入光标处继续绘制，对话被分成上下两层。走增量 renderLive。
+    if (!wasActive) { this.renderLive(); return }
     if (returnTo) { Object.assign(this.overlayController.nav(), returnTo.nav); this.overlay.activate(returnTo.id); return }
     // 计划预览返回路径：exitOverlayCore 已按 returnTo 重开面板（choice-panel /
     // plan-picker），此处不得再做主屏恢复——写主屏会污染 alt screen。
@@ -2621,6 +2687,15 @@ export class TuiApp {
     this.input.setMode('input')
     this.activateOverlay('connect')
   }
+
+  /** Open a masked sync-key input outside the composer and history. */
+  startTokenLedgerConnect(save: (key: string) => void): void {
+    this.tokenLedgerConnect?.clear()
+    this.tokenLedgerConnect = new TokenLedgerConnect(save)
+    this.input.setMode('input')
+    if (!this.activateOverlay('token-ledger-connect')) { this.tokenLedgerConnect.clear(); this.tokenLedgerConnect = undefined }
+  }
+  getTokenLedgerConnectData(): ConnectOverlayData { return (this.tokenLedgerConnect ?? new TokenLedgerConnect()).data() }
 
   /** Open the dedicated image-recognition bridge wizard. */
   startVisionOnboarding(execute: (request: VisionOnboardingRequest) => Promise<{ candidates?: VisionCandidate[] }>): void {
@@ -3248,6 +3323,12 @@ export class TuiApp {
    */
   private handleOverlayKey(key: { name: string; char: string; ctrl?: boolean; meta?: boolean; shift?: boolean }): boolean {
     const id = this.overlay.activeId()
+    if (id === 'token-ledger-connect' && this.tokenLedgerConnect) {
+      const result = this.tokenLedgerConnect.key(key)
+      if (result === 'edit') this.overlay.rerender()
+      else { if (result === 'saved') this.commitStatic('Token 账本密钥已保存；自动上传关闭。/token-ledger sync 手动同步。'); this.deactivateOverlay() }
+      return true
+    }
     if (id === 'terminal-mode') { this.modePanel.handleKey(key as KeyPress); this.overlay.rerender(); return true }
     if (id === 'permissions' && this.permissionPanel) { this.permissionPanel.handleKey(key as KeyPress); this.overlay.rerender(); return true }
     if (id === 'help') { this.helpPanel.handleKey(key as KeyPress); this.overlay.rerender(); return true }
@@ -4114,6 +4195,7 @@ export class TuiApp {
 
   /** 销毁资源 */
   dispose(): void {
+    this.tokenLedgerConnect?.clear(); this.tokenLedgerConnect = undefined
     this.cancelFileCompletionQuery()
     this.archiveAskCards()
     this.decisions.clear()
@@ -4266,6 +4348,7 @@ export class TuiApp {
       this.agentBusy = true
       this.decisions.setBusy(true)
       this.todosWrittenThisRun = false
+      this.pinnedPrompt = { text: text.trim(), status: 'running' }
       this.state.turnStartMs = Date.now()
       this.streamRenderController.lastActivityMs = Date.now()
       this.onSubmitCallback?.(text, images, options)
@@ -4777,7 +4860,12 @@ export class TuiApp {
     this.frontend.clearDisplay()
     this.live.reset()
     this.resetLiveHighWater()
+    this.pinnedPrompt = null
     this.renderLive()
+  }
+
+  clearPinnedPrompt(): void {
+    this.pinnedPrompt = null
   }
 
   /** 注册内置 slash 命令（/clear、/starmap、/chronicle、/exit）。 */
@@ -5574,7 +5662,7 @@ export class TuiApp {
 
   private async handleTurnComplete(usage: Partial<Usage>, turnNumber: number, isFinal: boolean, stopReason?: string): Promise<void> {
     this.turnCompleteInFlight++
-    if (isFinal) { this.rejectPendingApprovals(); this.decisions.setBusy(false) }
+    if (isFinal) { this.rejectPendingApprovals(); this.decisions.setBusy(false); if (this.pinnedPrompt) this.pinnedPrompt.status = 'completed' }
     try {
     this.state.turnNumber = turnNumber
 
@@ -5716,6 +5804,7 @@ export class TuiApp {
     this.setPhase('idle')
     this.state.isStreaming = false
     this.state.isThinking = false
+    if (this.pinnedPrompt) this.pinnedPrompt.status = 'completed'
     // 与 abort 同口径 flush 折叠组，避免错误后孤儿结果滞留组内无法提交。
     if (this.toolGroupController.isActiveGroup()) this.flushToolGroup()
     if (this.toolGroupController.isActiveBashGroup()) this.flushBashGroup()
@@ -5905,6 +5994,7 @@ export class TuiApp {
     this.frontend.record({ kind: 'error', text: reason ?? '已中止当前执行' })
     this.mainTaskStopped = true
     this.mainTaskEnded = Date.now()
+    if (this.pinnedPrompt) this.pinnedPrompt.status = 'completed'
     // 用户主动 abort（非 watchdog 守护）= 参与——取消倒计时自动批准
     if (!reason?.startsWith('watchdog')) this.cancelPlanAutoApprove()
     // 中断走自有回填路径（abortSettling backfill）——错误回填底料作废，防双份回填
@@ -6120,9 +6210,16 @@ export class TuiApp {
   /** Classic live chrome keeps a bounded high-water height; fullscreen owns its fixed grid. */
   private getDynamicBudget(chromeRows: number, dynamicRows: number): number {
     const rows = this.rows || 24
-    const expanded = !!(this.approvalIntentController.approvalPending || this.decisions.active
+    const decision = this.decisions.active
+    const expanded = !!(this.approvalIntentController.approvalPending || decision?.visible
       || this.inputController.slashMenu.open || this.inputLine.value.startsWith('/'))
     const cap = expanded ? liveMaxRowsFor(rows) : Math.min(liveMaxRowsFor(rows), Math.ceil(rows / 2))
+    if (decision && !this.approvalIntentController.approvalPending) {
+      // 决策卡有自己的稳定行预算：展开时按内容计（cap 封顶），收起时按当前
+      // 内容释放高水位——否则收起后保留展开高度，输入框上方留大片空白。
+      this.liveRowsHighWater = Math.min(Math.max(chromeRows, cap), dynamicRows + chromeRows)
+      return Math.max(0, this.liveRowsHighWater - chromeRows)
+    }
     if (!expanded && this.state.phase === 'idle') {
       this.liveRowsHighWater = dynamicRows + chromeRows
       return dynamicRows
@@ -6330,6 +6427,17 @@ export class TuiApp {
 
     let lines: LiveRegionLine[] = []
     lines = []
+
+    // 0. 置顶上一轮/执行中指令条（对标 Codex CLI prompt_header 契约）
+    if (this.pinnedPrompt && !this.frontend.isFullscreen) {
+      const pinnedLine = formatPinnedPrompt({
+        prompt: this.pinnedPrompt.text,
+        status: this.pinnedPrompt.status,
+        width: cols,
+        theme: this.theme,
+      })
+      lines.push({ text: this.clampLine(pinnedLine), livePart: 'pinned' })
+    }
 
     // 身份/环境不再占独立行：星域·分支·cwd 内嵌输入框顶边框标签（formatGlanceLeft），
     // 模型与指标收敛到状态行（5b）——辅助信息只此两处。
@@ -6658,7 +6766,7 @@ export class TuiApp {
       const inputDisplay = this.inputLine.displayLinesWithCaret({ maxLines: MAX_INPUT_DISPLAY_LINES, maxWidth: innerWidth })
       const inputLines = this.inputLine.value
         ? inputDisplay.lines
-        : [`${color('❯', arrowColor, { bold: true })} ${color('█', this.theme.primary)}${color(this.inputLine.placeholder, this.theme.dim)}`]
+        : [`${color('❯', arrowColor, { bold: true })} ${color(this.inputLine.placeholder, this.theme.dim)}`]
 
       /** 着色输入行：光标行前缀 ❯ 涂暗绿 bold，其余保持原样。
        *  光标行已在 displayLines 内做了水平视窗截断，不再二次 truncateToWidth。 */
@@ -6682,9 +6790,7 @@ export class TuiApp {
       /** 在 caret 行的 █ 后注入 ghost（lastIndexOf：用户文本含 █ 时 marker 仍在末尾）。 */
       const withGhost = (raw: string, lineIdx: number): string => {
         if (!ghostText || lineIdx !== inputDisplay.caret.line) return raw
-        const bi = raw.lastIndexOf('█')
-        if (bi < 0) return raw
-        return raw.slice(0, bi + 1) + color(ghostText, this.theme.dim) + raw.slice(bi + 1)
+        return raw + color(ghostText, this.theme.dim)
       }
       /** 折叠粘贴标记 → 反色 pill（纯渲染着色，buffer 与提交不受影响）。 */
       const withPastePills = (raw: string): string =>
@@ -7313,6 +7419,14 @@ export class TuiApp {
     this.overlayController.setConnectExec(connectExec)
     this.overlayController.setPlanPickerExec(planPickerExec)
     this.overlayController.setInitExec(initExec)
+    this.overlay.register('token-ledger-connect', {
+      render: () => {
+        const data = this.getTokenLedgerConnectData()
+        const lines = renderConnect(data, this.columns, this.rows, this.theme)
+        this.connectCaret = data.caret ?? null
+        return lines
+      }, caret: () => this.connectCaret,
+    })
     // Dedicated vision bridge wizard. It shares only generic wizard rendering;
     // state, endpoint discovery, and persistence are distinct from /connect.
     this.overlay.register('vision-onboarding', {

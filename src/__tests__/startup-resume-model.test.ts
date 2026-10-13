@@ -9,7 +9,15 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { decideStartupResumeModel, type ResolvedModelTarget } from '../bootstrap.js'
+
+test('startup assembly treats only CLI selection as explicit and authorizes its new cache generation', () => {
+  const source = readFileSync(new URL('../bootstrap.ts', import.meta.url), 'utf8')
+  assert.match(source, /explicitModel: opts\.modelId/)
+  assert.match(source, /inheritFrozenFrom: explicitStartupGeneration && resumedFrozen \? \{ \.\.\.resumedFrozen, executionSnapshot: undefined \}/)
+  assert.match(source, /if \(explicitStartupGeneration\) \{\s*agent\.config\.client\.authorizeCacheGeneration\?\.\('explicit_user_model'\)/)
+})
 
 const baseProviders = {
   deepseek: {

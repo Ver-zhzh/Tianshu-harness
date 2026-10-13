@@ -22,19 +22,19 @@ export async function prepareContextRequest(deps: {
   signal?: AbortSignal
 }): Promise<OaiChatRequest> {
   const requestId = randomUUID()
-  for (let attempt = 0; attempt <= 2; attempt++) {
+  for (let attempt = 0; attempt <= 1; attempt++) {
     deps.signal?.throwIfAborted()
     const request = deps.build()
     const visible = deps.preview?.(request) ?? request
     const budget = buildContextBudget(visible, deps.policy, { requestId, revision: attempt })
     budget.bodyBytes = Buffer.byteLength(JSON.stringify(visible))
-    const bodyExceeded = budget.bodyBytes > DEEPSEEK_BODY_LIMIT
-    const imageError = deepSeekImageLimitError(visible.messages)
+    const bodyExceeded = deps.policy.transportLimits !== 'none' && budget.bodyBytes > DEEPSEEK_BODY_LIMIT
+    const imageError = deps.policy.transportLimits === 'none' ? undefined : deepSeekImageLimitError(visible.messages)
     if (bodyExceeded || imageError) budget.state = 'blocked'
     request.contextBudget = budget
     deps.publish(budget)
-    if (budget.state !== 'blocked' && budget.inputTokens < budget.inputBudget * (attempt === 0 ? 0.9 : 0.7) && !bodyExceeded) return request
-    if (attempt < 2) {
+    if (budget.state !== 'blocked' && budget.inputTokens <= budget.inputBudget && !bodyExceeded) return request
+    if (attempt < 1) {
       deps.publish({ ...budget, state: 'compacting' })
       try { if (await deps.compact()) continue } catch (error) {
         deps.publish({ ...budget, state: 'blocked' })

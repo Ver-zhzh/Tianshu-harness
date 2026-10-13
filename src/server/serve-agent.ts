@@ -650,6 +650,7 @@ function assembleAgentLoop(
     refs: stores.refs,
     domainKnowledgeStore,
     modelId: spec.model.id,
+    modelKeyId: spec.keyId,
     session: stores.session,
     // Wave J: 跨 session 复用 ProviderHealthTracker，让 switchModel 不丢
     // provider 健康累积；coordinator 冷层路由有正确依据。
@@ -657,6 +658,9 @@ function assembleAgentLoop(
     // I4: user hook results → desktop event stream via the session manager.
     inheritFrozenFrom,
     emitHookResult: (results, meta) => shared?.sessions?.emitHookResult(sessionId, results, meta),
+    // #463: 每轮 goal 迭代推进后重发 goal_state SSE——否则桌面端步数计数器
+    // 恒停在创建快照（0/100），因为 advanceIteration 后从不重发。
+    onGoalIteration: (tracker) => shared?.sessions?.emitGoalIteration(sessionId, tracker),
     // Per-session 工具白名单（蒸馏回放等自动化场景）。
     allowedTools,
   })
@@ -863,13 +867,15 @@ export function buildManagedAgent(
   let agent = assembleAgentLoop(ctx, cwd, sessionId, stores, spec, approvalMode, registry, shared, allowedTools, reload)
   // Rebuild the loop on a new spec, preserving conversation + stores. Shared
   // by switchModel and the run pre-flight self-heal below.
-  const rebuildOnSpec = (next: ResolvedModelSpec) => {
+  const rebuildOnSpec = (next: ResolvedModelSpec, explicitModelChange = false) => {
     const oldCoordinator = stores.refs.coordinator
     const oldAgent = agent
+    if (explicitModelChange) oldAgent.config.promptEngine.authorizeCacheGeneration()
     void oldAgent.cancelIdleCompaction()
     spec = next
     const liveApprovalMode = oldAgent.config.approvalMode
     agent = assembleAgentLoop(ctx, cwd, sessionId, stores, spec, liveApprovalMode, registry, shared, allowedTools, reload, oldAgent.config.promptEngine)
+    if (explicitModelChange) agent.config.client.authorizeCacheGeneration?.('explicit_user_model')
     if (oldCoordinator && oldCoordinator !== stores.refs.coordinator) {
       try { oldCoordinator.shutdown() } catch { /* best-effort: shutdown is fail-open */ }
     }
@@ -939,7 +945,7 @@ export function buildManagedAgent(
       // (rebuildOnSpec cancels the old loop's idle compaction — it shares this
       // SessionContext with the incoming loop — and preserves the live
       // approvalMode the user may have switched since session creation.)
-      const oldAgent = rebuildOnSpec(next)
+      const oldAgent = rebuildOnSpec(next, true)
       let fromModel: string | undefined
       try { fromModel = oldAgent.config.promptEngine.getModel() } catch { /* idle/未初始化 */ }
       // 持久化切换（与 TUI bootstrap.switchAgentRuntime 同源）：metadata.model/
@@ -1269,6 +1275,9 @@ export async function delegateWorkerOnCoordinator(
       eventKind: a.eventKind,
       eventDetail: a.eventDetail,
       contract: a.contract,
+      terminalFailure: a.terminalFailure, usageKnown: a.usageKnown, failureReason: a.failureReason,
+      model: a.model, provider: a.provider, modelSelection: a.modelSelection, usage: a.usage,
+      summary: a.summary, changedFiles: a.changedFiles, artifactId: a.artifactId,
     })
   })
   const request: import('../agent/coordinator.js').DelegationRequest = {
@@ -1302,7 +1311,7 @@ export async function delegateWorkerOnCoordinator(
         profile,
         status: result.status === 'passed' ? 'completed' : result.status,
         progressLine: result.summary ? result.summary.slice(0, 120) : undefined,
-        failureReason: result.failureReason,
+        failureReason: result.failureReason, terminalFailure: result.terminalFailure, usageKnown: result.usageKnown,
         summary: buildDelegateSummary(input, run),
         changedFiles: result.changedFiles.length > 0 ? result.changedFiles : undefined,
         artifactId: result.diffArtifactId,

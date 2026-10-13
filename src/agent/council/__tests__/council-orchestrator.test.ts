@@ -555,7 +555,7 @@ describe('per-seat modelOverride 透传（异构议事会）', () => {
   }
 
   it('席位声明 provider+model → 扇出请求携带对应 modelOverride', async () => {
-    const captured: Array<{ authority: string; modelOverride?: { provider: string; model: string } }> = []
+    const captured: Array<{ authority: string; modelOverride?: import('../../../config/schema.js').ModelTarget }> = []
     const deps: CouncilDeps = {
       delegateBatch: async (reqs) => {
         for (const r of reqs) captured.push({ authority: r.authority, ...(r.modelOverride ? { modelOverride: r.modelOverride } : {}) })
@@ -634,7 +634,7 @@ describe('per-seat modelOverride 透传（异构议事会）', () => {
 
   it('第二轮反驳同样携带 modelOverride', async () => {
     // round1 制造冲突 → 触发 round2；断言 round2 请求也带 override。
-    const r2captured: Array<{ authority: string; modelOverride?: { provider: string; model: string } }> = []
+    const r2captured: Array<{ authority: string; modelOverride?: import('../../../config/schema.js').ModelTarget }> = []
     let round = 0
     const deps: CouncilDeps = {
       delegateBatch: async (reqs) => {
@@ -699,4 +699,18 @@ describe('runCouncil — Qliphoth 柱级退化接线（Phase 2）', () => {
     assert.equal(plan.meta.qliphoth, undefined)
     assert.ok(!plan.finalPlanMarkdown.includes('柱级退化检测'))
   })
+})
+
+it('seat strategy is explicit and fixed seats preserve key ownership in real fanout', async () => {
+  const captured: import('../council-orchestrator.js').CouncilFanoutRequest[] = []
+  await runCouncil({
+    draft: { objective: 'verify routing policies', items: [{ id: 'T1', title: 'verify', detail: 'routing' }] },
+    seats: [{ authority: 'tianquan', modelStrategy: 'session', provider: 'legacy', model: 'legacy' }, { authority: 'tianfu', modelStrategy: 'auto' }, { authority: 'tianxuan', provider: 'custom', model: 'same', keyId: 'second' }],
+  }, {
+    delegateBatch: async requests => { captured.push(...requests); return { results: requests.map(request => workerResult(request.authority, '{}')) } },
+    now: () => 1,
+  })
+  assert.deepEqual(captured.find(request => request.authority === 'tianquan')?.modelOverride, { strategy: 'session' })
+  assert.deepEqual(captured.find(request => request.authority === 'tianfu')?.modelOverride, { strategy: 'auto' })
+  assert.deepEqual(captured.find(request => request.authority === 'tianxuan')?.modelOverride, { provider: 'custom', model: 'same', keyId: 'second' })
 })

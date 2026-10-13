@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { encodeMessage, decodeMessages, createRpcClient } from '../rpc.js'
+import { encodeMessage, decodeMessages, createRpcClient, MAX_LSP_MESSAGE_BYTES, MAX_LSP_HEADER_BYTES } from '../rpc.js'
 import { PassThrough } from 'node:stream'
 
 describe('encodeMessage', () => {
@@ -61,6 +61,20 @@ describe('decodeMessages', () => {
     const { messages, rest } = decodeMessages(raw)
     assert.equal(messages.length, 1)
     assert.equal(rest, 'Content-Length: 999\r\n\r\n{"jso')
+  })
+
+  it('rejects oversized and malformed Content-Length before reading a body', () => {
+    for (const length of [String(MAX_LSP_MESSAGE_BYTES + 1), '999999999999999999999999999999999']) {
+      assert.throws(() => decodeMessages(`Content-Length: ${length}\r\n\r\n`), /body too large/)
+    }
+    for (const header of ['Content-Length: -1', 'Content-Length: 1junk', 'Content-Length: 1.5', 'Content-Length: 1\r\nContent-Length: 2', 'Content-Type: application/json']) {
+      assert.throws(() => decodeMessages(header + '\r\n\r\n'), /Invalid LSP Content-Length/)
+    }
+  })
+
+  it('bounds incomplete and complete oversized headers', () => {
+    assert.throws(() => decodeMessages('G'.repeat(MAX_LSP_HEADER_BYTES + 1)), /header buffer exceeded/)
+    assert.throws(() => decodeMessages('G'.repeat(MAX_LSP_HEADER_BYTES) + '\r\n\r\n'), /header buffer exceeded/)
   })
 })
 
@@ -191,5 +205,93 @@ describe('createRpcClient', () => {
     const { toServer, toClient } = connect()
     const client = createRpcClient(toClient, toServer)
     client.dispose()
+  })
+
+  it('kills oversized claims and headerless input, rejecting every pending request', async () => {
+    for (const input of [`Content-Length: ${MAX_LSP_MESSAGE_BYTES + 1}\r\n\r\n`, 'G'.repeat(MAX_LSP_HEADER_BYTES + 1)]) {
+      const { toServer, toClient } = connect()
+      const client = createRpcClient(toClient, toServer)
+      const first = assert.rejects(client.request('initialize', {}), /LSP transport failed/)
+      const second = assert.rejects(client.request('diagnostics', {}), /LSP transport failed/)
+      toClient.emit('data', Buffer.from(input))
+      await Promise.all([first, second])
+      assert.equal(toClient.listenerCount('data'), 0, 'failed RPC must detach its input handler')
+      toClient.emit('data', Buffer.alloc(1024 * 1024))
+      client.dispose()
+    }
+  })
+
+  it('accepts a body exactly at the cap including header overhead', () => {
+    const { toServer, toClient } = connect()
+    const client = createRpcClient(toClient, toServer)
+    let received = 0
+    client.onNotification('fixture', params => { assert.equal((params.text as string).length, size); received++ })
+    const prefix = '{"jsonrpc":"2.0","method":"fixture","params":{"text":"', suffix = '"}}'
+    const size = MAX_LSP_MESSAGE_BYTES - Buffer.byteLength(prefix + suffix)
+    const frame = Buffer.from(`Content-Length: ${MAX_LSP_MESSAGE_BYTES}\r\n\r\n${prefix}${'x'.repeat(size)}${suffix}`)
+    assert.doesNotThrow(() => assert.equal(decodeMessages(frame).messages.length, 1))
+    toClient.emit('data', frame)
+    assert.equal(received, 1)
+    client.dispose()
+  })
+
+  it('accepts coalesced legal frames whose combined bytes exceed the cap', () => {
+    const { toServer, toClient } = connect()
+    const client = createRpcClient(toClient, toServer)
+    let received = 0
+    client.onNotification('fixture', () => { received++ })
+    const frame = encodeMessage({ jsonrpc: '2.0', method: 'fixture', params: { text: 'x'.repeat(9 * 1024 * 1024) } })
+    toClient.emit('data', Buffer.from(frame + frame))
+    assert.equal(received, 2)
+    assert.equal(toClient.listenerCount('data'), 1)
+    client.dispose()
+  })
+
+  it('preserves fragmented Unicode and frame boundaries across arbitrary byte chunks', () => {
+    const { toServer, toClient } = connect()
+    const client = createRpcClient(toClient, toServer)
+    const received: unknown[] = []
+    client.onNotification('fixture', params => received.push(params.text))
+    const text = '中文🧭é'
+    const frame = Buffer.from(encodeMessage({ jsonrpc: '2.0', method: 'fixture', params: { text } }))
+    for (const byte of frame) toClient.emit('data', Buffer.from([byte]))
+    toClient.emit('data', Buffer.from('Content-Length: 4\r\n\r\nnullContent-Length: 0\r\n\r\n'))
+    toClient.emit('data', frame)
+    assert.deepEqual(received, [text, text])
+    client.dispose()
+  })
+
+  it('rejects new requests immediately after transport failure without writing', async () => {
+    const { toServer, toClient } = connect()
+    const client = createRpcClient(toClient, toServer)
+    let writes = 0
+    toServer.on('data', () => { writes++ })
+    toClient.emit('data', Buffer.from(`Content-Length: ${MAX_LSP_MESSAGE_BYTES + 1}\r\n\r\n`))
+    const request = client.request('after-failure', {}, 20)
+    const check = assert.rejects(request, /LSP transport failed/)
+    // A timer must not be necessary to observe rejection after a terminal failure.
+    await Promise.resolve()
+    client.notify('after-failure', {})
+    assert.equal(writes, 0)
+    await check
+    client.dispose()
+  })
+
+  it('read/write errors, close and dispose remain terminal without removing unrelated listeners', async () => {
+    for (const kind of ['read', 'write', 'close', 'dispose']) {
+      const { toServer, toClient } = connect()
+      const observer = () => {}
+      toClient.on('data', observer)
+      toClient.on('error', observer)
+      const client = createRpcClient(toClient, toServer)
+      if (kind === 'read') toClient.emit('error', new Error('fixture'))
+      if (kind === 'write') toServer.emit('error', new Error('fixture'))
+      if (kind === 'close') toClient.emit('close')
+      if (kind === 'dispose') client.dispose()
+      await assert.rejects(client.request('after-death', {}, 20), /LSP transport|disposed/)
+      client.dispose()
+      assert.equal(toClient.listeners('data').includes(observer), true)
+      assert.equal(toClient.listeners('error').includes(observer), true)
+    }
   })
 })

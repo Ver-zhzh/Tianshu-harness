@@ -40,21 +40,17 @@ for (const [name, raw, kind] of [
   ['缺字段', '{"summary":"定位到接缝","findings":[]}', 'schema'],
   ['截断', '{"workOrderId":"x","status":"passed","summary":"截断', 'truncated'],
 ] as const) {
-  it(`${name}: one independent repair, no exploration re-entry or execution of text tools`, async () => {
+  it(`${name}: terminal report failure; no closing, repair or text tool execution`, async () => {
     const { config, requests, repairs } = makeConfig(raw, JSON.stringify(packet('x')))
     const run = await runWorkerSession(config)
-    assert.equal(requests.length, 2, 'one execution + one same-prefix closing')
-    assert.equal(repairs.length, 1, 'maxRetries=9 still allows only one report repair')
-    assert.equal(repairs[0]!.messages.length, 1, 'never send exploration history')
-    assert.equal(repairs[0]!.tools, undefined)
-    assert.equal(repairs[0]!.max_tokens, REPORT_TOKEN_LIMIT)
-    assert.deepEqual(repairs[0]!.response_format, { type: 'json_object' })
-    assert.equal(run.result.status, 'blocked', 'fragment repair cannot fabricate trustworthy passed')
-    assert.equal(run.result.evidenceStatus, 'unverified')
-    assert.equal(run.usage.input_tokens, 40, 'execution + closing + repair each charged once')
-    assert.equal(run.transcript.repairAttempts, 1)
+    assert.equal(requests.length, 1, 'invalid report is terminal')
+    assert.equal(repairs.length, 0, 'report repair is disabled even with maxRetries=9')
+    assert.equal(run.result.status, 'blocked')
+    assert.equal(run.result.terminalFailure, true)
+    assert.equal(run.usage.input_tokens, 10)
+    assert.equal(run.transcript.repairAttempts, 0)
     assert.equal(run.transcript.reportDiagnostics?.[0]?.kind, kind)
-    assert.equal(run.transcript.toolUses.length, 0, 'DSML text never executes tools')
+    assert.equal(run.transcript.toolUses.length, 0)
     const artifact = run.transcript.reportDiagnostics?.[0]?.artifact
     assert.ok(artifact)
     assert.ok(readFileSync(artifact, 'utf8').includes(raw.replace(/"/g, '\\"')))
@@ -65,8 +61,8 @@ it('mode rejection or invalid repair returns salvage without further requests', 
   for (const rejected of [true, false]) {
     const { config, requests, repairs } = makeConfig('not a report', 'still not a report', rejected)
     const run = await runWorkerSession(config)
-    assert.equal(requests.length, 2)
-    assert.equal(repairs.length, 1)
+    assert.equal(requests.length, 1)
+    assert.equal(repairs.length, 0)
     assert.equal(run.result.status, 'blocked')
   }
 })

@@ -234,10 +234,9 @@ describe('coordinator 续跑冻结快照回传', () => {
       scope: { files: ['a.ts'] },
     })
 
-    assert.equal(captured.length, 3, '首轮 + 两次真实续跑；不为证据措辞复核')
-    assert.equal(captured[0]!.priorFrozenSnapshot, undefined, '首轮无快照可继承')
-    assert.deepEqual(captured[1]!.priorFrozenSnapshot, makeSnapshot('round1'), '第一次续跑继承首轮快照')
-    assert.deepEqual(captured[2]!.priorFrozenSnapshot, makeSnapshot('round2'), '第二次续跑拿到覆盖后的新快照')
+    assert.equal(captured.length, 1, 'failed worker cannot automatically continue')
+    assert.equal(captured[0]!.priorFrozenSnapshot, undefined)
+
   })
 })
 
@@ -289,7 +288,7 @@ describe('OOP 协议面冻结快照往返', () => {
       order: { id: 'wo_echo', objective: 'echo', profile: 'code_scout', allowedTools: ['read_file'], budget: { maxTurns: 3, maxTokens: 1000, wallClockMs: 60_000, inputTokens: 10_000, outputTokens: 2_000 } } as unknown as WorkOrder,
       client: {} as WorkerSessionConfig['client'],
       promptEngine: {} as WorkerSessionConfig['promptEngine'],
-      toolRegistry: {} as WorkerSessionConfig['toolRegistry'],
+      toolRegistry: new ToolRegistry(),
       cwd: process.cwd(),
       maxTurns: 3,
       contextWindow: 64000,

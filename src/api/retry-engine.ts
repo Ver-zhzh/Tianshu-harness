@@ -6,6 +6,7 @@
  */
 
 import { classifyApiError } from './error-classifier.js'
+import { currentExecutionScope } from './execution-continuity.js'
 import type { RetryBudget } from './retry-budget.js'
 import type { ClassifiedError, ErrorCategory } from './error-classifier.js'
 
@@ -218,7 +219,7 @@ export async function withStructuredRetry<T>(
 ): Promise<T> {
   // undefined = 未显式配置：重试上限由各 category 的分类器默认值决定。不注入
   // 隐式 5——全部可重试类别的默认值本就 ≤5，故默认行为不变，而显式配置不再被夹。
-  const maxTotal = options?.maxTotalRetries
+  const maxTotal = currentExecutionScope()?.singleAttempt ? 0 : options?.maxTotalRetries
   const maxDuration = options?.maxTotalDurationMs
   const policy = options?.policy
   const startTime = maxDuration ? Date.now() : 0

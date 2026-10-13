@@ -831,7 +831,7 @@ describe('AgentLoop — error handling', () => {
 
 
 describe('AgentLoop — compact policy', () => {
-  it('compacts on small context windows without legacy absolute-threshold approval', async t => {
+  it('small context windows preserve history until the actual hard request limit', async t => {
     const client = mockClient([makeTextBlock('done')])
     const registry = new ToolRegistry()
     const session = new SessionContext()
@@ -866,15 +866,9 @@ describe('AgentLoop — compact policy', () => {
       onApprovalRequired: async () => false,
     })
 
-    assert.ok(session.getCompactEvents().length > 0)
-    assert.equal(session.getCompactEvents().at(-1)?.tier, 1)
-    const archive = agent.artifactStore.list().find(item => item.tool === 'compact-history')
-    assert.ok(archive, 'discarded tool bytes have a real recovery archive')
-    const reopened = new ArtifactStore(artifactDir, 'small-window')
-    const raw = await reopened.readRaw(archive.id)
-    assert.ok(raw?.includes(historyMessage), 'original bytes survive reopening the artifact store')
-    assert.ok(session.getMessages().some(message => message.role === 'tool'
-      && message.content.includes(`[artifact:${archive.id}]`)))
+    assert.equal(session.getCompactEvents().length, 0)
+    assert.ok(session.getMessages().some(message => message.role === 'tool' && message.content === historyMessage))
+    assert.equal(agent.artifactStore.list().filter(item => item.tool === 'compact-history').length, 0)
   })
 
 

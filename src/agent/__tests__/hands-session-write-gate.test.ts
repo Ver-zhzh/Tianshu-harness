@@ -91,7 +91,7 @@ describe('runHandsSession × worker write gate (W4-D1)', () => {
     assert.equal(run.writeGate?.repairCount, 0)
   })
 
-  it('gate failed → ONE bounded repair by the same worker; repair passing → passed', async () => {
+  it('gate failed is terminal even when a later gate evaluation would pass', async () => {
     const order = testOrder({ id: 'wo-gate-repair' })
     const prompts: string[] = []
     let evaluations = 0
@@ -112,15 +112,15 @@ describe('runHandsSession × worker write gate (W4-D1)', () => {
         return evaluations === 1 ? report('failed') : report('passed')
       },
     }))
-    assert.equal(prompts.length, 2, 'exactly one repair round after the initial run')
-    assert.ok(prompts[1]!.includes('ONE bounded repair round'), 'repair prompt carries the contract')
-    assert.ok(prompts[1]!.includes('TS0000'), 'repair prompt carries gate evidence')
-    assert.equal(run.result.status, 'passed', 'repair fixed it — result stands')
-    assert.equal(run.writeGate?.repairCount, 1)
-    assert.equal(run.writeGate?.report.outcome, 'passed')
+    assert.equal(prompts.length, 1, 'gate failure must never start a repair request')
+    assert.equal(evaluations, 1)
+    assert.equal(run.result.status, 'failed')
+    assert.equal(run.result.terminalFailure, true)
+    assert.equal(run.writeGate?.repairCount, 0)
+    assert.equal(run.writeGate?.report.outcome, 'failed')
   })
 
-  it('gate failed twice → failed back to the primary, no second repair, no model switch', async () => {
+  it('gate false-green failure returns immediately without repair or model switch', async () => {
     const order = testOrder({ id: 'wo-gate-fail2' })
     let agentRuns = 0
     const run = await runHandsSession(baseConfig(order, {
@@ -133,11 +133,11 @@ describe('runHandsSession × worker write gate (W4-D1)', () => {
       },
       evaluateWriteGate: async () => report('failed', { falseGreen: true }),
     }))
-    assert.equal(agentRuns, 2, 'initial run + exactly one bounded repair — never a third')
+    assert.equal(agentRuns, 1, 'only the initial execution is allowed')
     assert.equal(run.result.status, 'failed')
     assert.equal(run.result.evidenceStatus, 'failed')
     assert.ok(run.result.risks.some(r => r.includes('falseGreen')), 'falseGreen recorded for primary adjudication')
-    assert.equal(run.writeGate?.repairCount, 1)
+    assert.equal(run.writeGate?.repairCount, 0)
   })
 
   it('gate blocked → environment-neutral: NO repair round, result blocked for primary', async () => {
@@ -178,7 +178,7 @@ describe('runHandsSession × worker write gate (W4-D1)', () => {
     assert.equal(run.writeGate, undefined)
   })
 
-  it('diff artifact includes bounded-repair changes (collected after the gate)', async () => {
+  it('failed gate retains the original diff without a compensating model request', async () => {
     const order = testOrder({ id: 'wo-gate-diff' })
     let agentRuns = 0
     let evaluations = 0
@@ -199,6 +199,8 @@ describe('runHandsSession × worker write gate (W4-D1)', () => {
     }))
     const diffArtifact = run.result.artifacts.find(a => a.kind === 'diff')
     assert.ok(diffArtifact, 'diff artifact present')
-    assert.ok(diffArtifact!.content.includes('repaired'), 'diff reflects the post-repair tree')
+    assert.equal(agentRuns, 1)
+    assert.equal(evaluations, 1)
+    assert.ok(diffArtifact!.content.includes('broken'), 'original partial work remains reviewable')
   })
 })

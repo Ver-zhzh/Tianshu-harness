@@ -15,9 +15,14 @@ import { isKeylessProviderEntry } from '../config/provider-presets.js'
 import { contractModels } from '../config/contract-models.js'
 import type { AuthProvider } from '../auth/types.js'
 import { PROCESS_SESSION_ID } from './caller-identity.js'
+import { withExecutionContinuity } from './execution-continuity.js'
 
 /** Runtime parameters that vary per-model or per-call, not stored in config */
 export interface RuntimeParams {
+  singleAttempt?: boolean
+  credentialScope?: string
+  expectedPrincipal?: string
+  priorExecution?: import('./continuation-prefix.js').ContinuationPrefixProof
   apiKey: string
   model: string
   maxTokens: number
@@ -117,6 +122,21 @@ export function resolveCredentialKey(cred: CredentialSlots): string {
  */
 
 export function createProviderClient(
+  provider: ProviderConfig,
+  capabilities: ProviderCapabilities,
+  params: RuntimeParams,
+): StreamClient {
+  const effective = params.singleAttempt ? { ...provider, maxRetries: 0 } : provider
+  return withExecutionContinuity(createRawProviderClient(effective, capabilities, params), {
+    provider: provider.name, model: params.model,
+    credentialScope: params.credentialScope ?? `${provider.name}:${provider.keyRef ?? provider.auth?.type ?? 'default'}`,
+    singleAttempt: params.singleAttempt, prior: params.priorExecution,
+    expectedPrincipal: params.expectedPrincipal,
+    sessionId: params.sessionId,
+  })
+}
+
+function createRawProviderClient(
   provider: ProviderConfig,
   capabilities: ProviderCapabilities,
   params: RuntimeParams,

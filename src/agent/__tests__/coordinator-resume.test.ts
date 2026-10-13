@@ -20,6 +20,8 @@ import type { StreamClient } from '../../api/stream-client.js'
 import type { ModelCapabilityCard } from '../../model/capability.js'
 import type { Tool, ToolCallParams } from '../../tools/types.js'
 
+process.env.RIVET_HOME = mkdtempSync(join(tmpdir(), 'coordinator-resume-home-'))
+
 describe('coordinator resume (B1: loadPersistedResult)', () => {
   it('loads a previously persisted worker result by id', () => {
     const home = mkdtempSync(join(tmpdir(), 'rivet-home-'))
@@ -150,7 +152,7 @@ describe('background work orders (B2: delegateBackground)', () => {
       usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
     }))
     const a = coordinator.delegateBackground(request)
-    const b = coordinator.delegateBackground({ ...request, parentTurnId: 't-bg-2' })
+    const b = coordinator.delegateBackground({ ...request, parentTurnId: 't-bg-2', objective: `${request.objective} in an independent module` })
     await Promise.all([coordinator.waitBackgroundRun(a), coordinator.waitBackgroundRun(b)])
     assert.equal(coordinator.listBackgroundRuns().length, 2)
     await assert.rejects(coordinator.waitBackgroundRun('bg_nope'), /Unknown background run/)
@@ -159,8 +161,8 @@ describe('background work orders (B2: delegateBackground)', () => {
 
 // ── P1-1: retry claim conflict ──
 
-describe('P1-1 retry claim conflict (Pro upgrade blocked by lock)', () => {
-  it('returns blocked when retry claim is held by another session, with rollback', async () => {
+describe('single-attempt write failure', () => {
+  it('releases original claims and never acquires retry claims or escalates', async () => {
     // Stateful mock: first acquire succeeds (2 files), retry partial failure
     let acquireCallCount = 0
     const releasedFiles: string[][] = []
@@ -238,11 +240,11 @@ describe('P1-1 retry claim conflict (Pro upgrade blocked by lock)', () => {
     // Assert: retry was blocked by claim conflict
     assert.equal(run.status, 'completed')
     assert.equal(run.results[0]?.status, 'blocked')
-    assert.match(run.results[0]?.summary ?? '', /Retry blocked.*claimed by another session/)
-    // Assert: original claims were released (first release) + retry rollback
-    assert.ok(releasedFiles.length >= 2, `claims released ${releasedFiles.length} times, expected >=2`)
-    // Assert: telemetry fields present
-    assert.equal(run.selectedModel, 'pro-model')
+    assert.match(run.results[0]?.summary ?? '', /ECONNRESET/)
+    assert.equal(run.results[0]?.terminalFailure, true)
+    assert.equal(acquireCallCount, 2, 'only initial claims may be acquired')
+    assert.deepEqual(releasedFiles, [['auth.ts', 'session.ts']])
+    assert.notEqual(run.selectedModel, 'pro-model')
     assert.ok(Array.isArray(run.modelTierShadows))
   })
 })

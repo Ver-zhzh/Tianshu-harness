@@ -31,7 +31,9 @@ export async function startFilePreview(root: string, path: string): Promise<File
       const file = await realpath(resolve(root, requestPath))
       const type = mime[extname(file).toLowerCase()]
       const parts = relative(root, file).split(/[/\\]/)
-      const forbidden = parts.some((p, i) => (p.startsWith('.') && !(p === '.rivet' && parts[i + 1] === 'artifacts')) || /(?:credentials|secret|token|private.*key)/i.test(p))
+      // Trusted tool output roots: runtime artifacts and answer-me-with-html pages (#470).
+      const allowed = (p: string, i: number) => (p === '.rivet' && parts[i + 1] === 'artifacts') || (p === '.am' && parts[i + 1] === 'pages')
+      const forbidden = parts.some((p, i) => (p.startsWith('.') && !allowed(p, i)) || /(?:credentials|secret|token|private.*key)/i.test(p))
       if (!inside(root, file) || !type || forbidden) { errors.add(requestPath); res.writeHead(403).end(); return }
       const info = await stat(file)
       if (!info.isFile() || info.size > 32 * 1024 * 1024) { errors.add(requestPath); res.writeHead(413).end(); return }

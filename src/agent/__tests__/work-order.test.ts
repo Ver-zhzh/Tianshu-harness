@@ -38,7 +38,7 @@ describe('work-order contract', () => {
     assert.ok(order.allowedTools.includes('repo_graph'))
     assert.ok(!order.allowedTools.includes('edit_file'))
     assert.deepEqual(order.disallowedTools, ['bash', 'write_file', 'edit_file', 'run_tests', 'delegate_task', 'delegate_batch'])
-    assert.equal(order.budget.maxRetries, 2)
+    assert.equal(order.budget.maxRetries, 0)
     // Read-only default turn budget (raised from 8 — flash has a 1M window).
     assert.equal(order.budget.maxTurns, 24)
     assert.equal(order.aggregationPolicy, 'primary_decides')

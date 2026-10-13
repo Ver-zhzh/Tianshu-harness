@@ -326,15 +326,15 @@ describe('config permissions schema', () => {
     assert.equal(fromObject.llmSpeculation.maxTokens, 320)
   })
 
-  it('routes repo summarization workers to V4 Flash by default', () => {
+  it('keeps named models without implicitly routing repo summarization', () => {
     const parsed = configSchema.parse(DEFAULT_CONFIG)
 
-    assert.equal(parsed.workers.routing.repo_summarization, 'cheap-flash')
+    assert.deepEqual(parsed.workers.routing, {})
     assert.equal(parsed.workers.profiles['cheap-flash']?.provider, 'deepseek')
     assert.equal(parsed.workers.profiles['cheap-flash']?.model, 'deepseek-flash')
   })
 
-  it('fills missing worker routing defaults with cheap-flash for repo summarization', () => {
+  it('missing worker routes remain unconfigured', () => {
     const parsed = workersSchema.parse({
       profiles: {
         'cheap-flash': { provider: 'deepseek', model: 'deepseek-v4-flash' },
@@ -342,22 +342,15 @@ describe('config permissions schema', () => {
       },
     })
 
-    assert.equal(parsed.routing.repo_summarization, 'cheap-flash')
-    assert.equal(parsed.routing.code_edit, 'cheap-flash')
+    assert.deepEqual(parsed.routing, {})
   })
 
-  it('routes all workers to cheap-flash by default (v4-flash 去廉价化)', () => {
+  it('defaults to following the session without implicit task overrides', () => {
     const parsed = configSchema.parse(DEFAULT_CONFIG)
-
-    // 2026-08-02：v4-flash 能力实测已超 v4-pro，planning 不再独立走强档，
-    // 全部 worker 任务默认走 cheap-flash；需更强可在 config 改 capable。
-    for (const [task, profile] of Object.entries(parsed.workers.routing)) {
-      assert.equal(profile, 'cheap-flash', `${task} should route to cheap-flash, got ${profile}`)
-    }
+    assert.equal(parsed.workers.defaultStrategy, 'session')
+    assert.deepEqual(parsed.workers.routing, {})
   })
-})
 
-describe('pro schema', () => {
   it('DEFAULT_CONFIG keeps Pro disabled for the free tier, with features ready once Pro activates', () => {
     const parsed = configSchema.parse(DEFAULT_CONFIG)
 

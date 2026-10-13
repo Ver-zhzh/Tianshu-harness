@@ -1339,6 +1339,7 @@ export function buildSessionRoutes(
         reasoningTokens: number
         totalTokens: number
         cost: number
+        costKnown: boolean
       }>()
       const modelTotals = new Map<string, { model: string; provider?: string; inputTokens: number; outputTokens: number; totalTokens: number; cost: number; count: number }>()
       const providerTotals = new Map<string, { provider: string; inputTokens: number; outputTokens: number; totalTokens: number; cost: number; count: number }>()
@@ -1464,6 +1465,7 @@ export function buildSessionRoutes(
           reasoningTokens: nextReasoning,
           totalTokens: nextTotal,
           cost: nextCost,
+          costKnown: !!pricing && ((data as { usageKnown?: boolean }).usageKnown !== false) && (!!usage || existing?.costKnown === true),
         }
         workers.set(workerId, worker)
 
@@ -1542,6 +1544,7 @@ export function buildSessionRoutes(
         body: {
           totals: {
             workers: workers.size,
+            costKnown: workerList.every(w => w.costKnown),
             inputTokens: totalInputTokens,
             outputTokens: workerOutput + (mainSession?.outputTokens ?? 0),
             cacheReadTokens: totalCacheRead,

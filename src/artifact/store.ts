@@ -2,7 +2,7 @@ import { appendFile, mkdir, readFile, writeFile, open } from 'node:fs/promises'
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, readFileSync, readdirSync, statSync, rmSync, createReadStream } from 'node:fs'
 import { createInterface } from 'node:readline'
-import { join } from 'node:path'
+import { join, resolve, sep } from 'node:path'
 import type { Artifact, ArtifactSection } from './types.js'
 
 /**
@@ -62,8 +62,8 @@ export class ArtifactStore {
 
   constructor(baseDir: string, sessionId: string, options: ArtifactStoreOptions = {}) {
     this.baseDir = baseDir
-    this.dir = join(baseDir, sessionId)
-    this.sessionId = sessionId
+    this.sessionId = safeSessionId(baseDir, sessionId)
+    this.dir = join(baseDir, this.sessionId)
     this.now = options.now ?? Date.now
     this.idGenerator = options.idGenerator ?? (() => randomUUID().slice(0, 8))
     this.loadIndex()
@@ -73,8 +73,12 @@ export class ArtifactStore {
    *  (e.g. `worker-<orderId>`) without copying files. Safe to call multiple
    *  times with the same session id. */
   addFallbackSession(sessionId: string): void {
-    if (!this.fallbackSessionIds.includes(sessionId)) {
-      this.fallbackSessionIds.push(sessionId)
+    // Sanitize here too — this is a read sink of the same tainted id the
+    // write path receives, and it must resolve to the identical directory
+    // `forSession()` would create, or worker diffs become unresolvable.
+    const safe = safeSessionId(this.baseDir, sessionId)
+    if (!this.fallbackSessionIds.includes(safe)) {
+      this.fallbackSessionIds.push(safe)
     }
   }
 
@@ -148,7 +152,7 @@ export class ArtifactStore {
   }
 
   private loadArtifactFromSessionIndex(sessionId: string, id: string): Artifact | null {
-    const indexPath = join(this.baseDir, sessionId, '_index.jsonl')
+    const indexPath = join(resolve(this.baseDir), sessionId, '_index.jsonl')
     if (!existsSync(indexPath)) return null
     try {
       const lines = readFileSync(indexPath, 'utf-8').split('\n')
@@ -158,7 +162,7 @@ export class ArtifactStore {
           const artifact = JSON.parse(line) as Artifact
           if (artifact.id === id && isArtifactForSession(artifact, sessionId)) {
             // Re-anchor rawPath to the fallback session directory so reads work.
-            artifact.rawPath = join(this.baseDir, sessionId, `${safeArtifactFileStem(id)}.raw`)
+            artifact.rawPath = join(resolve(this.baseDir), sessionId, `${safeArtifactFileStem(id)}.raw`)
             return artifact
           }
         } catch {
@@ -305,6 +309,28 @@ function isArtifactForSession(value: Artifact, sessionId: string): value is Arti
 
 function safeArtifactFileStem(id: string): string {
   return id.replace(/[^a-zA-Z0-9._-]/g, '-')
+}
+
+/** Minimal session-id sanitizer for filesystem use: neutralize path separators
+ *  and other special characters, then refuse anything that still resolves
+ *  outside `baseDir` (a bare `..` survives the character filter unchanged).
+ *  Applied at every entry point that turns a session id into a directory, so
+ *  the same input always names the same directory. */
+function safeSessionId(baseDir: string, sessionId: string): string {
+  const safe = sessionId.replace(/[^a-zA-Z0-9._-]/g, '-')
+  // 审查 L1：空串 / `.` 经字符过滤不变，resolve 后落在 baseDir 根本身——该
+  // 会话的制品与 `_index.jsonl` 会直接写进共享根、与别的会话串味。显式拒绝。
+  // （`..` 不在此列：它 resolve 到 baseDir 父目录，由下面的逃逸断言捕获。）
+  if (safe === '' || safe === '.') {
+    throw new Error(`Artifact session id is empty or degenerate: ${JSON.stringify(sessionId)}`)
+  }
+  const base = resolve(baseDir)
+  const candidate = resolve(base, safe)
+  // 退化形态已在上面被拒，故此处不再需要 `candidate === base` 的例外分支。
+  if (!candidate.startsWith(base + sep)) {
+    throw new Error(`Artifact session id escapes base directory: ${sessionId}`)
+  }
+  return safe
 }
 
 function lineCount(content: string): number {

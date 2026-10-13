@@ -159,6 +159,12 @@ export class GeminiClient implements StreamClient {
   private readonly proxyDispatcher: ProxyAgent | undefined
   private reasoningEffort: string | undefined
   private thinking: 'enabled' | 'disabled'
+  private restoredThinking?: { thinkingBudget?: number; includeThoughts?: boolean }
+
+  restoreExecutionOptions(options: Record<string, unknown>): void {
+    const thinking = options.thinking as { thinkingBudget?: number; includeThoughts?: boolean } | undefined
+    this.restoredThinking = thinking ? { ...thinking } : undefined
+  }
 
   constructor(private config: GeminiClientConfig) {
     this.proxyDispatcher = config.proxy ? new ProxyAgent(config.proxy) : undefined
@@ -360,6 +366,7 @@ export class GeminiClient implements StreamClient {
       }
     }
 
+    if (this.restoredThinking) body.generationConfig.thinkingConfig = { ...this.restoredThinking }
     return body
   }
 

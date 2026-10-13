@@ -22,6 +22,8 @@ export interface CouncilSeat {
   provider?: string
   /** 席位专属 model（须在 provider 的 models 列表中）。需与 provider 同时设置。 */
   model?: string
+  keyId?: string
+  modelStrategy?: 'session' | 'auto'
 }
 
 /** 缺省席位 —— 天权领航 · 天府护栏 · 天璇探索。调用方可经 seats 覆盖。

@@ -20,7 +20,11 @@ export function buildApprovalRoutes(manager: ApprovalManager, apiToken?: string)
       // 'deny' are legal (vscode ApprovalAnswer contract; serve.ts sends 'deny').
       // Previously `data.decision ?? 'approve'` let an empty body silently approve
       // a high-risk pending intervention.
-      const decision = data.decision
+      // 'reject' is accepted solely as a deny alias: desktop (ApprovalDecision in
+      // desktop/src/runtime/types.ts) and mobile-client.ts send 'reject' for the
+      // deny button (issue #472). It is normalized to the canonical 'deny' before
+      // reaching answerIntervention, which never treats it as approval.
+      const decision = data.decision === 'reject' ? 'deny' : data.decision
       if (decision !== 'approve' && decision !== 'deny') {
         return { status: 400, body: { error: 'Invalid or missing "decision" (expected "approve" or "deny")' } }
       }

@@ -12,7 +12,10 @@ import { imageGenerationService, type ImageGenerationService } from '../api/imag
 
 const draftSchema = z.object({
   baseUrl: z.string().trim().url(), modelId: z.string().trim().min(1), providerName: z.string().trim().optional(),
-  apiKey: z.string().optional(), apiKeyEnv: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/).optional(),
+  // 注意：draft 故意不支持 apiKeyEnv。请求体里的变量名若被服务端直接解析，
+  // 任意环境变量值会被当作 Bearer 密钥发往调用方自选的 baseUrl（机密外泄原语）。
+  // 需要环境变量密钥请走服务端配置文件里的 provider.apiKeyEnv。
+  apiKey: z.string().optional(),
   sizeField: z.enum(['size', 'image_size']).optional(), size: z.union([z.literal(''), imageSizeSchema]).optional(),
 })
 
@@ -33,14 +36,13 @@ export function buildImageGenerationRoutes(apiToken?: string, knownWorkspaces: (
       const origin = data.origin === 'test' ? 'test' : 'workbench'
       let selected: Pick<ImageGenerationInput, 'parameters' | 'connection'>
       if (origin === 'test' && data.draft && typeof data.draft === 'object') {
+        if ('apiKeyEnv' in data.draft) throw new Error('apiKeyEnv is not supported in test drafts; paste the key into apiKey instead')
         const draft = draftSchema.parse(data.draft)
-        if (draft.apiKey && draft.apiKeyEnv) throw new Error('Use either a key or an environment variable')
         const baseUrl = String(draft.baseUrl ?? '').trim(), model = String(draft.modelId ?? '').trim()
         const url = new URL(baseUrl)
         if (!['https:', 'http:'].includes(url.protocol) || !model) throw new Error('Enter an endpoint and model')
         const size = typeof draft.size === 'string' && draft.size ? draft.size : undefined
-        if (draft.apiKeyEnv && !process.env[draft.apiKeyEnv]) throw new Error('The configured environment variable is not set')
-        selected = { parameters: { provider: String(draft.providerName ?? 'test'), model, prompt: 'a red circle on a white background', size, sizeField: draft.sizeField === 'image_size' ? 'image_size' : 'size', timeoutMs: 180_000 }, connection: { baseUrl, apiKey: typeof draft.apiKey === 'string' && draft.apiKey ? draft.apiKey : typeof draft.apiKeyEnv === 'string' ? process.env[draft.apiKeyEnv] : undefined, ...imageGenerationNetwork(loadConfig()) } }
+        selected = { parameters: { provider: String(draft.providerName ?? 'test'), model, prompt: 'a red circle on a white background', size, sizeField: draft.sizeField === 'image_size' ? 'image_size' : 'size', timeoutMs: 180_000 }, connection: { baseUrl, apiKey: typeof draft.apiKey === 'string' && draft.apiKey ? draft.apiKey : undefined, ...imageGenerationNetwork(loadConfig()) } }
       } else selected = resolveImageGeneration({ ...raw, ...(origin === 'test' ? { prompt: 'a red circle on a white background' } : {}) })
       const requestId = z.string().min(1).max(200).parse(data.requestId)
       const record = await service.start({ cwd, requestId, origin, ...selected, ...(typeof data.sessionId === 'string' ? { sessionId: data.sessionId } : {}) })

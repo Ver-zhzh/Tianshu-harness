@@ -108,8 +108,8 @@ describe('review model override — config → card → coordinator path', () =>
     })
 
     assert.equal(parsed.agent.review?.skipAuto, false)
-    assert.equal(parsed.agent.review?.profiles.adversarial_verifier?.provider, 'deepseek')
-    assert.equal(parsed.agent.review?.profiles.adversarial_verifier?.model, 'deepseek-v4-flash')
+    assert.equal((parsed.agent.review?.profiles.adversarial_verifier as { provider: string; model: string })?.provider, 'deepseek')
+    assert.equal((parsed.agent.review?.profiles.adversarial_verifier as { provider: string; model: string })?.model, 'deepseek-v4-flash')
   })
 
   it('review.skipAuto defaults to false and profiles to empty', () => {
@@ -181,6 +181,6 @@ describe('review model override — config → card → coordinator path', () =>
       profiles: { reviewer: { provider: 'glm', model: 'glm-5.2' } },
     })
     assert.equal(parsed.skipAuto, true)
-    assert.equal(parsed.profiles.reviewer?.model, 'glm-5.2')
+    assert.equal((parsed.profiles.reviewer as { provider: string; model: string })?.model, 'glm-5.2')
   })
 })

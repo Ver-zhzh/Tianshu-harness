@@ -77,7 +77,7 @@ describe('T7 full-collapse fill-ratio threshold (option A)', () => {
     assert.ok(!content.startsWith('[collapsed '), 'must not be semantically collapsed below 0.85')
   })
 
-  it('DOES semantically collapse old tool results at 90% fill (above new 0.85)', () => {
+  it('preserves old tool results at 90% fill', () => {
     const engine = makeEngine()
     const oldTool = bigGrepResult(40)
     const messages = buildMessages(0.9, oldTool)
@@ -87,8 +87,7 @@ describe('T7 full-collapse fill-ratio threshold (option A)', () => {
     const toolMsg = req.messages.find(m => m.role === 'tool' && m.tool_call_id === 'grep_c1')
     assert.ok(toolMsg, 'old tool result must still be present')
     const content = toolMsg!.content as string
-    assert.ok(content.length < oldTool.length, 'old tool result must shrink above 0.85 fill')
-    assert.ok(content.startsWith('[collapsed grep:'), 'must be semantically collapsed above 0.85')
+    assert.equal(content, oldTool, 'only final request budgeting can authorize a history rewrite')
   })
 })
 
@@ -126,11 +125,11 @@ describe('T7 collapse FLOOR — no rewrite below COLLAPSE_FLOOR_FILL_RATIO', () 
     assert.ok(oldAsst, 'old reasoning must survive below floor — no history rewrite, no cache break')
   })
 
-  it('DOES strip old reasoning at 60% fill (above floor) — lightweight pass runs', () => {
+  it('preserves old reasoning at 60% fill', () => {
     const engine = makeEngine()
     const messages = buildMessagesWithOldReasoning(0.6, OLD_REASONING)
     const req = engine.buildOaiRequest(messages, undefined, CONTEXT_WINDOW)
     const stillHasMarker = req.messages.some(m => typeof (m as { reasoning_content?: string }).reasoning_content === 'string' && (m as { reasoning_content?: string }).reasoning_content!.includes('OLD_REASONING_MARKER'))
-    assert.equal(stillHasMarker, false, 'old reasoning must be stripped above floor (lightweight pass active)')
+    assert.equal(stillHasMarker, true, 'published reasoning cannot be stripped by a fill threshold')
   })
 })

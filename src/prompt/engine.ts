@@ -5,11 +5,7 @@ import { createHash } from 'node:crypto'
 import { assertCompleteAttachments } from '../api/attachment-integrity.js'
 import { FrozenAnchors } from './frozen-anchors.js'
 import type { OaiChatRequest, OaiContentPart, OaiMessage } from '../api/oai-types.js'
-import { pruneOutdatedQueryResults } from '../compact/semantic-prune.js'
 import { collapseToolResult } from '../compact/context-collapse.js'
-import { detectStaleness } from '../compact/staleness-detect.js'
-import { CACHE_ANCHOR_MESSAGES } from '../compact/constants.js'
-import { estimateOaiTokens } from '../compact/micro.js'
 import { buildSystemPrompt, type StaticPromptContext } from './static.js'
 import type { ToolDefinition } from '../api/types.js'
 import { buildStableVolatileBlock, buildLatestTurnVolatileBlock, buildDynamicAppendixParts, buildConsolidatedBlock, renderTaskDepthAdvisory, renderPlanMethodologyAdvisory, FROZEN_BLOCK_CAPS, type AppendixPart, type VolatileContext, type ToolHistoryEntry } from './volatile.js'
@@ -42,43 +38,8 @@ import { stableStringify } from '../api/stable-json.js'
 export type { PrefixFingerprint, DriftEvent, ContextLayerReport }
 export type { FrozenSnapshotData } from './frozen-snapshot.js'
 
-/**
- * T7 request-time collapse: window fill-ratio above which the *full* pass runs
- * (collapsing old tool results into summaries, not just the lightweight
- * reasoning-strip + dup-fold). The full pass breaks the exact-prefix cache on
- * DeepSeek-class providers, so it is deferred until the window is genuinely
- * near-full. See the call site in {@link PromptEngine} for the cost rationale.
- */
-const FULL_COLLAPSE_FILL_RATIO = 0.85
-
-/**
- * T7 collapse FLOOR: below this window fill-ratio, request-time collapse does
- * not run at all (neither the watermark advances nor any rewrite happens).
- *
- * Rationale (exact-prefix economics): old reasoning_content / tool results that
- * sit in the cached prefix are CHEAP to keep — they serve from cache-read
- * (~0.025元/M on V4-PRO). Collapsing them rewrites history, which breaks the
- * exact-prefix cache from the touched message onward — a one-time cache-MISS
- * rebuild (~3元/M, 120× the read price). Below the floor there is ample headroom
- * to the window limit, so keeping cached tokens is strictly cheaper than the
- * break. Session-overflow is handled separately by trySessionSplit at 86%, which
- * already rewrites at a cold-start boundary. Observed motivation: a session at
- * fillRatio ~0.2 took a 169K-token break when the watermark advanced for savings
- * it had no need for (mqhs/ed32f759 uMsg9). Collapse only earns its break when
- * the window is genuinely filling. Tunable.
- */
-const COLLAPSE_FLOOR_FILL_RATIO = 0.5
-
 /** Stable fingerprint of the frozen volatile prefix (diagnostics/restore only; never prompt bytes). */
 function frozenBaseHash(block: string): string { return createHash('sha256').update(block).digest('hex') }
-
-/** Fast non-crypto hash for content dedup (djb2 on first 2000 chars + length). */
-function simpleHash(s: string): string {
-  let h = 5381
-  const len = Math.min(s.length, 2000)
-  for (let i = 0; i < len; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0
-  return `${h}:${s.length}`
-}
 
 /**
  * Prefix-divergence probe result: how this request's serialized messages
@@ -128,6 +89,10 @@ export interface PromptEngineConfig {
 }
 
 export class PromptEngine {
+  private executionSnapshot?: import('../api/continuation-prefix.js').ContinuationPrefixProof
+  private toolCatalogPublished = false
+  getExecutionSnapshot(): import('../api/continuation-prefix.js').ContinuationPrefixProof | undefined { return this.executionSnapshot }
+  authorizeCacheGeneration(): void { this.executionSnapshot = undefined }
   getRequestBudgetPolicy(): import('../context/request-budget.js').RequestBudgetPolicy | undefined {
     return this.config.requestBudgetPolicy
   }
@@ -307,6 +272,7 @@ export class PromptEngine {
     const inherit = config.inheritFrozenFrom
     const initialFrozenBase = buildStableVolatileBlock(config.volatileCtx)
     if (inherit instanceof PromptEngine) {
+      this.executionSnapshot = inherit.executionSnapshot
       this.anchors = new FrozenAnchors(inherit.anchors.export())
       this.anchorHistory = [...inherit.anchorHistory]
       this.checkInheritedHistory = true
@@ -319,6 +285,7 @@ export class PromptEngine {
     } else {
       const data = inherit ? parseFrozenSnapshotData(inherit) : undefined
       if (data) {
+        this.executionSnapshot = data.executionSnapshot
         this.anchors = new FrozenAnchors(data.anchors)
         this.anchorHistory = data.userKeys ?? []
         this.checkInheritedHistory = true
@@ -334,6 +301,9 @@ export class PromptEngine {
         this.collapseTokenStep = data.collapseTokenStep
       }
     }
+    this.toolCatalogPublished = !!this.executionSnapshot
+    const savedMaxTokens = this.executionSnapshot?.options?.max_tokens ?? this.executionSnapshot?.options?.max_completion_tokens
+    if (this.executionSnapshot?.model === config.model && typeof savedMaxTokens === 'number') this.config = { ...this.config, maxTokens: savedMaxTokens }
     this.approvalMode = config.approvalMode
     this.systemPrompt = buildSystemPrompt(config.staticCtx)
     this.frozenBase = initialFrozenBase
@@ -451,6 +421,7 @@ export class PromptEngine {
   exportFrozenSnapshot(): FrozenSnapshotData {
     return {
       v: 2,
+      ...(this.executionSnapshot ? { executionSnapshot: this.executionSnapshot } : {}),
       anchors: this.anchors.export(),
       userKeys: [...this.anchorHistory],
       frozenBaseHash: this.inheritedActiveBase ? this.inheritedActiveBase.hash : frozenBaseHash(this.volatileBlock),
@@ -587,7 +558,7 @@ export class PromptEngine {
         : JSON.stringify(oaiMessages[lastUserIdx]!.content)
       // 1) Pending entries whose key is no longer the active last-user message
       //    belong to a finished turn — commit unconditionally and clear.
-      for (const key of [...this.frozenPendingMerged.keys()]) {
+      for (const key of this.frozenPendingMerged.keys()) {
         if (key === lastUserContent) continue
         this.commitFrozenSnapshot(key)
         this.frozenPendingMerged.delete(key)
@@ -806,139 +777,12 @@ export class PromptEngine {
 
     const tools = buildOaiToolDefinitions(this.config.staticCtx.tools)
 
-    // On 1M+ windows, skip pruning entirely — same rationale as observation masking:
-    // mutating message content breaks DeepSeek exact-prefix cache. trySessionSplit (86%)
-    // handles context overflow instead.
-    if (!contextWindow || contextWindow < 1_000_000) {
-      const { messages: prunedMessages, prunedCount, savedChars } = pruneOutdatedQueryResults(result, CACHE_ANCHOR_MESSAGES)
-      if (prunedCount > 0) {
-        debugLog(`[semantic-prune] pruned ${prunedCount} results, saved ${savedChars} chars`)
-        result.length = 0
-        result.push(...prunedMessages)
-      }
-
-      const { messages: stalenessPruned } = detectStaleness(result, CACHE_ANCHOR_MESSAGES, {
-        suffixTokenLimit: 8_000, // only mutate cheap-to-recache tail
-      })
-      if (stalenessPruned !== result) {
-        for (let i = 0; i < result.length; i++) result[i] = stalenessPruned[i]!
-      }
-    }
-
-    // Observation masking: replace tool result content older than 10 user turns
-    // with compact placeholder. On 1M+ context windows, skip masking entirely —
-    // the 1M window has enough headroom, and masking mutates message content
-    // which breaks exact prefix cache. trySessionSplit (86%) is the primary
-    // defense against context overflow on 1M windows.
-    const MASK_WINDOW = 10
-    if (!contextWindow || contextWindow < 1_000_000) {
-      let userCount = 0
-      const userTurnIndices: number[] = []
-      for (let i = result.length - 1; i >= 0; i--) {
-        if (result[i]!.role === 'user') {
-          userCount++
-          userTurnIndices.push(i)
-        }
-      }
-      if (userCount > MASK_WINDOW) {
-        const cutoff = userTurnIndices[MASK_WINDOW - 1]!
-        for (let i = 0; i < cutoff; i++) {
-          const msg = result[i]!
-          if (msg.role === 'tool' && msg.content.length > 200) {
-            const preview = msg.content.slice(0, 100)
-            result[i] = { ...msg, content: `[observation masked, ${msg.content.length} chars]\n${preview}…` }
-          }
-        }
-      }
-    }
-
-    // File content dedup + disk budget: skip on 1M+ windows — mutating historical
-    // tool results breaks DeepSeek exact-prefix cache (same rationale as pruning/masking).
-    if (!contextWindow || contextWindow < 1_000_000) {
-      const seenContent = new Map<string, Set<string>>()
-      for (let i = result.length - 1; i >= 0; i--) {
-        const msg = result[i]!
-        if (msg.role === 'tool' && msg.content.length > 500 && !msg.content.startsWith('[observation masked')) {
-          const hash = simpleHash(msg.content)
-          const bucket = seenContent.get(hash)
-          if (bucket?.has(msg.content)) {
-            result[i] = { ...msg, content: `[duplicate content, see later tool result]` }
-          } else if (bucket) {
-            bucket.add(msg.content)
-          } else {
-            seenContent.set(hash, new Set([msg.content]))
-          }
-        }
-      }
-
-      const DISK_BUDGET_CHARS = 50_000
-      const PREVIEW_CHARS = 2000
-      for (let i = 0; i < result.length; i++) {
-        const msg = result[i]!
-        if (msg.role === 'tool' && msg.content.length > DISK_BUDGET_CHARS) {
-          const preview = msg.content.slice(0, PREVIEW_CHARS)
-          result[i] = { ...msg, content: `${preview}\n\n[output truncated: ${msg.content.length} chars total, showing first ${PREVIEW_CHARS}]` }
-        }
-      }
-    }
-
     // Only retire anchors absent from the authoritative main history.
     if (!sidePath && this.pruneAnchorsOnBuild) {
       this.pruneAnchorsOnBuild = false
       this.anchors.retain(liveAnchors)
       const liveText = new Set(oaiMessages.filter(m => m.role === 'user').map(m => typeof m.content === 'string' ? m.content : ''))
       for (const key of this.frozenUserMerged.keys()) if (!liveText.has(key)) this.frozenUserMerged.delete(key)
-    }
-
-    // T7: Cache-Safe Context Collapse for 1M+ windows.
-    // Operates on the request copy only — session messages remain intact
-    // so DeepSeek exact-prefix cache is preserved up to the collapse point.
-    // Gated at 50% window usage, with a watermark boundary that only advances
-    // when crossing a 50K-token step — so the break happens once per step,
-    // not on every turn (rolling break would defeat the prefix cache).
-    if (contextWindow && contextWindow >= 200_000 && !sidePath && !this.config.requestBudgetPolicy) {
-      const collapseAge = this.config.attentionProfile?.collapseAgeTurns ?? 8
-      // Use the same CJK-aware accounting as the session layer
-      // (estimateOaiMessageTokens: cjk/1.2, ascii/4, plus tool_calls and the
-      // reasoning_content echoed back on tool-call turns). The old hand-rolled
-      // `chars/4` undercounted CJK text by ~3.3× and ignored tool_calls, so on
-      // CJK-heavy sessions the T7 gate fired far later than maybeCompact's
-      // ratio — leaving the two subsystems' compaction decisions uncoordinated.
-      const estTokens = estimateOaiTokens(result)
-      const fillRatio = estTokens / contextWindow
-
-      // Lightweight pass (0–85%): strip reasoning + fold duplicate grep/read.
-      // Full pass (>85%): also collapse old tool results via semantic summaries.
-      //
-      // The full pass rewrites old tool results into summaries. On exact-prefix
-      // providers (DeepSeek) that rewrite invalidates the whole prefix after the
-      // touched message — one full pass costs a real cache-miss rebuild of the
-      // collapsed region (observed: 240K tokens at 3元/M ≈ 0.71元 on a single
-      // request, ~27% of a session's total spend). estTokens here is a char/4
-      // estimate that *includes* echoed reasoning_content, so it runs well ahead
-      // of the real billed prompt. Triggering the full pass at 0.5 fired while
-      // the real prompt was only ~27% of the window — paying the cache break for
-      // headroom that was never needed. FULL_COLLAPSE_FILL_RATIO defers the full
-      // pass until the window is genuinely near-full (when avoiding overflow is
-      // worth more than cache protection); the lightweight pass still runs the
-      // whole time. Tunable: lower it to collapse more aggressively, raise it to
-      // protect cache longer.
-      if (fillRatio >= COLLAPSE_FLOOR_FILL_RATIO) {
-        // History rewrite (compact / session split) invalidates stored indices.
-        if (this.collapseWatermark > result.length) {
-          this.collapseWatermark = 0
-          this.collapseTokenStep = -1
-        }
-        const step = Math.floor(estTokens / 50_000)
-        if (step > this.collapseTokenStep) {
-          this.collapseTokenStep = step
-          this.collapseWatermark = computeCollapseBoundary(result, collapseAge)
-          debugLog('prompt-engine', `T7 watermark advanced: step=${step} boundary=${this.collapseWatermark} estTokens=${estTokens}`)
-        }
-        if (this.collapseWatermark > 0) {
-          requestTimeCollapse(result, this.collapseWatermark, contextWindow, fillRatio < FULL_COLLAPSE_FILL_RATIO)
-        }
-      }
     }
 
     const request: OaiChatRequest = {
@@ -953,6 +797,11 @@ export class PromptEngine {
       // fingerprints final send bytes for these requests (side-path calls
       // through the same client would poison its baseline too).
       prefixProbe: !sidePath || undefined,
+      onExecutionSnapshot: sidePath ? undefined : proof => {
+        this.executionSnapshot = proof
+        this.toolCatalogPublished = true
+        try { this.onFrozenChanged?.() } catch { /* persistence cannot break dispatch */ }
+      },
     }
     // Side-path builds (compaction summaries etc.) have unrelated message
     // arrays — recording them would poison the main-turn baseline and report
@@ -1026,6 +875,7 @@ export class PromptEngine {
   }
 
   updateTools(tools: ToolDefinition[]): void {
+    if (this.toolCatalogPublished) return
     // 字节级幂等守卫（2026-09-06 缓存碎裂根修 P2）：MCP 重连/插件重复注册/
     // applyFace 重挂会以同一份工具定义反复重进这里——字节不变时跳过替换与
     // 计数，fingerprint 与请求字节完全不动（此前每次调用都 bump

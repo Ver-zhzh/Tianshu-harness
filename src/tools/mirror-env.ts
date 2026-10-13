@@ -131,7 +131,7 @@ export function rewriteGitHubUrls(command: string, config: MirrorsConfig): strin
 
   return command.replace(
     /https?:\/\/github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)(?:\.git)?/g,
-    (match, repo: string) => mirror.template.replace('{repo}', repo),
+    (_match, repo: string) => mirror.template.replace('{repo}', repo),
   )
 }
 

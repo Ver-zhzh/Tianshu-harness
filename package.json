@@ -1,6 +1,6 @@
 {
   "name": "tianshu-harness",
-  "version": "3.30.0",
+  "version": "3.31.0",
   "description": "Cognitive runtime (CVM) for coding agents — stable, evidence-gated delivery; prefix cache works with all models (95–99% hit rate)",
   "license": "Apache-2.0",
   "type": "module",
@@ -12,13 +12,13 @@
     "ai",
     "cli"
   ],
-  "homepage": "https://github.com/huiliyi37/Tianshu-Tui#readme",
+  "homepage": "https://github.com/huiliyi37/Tianshu-harness#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/huiliyi37/Tianshu-Tui.git"
+    "url": "git+https://github.com/huiliyi37/Tianshu-harness.git"
   },
   "bugs": {
-    "url": "https://github.com/huiliyi37/Tianshu-Tui/issues"
+    "url": "https://github.com/huiliyi37/Tianshu-harness/issues"
   },
   "engines": {
     "node": ">=24"

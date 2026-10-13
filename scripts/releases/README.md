@@ -2,6 +2,23 @@
 
 `catalog.mjs` defines schema version 1 and source validation. The website keeps a byte-identical copy; desktop coordination remains private. Catalog revisions may change availability, but a version/platform/purpose must keep the same package bytes and updater signature. macOS installation DMGs and update archives are different artifacts.
 
+## Release body installation preamble (mandatory)
+
+Every release body must lead with the cross-platform installation guide. It lives in a single source, `docs/releases/install-preamble.md`, and is composed into the body — never hand-written per release:
+
+```sh
+# Full compose (install preamble + docs/releases/vX.Y.Z.md changelog):
+node scripts/releases/compose-release-body.mjs --version X.Y.Z --out release/body.md
+gh release edit vX.Y.Z --notes-file release/body.md
+
+# Repair an already-published release whose body was hand-curated (prepends the preamble, keeps the existing body):
+gh release view vX.Y.Z --json body --jq .body > release/existing-body.md
+node scripts/releases/compose-release-body.mjs --version X.Y.Z --prepend-to release/existing-body.md --out release/body.md
+gh release edit vX.Y.Z --notes-file release/body.md
+```
+
+The composer fails closed on a missing/empty preamble, rewrites relative links to absolute GitHub URLs, injects the version into artifact names (`Tianshu_<版本>_aarch64.dmg`), and is idempotent when prepending to a body that already carries the guide.
+
 From the product repository root, after building, signing and uploading the existing GitHub release:
 
 ```sh

@@ -171,6 +171,11 @@ export class AnthropicClient implements StreamClient {
     this.reasoningEffort = effort
   }
 
+  restoreExecutionOptions(options: Record<string, unknown>): void {
+    const thinking = options.thinking as { budget_tokens?: number } | undefined
+    this.config.thinkingBudget = thinking?.budget_tokens ?? 0
+  }
+
   setThinking(_mode: 'enabled' | 'disabled'): void {
     // Anthropic thinking is controlled via budget_tokens, not a toggle
   }
@@ -512,12 +517,23 @@ export class AnthropicClient implements StreamClient {
     const decoder = new TextDecoder()
     let buffer = ''
     let stopReason: string | null = null
-    let usage: {
+    const usage: {
       input_tokens?: number
       output_tokens?: number
       cache_read_input_tokens?: number
       cache_creation_input_tokens?: number
     } = {}
+    // SSE usage counters are cumulative snapshots. Relays may defer input
+    // and cache buckets until message_delta; omitted/invalid fields retain
+    // the last valid value, while an explicit zero replaces it.
+    const mergeUsage = (value: unknown): void => {
+      if (!value || typeof value !== 'object') return
+      const incoming = value as Record<string, unknown>
+      for (const field of ['input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens'] as const) {
+        const count = incoming[field]
+        if (typeof count === 'number' && Number.isFinite(count) && count >= 0) usage[field] = count
+      }
+    }
 
     // Accumulators for content blocks
     const textBlocks: string[] = []
@@ -613,14 +629,7 @@ export class AnthropicClient implements StreamClient {
           switch (type) {
             case 'message_start': {
               const msg = parsed.message as Record<string, unknown> | undefined
-              if (msg?.usage) {
-                const u = msg.usage as Record<string, unknown>
-                usage = {
-                  input_tokens: u.input_tokens as number,
-                  cache_read_input_tokens: u.cache_read_input_tokens as number,
-                  cache_creation_input_tokens: u.cache_creation_input_tokens as number,
-                }
-              }
+              mergeUsage(msg?.usage)
               break
             }
 
@@ -688,10 +697,7 @@ export class AnthropicClient implements StreamClient {
               if (d?.stop_reason) {
                 stopReason = d.stop_reason as string
               }
-              if (parsed.usage) {
-                const u = parsed.usage as Record<string, unknown>
-                usage.output_tokens = u.output_tokens as number
-              }
+              mergeUsage(parsed.usage)
               break
             }
 

@@ -74,6 +74,8 @@ export interface ToolDefinition {
 export interface Usage {
   cacheCoverage?: { input: number; read: number; observed: number; unknown: number; creationUnknown: number }
   observation?: {
+    executionSnapshot?: import('./continuation-prefix.js').ContinuationPrefixProof
+    continuity?: { cacheGenerationId: string; generationReason: string; optionsHash: string; toolsHash: string; credentialScope?: string }
     requestId: string
     attemptId: string
     status: 'complete' | 'aborted'

@@ -1,3 +1,4 @@
+import { snapshotSessionBinding } from '../model/model-binding.js'
 import { createReportClientFactory } from '../api/report-client.js'
 import { deepSeekBudgetPolicy } from '../context/request-budget.js'
 import { createProviderClient, resolveApiKey } from '../api/factory.js'
@@ -214,8 +215,10 @@ export function createAgentConfig(input: AgentConfigInput): Pick<
 
   // 共享重试预算载体：客户端 getter 与 AgentConfig 都指向它（onRun 起点赋值）。
   const retryBudgetHolder: { current?: import('../api/retry-budget.js').RetryBudget } = {}
+  const credentialOwner = snapshotSessionBinding(provider, model.id, apiKey)
   const primaryClient = createProviderClient(provider, capabilities, {
     apiKey,
+    credentialScope: `${provider.name}:${credentialOwner.keyId ?? provider.keyRef ?? provider.apiKeyEnv ?? provider.auth?.type ?? 'default'}`,
     model: model.id,
     reasoningEffort: model.reasoningEffort,
     maxTokens: model.maxTokens,
@@ -282,6 +285,8 @@ export function createAgentConfig(input: AgentConfigInput): Pick<
     appendixDelta: process.env['RIVET_APPENDIX_DELTA'] !== '0',
     inheritFrozenFrom: input.inheritFrozenFrom,
  })
+  const restoredExecution = promptEngine.getExecutionSnapshot()
+  if (restoredExecution) primaryClient.restoreExecutionSnapshot?.(restoredExecution)
 
   return {
     client,

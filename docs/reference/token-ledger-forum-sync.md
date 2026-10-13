@@ -2,7 +2,7 @@
 title: Token 消耗台账 · 论坛同步接口与接入交接
 type: reference
 status: active
-date: 2026-10-11
+date: 2026-10-12
 tags: [token-ledger, forum, sync, api, integration]
 ---
 
@@ -30,9 +30,17 @@ POST {token-server}/v1/token-usage ── Bearer 用户同步密钥（论坛签�
 两条关键性质：
 
 - **累计语义**：每次推送都是"截至目前全量"，论坛/token-server 只做 upsert，不需要去重表。
-- **本地是权威**：推送失败不影响本地台账增长；端点恢复后下一趟自动补齐全部历史。
+- **本地是权威**：推送失败不影响本地台账增长；端点恢复后下一次手动或已开启的自动同步补齐全部历史。
 
 ## 2. 用户侧配置（如何开启同步）
+
+CLI 使用 `/usage` 查看全设备本地累计，`/usage connect` 在原生终端的遮蔽输入框配置论坛个人同步密钥；`/usage sync` 立即同步，`/usage auto on` 明确开启每 30 分钟上传，`/usage auto off` 关闭自动上传，`/usage disconnect` 清除密钥。远控兼容终端提供查询和同步命令，密钥需通过原生终端或 VS Code 的安全入口配置，不要粘贴到普通命令行。
+
+VS Code 在设置抽屉的「Token 账本」中查看累计、设置个人同步密钥、开关自动同步及立即同步。密码输入在 VS Code 宿主中完成，网页界面只接收「已配置」状态。默认只记录本地数据；配置密钥不会自动开启上传。上传端点、密钥与自动上传开关只接受用户配置，仓库项目配置不能自行启用或改变上传目标。
+
+桌面端在设置中的「Token 账本」查看全设备累计、配置论坛个人同步密钥、开关自动同步及立即同步。默认只记录本地数据；配置密钥不会自动开启上传。密钥仅通过设置写入，查询只返回「已配置」状态。上传端点、密钥与自动上传开关只接受用户配置，已信任的仓库项目配置也不能自行启用或改变上传目标。
+
+正式服务探活地址为 `https://tianshuharness.com/token/health`。总 Token = 输入 + 输出；缓存读取已包含在输入中，不再重复相加。计价值按模型原始定价单位估算，可能混合币种，不是统一费用或账单。
 
 用户在论坛个人页生成同步密钥（论坛后端调 token-server 签发），填入 `~/.rivet/config.json`：
 
@@ -41,7 +49,7 @@ POST {token-server}/v1/token-usage ── Bearer 用户同步密钥（论坛签�
   "tokenLedger": {
     "deviceName": "小明的 MacBook",
     "forum": {
-      "endpoint": "https://<token-server 域名>/v1/token-usage",
+      "endpoint": "https://tianshuharness.com/token/v1/token-usage",
       "apiKey": "tsu_论坛签发的密钥",
       "autoSync": true,
       "intervalMinutes": 30
@@ -54,9 +62,11 @@ POST {token-server}/v1/token-usage ── Bearer 用户同步密钥（论坛签�
 |------|---------|
 | `enabled` | 默认 `true`（本地台账始终累计；只是本地记录，不上传） |
 | `deviceName` | 缺省 `os.hostname()`；展示用 |
-| `forum.endpoint` | **缺省 = 不上传**。完整 POST URL，客户端不拼路径 |
-| `forum.apiKey` | 配置了才带 `Authorization: Bearer` 头 |
-| `forum.autoSync` | 默认 `false`；`true` 且 endpoint 已配时，会话内每 `intervalMinutes`（默认 30）推一趟，退出时冲刷最后一趟（3s 有界）。桌面端由 sidecar 进程承担间隔推送 |
+| `forum.endpoint` | 配置个人同步密钥后缺省使用 `https://tianshuharness.com/token/v1/token-usage`；没有密钥不上传。完整 POST URL，仅接受 HTTPS 或本机 loopback HTTP，不含用户名、密码、查询或片段 |
+| `forum.apiKey` | 上传必须配置；只写入，不回显。清除密钥会关闭自动上传并取消进行中的请求 |
+| `forum.autoSync` | 默认 `false`；`true` 且密钥与安全端点齐备时，会话内每 `intervalMinutes`（默认 30）推一趟，退出时冲刷最后一趟（3s 有界）。桌面端由 sidecar 进程承担间隔推送 |
+
+退出时始终在默认 3 秒内等待本地保存与已在进行的手动同步；到期取消请求和旧同步队列。未选择自动上传时，退出不会新发上传。账本跨进程锁等待预算保持 5 秒，超时保留数据并拒绝提交。
 
 环境变量覆盖（联调/多环境）：`RIVET_FORUM_API` 覆盖 endpoint，`RIVET_FORUM_TOKEN` 覆盖 apiKey。
 
@@ -95,14 +105,15 @@ Authorization: Bearer tsu_<用户同步密钥>
 | `requests` | int | 计费请求数（主请求 + side_path + 中断重试行） |
 | `input` | int | cache-**inclusive** 输入 tokens |
 | `output` / `cacheRead` / `cacheCreate` | int | 输出 / 缓存命中 / 缓存创建 tokens |
-| `cost` | number | 客户端按本地定价估算（DeepSeek 官方含峰谷）；**未定价模型计 0**，是估算下限不是账单 |
+| `cost` | number | 客户端按本地定价估算（DeepSeek 官方含峰谷）；**未定价模型计 0**。可能混合币种，不应直接显示单一货币符号，也不是账单 |
 | `provider` | string? | 老数据行可能缺省 |
 
 ### 3.2 响应与客户端行为
 
 | token-server 响应 | 客户端行为 |
 |---------|-----------|
-| 2xx `{ ok, stale, receivedAt }` | 确认；`stale:true` = 旧包被丢弃（仍算成功）。台账无新变化时客户端不再推 |
+| 2xx `{ "ok": true, "stale": false }` | 确认实际上送的累计摘要与同步目标；上传期间产生的新用量仍待同步 |
+| HTML、无效 JSON、`ok` 非 true 或 `stale` 非 false | 不确认摘要，保留待同步状态 |
 | 401 | 密钥无效/已吊销，不重试，回执记 `http_4xx`（用户需回论坛重新签发） |
 | 其他 4xx | 载荷问题，不重试 |
 | 429 / 5xx / 网络 / 超时(10s) | 瞬态：当场重试一次（1s 退避），失败等下趟定时推送 |
@@ -123,30 +134,34 @@ Authorization: Bearer tsu_<用户同步密钥>
 论坛接入流程：
 
 1. 用户在论坛个人页点「生成同步密钥」→ 论坛后端调 `POST /v1/admin/keys` → key 展示给用户一次
-2. 用户填进 CLI 配置，客户端开始自动上报
+2. 用户填进桌面设置或用户配置；手动同步，或明确开启自动上传
 3. 论坛渲染：个人页用 `GET /v1/admin/usage?forumUserId=`（论坛后端持 `ADMIN_TOKEN` 直读，与 `/v1/usage/me` 同构；用户自己带 key 时也可走 `/v1/usage/me`）；榜单页后端拉 `/v1/usage/leaderboard` join 论坛昵称/头像
 
 > 备选路径：论坛也可以**自建接收端**绕开 token-server——客户端契约（§3）不变，按 deviceId upsert 即可。推荐走 token-server：密钥体系、stale 守卫、口径校验都已实现并有测试覆盖。
 
 ## 5. 本地调试（联调用）
 
-桌面 sidecar 暴露三条路由（`Authorization: Bearer <sidecar token>`）：
+公开 sidecar 暴露查询、同步与设置路由（`Authorization: Bearer <sidecar token>`）：
 
 ```bash
 # 本地台账视图（窗口聚合 + 全量累计）
 curl -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$PORT/token-ledger/summary?days=30"
 # 同步状态：deviceId / pending / 上次推送回执
 curl -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$PORT/token-ledger/status"
-# 立即同步一次（联调主力；未配置 endpoint 返回 400 + 配置提示）
+# 立即同步一次（未配置个人同步密钥返回 400）
 curl -X POST -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$PORT/token-ledger/sync"
 ```
 
 token-server 本地起：`cd token-server && npm run db:init:local && npm run dev`，然后 `RIVET_FORUM_API=http://127.0.0.1:8787/v1/token-usage rivet` 即可看到真实上报。
 
+`GET /token-ledger/settings` 返回不含密钥的配置；`PUT /token-ledger/settings` 接收局部更新，密钥仅写入、不回显，字段缺省时保留原值，传空字符串时清除密钥并关闭自动同步。两条路由均要求 sidecar 鉴权。`forum.apiKeySource` 返回有效密钥来源 `environment`、`saved` 或 `none`，不返回环境变量原文。设置中的清除只移除已保存密钥并关闭自动上传；`RIVET_FORUM_TOKEN` 仍可覆盖已保存值，手动同步仍会使用有效环境密钥。要完全断开，须停止程序、移除环境覆盖后重新启动。环境空字符串回落到已保存密钥，纯空白环境值覆盖已保存值但视为没有有效密钥，与同步服务的优先级一致。
+
+服务端必须返回 `2xx` 和 JSON `{ "ok": true, "stale": false }` 才确认上传摘要。HTML、无效 JSON、旧快照回执与网络错误保留待同步状态；请求不跟随重定向。
+
 ## 6. 边界与 FAQ
 
 - **payload 里没有会话内容**：只有 token 计数与模型名，不含代码、prompt、文件路径。
-- **deviceId 重置**：删 `~/.rivet/token-ledger.json` 会生成新 deviceId 并全量重建——token-server 视为新设备，历史留在旧 deviceId 下（论坛按账号聚合则自动正确）。
-- **换 key**：论坛重新签发后，设备下一次推送自动改绑新 key，历史消耗并入。
-- **cost 口径**：客户端配置定价的估算（官方 DeepSeek 峰谷）；展示建议标注「估算」，账单以平台为准。
+- **升级与恢复**：保留 `token-ledger.json` 与 `token-ledger.json.identity.json`。身份文件保留设备 ID 和单调快照时间；账本缺失或损坏时，会沿用原设备 ID 从保留的计费日志恢复，损坏文件另行备份。日志已删除时须优先恢复完整账本备份，不能保证仅靠身份文件恢复全部用量。无法恢复原设备身份时拒绝重建并上传，避免新设备重复累计。请勿同时删除两份文件后重扫历史。
+- **换 key**：同一账号更换同步密钥后，用原设备 ID 重传累计快照，历史只保留一份；不同账号接管已有设备会被服务端拒绝，不能通过重置设备 ID 绕过。
+- **cost 口径**：按模型原始定价单位估算（官方 DeepSeek 峰谷）；可能混合币种，展示应去掉固定货币符号并说明不是统一费用。账单以平台为准。
 - **version 演进**：新增字段只向后兼容地加；破坏性变更递增 `version`，token-server 对未知版本回 400（客户端停推留回执）。

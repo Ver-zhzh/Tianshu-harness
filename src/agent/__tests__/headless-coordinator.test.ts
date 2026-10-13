@@ -68,6 +68,7 @@ describe('createHeadlessCoordinator', () => {
     const coordinator = createHeadlessCoordinator({
       toolRegistry,
       provider: makeProvider(),
+      currentModelId: 'test-model-flash',
       providerName: 'test-provider',
       apiKey: 'test-key',
       cwd: '/tmp/test',
@@ -84,6 +85,7 @@ describe('createHeadlessCoordinator', () => {
     const coordinator = createHeadlessCoordinator({
       toolRegistry,
       provider: makeProvider(),
+      currentModelId: 'test-model-flash',
       providerName: 'test-provider',
       apiKey: 'test-key',
       cwd: '/tmp/test',

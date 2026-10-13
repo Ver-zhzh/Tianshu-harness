@@ -39,6 +39,21 @@ describe('bash tool requiresApproval', () => {
     )
   })
 
+  // 收编公开仓 PR #467：INJECTION 清单此前在 manual 档只测原始视图，
+  // 反斜杠/${IFS}/引号拼接等归一化可消除的混淆漏网（`powershel\l -enc`）。
+  it('flags obfuscated injection forms on the normalized view', async () => {
+    const tool = await getBashTool()
+    for (const command of [
+      'powershell -enc xyz',
+      'powershel\\l -enc xyz',
+      'powershell${IFS}-enc xyz',
+      '"powershell" -enc xyz',
+      'cron\\tab -e',
+    ]) {
+      assert.equal(tool.requiresApproval!({ toolUseId: 't1', cwd: '/repo', input: { command } }), true, command)
+    }
+  })
+
   it('flags curl pipe to bash', async () => {
     const tool = await getBashTool()
     assert.equal(

@@ -42,6 +42,7 @@ export function isOfficialDeepSeek(baseUrl: string, model: string): boolean {
 }
 
 export interface RequestBudgetPolicy {
+  transportLimits?: 'deepseek' | 'none'
   windowTokens: number
   maxOutputTokens: number
 }
@@ -55,7 +56,7 @@ export function deepSeekBudgetPolicy(baseUrl: string, model: string, configuredW
 }
 
 export function inputBudgetFor(windowTokens: number, outputReserve: number): { inputBudget: number; safetyMargin: number } {
-  const safetyMargin = Math.max(16_384, Math.ceil(windowTokens * 0.05))
+  const safetyMargin = Math.max(Math.min(16_384, Math.ceil(windowTokens * 0.1)), Math.ceil(windowTokens * 0.05))
   return { inputBudget: Math.max(0, windowTokens - outputReserve - safetyMargin), safetyMargin }
 }
 
@@ -82,7 +83,7 @@ export function estimateBudgetInput(messages: OaiMessage[], tools?: unknown): Pi
 
 export function buildContextBudget(request: Pick<OaiChatRequest, 'messages' | 'tools' | 'model' | 'max_tokens'>, policy: RequestBudgetPolicy, identity: { requestId: string; revision: number }): ContextBudgetSnapshot {
   // outputReserve 封顶到「现实输出预留」而非能力上限——见 DEEPSEEK_OUTPUT_RESERVE 注释。
-  const outputReserve = Math.min(request.max_tokens ?? policy.maxOutputTokens, DEEPSEEK_OUTPUT_RESERVE)
+  const outputReserve = policy.transportLimits === 'none' ? (request.max_tokens ?? policy.maxOutputTokens) : Math.min(request.max_tokens ?? policy.maxOutputTokens, DEEPSEEK_OUTPUT_RESERVE)
   const budget = inputBudgetFor(policy.windowTokens, outputReserve)
   const counts = estimateBudgetInput(request.messages, request.tools)
   const ratio = budget.inputBudget > 0 ? counts.inputTokens / budget.inputBudget : Infinity

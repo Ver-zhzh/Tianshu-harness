@@ -70,4 +70,37 @@ describe('chunker: chunkByDefinitions', () => {
     assert.equal(chunks[0]!.startLine, 1)
     assert.ok(chunks.every(c => c.endLine >= c.startLine))
   })
+
+  it('ReDoS guard: long whitespace lines do not hang java-family chunking', () => {
+    // The java/php definition patterns backtrack exponentially on long
+    // whitespace runs (pre-fix: 1000 spaces → 138s). The guard skips
+    // absurdly long lines; real definitions still split.
+    const java = [
+      'public class Foo {',
+      ' '.repeat(5000),
+      '    public int bar() {',
+      '        return 1;',
+      '    }',
+      '}',
+    ].join('\n')
+    const t = Date.now()
+    const chunks = chunkByDefinitions(java, '.java')
+    assert.ok(Date.now() - t < 2000, 'chunking took too long (ReDoS?)')
+    assert.ok(chunks.some(c => c.text.includes('public class Foo')))
+    assert.ok(chunks.some(c => c.text.includes('public int bar')))
+  })
+
+  it('ReDoS guard: long whitespace lines do not hang php chunking', () => {
+    const php = [
+      '<?php',
+      ' '.repeat(5000),
+      'function alpha() {',
+      '    return 1;',
+      '}',
+    ].join('\n')
+    const t = Date.now()
+    const chunks = chunkByDefinitions(php, '.php')
+    assert.ok(Date.now() - t < 2000, 'chunking took too long (ReDoS?)')
+    assert.ok(chunks.some(c => c.text.includes('function alpha')))
+  })
 })

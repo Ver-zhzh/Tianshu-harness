@@ -49,6 +49,17 @@ const EXT_TO_FAMILY: Record<string, keyof typeof DEFINITION_PATTERNS> = {
 const MAX_CHUNK_LINES = 120
 const MIN_CHUNK_LINES = 4
 
+/**
+ * ReDoS guard: definition-boundary regexes are never tested against lines
+ * longer than this. The java/php families contain `(modifier|\s)*`-style
+ * alternations whose backtracking is exponential on long whitespace runs —
+ * a single 1k-space line in a .java/.php file froze the (synchronous) index
+ * rebuild for 2+ minutes (probe: 1000 spaces → 138s, 5000 spaces → 54s+).
+ * Lines this long are never real definition headers; they stay inside the
+ * surrounding chunk (sub-windowed later if the chunk is huge).
+ */
+const MAX_DEFINITION_SCAN_LINE = 2000
+
 export function familyForExt(ext: string): keyof typeof DEFINITION_PATTERNS | null {
   return EXT_TO_FAMILY[ext] ?? null
 }
@@ -67,7 +78,10 @@ export function chunkByDefinitions(content: string, ext: string): Chunk[] {
   const lines = content.split('\n')
   const boundaries: number[] = []
   for (let i = 0; i < lines.length; i++) {
-    if (patterns.some(p => p.test(lines[i]!))) boundaries.push(i)
+    const line = lines[i]!
+    // ReDoS guard: skip absurdly long lines (see MAX_DEFINITION_SCAN_LINE).
+    if (line.length > MAX_DEFINITION_SCAN_LINE) continue
+    if (patterns.some(p => p.test(line))) boundaries.push(i)
   }
   if (boundaries.length === 0) return windowChunks(content)
 

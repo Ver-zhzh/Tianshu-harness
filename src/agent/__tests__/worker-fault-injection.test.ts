@@ -17,7 +17,7 @@ import {
   type RunnableAgent,
   type WorkerTranscript,
 } from '../worker-session.js'
-import { makeFaultClient } from './helpers/fault-client.js'
+import { makeFaultClient, getFaultCallCount } from './helpers/fault-client.js'
 import { makeWorkerConfig } from './helpers/worker-fixture.js'
 
 const VALID_RESULT_JSON = JSON.stringify({
@@ -58,19 +58,14 @@ function makeScriptedAgent(script: Array<{ error?: string; text?: string }>): { 
 
 describe('worker fault injection — high availability', () => {
   describe('runOnceWithTransientRetry (real retry layer, injected agent)', () => {
-    it('retries a transient ECONNRESET and recovers', async () => {
+    it('ECONNRESET rejects immediately even when a second attempt would succeed', async () => {
       const { agent, attempts } = makeScriptedAgent([
         { error: 'ECONNRESET socket hang up' },
         { text: VALID_RESULT_JSON },
       ])
       const transcript = emptyTranscript()
-      const text = await runOnceWithTransientRetry(agent, 'go', transcript)
-      assert.equal(text, VALID_RESULT_JSON, 'second attempt must return the text')
-      assert.equal(attempts(), 2, 'exactly one retry')
-      assert.ok(
-        transcript.errors.some(e => /Transient error.*ECONNRESET.*retrying/.test(e)),
-        `retry must be logged, got: ${JSON.stringify(transcript.errors)}`,
-      )
+      await assert.rejects(runOnceWithTransientRetry(agent, 'go', transcript), /ECONNRESET/)
+      assert.equal(attempts(), 1)
     })
 
     it('exhausted transient retries reject deterministically (no hang)', async () => {
@@ -79,17 +74,16 @@ describe('worker fault injection — high availability', () => {
         runOnceWithTransientRetry(agent, 'go', emptyTranscript()),
         /ECONNRESET/,
       )
-      assert.equal(attempts(), 3, 'initial attempt + MAX_TRANSIENT_RETRIES(2)')
+      assert.equal(attempts(), 1, 'no transient retry')
     })
 
-    it('429 rate limit is transient and retried', async () => {
+    it('429 rate limit stops after the first attempt', async () => {
       const { agent, attempts } = makeScriptedAgent([
         { error: 'HTTP 429 Too Many Requests' },
         { text: 'ok' },
       ])
-      const text = await runOnceWithTransientRetry(agent, 'go', emptyTranscript())
-      assert.equal(text, 'ok')
-      assert.equal(attempts(), 2)
+      await assert.rejects(runOnceWithTransientRetry(agent, 'go', emptyTranscript()), /429/)
+      assert.equal(attempts(), 1)
     })
 
     it('non-transient errors are NOT retried — fail fast', async () => {
@@ -100,7 +94,7 @@ describe('worker fault injection — high availability', () => {
       assert.equal(attempts(), 1, 'no retry for non-transient failures')
     })
 
-    it('emits a retry activity on transient failure (feeds liveness — 慢 ≠ 死)', async () => {
+    it('transient failure never emits retry activity', async () => {
       // API 层内部重试期间没有任何流式事件；retry activity 是 stall sweep
       // 不把健康重试误判为静默的唯一信号（2026-07-18 四 scout 齐死的补强）。
       const { agent } = makeScriptedAgent([
@@ -108,19 +102,21 @@ describe('worker fault injection — high availability', () => {
         { text: VALID_RESULT_JSON },
       ])
       const activities: string[] = []
-      await runOnceWithTransientRetry(agent, 'go', emptyTranscript(), (kind) => { activities.push(kind) })
-      assert.ok(activities.includes('retry'), `retry must tick liveness, got: ${activities.join(',')}`)
+      await assert.rejects(runOnceWithTransientRetry(agent, 'go', emptyTranscript(), (kind) => { activities.push(kind) }))
+      assert.ok(!activities.includes('retry'))
     })
   })
 
   describe('runWorkerSession (full path, fault client)', () => {
-    it('transient ECONNRESET is retried, then a valid result resolves', async () => {
+    it('transient ECONNRESET becomes terminal without consuming the successful second response', async () => {
       const client = makeFaultClient([
         { kind: 'econnreset' },
         { kind: 'ok', text: VALID_RESULT_JSON },
       ])
       const run = await runWorkerSession(makeWorkerConfig({ client }))
-      assert.equal(run.result.status, 'passed', 'should recover after one transient failure')
+      assert.equal(run.result.status, 'blocked')
+      assert.equal(run.result.terminalFailure, true)
+      assert.equal(getFaultCallCount(), 1)
       assert.ok(
         run.transcript.errors.some(e => /Transient|ECONNRESET/.test(e)),
         'retry must be logged in the transcript',

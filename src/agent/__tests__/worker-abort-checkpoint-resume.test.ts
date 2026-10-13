@@ -96,7 +96,7 @@ function abortedRun(order: WorkOrder) {
 }
 
 describe('W3 abort checkpoint → resume re-dispatch entry', () => {
-  it('annotates the blocked result with an explicit resume hint and re-injects the checkpoint on resume', async () => {
+  it('retains the blocked checkpoint for inspection and rejects explicit resume', async () => {
     const seenCheckpoints: (WorkerCheckpoint | undefined)[] = []
     const coordinator = makeCoordinator(async config => {
       seenCheckpoints.push(config.checkpoint)
@@ -131,8 +131,8 @@ describe('W3 abort checkpoint → resume re-dispatch entry', () => {
     assert.equal(firstResult.status, 'blocked')
     assert.equal(firstResult.failureReason, 'timeout')
     const resumeHint = firstResult.nextActions.find(a => a.includes('Resumable'))
-    assert.ok(resumeHint, `blocked result must advertise the resume entry. Got: ${JSON.stringify(firstResult.nextActions)} · risks: ${JSON.stringify(firstResult.risks)}`)
-    assert.ok(resumeHint.includes(`resume:'${firstResult.workOrderId}'`), 'hint must name the exact resume id')
+    assert.equal(resumeHint, undefined)
+    assert.equal(firstResult.terminalFailure, true)
     assert.equal(seenCheckpoints[0], undefined, 'first dispatch starts without a checkpoint')
 
     // Resume dispatch: checkpoint from the aborted run must ride along.
@@ -144,11 +144,11 @@ describe('W3 abort checkpoint → resume re-dispatch entry', () => {
       scope: { files: ['src/agent/loop.ts'] },
       resumeWorkOrderId: firstResult.workOrderId,
     })
-    assert.equal(second.results[0]!.status, 'passed')
-    assert.deepEqual(seenCheckpoints[1], CHECKPOINT, 'resume dispatch must inject the aborted run\'s checkpoint')
+    assert.equal(second.results[0]!.status, 'blocked')
+    assert.equal(seenCheckpoints.length, 1, 'failed checkpoint cannot start another worker')
   })
 
-  it('checkpoint is consumed once — a second resume of the same id starts fresh', async () => {
+  it('repeated resume attempts cannot bypass the terminal task lock', async () => {
     const seenCheckpoints: (WorkerCheckpoint | undefined)[] = []
     const coordinator = makeCoordinator(async config => {
       seenCheckpoints.push(config.checkpoint)
@@ -190,7 +190,7 @@ describe('W3 abort checkpoint → resume re-dispatch entry', () => {
       scope: { files: ['src/agent/compact-boundary-coordinator.ts'] },
       resumeWorkOrderId: orderId,
     })
-    assert.deepEqual(seenCheckpoints[1], CHECKPOINT)
+    assert.equal(seenCheckpoints.length, 1)
 
     await coordinator.delegate({
       parentTurnId: 'turn-3',
@@ -200,7 +200,7 @@ describe('W3 abort checkpoint → resume re-dispatch entry', () => {
       scope: { files: ['src/agent/compact-boundary-coordinator.ts'] },
       resumeWorkOrderId: orderId,
     })
-    assert.equal(seenCheckpoints[2], undefined, 'checkpoint must not replay after being consumed')
+    assert.equal(seenCheckpoints.length, 1, 'failed checkpoint must never dispatch again')
   })
 })
 

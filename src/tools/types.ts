@@ -23,6 +23,7 @@ export interface DelegationIdentity {
 }
 
 export interface DelegationActivity extends DelegationIdentity {
+  modelSelection?: import('../agent/coordinator.js').WorkerActivityEvent['modelSelection']
   /** Stable per-worker id within a run (work order id), distinct from the tool id. */
   workOrderId: string
   /** The delegation tool call that spawned this worker (delegation tree parent). */
@@ -58,6 +59,8 @@ export interface DelegationActivity extends DelegationIdentity {
   /** Terminal failure classification (WorkerFailureReason in agent/work-order.ts;
    *  typed as string here to avoid a tools→agent dependency). Present only on
    *  terminal blocked/failed events. */
+  terminalFailure?: boolean
+  usageKnown?: boolean
   failureReason?: string
   /** Actual model dispatched for this worker (insights / cost visualization). */
   model?: string

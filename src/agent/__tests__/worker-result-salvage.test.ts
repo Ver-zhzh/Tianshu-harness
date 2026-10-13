@@ -25,7 +25,7 @@ import {
   WorkerResultParseError,
 } from '../work-order.js'
 import { createSoftLandingDrain, runWorkerSession, salvageAbortedReport } from '../worker-session.js'
-import { makeFaultClient } from './helpers/fault-client.js'
+import { makeFaultClient, getFaultCallCount } from './helpers/fault-client.js'
 import { makeWorkerConfig } from './helpers/worker-fixture.js'
 
 /** Faithful reproduction of the 天权 failure shape: a full WorkerResult with
@@ -319,7 +319,8 @@ describe('salvageAbortedReport (W2 abort salvage ladder)', () => {
   it('full report parses → degraded to unverified with abort risk note', () => {
     const salvaged = salvageAbortedReport(VALID_REPORT, 'wo1', 'timeout')
     assert.ok(salvaged)
-    assert.equal(salvaged.status, 'passed', 'complete report survives the abort race')
+    assert.equal(salvaged.status, 'blocked', 'complete report remains partial evidence after terminal abort')
+    assert.equal(salvaged.terminalFailure, true)
     assert.equal(salvaged.evidenceStatus, 'unverified', 'verified must be downgraded')
     assert.equal(salvaged.failureReason, 'timeout')
     assert.ok(salvaged.risks.some(r => r.includes('budget timeout')))
@@ -340,7 +341,7 @@ describe('salvageAbortedReport (W2 abort salvage ladder)', () => {
 })
 
 describe('runWorkerSession repair ladder (full path)', () => {
-  it('malformed report → repair re-ask fires → repaired report parses (full fidelity)', async () => {
+  it('malformed report retains locally salvaged findings without consuming the repair response', async () => {
     const client = makeFaultClient([
       { kind: 'ok', text: TIANQUAN_MALFORMED_REPORT },
       { kind: 'ok', text: VALID_REPORT },
@@ -353,11 +354,11 @@ describe('runWorkerSession repair ladder (full path)', () => {
     // 降级留痕」，而不是 status==='passed'。
     assert.equal(run.result.status, 'blocked', '修复轮产出必须降级，不得冒充 passed')
     assert.equal(run.result.evidenceStatus, 'unverified', '降级后证据状态必须是 unverified')
-    assert.ok(run.result.risks.some(r => r.includes('残片修复')), '降级必须留痕（不得静默）')
-    assert.equal(run.result.summary, 'repaired report', '字段保真：修复轮的完整报告必须原样解析')
-    assert.ok(run.transcript.repairAttempts >= 1, 'repair loop must have fired')
-    assert.equal(run.result.summary, 'repaired report')
-    assert.ok(run.transcript.repairAttempts >= 1, 'repair loop must have fired')
+    assert.equal(run.result.terminalFailure, true)
+    assert.equal(run.result.findings.length, 3)
+    assert.equal(run.transcript.repairAttempts, 0)
+    assert.equal(getFaultCallCount(), 1)
+    assert.notEqual(run.result.summary, 'repaired report')
   })
 
   it('repair exhausted → salvage tier returns degraded findings instead of empty blocked', async () => {

@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { rivetHome } from '../config/paths.js'
 import type { ModelConfig } from '../config/schema.js'
 import { computeUsageCost } from '../utils/pricing.js'
+import { currentExecutionScope } from './execution-continuity.js'
 
 export interface CallAuditContext {
   requestId?: string
@@ -38,6 +39,9 @@ function append(record: CallAuditRecord): void {
 
 /** Accepts only diagnostic fields, never request bodies or authentication headers. */
 export function beginCallAudit(context: CallAuditContext) {
+  const execution = currentExecutionScope()
+  context = { ...context, sessionId: execution?.sessionId ?? context.sessionId }
+  if (execution && context.requestId) execution.requestId = context.requestId
   const operationId = context.attemptId ?? randomUUID()
   const identity: CallAuditContext = Object.fromEntries(Object.entries(context).filter(([key, value]) =>
     ['requestId', 'attemptId', 'sessionId', 'parentRequestId', 'workOrderId', 'provider', 'model', 'purpose', 'routeReason', 'configFingerprint'].includes(key) && typeof value === 'string'))

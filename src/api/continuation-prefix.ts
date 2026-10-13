@@ -3,7 +3,11 @@ import { stableStringify } from './stable-json.js'
 import type { Usage } from './types.js'
 
 export interface ContinuationPrefixProof {
-  version: 1
+  version: 1 | 2
+  cacheGenerationId?: string
+  generationReason?: string
+  credentialScope?: string
+  options?: Record<string, unknown>
   provider: string
   model: string
   requestId: string
@@ -42,10 +46,21 @@ export function isLocalWorkerPolicyError(error: unknown): error is LocalWorkerPo
 
 const hash = (value: unknown): string => createHash('sha256').update(stableStringify(value)).digest('hex')
 
+export function isCompleteExecutionSnapshot(value: unknown): value is ContinuationPrefixProof & { options: Record<string, unknown> } {
+  if (!value || typeof value !== 'object') return false
+  const p = value as ContinuationPrefixProof
+  return p.version === 2 && typeof p.cacheGenerationId === 'string' && typeof p.credentialScope === 'string'
+    && typeof p.endpointHash === 'string' && typeof p.provider === 'string' && typeof p.model === 'string'
+    && typeof p.requestId === 'string' && typeof p.toolsHash === 'string' && typeof p.optionsHash === 'string'
+    && !!p.options && !Array.isArray(p.options) && hash(p.options) === p.optionsHash
+    && Array.isArray(p.messages) && p.messages.every(m => typeof m.hash === 'string' && typeof m.role === 'string' && Number.isFinite(m.chars))
+}
+
 /** Hash the final transport body, after every send-time transformation. No content or headers. */
 export function proveWirePrefix(body: Record<string, unknown>, provider: string, requestId: string, endpoint?: string): ContinuationPrefixProof {
   return {
-    version: 1, provider, model: String(body.model), requestId,
+    version: 2, provider, model: String(body.model), requestId,
+    options: wireOptions(body),
     ...(endpoint ? { endpointHash: hash(endpoint) } : {}),
     optionsHash: hash(wireOptions(body)), toolsHash: hash(body.tools ?? []),
     messages: ((body.messages ?? []) as Array<Record<string, unknown>>).map(m => ({
@@ -55,8 +70,10 @@ export function proveWirePrefix(body: Record<string, unknown>, provider: string,
 }
 
 export function wireOptions(body: Record<string, unknown>): Record<string, unknown> {
-  return Object.fromEntries(['thinking', 'reasoning_effort', 'tool_choice', 'response_format', 'temperature', 'top_p', 'max_tokens', 'max_completion_tokens', 'output_config']
-    .map(key => [key, body[key] ?? null]))
+  const fields = ['thinking', 'reasoning_effort', 'tool_choice', 'response_format', 'temperature', 'top_p', 'max_tokens', 'max_completion_tokens', 'output_config', 'generationConfig', 'toolConfig', 'text', 'safetySettings', 'parallel_tool_calls', 'seed', 'stop', 'frequency_penalty', 'presence_penalty', 'service_tier']
+  const covered = new Set([...fields, 'model', 'stream', 'messages', 'tools', 'system', 'instructions', 'systemInstruction', 'input', 'contents', 'reasoning', 'max_output_tokens'])
+  const extraFields = Object.fromEntries(Object.keys(body).filter(key => !covered.has(key)).sort().map(key => [key, hash(body[key])]))
+  return { ...Object.fromEntries(fields.map(key => [key, body[key] ?? null])), ...(Object.keys(extraFields).length ? { extraFields } : {}) }
 }
 
 export function wireObservation(body: Record<string, unknown>, proof: ContinuationPrefixProof, diagnostics?: RequestDiagnostics, main?: ContinuationPrefixProof): NonNullable<NonNullable<Usage['observation']>['wire']> {
@@ -66,12 +83,13 @@ export function wireObservation(body: Record<string, unknown>, proof: Continuati
     messages: proof.messages, toolsHash: proof.toolsHash, options: wireOptions(body) }
 }
 
-/** Unknown old baselines fail toward observation; proven historical forks fail before dispatch. */
+/** Proven historical forks fail locally before dispatch. Legacy recovery requires a complete snapshot. */
 export function assertContinuationPrefix(previous: ContinuationPrefixProof | undefined, next: ContinuationPrefixProof): 'present' | 'baseline_missing' | 'configuration_changed' {
   if (!previous) return 'baseline_missing'
-  if (previous.provider !== next.provider || previous.model !== next.model || (previous.endpointHash && previous.endpointHash !== next.endpointHash)) return 'configuration_changed'
+  if (previous.provider !== next.provider || previous.model !== next.model || (previous.endpointHash && previous.endpointHash !== next.endpointHash)) throw new ContinuationPrefixError('binding', previous, next)
   const changed = previous.toolsHash !== next.toolsHash
     ? 'tools' : previous.messages.findIndex((m, i) => next.messages[i]?.hash !== m.hash)
   if (changed === 'tools' || changed !== -1) throw new ContinuationPrefixError(changed, previous, next)
-  return previous.optionsHash === next.optionsHash ? 'present' : 'configuration_changed'
+  if (previous.optionsHash !== next.optionsHash) throw new ContinuationPrefixError('options', previous, next)
+  return 'present'
 }

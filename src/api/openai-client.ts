@@ -1,4 +1,5 @@
 import { proveWirePrefix, assertContinuationPrefix, wireObservation, type ContinuationPrefixProof, type RequestDiagnostics } from './continuation-prefix.js'
+import { currentExecutionScope } from './execution-continuity.js'
 import { beginCallAudit, auditConfigFingerprint, observedAuditUsage } from './call-audit.js'
 import { createHash } from 'node:crypto'
 import type { Usage } from './types.js'
@@ -959,7 +960,7 @@ export class OpenAIClient implements StreamClient {
       let guard: ReturnType<typeof enforceRequestBodyLimit>
       try { guard = enforceRequestBodyLimit(effectiveBody, {
         limitBytes: policy ? Math.min(this.config.maxBodyBytes ?? DEEPSEEK_BODY_LIMIT, DEEPSEEK_BODY_LIMIT) : this.config.maxBodyBytes,
-        preserveContent: !!policy,
+        preserveContent: !!policy || !!currentExecutionScope()?.beforeSend,
       }) } catch (error) {
         if (wireBudget) callbacks.onContextBudget?.({ ...wireBudget, state: 'blocked', bodyBytes: (error as { bytes?: number }).bytes })
         throw error
@@ -978,7 +979,7 @@ export class OpenAIClient implements StreamClient {
       await acquireRateLimitSlot(this.config.providerName ?? this.config.baseUrl, this.config.retry?.rateLimit, lifecycle.signal)
       const proof = proveWirePrefix(guard.body, this.config.providerName ?? 'openai', requestId, normalizeBaseUrl(this.config.baseUrl))
       identity.wire = wireObservation(guard.body, proof, diagnostics, this.mainPrefixProof)
-      if (diagnostics?.continuationSource) {
+      if (diagnostics?.continuationSource && !currentExecutionScope()?.beforeSend) {
         try {
           const baseline = assertContinuationPrefix(diagnostics.priorPrefix, proof)
           identity.wire.baseline = baseline

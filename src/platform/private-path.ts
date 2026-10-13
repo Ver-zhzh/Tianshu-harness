@@ -19,14 +19,43 @@ foreach ($sid in @($user.Value, 'S-1-5-18', 'S-1-5-32-544')) {
 }
 $current = $item.GetAccessControl()
 if (@($user.Value, 'S-1-5-18', 'S-1-5-32-544') -notcontains $current.GetOwner([Security.Principal.SecurityIdentifier]).Value) { throw 'Untrusted storage owner is unsafe' }
-if ($current.GetSecurityDescriptorSddlForm('Access') -ne $acl.GetSecurityDescriptorSddlForm('Access')) {
+# #450: compare the explicit ACE fingerprints (sorted set) plus the protection
+# flag instead of the raw SDDL string. An already-hardened directory reads back
+# as D:PAI(A;OICI;FA;;;...) — the AI control flag ("auto inherited" bookkeeping)
+# differs from the fresh D:P target forever, so the string compare rewrote the
+# DACL on every boot (24s+ propagation over a 48k-file tree, then the
+# execFileSync timeout killed the sidecar pre-listen). The fingerprint compare
+# converges: same ACE set + protected => no write, no subtree propagation.
+$sidType = [Security.Principal.SecurityIdentifier]
+function Get-RuleFingerprint($rules) {
+  @($rules | ForEach-Object { '{0}|{1}|{2}|{3}|{4}' -f $_.IdentityReference.Value, $_.AccessControlType, $_.FileSystemRights, $_.InheritanceFlags, $_.PropagationFlags } | Sort-Object)
+}
+$currentRules = Get-RuleFingerprint $current.GetAccessRules($true, $false, $sidType)
+$targetRules = Get-RuleFingerprint $acl.GetAccessRules($true, $false, $sidType)
+$diff = @(Compare-Object -ReferenceObject $currentRules -DifferenceObject $targetRules)
+if (-not $current.AreAccessRulesProtected -or $diff.Count -gt 0) {
   if ($item.PSIsContainer) { [IO.Directory]::SetAccessControl($item.FullName, $acl) }
   else { [IO.File]::SetAccessControl($item.FullName, $acl) }
 }
 `
 
-export function protectPrivatePath(path: string, platform = process.platform): void {
-  if (lstatSync(path).isSymbolicLink()) throw new Error('Private storage cannot be a symbolic link')
+// #450: the one-shot SetAccessControl propagation over an unhardened 48k-file
+// tree measured 24s+ in the wild. 10s killed the sidecar pre-listen; 30s
+// absorbs the one-time cost while repeat boots skip the write entirely (see
+// the fingerprint compare above) and the serve startup call site degrades to
+// warn instead of failing hard.
+export const PRIVATE_PATH_ACL_TIMEOUT_MS = 30_000
+
+/** Symlinked "private storage" is a configuration attack, not a degraded state — always fatal. */
+export class PrivatePathSymlinkError extends Error {
+  constructor(path: string) {
+    super(`Private storage cannot be a symbolic link: ${path}`)
+    this.name = 'PrivatePathSymlinkError'
+  }
+}
+
+export function protectPrivatePath(path: string, platform: NodeJS.Platform = process.platform): void {
+  if (lstatSync(path).isSymbolicLink()) throw new PrivatePathSymlinkError(path)
   if (platform !== 'win32') {
     chmodSync(path, lstatSync(path).isDirectory() ? 0o700 : 0o600)
     const effective = lstatSync(path)
@@ -37,11 +66,40 @@ export function protectPrivatePath(path: string, platform = process.platform): v
   }
   const powershell = join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
   execFileSync(powershell, ['-NoProfile', '-NonInteractive', '-Command', PRIVATE_PATH_ACL_SCRIPT], {
-    env: { ...process.env, RIVET_PRIVATE_PATH: path }, stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true, timeout: 10_000,
+    env: { ...process.env, RIVET_PRIVATE_PATH: path }, stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true, timeout: PRIVATE_PATH_ACL_TIMEOUT_MS,
   })
 }
 
-export function ensurePrivateDirectory(path: string): void {
+export function ensurePrivateDirectory(path: string, platform: NodeJS.Platform = process.platform): void {
   mkdirSync(path, { recursive: true, mode: 0o700 })
-  protectPrivatePath(path)
+  protectPrivatePath(path, platform)
+}
+
+/**
+ * Serve-startup variant of {@link ensurePrivateDirectory} (#450).
+ *
+ * Security stance:
+ * - POSIX stays fail-closed — the hardening there is an O(1) chmod whose
+ *   failure means a genuinely broken filesystem/config, not scale.
+ * - Symlink rejection stays fatal on every platform (configuration attack).
+ * - win32 only: a PowerShell DACL failure/timeout degrades to warn and serve
+ *   continues to listen. The directory itself is still created (mkdirSync
+ *   runs first); only the extra hardening pass failed. Credential-bearing
+ *   surfaces (server-info discovery, protectPrivatePath callers) keep using
+ *   the fail-closed {@link ensurePrivateDirectory}.
+ */
+export function ensurePrivateDirectoryForStartup(
+  path: string,
+  platform: NodeJS.Platform = process.platform,
+  warn: (message: string) => void = () => {},
+): void {
+  // mkdir stays fatal on every platform — if the directory itself cannot be
+  // created, serve has nothing to run on. Only the hardening pass degrades.
+  mkdirSync(path, { recursive: true, mode: 0o700 })
+  try {
+    protectPrivatePath(path, platform)
+  } catch (err) {
+    if (platform !== 'win32' || err instanceof PrivatePathSymlinkError) throw err
+    warn(`private storage hardening failed on ${path}; continuing without ACL hardening: ${err instanceof Error ? err.message : String(err)}`)
+  }
 }

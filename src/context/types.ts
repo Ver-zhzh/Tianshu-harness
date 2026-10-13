@@ -160,6 +160,7 @@ export interface SessionMemoryState {
 }
 
 export interface SessionMetadata {
+  modelSelection?: import('../tools/types.js').DelegationActivity['modelSelection']
   workspaceRoots?: string[]
   sessionId: string
   /** ISO timestamp when the session was first created */

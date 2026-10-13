@@ -134,3 +134,75 @@ test('saving without a trial and saving after a trial never call generation; mod
   delete legacy.agent.imageGenModel; saveConfig(legacy)
   assert.equal((await router('POST', '/image-generations', { cwd: root, requestId: randomUUID(), parameters: params }, { authorization: 'Bearer test-config' })).status, 400, 'Vision or missing capability alone does not permit generation')
 })
+
+test('test drafts reject apiKeyEnv: no env var is resolved from a request body', async t => {
+  const cwd = await mkdtemp(join(tmpdir(), 'image-draft-env-'))
+  const previous = process.env.RIVET_CONFIG_PATH
+  process.env.RIVET_CONFIG_PATH = join(cwd, 'config.json')
+  const prevCanary = process.env.AUDIT_EXFIL_CANARY
+  process.env.AUDIT_EXFIL_CANARY = 'canary-value'
+  t.after(() => {
+    if (previous === undefined) delete process.env.RIVET_CONFIG_PATH; else process.env.RIVET_CONFIG_PATH = previous
+    if (prevCanary === undefined) delete process.env.AUDIT_EXFIL_CANARY; else process.env.AUDIT_EXFIL_CANARY = prevCanary
+  })
+  // 攻击者自选的 baseUrl：若服务端解析了 apiKeyEnv，这里的请求头会带走 canary。
+  let hits = 0
+  let seenAuth: unknown
+  const probe = createServer((req, res) => { hits++; seenAuth = req.headers.authorization; res.end('{}') })
+  await new Promise<void>(resolve => probe.listen(0, '127.0.0.1', resolve))
+  t.after(() => { probe.closeAllConnections(); probe.close() })
+  const port = (probe.address() as { port: number }).port
+  const router = createRouter(buildImageGenerationRoutes('draft-env', () => [cwd], new ImageGenerationService()))
+  const auth = { authorization: ['Bearer', 'draft-env'].join(' ') }
+  const res = await router('POST', '/image-generations', {
+    cwd, requestId: randomUUID(), origin: 'test',
+    draft: { baseUrl: `http://127.0.0.1:${port}/v1`, modelId: 'm', apiKeyEnv: 'AUDIT_EXFIL_CANARY' },
+  }, auth)
+  assert.equal(res.status, 400)
+  assert.match(String((res.body as { error?: string }).error ?? ''), /apiKeyEnv/)
+  assert.equal(hits, 0, 'rejected before any outbound request')
+  assert.equal(seenAuth, undefined)
+})
+
+test('image-gen test endpoint only resolves apiKeyEnv names declared in the saved provider config', async t => {
+  const cwd = await mkdtemp(join(tmpdir(), 'image-test-env-'))
+  const previous = process.env.RIVET_CONFIG_PATH
+  process.env.RIVET_CONFIG_PATH = join(cwd, 'config.json')
+  const prevDeclared = process.env.DECLARED_TEST_KEY, prevEvil = process.env.EVIL_EXFIL_KEY
+  process.env.DECLARED_TEST_KEY = 'declared-secret'
+  process.env.EVIL_EXFIL_KEY = 'evil-secret'
+  t.after(() => {
+    if (previous === undefined) delete process.env.RIVET_CONFIG_PATH; else process.env.RIVET_CONFIG_PATH = previous
+    if (prevDeclared === undefined) delete process.env.DECLARED_TEST_KEY; else process.env.DECLARED_TEST_KEY = prevDeclared
+    if (prevEvil === undefined) delete process.env.EVIL_EXFIL_KEY; else process.env.EVIL_EXFIL_KEY = prevEvil
+  })
+  saveConfig(configSchema.parse({
+    provider: {
+      default: 'p',
+      providers: { p: { name: 'p', baseUrl: 'http://provider.example/v1', apiKeyEnv: 'DECLARED_TEST_KEY', models: [] } },
+    },
+  }))
+  let hits = 0
+  let seenAuth: unknown
+  const upstream = createServer((req, res) => {
+    hits++; seenAuth = req.headers.authorization
+    res.setHeader('content-type', 'application/json')
+    res.end(JSON.stringify({ data: [{ b64_json: png }] }))
+  })
+  await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve))
+  t.after(() => { upstream.closeAllConnections(); upstream.close() })
+  const port = (upstream.address() as { port: number }).port
+  const baseUrl = `http://127.0.0.1:${port}/v1`
+  const router = createRouter(buildConfigRoutes('env-allowlist'))
+  const auth = { authorization: ['Bearer', 'env-allowlist'].join(' ') }
+  // 未声明的变量名：400，且不产生任何出站请求。
+  const evil = await router('POST', '/config/image-gen-model/test', { baseUrl, modelId: 'm', apiKeyEnv: 'EVIL_EXFIL_KEY' }, auth)
+  assert.equal(evil.status, 400)
+  assert.match(String((evil.body as { error?: string }).error ?? ''), /not declared/)
+  assert.equal(hits, 0, 'undeclared env name must not trigger a request')
+  // 已声明的变量名：解析并作为 Bearer 发送。
+  const ok = await router('POST', '/config/image-gen-model/test', { baseUrl, modelId: 'm', apiKeyEnv: 'DECLARED_TEST_KEY' }, auth)
+  assert.equal(ok.status, 200, JSON.stringify(ok.body))
+  assert.equal(hits, 1)
+  assert.equal(seenAuth, ['Bearer', 'declared-secret'].join(' '))
+})

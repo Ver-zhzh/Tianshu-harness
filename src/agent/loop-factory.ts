@@ -1059,7 +1059,7 @@ export function createCompactBoundaryCoordinator(self: AgentLoop): CompactBounda
     shouldDelayCompact: (threshold, ctx) => self.cacheAdvisor.shouldDelayCompact(threshold, ctx?.estimatedTokens !== undefined && ctx?.contextWindow !== undefined ? { estimatedTokens: ctx.estimatedTokens, contextWindow: ctx.contextWindow } : undefined),
     getStalePreviewChars: () => self.cacheAdvisor.getStalePreviewChars(),
     shouldOpportunisticCompact: () => self.cacheAdvisor.shouldOpportunisticCompact(),
-    isCachePreservingProvider: () => self.compaction.isCachePreservingProvider(),
+    isCachePreservingProvider: () => true,
     isCostInsensitiveProvider: () => isCostInsensitiveProvider(self.config.providerName),
     getCompactionProfile: () => self.config.compactionProfile,
     getProviderName: () => self.config.providerName,
@@ -1230,8 +1230,8 @@ export function createTurnOrchestrator(self: AgentLoop): TurnOrchestrator {
     }),
     getTurnLevelThinking: () => self.config.turnLevelThinking,
     getPlanModeState: () => self.planModeState,
-    getStreamRules: () => self.config.streamRules,
-    getAgentReconnect: () => self.config.agentReconnect,
+    getStreamRules: () => self.config.inputOrigin === 'worker_task' ? undefined : self.config.streamRules,
+    getAgentReconnect: () => self.config.inputOrigin === 'worker_task' ? undefined : self.config.agentReconnect,
     getRetryBudgetHolder: () => self.config.retryBudgetHolder,
     getCwd: () => self.cwd,
     getSessionId: () => self.config.sessionId,
@@ -1242,7 +1242,7 @@ export function createTurnOrchestrator(self: AgentLoop): TurnOrchestrator {
     // === Session ===
     removeLastMessage: () => { self.session.removeLastMessage() },
     preserveUserOnError: () => !!self.config.promptEngine.getRequestBudgetPolicy(),
-    recoverContextBudget: () => self.compactContextBudget(true),
+    recoverContextBudget: self.config.inputOrigin === 'worker_task' ? undefined : () => self.compactContextBudget(false),
     addUserMessage: (content) => { self.session.addUserMessage(content) },
     appendSystemReminder: (content, cls) => { self.session.appendSystemReminder(content, cls) },
     appendSystemReminderAndReport: (content) => self.session.appendSystemReminderAndReport(content),
@@ -1391,6 +1391,8 @@ export function createTurnOrchestrator(self: AgentLoop): TurnOrchestrator {
     // === Sub-controllers ===
     goalContinuation: new GoalContinuationController({
       getGoalTracker: () => self.getGoalTracker(),
+      // #463: sidecar wires this to re-emit `goal_state` SSE per goal iteration.
+      onGoalIteration: self.config.onGoalIteration,
       hasPendingPlanApproval: async () => {
         // 待批计划闸门（2026-07-24）：最新计划为 submitted 即停 goal 续跑。
         // 读盘失败 fail-open——宁可空转不可假死。
@@ -1461,7 +1463,7 @@ export function createTurnOrchestrator(self: AgentLoop): TurnOrchestrator {
       getTurnCount: () => self.session.getTurnCount(),
       // GLM independent reasoning: thinking-only turns are legitimate output,
       // not failed utterances. Skip retry to avoid wasting time on fresh reasoning.
-      skipThinkingRetry: self.config.providerName === 'glm',
+      skipThinkingRetry: self.config.providerName === 'glm' || self.config.inputOrigin === 'worker_task',
       maxTurns: self.config.maxTurns,
       reserveReasoningRecovery: () => self.config.retryBudgetHolder?.current?.take() ?? true,
       markReasoningRecovery: () => { self.reasoningRecoveryPending = true },

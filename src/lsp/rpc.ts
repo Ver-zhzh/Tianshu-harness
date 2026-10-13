@@ -1,4 +1,6 @@
 import { type Readable, type Writable } from 'node:stream'
+import { decodeFrames, LspMessageDecoder } from './rpc-framing.js'
+export { MAX_LSP_MESSAGE_BYTES, MAX_LSP_HEADER_BYTES } from './rpc-framing.js'
 
 interface JsonRpcRequest {
   jsonrpc: '2.0'
@@ -43,39 +45,9 @@ export function encodeMessage(msg: JsonRpcMessage): string {
   return `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`
 }
 
-const CRLFCRLF = Buffer.from('\r\n\r\n')
-
 export function decodeMessages(input: string | Buffer): { messages: JsonRpcMessage[]; rest: string } {
-  const messages: JsonRpcMessage[] = []
-  const buf = Buffer.isBuffer(input) ? input : Buffer.from(input, 'utf8')
-  let offset = 0
-
-  while (true) {
-    const headerEnd = buf.indexOf(CRLFCRLF, offset)
-    if (headerEnd === -1) break
-
-    const header = buf.subarray(offset, headerEnd).toString('utf8')
-    const lengthMatch = /^Content-Length: (\d+)/m.exec(header)
-    if (!lengthMatch) {
-      offset = headerEnd + 4
-      continue
-    }
-
-    const contentLength = parseInt(lengthMatch[1]!, 10)
-    const bodyStart = headerEnd + 4
-    if (buf.length - bodyStart < contentLength) break
-
-    const body = buf.subarray(bodyStart, bodyStart + contentLength).toString('utf8')
-    try {
-      messages.push(JSON.parse(body) as JsonRpcMessage)
-    } catch {
-      // Skip malformed message
-    }
-    offset = bodyStart + contentLength
-  }
-
-  const rest = buf.subarray(offset).toString('utf8')
-  return { messages, rest }
+  const { messages, rest } = decodeFrames(Buffer.isBuffer(input) ? input : Buffer.from(input, 'utf8'))
+  return { messages: messages as unknown as JsonRpcMessage[], rest: rest.toString('utf8') }
 }
 
 export function createRpcClient(
@@ -92,7 +64,8 @@ export function createRpcClient(
   }
   const pending = new Map<number, Pending>()
   const notificationHandlers = new Map<string, Array<(params: Record<string, unknown>) => void>>()
-  let buffer = Buffer.alloc(0)
+  const decoder = new LspMessageDecoder()
+  let terminalError: Error | undefined
 
   const settle = (id: number, fn: (p: Pending) => void): void => {
     const p = pending.get(id)
@@ -111,39 +84,44 @@ export function createRpcClient(
     }
   }
 
-  readable.on('data', (chunk: Buffer) => {
-    buffer = Buffer.concat([buffer, chunk])
-    const { messages, rest } = decodeMessages(buffer)
-    buffer = Buffer.from(rest, 'utf8')
-
-    for (const msg of messages) {
-      if ('id' in msg && 'result' in msg && !('method' in msg)) {
-        settle(msg.id, p => p.resolve(msg.result))
-      } else if ('id' in msg && 'error' in msg && !('method' in msg)) {
-        settle(msg.id, p => p.reject(new Error(msg.error!.message)))
-      } else if ('method' in msg && !('id' in msg)) {
-        const handlers = notificationHandlers.get(msg.method)
-        if (handlers) {
-          for (const h of handlers) h((msg as JsonRpcNotification).params ?? {})
-        }
-      }
-    }
-  })
-
-  // Transport death must never leave callers waiting: stdin/stdout close (or
-  // error) is the RPC-level equivalent of the process exit handled by the
-  // LSP manager, and covers cases where the manager missed the proc event.
-  const transportDead = (label: string, err?: Error): void => {
-    const detail = err ? `: ${err.message}` : ''
-    abortAllPending(new Error(`LSP transport ${label}${detail}`))
+  const failTransport = (error: Error): void => {
+    if (terminalError) return
+    terminalError = error
+    decoder.clear()
+    readable.removeListener('data', onData)
+    abortAllPending(error)
   }
-  readable.on('error', (err: Error) => transportDead('read error', err))
-  writable.on('error', (err: Error) => transportDead('write error', err))
-  readable.on('close', () => transportDead('closed'))
-  writable.on('close', () => transportDead('closed'))
+
+  const onData = (chunk: Buffer): void => {
+    if (terminalError) return
+    try {
+      decoder.push(chunk, message => {
+        const msg = message as unknown as JsonRpcMessage
+        if ('id' in msg && 'result' in msg && !('method' in msg)) {
+          settle(msg.id, p => p.resolve(msg.result))
+        } else if ('id' in msg && 'error' in msg && !('method' in msg)) {
+          settle(msg.id, p => p.reject(new Error(msg.error!.message)))
+        } else if ('method' in msg && !('id' in msg)) {
+          const handlers = notificationHandlers.get(msg.method)
+          if (handlers) for (const handler of handlers) handler((msg as JsonRpcNotification).params ?? {})
+        }
+      })
+    } catch (error) {
+      failTransport(new Error(`LSP transport failed: ${error instanceof Error ? error.message : String(error)}`))
+    }
+  }
+  const readError = (error: Error) => failTransport(new Error(`LSP transport read error: ${error.message}`))
+  const writeError = (error: Error) => failTransport(new Error(`LSP transport write error: ${error.message}`))
+  const closed = () => failTransport(new Error('LSP transport closed'))
+  readable.on('data', onData)
+  readable.on('error', readError)
+  writable.on('error', writeError)
+  readable.on('close', closed)
+  writable.on('close', closed)
 
   return {
     request(method, params, timeoutMs = defaultTimeoutMs) {
+      if (terminalError) return Promise.reject(terminalError)
       const effectiveTimeout = Number.isFinite(timeoutMs) && timeoutMs > 0
         ? timeoutMs
         : defaultTimeoutMs
@@ -165,6 +143,7 @@ export function createRpcClient(
       })
     },
     notify(method, params) {
+      if (terminalError) return
       const msg: JsonRpcNotification = {
         jsonrpc: '2.0' as const,
         method,
@@ -182,13 +161,13 @@ export function createRpcClient(
     },
     abortAllPending,
     dispose() {
-      abortAllPending(new Error('LSP RPC client disposed'))
+      failTransport(new Error('LSP RPC client disposed'))
       notificationHandlers.clear()
-      readable.removeAllListeners('data')
-      readable.removeAllListeners('error')
-      readable.removeAllListeners('close')
-      writable.removeAllListeners('error')
-      writable.removeAllListeners('close')
+      readable.removeListener('data', onData)
+      readable.removeListener('error', readError)
+      readable.removeListener('close', closed)
+      writable.removeListener('error', writeError)
+      writable.removeListener('close', closed)
     },
   }
 }

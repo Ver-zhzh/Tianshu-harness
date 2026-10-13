@@ -28,6 +28,7 @@ export interface WorkerSessionRecord {
   /** Resume checkpoint captured from a previous run. Only present on v2. */
   readonly checkpoint?: WorkerCheckpoint
   readonly frozenSnapshot?: FrozenSnapshotData
+  readonly terminalFailure?: boolean
   readonly prefixProof?: ContinuationPrefixProof
   /** Set when messages were dropped because the serialized record exceeded
    *  SESSION_HISTORY_SIZE_LIMIT. Value = the limit that was exceeded. */
@@ -113,6 +114,7 @@ function parseWorkerRecord(value: unknown): WorkerSessionRecord | null {
     objective: o.objective,
     messages: o.messages as OaiMessage[],
     savedAt: o.savedAt,
+    terminalFailure: o.terminalFailure === true,
     ...(parseFrozenSnapshotData(o.frozenSnapshot) ? { frozenSnapshot: parseFrozenSnapshotData(o.frozenSnapshot) } : {}),
     ...(validPrefixProof(o.prefixProof) ? { prefixProof: o.prefixProof } : {}),
     ...(o.checkpoint !== undefined ? { checkpoint: o.checkpoint as WorkerCheckpoint } : {}),
@@ -133,7 +135,7 @@ export function saveWorkerSession(
   messages: readonly OaiMessage[],
   homeDir?: string,
   checkpoint?: WorkerCheckpoint,
-  continuation?: { frozenSnapshot?: FrozenSnapshotData; prefixProof?: ContinuationPrefixProof },
+  continuation?: { terminalFailure?: boolean; frozenSnapshot?: FrozenSnapshotData; prefixProof?: ContinuationPrefixProof },
   dispatchNonce?: string,
 ): WorkerPersistenceOutcome {
   try {
@@ -211,7 +213,7 @@ export function consumeCheckpointOnce(workOrderId: string, homeDir?: string, exp
 function validPrefixProof(value: unknown): value is ContinuationPrefixProof {
   if (!value || typeof value !== 'object') return false
   const p = value as ContinuationPrefixProof
-  return p.version === 1 && typeof p.provider === 'string' && typeof p.model === 'string'
+  return (p.version === 1 || p.version === 2) && typeof p.provider === 'string' && typeof p.model === 'string'
     && typeof p.requestId === 'string' && typeof p.optionsHash === 'string' && typeof p.toolsHash === 'string'
     && Array.isArray(p.messages) && p.messages.every(m => typeof m.hash === 'string' && typeof m.role === 'string' && Number.isFinite(m.chars))
 }

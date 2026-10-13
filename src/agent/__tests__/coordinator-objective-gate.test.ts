@@ -15,6 +15,7 @@ import { ToolRegistry } from '../../tools/registry.js'
 import type { Tool, ToolCallParams } from '../../tools/types.js'
 import { READ_ONLY_WORKER_TOOLS, type WorkerResult } from '../work-order.js'
 import { profileRegistry } from '../profile-registry.js'
+import { PromptEngine } from '../../prompt/engine.js'
 
 function fakeTool(name: string): Tool {
   return {
@@ -54,7 +55,8 @@ function createCoordinator(runWorker: () => Promise<WorkerSessionRun>): Delegati
     baseToolRegistry: makeRegistry(),
     modelCards: cards,
     maxWorkers: 2,
-    runtimeFactory: () => ({}) as any,
+    runtimeFactory: (order: any, card: ModelCapabilityCard, registry: ToolRegistry) => ({ order, client: {}, toolRegistry: registry,
+      promptEngine: new PromptEngine({ model: card.model, maxTokens: 1024, staticCtx: { tools: registry.getDefinitions() }, volatileCtx: { cwd: '/repo' } }) }) as any,
     runWorker,
   }
   return new DelegationCoordinator(config)

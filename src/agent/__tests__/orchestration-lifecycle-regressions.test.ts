@@ -29,7 +29,7 @@ async function oopSteer() {
   let drains = 0
   const config: any = {
     order: { id: 'fake-oop', objective: 'Fictional task', profile: 'code_scout', allowedTools: [], budget: { maxTurns: 3 } },
-    client: {}, promptEngine: {}, toolRegistry: {}, cwd: fixtureDir, maxTurns: 3, contextWindow: 64000,
+    client: {}, promptEngine: {}, toolRegistry: new ToolRegistry(), cwd: fixtureDir, maxTurns: 3, contextWindow: 64000,
     compact: { enabled: false, model: 'fake' }, activeClaims: [],
     runtimeDecision: { providerName: 'fictional', model: 'fictional-model', maxTokens: 1024, contextWindow: 64000, thinkingBudget: 0, isWrite: false },
     onSteerDrain: () => { drains++; const text = pending; pending = null; return text },
@@ -54,7 +54,7 @@ async function oopSteer() {
   console.log('OOP_STEER', JSON.stringify({ productionObservation, manualCallbackSteerFrames: frames.filter(f => f.t === 'steer').length }))
 }
 
-async function continuationCancellation(mode: 'kill' | 'shutdown' | 'stall' = 'kill', retryFirst = false) {
+async function continuationCancellation(mode: 'kill' | 'shutdown' | 'stall' = 'kill') {
   let resolveContinuation!: (value: any) => void
   let resolveStarted!: () => void
   const started = new Promise<void>(r => { resolveStarted = r })
@@ -70,14 +70,12 @@ async function continuationCancellation(mode: 'kill' | 'shutdown' | 'stall' = 'k
     runWorker: async config => {
       calls++
       orderId = config.order.id
-      if (retryFirst && calls === 1) throw new Error('fictional transient transport failure')
-      if (calls === (retryFirst ? 2 : 1)) return { result: result(orderId, 'blocked', 'max_turns'), session: { getMessages: () => [{ role: 'user', content: 'Fictional retained history' }] }, transcript, usage } as any
       continuedSignal = config.abortSignal
       resolveStarted()
       return new Promise(r => { resolveContinuation = r }) as any
     },
   })
-  const running = coordinator.delegate({ parentTurnId: 'fake-turn', objective: 'Inspect fictional worker cancellation and retain previous findings', kind: 'code_search', profile: 'code_scout', scope: {}, budget: { maxRetries: retryFirst ? 1 : 0 } })
+  const running = coordinator.delegate({ parentTurnId: 'fake-turn', objective: 'Inspect fictional worker cancellation and retain previous findings', kind: 'code_search', profile: 'code_scout', scope: {} })
   await started
   const immediate = { isWorkerRunning: coordinator.isWorkerRunning(orderId), steerAccepted: coordinator.steerWorker(orderId, 'fictional advice'), killAccepted: mode === 'kill' ? coordinator.killWorker(orderId) : undefined }
   if (mode === 'shutdown') coordinator.shutdown()
@@ -92,6 +90,7 @@ async function continuationCancellation(mode: 'kill' | 'shutdown' | 'stall' = 'k
   assert.equal(afterStall.signalAborted, true)
   assert.equal(immediate.steerAccepted, true)
   assert.equal(afterShutdown.signalAborted, true)
+  assert.equal(calls, 1, 'cancellation never starts another worker')
   console.log('CONTINUATION_CANCEL', JSON.stringify({ calls, immediate, afterStall, afterShutdown }))
 }
 
@@ -127,7 +126,7 @@ async function routingMetadata() {
   const coordinator = new DelegationCoordinator({
     baseToolRegistry: new ToolRegistry(), maxWorkers: 1, cwd: fixtureDir, routing,
     modelCards: [{ model: 'fake-card-A', toolUseReliability: .8, jsonStability: .9, editSuccessRate: .7, testRepairRate: .6, contextWindow: 64000, cacheEconomics: 'strong', recommendedTasks: ['code_search'] }],
-    runtimeFactory: (order, card, registry) => buildWorkerRuntime({ config: { provider: { providers } } as any, cwd: fixtureDir, provider: mainProvider, apiKey: 'fictional-key', auth: undefined, currentModelId: 'fake-card-A', listActiveClaims: () => [], sessionMemoryBlock: () => undefined, domainKnowledgeStore: undefined, reviewOverrides: new Map(), reviewOverrideApiKeys: new Map(), workerRouting: routing, writeProfiles: [] }, order, card, registry),
+    runtimeFactory: (order, card, registry) => buildWorkerRuntime({ config: { provider: { providers }, agent: { review: { profiles: {} } }, workers: routing } as any, cwd: fixtureDir, provider: mainProvider, apiKey: 'fictional-key', auth: undefined, currentModelId: 'fake-card-A', listActiveClaims: () => [], sessionMemoryBlock: () => undefined, domainKnowledgeStore: undefined, writeProfiles: [] }, order, card, registry),
     runWorker: async config => { actualModel = config.runtimeDecision?.model; return { result: result(config.order.id), session: { getMessages: () => [] }, transcript, usage } as any },
   })
   const run = await coordinator.delegate({ parentTurnId: 'fake-routing', objective: 'Inspect fictional routed worker model identity and report its findings', kind: 'code_search', profile: 'code_scout', scope: {} })
@@ -140,11 +139,8 @@ async function routingMetadata() {
 }
 
 test('OOP guidance reaches child without a manual drain', oopSteer)
-test('automatic continuation remains cancellable and steerable', () => continuationCancellation())
-test('retry continuation remains cancellable and steerable', () => continuationCancellation('kill', true))
-test('retry continuation remains cancellable during shutdown', () => continuationCancellation('shutdown', true))
-test('retry continuation remains cancellable by the stall sweep', () => continuationCancellation('stall', true))
-test('shutdown cancels an active automatic continuation', () => continuationCancellation('shutdown'))
-test('stall sweep cancels an inactive automatic continuation', () => continuationCancellation('stall'))
+test('active worker remains cancellable and steerable without automatic continuation', () => continuationCancellation())
+test('shutdown cancels the active worker without restarting it', () => continuationCancellation('shutdown'))
+test('stall sweep cancels the active worker without restarting it', () => continuationCancellation('stall'))
 test('fresh file reads replace stale observation evidence', claimRefresh)
 test('result identity matches actual cross-provider runtime', routingMetadata)

@@ -79,13 +79,13 @@ describe('createSubmitResultTool', () => {
     assert.deepEqual(JSON.parse(accepted[0]!), report('wo_tool'))
   })
 
-  it('不合格报告：错误回给模型、不结束本轮、不交付', async () => {
+  it('不合格报告立即结束，不交付也不允许模型重试', async () => {
     const accepted: string[] = []
     const tool = createSubmitResultTool('wo_tool', r => accepted.push(r))
     const result = await tool.execute({ input: { summary: 'done', status: 'passed' }, toolUseId: 'tu_1', cwd: '/repo' })
 
     assert.equal(result.isError, true)
-    assert.notEqual(result.endTurn, true)
+    assert.equal(result.endTurn, true)
     assert.equal(accepted.length, 0)
     assert.match(result.content, /报告未通过校验/)
   })

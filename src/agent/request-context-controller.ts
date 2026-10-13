@@ -45,7 +45,7 @@ export class RequestContextController {
       if (recovering) request.diagnostics = { ...request.diagnostics, purpose: 'reasoning_recovery' }
       return request
     }
-    const policy = this.agent.config.promptEngine.getRequestBudgetPolicy()
+    const policy = this.agent.config.promptEngine.getRequestBudgetPolicy() ?? (Number.isFinite(this.agent.config.contextWindow) ? { windowTokens: this.agent.config.contextWindow!, maxOutputTokens: this.agent.config.contextWindow!, transportLimits: 'none' as const } : undefined)
     if (!policy) { this.agent.reasoningRecoveryPending = false; return buildRequest() }
     try {
       const request = await prepareContextRequest({ build: buildRequest, policy, signal: this.agent.abortController?.signal,
@@ -76,6 +76,7 @@ export class RequestContextController {
 
   async compact(force = false): Promise<boolean> {
     const self = this.agent, budget = this.snapshot
+    if (!force && (!budget || budget.inputTokens <= budget.inputBudget)) return false
     if (!self.config.budgetSummaryClient || !self.persist || !self.artifactStore || self.config.compact?.enabled === false) return false
     if (!force && budget && this.failedAt?.model === budget.model && this.failedAt.budget === budget.inputBudget
       && budget.inputTokens < this.failedAt.input + 32_768) return false
@@ -111,6 +112,8 @@ export class RequestContextController {
       commit: async messages => {
         signal?.throwIfAborted()
         await self.commitBudgetHistory(source, messages)
+        self.config.client.authorizeCacheGeneration?.(force ? 'explicit_user_compact' : 'context_limit')
+        self.config.promptEngine.authorizeCacheGeneration()
         this.activeUserMessage = activeUser
         self.config.promptEngine.resetAppendixBaseline()
         invalidateSessionReadDedup(self.config.sessionId)

@@ -152,7 +152,7 @@ describe('global concurrency gate', () => {
     assert.equal(run.results[0]!.status, 'passed')
   })
 
-  it('等槽期间 parentSignal 触发 → 等槽 promise 立即 reject（僵尸唤醒修复）', async () => {
+  it('等槽期间 parentSignal 触发立即返回终态受阻，不启动 worker', async () => {
     let releaseFirst!: () => void
     let firstCall = true
     const coordinator = new DelegationCoordinator({
@@ -180,12 +180,10 @@ describe('global concurrency gate', () => {
     await new Promise(r => setTimeout(r, 20)) // 等 holder 占槽
     const ac = new AbortController()
     const waiting = coordinator.delegate({ parentTurnId: 'waiter', objective: 'Wait patiently for a worker slot to free up', kind: 'code_search', profile: 'code_scout', scope: {} }, ac.signal)
-    const outcome = waiting.then(
-      () => 'resolved' as const,
-      (e: unknown) => (e instanceof Error ? e.message : String(e)),
-    )
     ac.abort()
-    assert.notEqual(await outcome, 'resolved', 'abort 必须唤醒等槽 promise 并 reject')
+    const stopped = await waiting
+    assert.equal(stopped.results[0]?.status, 'blocked')
+    assert.equal(stopped.results[0]?.terminalFailure, true)
     releaseFirst()
     await first
   })
