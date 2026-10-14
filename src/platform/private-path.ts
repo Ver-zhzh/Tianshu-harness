@@ -1,4 +1,4 @@
-import { chmodSync, lstatSync, mkdirSync } from 'node:fs'
+import { lstatSync, mkdirSync, openSync, fchmodSync, fstatSync, closeSync, constants } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { join } from 'node:path'
 
@@ -57,10 +57,19 @@ export class PrivatePathSymlinkError extends Error {
 export function protectPrivatePath(path: string, platform: NodeJS.Platform = process.platform): void {
   if (lstatSync(path).isSymbolicLink()) throw new PrivatePathSymlinkError(path)
   if (platform !== 'win32') {
-    chmodSync(path, lstatSync(path).isDirectory() ? 0o700 : 0o600)
-    const effective = lstatSync(path)
-    if (effective.isSymbolicLink() || (effective.mode & 0o077) !== 0) {
-      throw new Error('Private storage permissions could not be enforced')
+    // Open with O_NOFOLLOW so the chmod below acts on the exact inode inspected
+    // above: a symlink swapped in between the lstat check and the chmod can no
+    // longer redirect the permission change onto an arbitrary target (classic
+    // check-then-use race). The fd pins the inode for the fstat calls as well.
+    const fd = openSync(path, constants.O_NOFOLLOW)
+    try {
+      const st = fstatSync(fd)
+      fchmodSync(fd, st.isDirectory() ? 0o700 : 0o600)
+      if ((fstatSync(fd).mode & 0o077) !== 0) {
+        throw new Error('Private storage permissions could not be enforced')
+      }
+    } finally {
+      closeSync(fd)
     }
     return
   }
