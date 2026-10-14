@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, statSync, rmSync, symlinkSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, statSync, rmSync, symlinkSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import childProcess from 'node:child_process'
@@ -141,34 +141,42 @@ for (const kind of ['directory', 'file']) {
   })
 }
 
-for (const variant of ['unsafe-mode', 'owner-executable', 'symlink-after-chmod'] as const) {
-  test(`POSIX protection verifies the effective access boundary: ${variant}`, () => {
-    const root = mkdtempSync(join(tmpdir(), 'private-effective-'))
-    const path = join(root, 'fixture.txt')
-    writeFileSync(path, 'ordinary fixture')
-    const originalStat = fs.lstatSync
-    const originalChmod = fs.chmodSync
-    let protectedAttempt = false
-    fs.chmodSync = (() => { protectedAttempt = true }) as typeof fs.chmodSync
-    const statFixture = ((target: string) => {
-      const value = originalStat(target)
-      if (!protectedAttempt) return value
-      return new Proxy(value, { get(stat, name) {
-        if (name === 'mode') return variant === 'unsafe-mode' ? 0o100777 : 0o100700
-        if (name === 'isSymbolicLink') return () => variant === 'symlink-after-chmod'
-        return Reflect.get(stat, name)
-      } })
-    }) as typeof fs.lstatSync
-    Object.defineProperty(fs, 'lstatSync', { value: statFixture })
+test('POSIX protection does not follow a symlink swapped in after the check', { skip: process.platform === 'win32' }, () => {
+  // Simulates the check-then-use race: the pre-check sees a regular file, but a
+  // symlink is swapped in before the permission change. O_NOFOLLOW must refuse
+  // instead of following the link onto the target.
+  const root = mkdtempSync(join(tmpdir(), 'private-race-'))
+  const target = join(root, 'target.txt')
+  writeFileSync(target, 'target')
+  chmodSync(target, 0o644)
+  const link = join(root, 'link.txt')
+  symlinkSync(target, link)
+  const originalLstat = fs.lstatSync
+  Object.defineProperty(fs, 'lstatSync', { value: (p: string) => originalLstat(target) })
+  syncBuiltinESMExports()
+  try {
+    assert.throws(() => protectPrivatePath(link, 'darwin'), /ELOOP/)
+    assert.equal(statSync(target).mode & 0o777, 0o644)
+  } finally {
+    Object.defineProperty(fs, 'lstatSync', { value: originalLstat })
     syncBuiltinESMExports()
-    try {
-      if (variant === 'owner-executable') assert.doesNotThrow(() => protectPrivatePath(path, 'darwin'))
-      else assert.throws(() => protectPrivatePath(path, 'darwin'), /Private storage/)
-    } finally {
-      Object.defineProperty(fs, 'lstatSync', { value: originalStat })
-      fs.chmodSync = originalChmod
-      syncBuiltinESMExports()
-      rmSync(root, { recursive: true, force: true })
-    }
-  })
-}
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('POSIX protection throws when the permission change cannot take effect', { skip: process.platform === 'win32' }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'private-nochmod-'))
+  const path = join(root, 'fixture.txt')
+  writeFileSync(path, 'ordinary fixture')
+  chmodSync(path, 0o644)
+  const originalFchmod = fs.fchmodSync
+  fs.fchmodSync = (() => {}) as typeof fs.fchmodSync
+  syncBuiltinESMExports()
+  try {
+    assert.throws(() => protectPrivatePath(path, 'darwin'), /Private storage permissions could not be enforced/)
+  } finally {
+    fs.fchmodSync = originalFchmod
+    syncBuiltinESMExports()
+    rmSync(root, { recursive: true, force: true })
+  }
+})
