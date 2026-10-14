@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "version": "3.31.0",
+  "date": "2026-10-14",
+  "fullNotesUrl": "https://github.com/huiliyi37/Tianshu-harness/releases/tag/v3.31.0",
+  "locales": {
+    "zh": {
+      "title": "Token 台账三段式落地 + 社区安全收编第二波",
+      "highlights": [
+        "Token 消耗台账端到端可用：本地按 cache-inclusive 口径累计，/usage 查看全设备用量与缓存命中率，/usage connect 配置论坛同步密钥后可同步个人用量——密钥全链只写不回显，仓库项目配置无法自行启用上传。",
+        "收编公开仓 #447–#474 共 19 个安全与稳定性修复：路径穿越防护、ReDoS 加固、环境隔离、ACL fail-closed、审批混淆双视图等；桌面端会话滚动恢复与流式渲染稳定性系列同步落地。",
+        "执行连续性钉扎：模型、凭据、工具集与历史前缀跨轮不变，未批准的前缀变更与不可用绑定就地拦截，不再静默漂移；终态失败的 worker 不再僵尸续命。"
+      ],
+      "notice": "Token 台账默认只在本地记录；连接论坛并配置个人同步密钥后仍需手动同步，自动上传须另行显式开启。计价数值按各提供商原始定价累加（可能混合币种），不代表统一费用或账单。3.30.x 用户直接自动更新即可。完整清单见 docs/releases/v3.31.0.md。"
+    },
+    "en": {
+      "title": "Token ledger end to end + second wave of community security fixes",
+      "highlights": [
+        "Token usage ledger is end-to-end: local accumulation on the cache-inclusive basis, /usage shows per-device totals and cache hit rates, /usage connect pairs a forum sync key for personal usage sync—the key is write-only across the chain; repo-level config can never enable uploads on its own.",
+        "Adopts 19 security and stability fixes from public PRs #447–#474: path-traversal guards, ReDoS hardening, environment isolation, fail-closed ACLs, dual-view approval confusion checks; the desktop session-scroll restoration and streaming-render stability series lands alongside.",
+        "Execution continuity pinning: model, credentials, tool set and history prefix stay unchanged across turns; unapproved prefix changes and unavailable bindings are intercepted in place instead of silently drifting. Terminally failed workers stay failed—no zombie revivals."
+      ],
+      "notice": "The ledger records locally by default; after pairing a forum sync key, syncing is still manual and auto-upload requires an explicit opt-in. Pricing figures accumulate from provider-native rates (possibly mixed currencies) and do not represent a unified bill. 3.30.x users can simply auto-update. Full notes: docs/releases/v3.31.0.md."
+    }
+  }
+}
