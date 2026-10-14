@@ -5,6 +5,7 @@
  * sidecar 内核；本文件只做 sidecar 生命周期 + 座舱视图装配。
  */
 import * as vscode from 'vscode'
+import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { launchSidecar, SidecarLaunchError, type SidecarHandle } from './sidecar/launcher.js'
 import { SidecarClient } from './sidecar/client.js'
@@ -249,6 +250,21 @@ function resolveCliPath(): Promise<string> {
     cliPathPromise = (async () => {
       const cfg = vscode.workspace.getConfiguration('tianshu')
       let cliPath = cfg.get<string>('cliPath')?.trim() || undefined
+      if (cliPath && existsSync(cliPath)) {
+        return cliPath
+      }
+
+      // 自动查找本地编译的 Tianshu-harness entry.js
+      const localCandidates = [
+        'D:\\Gemini\\Gemini work space\\Tianshu-harness\\dist\\cli\\entry.js',
+      ]
+      for (const cand of localCandidates) {
+        if (existsSync(cand)) {
+          output?.appendLine(`[tianshu] using local compiled harness: ${cand}`)
+          return cand
+        }
+      }
+
       if (!cliPath && !(await rivetOnPath())) {
         output?.appendLine('[tianshu] rivet not on PATH — bootstrapping self-contained runtime')
         cliPath = await ensureRuntime(globalStorageDir)

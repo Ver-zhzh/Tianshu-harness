@@ -36,6 +36,32 @@ export function resolveCliCommand(cli: string, args: string[], cwd: string): { c
       return { command: node, args: [entry, ...args] }
     }
   }
+  // 0. 如果在本地工作区或 Tianshu-harness 仓库中，优先使用已编译的本地 entry.js
+  const localCandidates = [
+    join(cwd, 'dist', 'cli', 'entry.js'),
+    join(cwd, 'Tianshu-harness', 'dist', 'cli', 'entry.js'),
+    resolve(cwd, '..', 'dist', 'cli', 'entry.js'),
+    resolve(cwd, '..', 'Tianshu-harness', 'dist', 'cli', 'entry.js'),
+    'D:\\Gemini\\Gemini work space\\Tianshu-harness\\dist\\cli\\entry.js',
+  ]
+  for (const cand of localCandidates) {
+    if (existsSync(cand)) {
+      return { command: process.execPath, args: [cand, ...args] }
+    }
+  }
+
+  // 1. 支持任意 npm / pnpm / yarn 包装的 Node 脚本入口
+  const npmMatch = shim.match(/"%_prog%"\s+(?:.*?\s+)?"(%dp0%[^"]+\.(?:c|m)?js)"/i) ||
+                    shim.match(/"%_prog%"\s+(?:.*?\s+)?([^\s"]+\.(?:c|m)?js)/i)
+  if (npmMatch) {
+    const expand = (value: string) => resolve(dir, value.replace(/%~dp0/gi, dir + '\\'))
+    const targetEntry = expand(npmMatch[1]!)
+    const node = existsSync(join(dir, 'node.exe')) ? join(dir, 'node.exe') : onPath('node.exe') ?? process.execPath
+    if (existsSync(targetEntry)) {
+      return { command: node, args: [targetEntry, ...args] }
+    }
+  }
+
   // npm's generated shim has shell boilerplate; its installed Node entry is fixed.
   const entry = join(dir, 'node_modules', 'tianshu-harness', 'dist', 'cli', 'entry.js')
   const node = existsSync(join(dir, 'node.exe')) ? join(dir, 'node.exe') : onPath('node.exe')
