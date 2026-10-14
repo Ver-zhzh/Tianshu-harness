@@ -5,6 +5,8 @@ import { AgentLoop } from '../loop.js'
 test('run claims the instance synchronously before awaiting idle compaction', async () => {
   let releaseIdle!: () => void
   const idleGate = new Promise<void>(resolve => { releaseIdle = resolve })
+  let cancellationStarted!: () => void
+  const cancelling = new Promise<void>(resolve => { cancellationStarted = resolve })
   let cancelCalls = 0
   let innerCalls = 0
   let schedules = 0
@@ -44,6 +46,7 @@ test('run claims the instance synchronously before awaiting idle compaction', as
     runObserved: (AgentLoop.prototype as unknown as { runObserved: unknown }).runObserved,
     cancelIdleCompaction: async () => {
       cancelCalls++
+      cancellationStarted()
       await idleGate
     },
     _runInner: async () => { innerCalls++ },
@@ -54,7 +57,8 @@ test('run claims the instance synchronously before awaiting idle compaction', as
   assert.equal(fake._running, true, 'the guard must be claimed before run() returns its first promise')
 
   const duplicate = AgentLoop.prototype.run.call(fake as unknown as AgentLoop, 'second', {} as never)
-  await duplicate
+  assert.equal(await duplicate, 'skipped-already-running')
+  await cancelling
   assert.equal(cancelCalls, 1, 'duplicate run must preserve the existing no-op contract')
   assert.equal(innerCalls, 0)
 

@@ -88,6 +88,17 @@ test('worker resume restores actual options and dispatch session nonce', async (
   assert.equal(headers[1]!.get('X-Request-Session'), 'worker-task-nonce')
 }))
 
+test('main resume rejects a rewritten history without borrowing the worker resume allowance', async () => withFetch(async bodies => {
+  const first = client()
+  await first.stream(request(), callbacks)
+  const resumed = client()
+  resumed.restoreExecutionSnapshot!(first.getMainPrefixProof!()!)
+  const changed = request()
+  changed.messages[0] = { role: 'user', content: 'rewritten after resume' }
+  await assert.rejects(resumed.stream(changed, callbacks), /prefix diverged/)
+  assert.equal(bodies.length, 1)
+}))
+
 test('incomplete legacy proof blocks resume without HTTP', async () => withFetch(async bodies => {
   const c = client(true)
   assert.throws(() => c.restoreExecutionSnapshot!({ version: 1, provider: 'deepseek', model: 'deepseek-flash', requestId: 'legacy', optionsHash: '', toolsHash: '', messages: [] }), /snapshot/)

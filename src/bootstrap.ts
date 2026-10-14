@@ -36,6 +36,7 @@ import { resolveMaxTurns } from './agent/turn-budget-policy.js'
 import { createAgentConfig, createMainAgentConfigInput } from './agent/create-agent-config.js'
 import { SessionContext } from './agent/context.js'
 import { SessionPersist, evictOldSessions, getSessionDir } from './agent/session-persist.js'
+import { waitForAgentRewind } from './agent/session-persist-listener.js'
 import { runGateCompletion } from './agent/gate-completion.js'
 import { memoryBackfillEnabled, runMemoryBackfill } from './memory/backfill.js'
 import { migrateSessionFiles, rebuildStoresAfterCwdMove } from './agent/session-cd.js'
@@ -917,6 +918,7 @@ export function createInteractiveToolRegistry(
  * 顶多下次 resume 退化为全量重建）。startup / /resume 切换 / /cd 三处统一挂。
  */
 function wireFrozenSnapshotPersist(persist: SessionPersist, engine: import('./prompt/engine.js').PromptEngine): void {
+  engine.setExecutionSnapshotCommit(snapshot => persist.commitFrozenSnapshot(snapshot))
   engine.setOnFrozenSnapshotChanged(() => persist.queueFrozenSnapshot(engine.exportFrozenSnapshot()))
 }
 
@@ -1419,6 +1421,7 @@ export function createShutdownHandler(ctx: BootstrapContext): () => Promise<void
     if (shutdownPromise) return shutdownPromise
     shutdownPromise = (async () => {
       try {
+        await waitForAgentRewind(ctx.agent)
         // Mark a clean exit. Next startup mints a fresh session by default;
         // returning here requires explicit --continue / --resume <id> (R1).
         try { ctx.persist.updateMetadata({ cleanExit: true }) } catch { /* best-effort */ }

@@ -71,11 +71,18 @@ echo "=== 拷贝源码 → 容器卷（排除 .git/target/node_modules/release/o
 # 注意 COPYFILE_DISABLE 与 --exclude='._*' 对**本问题无效**（二者管 tar 打包侧，
 # 而 `._*` 是落盘侧生成的）；保留它们只作同类问题的低成本防御。
 # 真正解决的是拷贝之后那道 find -delete（实测一次构建会残留 2743 个）。
+#
+# ⚠ provenance xattr 陷阱（2026-10-14 v3.31.0 实证）：macOS Sequoia+ 的
+# com.apple.provenance 是 SIP 受保护 xattr——用户态删不掉（xattr -d exit 0 但属性
+# 立即回写），docker cp 解包端会对它 lsetxattr → Linux 卷不支持 →
+# "Error response from daemon: lsetxattr ... com.apple.provenance: no such file or
+# directory" 整次拷贝失败。防御：入向改用容器端 GNU tar 解包（tar 流本身不含
+# macOS xattr，GNU tar 也不会尝试还原），彻底绕开 docker cp 的 xattr 语义。
 COPYFILE_DISABLE=1 tar cf - --exclude=.git \
   --exclude='src-tauri/target' --exclude='desktop/src-tauri/target' \
   --exclude='*/node_modules' --exclude=release --exclude=out \
   --exclude='._*' . \
-  | docker cp - "$CID":/work/
+  | docker exec -i "$CID" tar -x -C /work --no-same-owner
 # 清理已落盘的 AppleDouble 残留（tar 行为或 Docker 卷写入都可能带入）
 docker exec "$CID" sh -c "find /work -name '._*' -delete 2>/dev/null || true"
 
