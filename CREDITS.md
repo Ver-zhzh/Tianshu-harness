@@ -453,3 +453,4 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 - #475 fix(tui): 修复提问卡与计划审批卡导致对话分层（CLOSED）
 - #474 fix: 修复会话回退事件遗漏与课程文件误判（CLOSED）
 - #476 fix(platform): 消除 protectPrivatePath 的符号链接 TOCTOU 竞态（OPEN）
+- #478 fix: 修复前缀证明污染与回退持久化，补齐全量验收（OPEN）
