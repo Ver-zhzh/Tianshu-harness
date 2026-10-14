@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "revision": 17,
+  "revision": 14,
   "version": "3.30.0",
   "publishedAt": "2026-10-11T11:22:15.354Z",
   "notes": "v3.29.0——多会话文件认领可接管；交付按本会话判断，项目外写入与他人失败不再假红假绿；项目配置不能再关审批和沙箱；桌面更新先验包再安装；技能在桌面与命令行共用，从新会话生效；Windows sidecar 改名为 tianshu-runtime.exe。Linux 本版提供双架构 AppImage。完整清单见 docs/releases/v3.29.0.md。",
@@ -24,17 +24,6 @@
         "oss": {
           "url": "https://tianshu-update.oss-cn-hangzhou.aliyuncs.com/tianshu/v3.30.0/Tianshu_3.30.0_aarch64.app.tar.gz",
           "verified": false
-        },
-        "atomgit": {
-          "url": "https://api.atomgit.com/api/v5/repos/huiliyi37/Tianshu-harness/releases/v3.30.0/attach_files/Tianshu_3.30.0_aarch64.app.tar.gz/download",
-          "verified": false,
-          "anonymous": true,
-          "verifiedAt": "2026-10-11T14:16:27.381Z",
-          "sha256": "96a9103025fd045ed77bf3e982bef204087910fc998fb7d2d184fcbf7ef1d945",
-          "size": 241672937,
-          "headStatus": 404,
-          "rangeSupported": true,
-          "qualificationVerified": false
         }
       }
     },
@@ -76,17 +65,6 @@
         "oss": {
           "url": "https://tianshu-update.oss-cn-hangzhou.aliyuncs.com/tianshu/v3.30.0/Tianshu_3.30.0_x64.app.tar.gz",
           "verified": false
-        },
-        "atomgit": {
-          "url": "https://api.atomgit.com/api/v5/repos/huiliyi37/Tianshu-harness/releases/v3.30.0/attach_files/Tianshu_3.30.0_x64.app.tar.gz/download",
-          "verified": false,
-          "anonymous": true,
-          "verifiedAt": "2026-10-11T14:17:37.758Z",
-          "sha256": "2c1cfb501b911a53d0df2e0cba39e4e8614bd8d9c4503f71362daae9f1327f9f",
-          "size": 244296599,
-          "headStatus": 404,
-          "rangeSupported": true,
-          "qualificationVerified": false
         }
       }
     },
@@ -128,17 +106,6 @@
         "oss": {
           "url": "https://tianshu-update.oss-cn-hangzhou.aliyuncs.com/tianshu/v3.30.0/Tianshu_3.30.0_x64-setup.exe",
           "verified": false
-        },
-        "atomgit": {
-          "url": "https://api.atomgit.com/api/v5/repos/huiliyi37/Tianshu-harness/releases/v3.30.0/attach_files/Tianshu_3.30.0_x64-setup.exe/download",
-          "verified": false,
-          "anonymous": true,
-          "verifiedAt": "2026-10-11T14:15:19.305Z",
-          "sha256": "820b6968d2c9dbfcdca4e7213290f9d7485bbe2abf35e4084a120a5c3e1c4713",
-          "size": 426024933,
-          "headStatus": 404,
-          "rangeSupported": true,
-          "qualificationVerified": false
         }
       }
     },
@@ -159,17 +126,6 @@
         "oss": {
           "url": "https://tianshu-update.oss-cn-hangzhou.aliyuncs.com/tianshu/v3.30.0/Tianshu_3.30.0_x64-setup.exe",
           "verified": false
-        },
-        "atomgit": {
-          "url": "https://api.atomgit.com/api/v5/repos/huiliyi37/Tianshu-harness/releases/v3.30.0/attach_files/Tianshu_3.30.0_x64-setup.exe/download",
-          "verified": false,
-          "anonymous": true,
-          "verifiedAt": "2026-10-11T14:15:19.305Z",
-          "sha256": "820b6968d2c9dbfcdca4e7213290f9d7485bbe2abf35e4084a120a5c3e1c4713",
-          "size": 426024933,
-          "headStatus": 404,
-          "rangeSupported": true,
-          "qualificationVerified": false
         }
       }
     },

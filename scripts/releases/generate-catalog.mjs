@@ -1,9 +1,10 @@
 import { createHash } from 'node:crypto'
-import { createReadStream, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs'
 import { basename, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { validateCatalog, chooseCatalog } from './catalog.mjs'
 import { validateReleaseNotes } from './release-notes.mjs'
+import { writeCatalog } from './check-workspace-metadata.mjs'
 
 export async function sha256(path) {
   const hash = createHash('sha256')
@@ -45,7 +46,7 @@ export async function generateCatalog({ manifest, assets, revision = 1, githubAs
   if (previousCatalog?.version === manifest.version) chooseCatalog([catalog,previousCatalog])
   return catalog
 }
-async function main() {
+export async function main() {
   const value = flag => { const i = process.argv.indexOf(flag); return i < 0 ? undefined : process.argv[i + 1] }
   const manifest = JSON.parse(readFileSync(value('--manifest') ?? 'latest.json', 'utf8'))
   const response = await fetch(`https://api.github.com/repos/huiliyi37/Tianshu-harness/releases/tags/v${manifest.version}`, { signal: AbortSignal.timeout(15000), headers: { 'User-Agent': 'tianshu-release-catalog' } })
@@ -57,7 +58,7 @@ async function main() {
   const notesFile = value('--notes') ?? `docs/releases/summaries/${manifest.version}.json`
   const releaseNotes = existsSync(notesFile) ? JSON.parse(readFileSync(notesFile,'utf8')) : undefined
   const catalog = await generateCatalog({ manifest, assets: resolve(value('--assets') ?? 'release'), revision: Number(value('--revision') ?? previousCatalog?.revision ?? 1), githubAssets: release.assets, evidence, previousCatalog, releaseNotes })
-  writeFileSync(out, JSON.stringify(catalog, null, 2) + '\n')
+  writeCatalog(out, catalog)
   console.log(`Validated v${catalog.version}: ${catalog.artifacts.length} artifacts; unverified sources cannot be selected`)
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) main().catch(error => { console.error(error.message); process.exitCode = 1 })

@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url'
 import { execFileSync } from 'node:child_process'
 import { sha256 } from './generate-catalog.mjs'
 import { validateCatalog } from './catalog.mjs'
+import { writeCatalog } from './check-workspace-metadata.mjs'
 
 const BASE = 'https://api.atomgit.com/api/v5/repos/huiliyi37/Tianshu-harness'
 export const downloadURL = (tag, name) => `${BASE}/releases/${encodeURIComponent(tag)}/attach_files/${encodeURIComponent(name)}/download`
@@ -177,7 +178,7 @@ async function main() {
   const qualified = proof.verified
   if (JSON.stringify(previous) !== JSON.stringify(proof)) catalog.revision += 1
   for (const a of catalog.artifacts.filter(a => a.platform === target.platform && a.fileName === target.fileName)) a.sources.atomgit = proof
-  writeFileSync(catalogPath,JSON.stringify(validateCatalog(catalog),null,2)+'\n')
+  writeCatalog(catalogPath, catalog)
   const extra = async path => uploadImmutable(api, tag, path, { size: statSync(path).size, sha256: await sha256(path) })
   // 安装包（macOS DMG）不参与 updater 签名，没有 .sig 文件：缺了跳过，不是错误。
   if (existsSync(file + '.sig')) await extra(file + '.sig')
@@ -186,7 +187,7 @@ async function main() {
   if (process.argv.includes('--assets-only')) { console.log(`Verified ${target.platform} assets; metadata publication deferred until all intended platforms are ready`); return }
   if (!qualified) { console.log('Anonymous bytes/HEAD/Range passed. AtomGit remains disabled pending recorded Tauri redirects, stable entry, disconnect retry, distinct domestic networks and limits observations (--acceptance).'); return }
   await publishMetadata(api, tag, assets, catalog, fetch, readFileSync(catalogPath))
-  writeFileSync(catalogPath,JSON.stringify(catalog,null,2)+'\n')
+  writeCatalog(catalogPath, catalog)
   console.log(`Verified anonymous AtomGit download: ${target.fileName}, ${proof.size} bytes. Catalog saved; publish it to GitHub/OSS before enabling routing.`)
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) main().catch(error => {

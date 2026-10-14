@@ -94,6 +94,8 @@ node scripts/releases/publish-update-control.mjs init --catalog release-catalog.
 
 Upload the next signed numeric-version release as **prerelease**, along with its complete, source-qualified `latest.json`, `release-catalog.json` and release notes. Finish source qualification before staging: referenced catalog bytes become immutable. Keep the previous stable catalog and legacy manifests unchanged. OSS package uploads must use `bash scripts/upload-update-to-oss.sh --assets-only`; AtomGit's existing immutable package publisher can also be used with `--assets-only`; do not run the stable close-out wrapper for a candidate.
 
+Root `latest.json` and `release-catalog.json` describe `update-control.json`'s stable release. The development package version may be newer. Check their versions, exact catalog digest, platform coverage, signatures and verified URLs with `node scripts/releases/check-workspace-metadata.mjs`. Candidate manifests belong in `release/candidates/<version>/`; generate them with explicit `--manifest` and `--out` paths. Generators and AtomGit proof writes preserve pinned root bytes and reject changes to that root. Save additional source qualification proofs in a separate draft catalog. Copy candidate metadata to the root only as part of the reviewed promotion transaction described below.
+
 Copy `rollout-acceptance.example.json` into your release working directory and fill it from actual tests. `passed`, `sha256`, timestamp and a maintainer conclusion are required per platform. The supplied template deliberately cannot pass validation. Do not substitute an automated browser fixture for a real signed upgrade.
 
 ```sh
