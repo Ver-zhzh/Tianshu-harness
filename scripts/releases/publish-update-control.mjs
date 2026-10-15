@@ -10,15 +10,16 @@ const catalogURL = version => `https://github.com/${REPO}/releases/download/v${v
 const FETCH_TIMEOUT_MS = Number(process.env.RELEASE_FETCH_TIMEOUT_MS ?? 15000)
 // Node fetch 对 github.com 下载域在部分代理/直连链路上偶发 UND_ERR_CONNECT_TIMEOUT，
 // curl 走系统网络栈（含 env 代理）常能通。仅网络层失败时回落；HTTP 错误语义不变。
+// windowsHide：Windows 上不给 curl 开控制台窗口（architecture-guards 的 spawn 守卫基线为 0）。
 function curlReadRemote(url) {
   const max = String(Math.ceil(FETCH_TIMEOUT_MS / 1000))
   try {
-    const buf = execFileSync('curl', ['-sS', '-L', '--fail', '--max-time', max, '-H', 'Cache-Control: no-store', url], { encoding: 'buffer', maxBuffer: CONTROL_LIMIT * 4 })
+    const buf = execFileSync('curl', ['-sS', '-L', '--fail', '--max-time', max, '-H', 'Cache-Control: no-store', url], { encoding: 'buffer', maxBuffer: CONTROL_LIMIT * 4, windowsHide: true })
     if (buf.length > CONTROL_LIMIT) throw new Error('Metadata exceeds 256 KiB')
     return buf
   } catch (error) {
     if (error?.status === 22) {
-      const code = execFileSync('curl', ['-sS', '-L', '-o', '/dev/null', '-w', '%{http_code}', '--max-time', max, url], { encoding: 'utf8' }).trim()
+      const code = execFileSync('curl', ['-sS', '-L', '-o', '/dev/null', '-w', '%{http_code}', '--max-time', max, url], { encoding: 'utf8', windowsHide: true }).trim()
       if (code === '404') return undefined
       throw new Error(`Cannot read ${url}: HTTP ${code}`)
     }

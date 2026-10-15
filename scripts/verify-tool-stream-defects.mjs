@@ -62,7 +62,7 @@ for (const mutant of mutants) {
   try {
     writeFileSync(path, changed)
     const result = spawnSync(process.execPath, ['--import', 'tsx', '--test', '--test-timeout=15000',
-      `--test-name-pattern=${mutant.pattern}`, mutant.test], { cwd: root, encoding: 'utf8', timeout: 20000 })
+      `--test-name-pattern=${mutant.pattern}`, mutant.test], { cwd: root, encoding: 'utf8', timeout: 20000, windowsHide: true })
     assert.equal(result.error, undefined, mutant.label)
     const output = result.stdout + result.stderr
     assert.equal(result.status, 1, `${mutant.label} did not turn red\n${output}`)
