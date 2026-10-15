@@ -284,13 +284,15 @@ export class SessionStateManager {
       .filter(([, v]) => v.modifiedByMe)
       .map(([k]) => k)
     if (modifiedFiles.length > 0) {
-      lines.push(`Modified: ${modifiedFiles.slice(0, 10).join(', ')}`)
+      // 文件路径可含不可信字符（文件名即攻击面）：拼进 <session-state> 前转义，
+      // 否则可提前闭合标签、伪造 <context-update> 等附录 markup（提示词注入）。
+      lines.push(`Modified: ${modifiedFiles.slice(0, 10).map(escapeXml).join(', ')}`)
     }
 
     if (s.decisions.length > 0) {
       lines.push('Decisions:')
       for (const d of s.decisions.slice(-5)) {
-        lines.push(`  - ${d.decision}`)
+        lines.push(`  - ${escapeXml(d.decision)}`)
       }
     }
 
@@ -299,7 +301,7 @@ export class SessionStateManager {
       v => v.status === 'failed' && Date.now() - v.verifiedAt < STALE_VERIFICATION_MS,
     )
     if (failedTests.length > 0) {
-      lines.push(`Failed: ${failedTests.map(v => v.target).join(', ')}`)
+      lines.push(`Failed: ${failedTests.map(v => escapeXml(v.target)).join(', ')}`)
     }
 
     // No content means no block. An empty `<session-state></session-state>` is
@@ -331,4 +333,14 @@ export class SessionStateManager {
 
     return result
   }
+}
+
+/** XML 转义：renderForVolatile 的插值（文件路径/决策文本/验证目标）均可能含
+ *  不可信字符，拼进提示词 markup 前必须转义（与 volatile.ts 的 escapeXml 同契约）。 */
+function escapeXml(text: string): string {
+  return text
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
 }
