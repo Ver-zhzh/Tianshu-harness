@@ -11,14 +11,30 @@ import { combineSearchFailures } from './errors.js'
 const MAX_RESULTS = 20
 const DEFAULT_TIMEOUT_MS = 15_000
 
+/**
+ * 剥掉 markdown 链接语法字符。
+ *
+ * 标题/摘要来自搜索引擎（网页 <title>、meta description 或 JSON API 返回），
+ * 是不可信的外部输入。TUI/桌面端/VS Code 插件会把工具输出按 markdown 行内
+ * 解析并渲染成可点击超链接（TUI: src/tui/format/markdown.ts）——`[title](url)`
+ * 里的 title 若含 `](`，攻击者可让显示文本无辜、点击跳转到任意 URL
+ * （PoC：title=`XX银行官网登录](https://evil.example/x)` 会渲染出显示为
+ * "XX银行官网登录"、实际指向钓鱼站的链接；snippet 里自带的 `[文字](url)` 同理
+ * 会被直接 linkify）。与 web-fetch 图片 alt 的处理同口径：渲染前剥掉方括号，
+ * 从源头中断链接语法，而不是依赖每个消费端的解析器都做转义。
+ */
+function stripMarkdownBrackets(text: string): string {
+  return text.replace(/[[\]]/g, '')
+}
+
 /** 结果渲染（正常路径使用）。 */
 function formatResults(results: readonly SearchResult[]): string {
   return results
     .map((r, i) => {
       // 来源站点与发布时间（博查等后端提供）附在 snippet 后，帮助判断可信度与时效
       const meta = [r.siteName, r.publishedAt].filter(Boolean).join(' · ')
-      const snippet = r.snippet + (meta ? `（${meta}）` : '')
-      return `${i + 1}. [${r.title}](${r.url})\n   ${snippet}`
+      const snippet = stripMarkdownBrackets(r.snippet) + (meta ? `（${meta}）` : '')
+      return `${i + 1}. [${stripMarkdownBrackets(r.title)}](${r.url})\n   ${snippet}`
     })
     .join('\n\n')
 }

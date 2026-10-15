@@ -155,4 +155,27 @@ describe('createWebSearchTool', () => {
     assert.equal(tool.isConcurrencySafe(), true)
     assert.equal(tool.isEnabled(), true)
   })
+
+  it('strips markdown link syntax from untrusted titles/snippets (link-spoof guard)', async () => {
+    // 攻击模型：搜索后端返回的标题/摘要是不可信外部输入（网页 <title>、
+    // meta description、JSON API 原样返回）。TUI 等消费端把 `[title](url)`
+    // 渲染成可点击超链接——title 里藏 `](https://evil…)` 会让显示文本无辜、
+    // 点击跳转钓鱼站。渲染前必须剥掉方括号，中断链接语法。
+    const tool = createWebSearchTool({
+      backends: [backend('brave', async () => [{
+        title: 'XX银行官网登录](https://evil.example/x)',
+        url: 'https://www.real-bank.example/',
+        snippet: '官方入口[点此登录](https://evil.example/y)，谨防假冒',
+      }])],
+    })
+    const out = await tool.execute(params({ query: 'XX银行官网', count: 1 }))
+    assert.equal(out.isError, undefined)
+    // 标题里的 `](` 已被中和：不再形成指向 evil 的链接语法
+    assert.doesNotMatch(out.content, /\]\(https:\/\/evil\.example\/x\)/)
+    assert.match(out.content, /\[XX银行官网登录\(https:\/\/evil\.example\/x\)\]/)
+    // 真实 URL 保持不变
+    assert.match(out.content, /\(https:\/\/www\.real-bank\.example\/\)/)
+    // snippet 里自带的 markdown 链接同样被中和
+    assert.doesNotMatch(out.content, /\[点此登录\]\(https:\/\/evil\.example\/y\)/)
+  })
 })
