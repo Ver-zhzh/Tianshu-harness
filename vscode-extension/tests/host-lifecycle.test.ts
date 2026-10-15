@@ -523,7 +523,8 @@ function extensionFixture(opts: { runtime?: string; delayedHealth?: boolean; del
     spawnEnvs.push(options.env ?? {})
     if (opts.realPort) {
       const toy = 'const http=require("node:http");const s=http.createServer((q,r)=>{if(q.headers.authorization!=="Bearer "+process.env.RIVET_SERVER_TOKEN){r.writeHead(401);r.end();return}setTimeout(()=>r.end("ok"),Number(process.env.FIXTURE_DELAY))});s.on("error",e=>{console.error(e.code);process.exit(1)});s.listen(Number(process.argv[1]),"127.0.0.1",()=>console.log("LISTENING"))'
-      const child = spawnProcess(opts.realShim ? cli : process.execPath, opts.realShim ? args : ['-e', toy, args[2]!], {
+      const portArg = (args.includes('--port') ? args[args.indexOf('--port') + 1] : args[2])!
+      const child = spawnProcess(opts.realShim ? cli : process.execPath, opts.realShim ? args : ['-e', toy, portArg], {
         ...(opts.realShim ? options : {}),
         cwd: root, env: { ...options.env, FIXTURE_DELAY: children.length === 0 ? '1000' : '0' },
         stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,

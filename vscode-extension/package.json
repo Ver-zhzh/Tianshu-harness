@@ -39,6 +39,7 @@
   ],
   "main": "./dist/extension.js",
   "activationEvents": [
+    "onView:tianshu.cockpitView",
     "onChatParticipant:tianshu.default",
     "onLanguageModelChatProvider:tianshu"
   ],
@@ -49,6 +50,13 @@
   ],
   "contributes": {
     "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "tianshu-sidebar",
+          "title": "天枢",
+          "icon": "media/icon.svg"
+        }
+      ],
       "secondarySidebar": [
         {
           "id": "tianshu",
@@ -64,6 +72,13 @@
           "name": "天枢变更"
         }
       ],
+      "tianshu-sidebar": [
+        {
+          "type": "webview",
+          "id": "tianshu.cockpitView",
+          "name": "天枢座舱"
+        }
+      ],
       "secondarySidebar": [
         {
           "id": "tianshu.launcher",
@@ -73,8 +88,21 @@
     },
     "commands": [
       {
+        "command": "tianshu.refreshCockpit",
+        "title": "刷新座舱",
+        "icon": "$(refresh)",
+        "category": "天枢"
+      },
+      {
+        "command": "tianshu.focusCockpit",
+        "title": "聚焦座舱",
+        "icon": "$(layout-sidebar-left)",
+        "category": "天枢"
+      },
+      {
         "command": "tianshu.newSession",
         "title": "新建会话",
+        "icon": "$(plus)",
         "category": "天枢"
       },
       {
@@ -225,6 +253,21 @@
         }
       ],
       "view/title": [
+        {
+          "command": "tianshu.refreshCockpit",
+          "when": "view == tianshu.cockpitView",
+          "group": "navigation@1"
+        },
+        {
+          "command": "tianshu.newSession",
+          "when": "view == tianshu.cockpitView",
+          "group": "navigation@2"
+        },
+        {
+          "command": "tianshu.openInEditor",
+          "when": "view == tianshu.cockpitView",
+          "group": "navigation@3"
+        },
         {
           "command": "tianshu.refreshChanges",
           "when": "view == tianshu.changes",

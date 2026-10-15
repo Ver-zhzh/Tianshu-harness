@@ -82,6 +82,13 @@ export function activate(context: vscode.ExtensionContext): void {
     (): Promise<SidecarClient> => ensureClient(provider, cwd),
     cwd ?? '',
   )
+  if (typeof vscode.window.registerWebviewViewProvider === 'function') {
+    context.subscriptions.push(
+      vscode.window.registerWebviewViewProvider(CockpitProvider.viewType, provider, {
+        webviewOptions: { retainContextWhenHidden: true },
+      }),
+    )
+  }
 
   const visualBuilder = new VisualBuilderProvider(
     context.extensionUri,
@@ -187,11 +194,17 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('tianshu.openInEditor', () => {
       provider.openInEditor()
     }),
+    vscode.commands.registerCommand('tianshu.refreshCockpit', () => {
+      void provider.refresh()
+    }),
+    vscode.commands.registerCommand('tianshu.focusCockpit', () => {
+      provider.focus()
+    }),
     vscode.commands.registerCommand('tianshu.openVisualBuilder', (uri?: vscode.Uri) => {
       void visualBuilder.open(uri)
     }),
     vscode.commands.registerCommand('tianshu.newSession', () => {
-      provider.openInEditor()
+      provider.newSession()
     }),
     vscode.commands.registerCommand('tianshu.restartSidecar', async () => {
       try {
@@ -249,19 +262,22 @@ function resolveCliPath(): Promise<string> {
     const generation = sidecarGeneration
     cliPathPromise = (async () => {
       const cfg = vscode.workspace.getConfiguration('tianshu')
-      let cliPath = cfg.get<string>('cliPath')?.trim() || undefined
+      let cliPath = cfg.get<string>('cliPath')?.trim() || process.env.TIANSHU_CLI_PATH || undefined
       if (cliPath && existsSync(cliPath)) {
         return cliPath
       }
 
-      // 自动查找本地编译的 Tianshu-harness entry.js
-      const localCandidates = [
-        'D:\\Gemini\\Gemini work space\\Tianshu-harness\\dist\\cli\\entry.js',
-      ]
-      for (const cand of localCandidates) {
-        if (existsSync(cand)) {
-          output?.appendLine(`[tianshu] using local compiled harness: ${cand}`)
-          return cand
+      if (process.env.NODE_ENV !== 'test') {
+        const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd()
+        const localCandidates = [
+          join(root, 'dist', 'cli', 'entry.js'),
+          join(root, 'Tianshu-harness', 'dist', 'cli', 'entry.js'),
+        ]
+        for (const cand of localCandidates) {
+          if (existsSync(cand)) {
+            output?.appendLine(`[tianshu] using local compiled harness: ${cand}`)
+            return cand
+          }
         }
       }
 
