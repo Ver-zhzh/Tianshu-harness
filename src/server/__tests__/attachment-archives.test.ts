@@ -10,7 +10,7 @@
 import './disable-cpu-pool.js'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
@@ -147,6 +147,25 @@ test('validateArchivesPayload: 非白名单压缩格式拒绝（rar/7z/单文件
   for (const name of ['../a.zip', '.env.zip', 'a/b.zip']) {
     assert.ok(validateArchivesPayload([{ name, path: '/tmp/x' }]).error, `${name} 应被拒`)
   }
+})
+
+test('validateArchivesPayload: path 指向私密文件拒绝（.env/私钥/credentials/token）', () => {
+  // name 是展示名、path 才是真实读取的文件：只校验 name 扩展名会被绕过。
+  const base = process.platform === 'win32' ? 'C:\\Users\\u' : '/home/u'
+  for (const p of [
+    join(base, '.env'), join(base, '.env.local'), join(base, '.ssh', 'id_rsa'),
+    join(base, 'credentials.json'), join(base, 'my-token.txt'), join(base, 'private.key'),
+    join(base, 'secrets.yaml'), join(base, 'app.pem'),
+  ]) {
+    const res = validateArchivesPayload([{ name: 'backup.zip', path: p }])
+    assert.ok(res.error, `${p} 应被拒`)
+    assert.match(res.error!, /private\/secret/)
+  }
+  // 非私密路径不受影响
+  assert.equal(validateArchivesPayload([{ name: 'backup.zip', path: join(base, 'backup.zip') }]).error, undefined)
+  // dataUrl 形态不受私密路径策略影响（内容即载荷，无路径读取）
+  const ok = validateArchivesPayload([{ name: 'b.zip', dataUrl: `data:application/zip;base64,${ZIP_BYTES.toString('base64')}` }])
+  assert.equal(ok.error, undefined)
 })
 
 test('validateArchivesPayload: 个数上限与空数组', () => {
@@ -302,6 +321,39 @@ test('POST /prompt 压缩包校验失败（rar / 相对路径 / 源文件不存�
     }, AUTH)
     assert.equal(res.status, 400)
     assert.match((res.body as { error: string }).error, /not found/)
+  } finally { await cleanup() }
+})
+
+test('POST /prompt 压缩包 path 指向私密文件（.env）→ 400（线缆层即拦）', async () => {
+  const { dir, manager, router, cleanup } = setup()
+  try {
+    // 无害占位内容：回归测试只断言"被拒绝"，不读取真实私密文件
+    const envPath = join(dir, '.env')
+    writeFileSync(envPath, 'HARMLESS_TEST_MARKER=1\n')
+    const rec = manager.createSession({ cwd: dir })
+    const res = await router('POST', `/sessions/${rec.id}/prompt`, {
+      prompt: 'x', archives: [{ name: 'backup.zip', path: envPath }],
+    }, AUTH)
+    assert.equal(res.status, 400)
+    assert.match((res.body as { error: string }).error, /private\/secret/)
+  } finally { await cleanup() }
+})
+
+test('POST /prompt 压缩包 path 经符号链接指向私密文件 → 400（持久化层 realpath 后拦）', async function () {
+  if (process.platform === 'win32') return // Windows 建符号链接需提权，CI 上跳过
+  const { dir, manager, router, cleanup } = setup()
+  try {
+    const envPath = join(dir, '.env')
+    writeFileSync(envPath, 'HARMLESS_TEST_MARKER=1\n')
+    // 链接名干净：线缆层基名检查看不到目标，靠 persistArchives 的 realpath 后检查
+    const linkPath = join(dir, 'clean-link')
+    symlinkSync(envPath, linkPath)
+    const rec = manager.createSession({ cwd: dir })
+    const res = await router('POST', `/sessions/${rec.id}/prompt`, {
+      prompt: 'x', archives: [{ name: 'backup.zip', path: linkPath }],
+    }, AUTH)
+    assert.equal(res.status, 400)
+    assert.match((res.body as { error: string }).error, /private\/secret/)
   } finally { await cleanup() }
 })
 

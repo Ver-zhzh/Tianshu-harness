@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import { MAX_IMAGES, MAX_IMAGE_BYTES, MAX_DOCUMENTS, MAX_DOCUMENT_BYTES, MAX_ARCHIVES, MAX_ARCHIVE_DATAURL_BYTES } from './attachment-limits.js'
-import { contextFileKind, contextDataUrlBytes, decodeContextText, isSupportedArchiveName, MAX_TEXT_ATTACHMENT_BYTES } from './file-context-policy.js'
+import { contextFileKind, contextDataUrlBytes, decodeContextText, isPrivateContextPath, isSupportedArchiveName, MAX_TEXT_ATTACHMENT_BYTES } from './file-context-policy.js'
 import { extractDocumentText, EXTRACTION_CAVEAT, isExtractableDocument } from '../tools/doc-extract.js'
 import { isSafeFileName } from '../utils/safe-path.js'
 
@@ -152,6 +152,9 @@ export function validateArchivesPayload(value: unknown): { archives?: SessionArc
     }
     if (hasPath) {
       if (!isAbsolute(path as string)) return { error: `${name}: archive path must be absolute` }
+      // 私密文件（.env/credentials/私钥等）不得以 path 形态进压缩包附件——
+      // name 是展示名，path 才是真实读取的文件；只校验扩展名会被绕过。
+      if (isPrivateContextPath(path as string)) return { error: `${name}: archive path must not be a private/secret file` }
       continue
     }
     if (!/^data:[^;,]+;base64,/.test(dataUrl as string)) {

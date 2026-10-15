@@ -130,6 +130,7 @@ import type {
 import { redactValue, redactText, truncateUtf16Safe } from './redact.js'
 import { MAX_ARCHIVES, MAX_ARCHIVE_BYTES, MAX_DOCUMENTS, MAX_IMAGES } from './attachment-limits.js'
 import type { SessionArchivePayload } from './attachment-validation.js'
+import { isPrivateContextPath } from './file-context-policy.js'
 import { applyRingLimits } from './session-ring-limits.js'
 import { resolveSessionDefaults } from './session-defaults.js'
 // The session wire contract (event types, records, statuses) lives in
@@ -7331,9 +7332,10 @@ export class RuntimeSessionManager {
    * 拒绝路径（busy/预算）不留 discard 钩子：同内容文件可能被另一在途请求引用，
    *  误删活引用比留孤儿更糟（孤儿随会话目录生命周期回收）。
    *
-   * path 形态的持久化时核验（存在/regular file/≤MAX_ARCHIVE_BYTES）在这里——
-   * 线缆校验（validateArchivesPayload）只查绝对路径；realpath 后再 copyFile，
-   * 用户原文件绝不被写。sha256 流式计算，hex 前 8 位进句柄。
+   * path 形态的持久化时核验（存在/regular file/≤MAX_ARCHIVE_BYTES/非私密文件）
+   * 在这里——线缆校验（validateArchivesPayload）只查绝对路径与路径基名的私密
+   * 策略；realpath 后再对解析目标查一次，堵住"干净名符号链接 → 私密文件"
+   * 的绕过。copyFile 前用户原文件绝不被写。sha256 流式计算，hex 前 8 位进句柄。
    */
   async persistArchives(sessionId: string, archives: SessionArchivePayload[]): Promise<{ refs: SessionArchiveRef[] } | { error: string }> {
     if (!this.persistence?.saveArchive) return { error: 'Archive attachments are unavailable (persistence missing)' }
@@ -7345,6 +7347,10 @@ export class RuntimeSessionManager {
           // realpath 解符号链接后核 regular file——对链接本身 stat 会跟到目录
           // 也放行 copyFile 一个目录的假象（copyFile 会失败，但错误文案不可读）。
           const srcPath = await realpath(archive.path)
+          // 私密文件策略查解析后的真实目标：线缆层只看得到用户给的路径字面量，
+          // 形如 {name:'backup.zip', path:'/tmp/clean-link'} → symlink → ~/.env
+          // 的绕过必须在这里拦。
+          if (isPrivateContextPath(srcPath)) return { error: `${name}: archive path must not be a private/secret file` }
           const st = await stat(srcPath)
           if (!st.isFile()) return { error: `${name}: not a regular file` }
           if (st.size > MAX_ARCHIVE_BYTES) {
