@@ -6,6 +6,7 @@
  * prefix cache.
  */
 import type { ProjectConstellation, Milestone, MilestoneVerification } from './schema.js'
+import { stripTerminalEscapes } from '../utils/safe-path.js'
 
 const VERIFY_GLYPH: Record<MilestoneVerification, string> = {
   verified: '✓',
@@ -44,7 +45,13 @@ export function formatMilestoneLine(m: Milestone, now = Date.now()): string {
   const type = TYPE_GLYPH[m.type] ?? '●'
   const verify = VERIFY_GLYPH[m.verificationStatus] ?? '·'
   const files = m.filesChanged.length > 0 ? ` (${m.filesChanged.length}f)` : ''
-  return `${type} ${verify} ${m.summary}${files} — ${markLabel(m)}, ${relativeTime(m.timestamp, now)}`
+  const line = `${type} ${verify} ${m.summary}${files} — ${markLabel(m)}, ${relativeTime(m.timestamp, now)}`
+  // Milestone fields come from the git-tracked .rivet/constellation.json, which a
+  // hostile repo can pre-seed. This line reaches the Starmap overlay verbatim
+  // (renderStarmap → overlay-engine stdout.write) without enforceTextContract,
+  // so strip terminal escapes here — stripTerminalEscapes covers ANSI/C0, the
+  // C1 range (U+0080–U+009F) is closed locally since it passes that guard.
+  return stripTerminalEscapes(line).replace(/[\u0080-\u009F]/g, ' ')
 }
 
 /** Render the full constellation view: skeleton + recent milestones. */
