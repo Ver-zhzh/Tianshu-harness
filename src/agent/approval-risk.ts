@@ -606,7 +606,13 @@ export function assessToolRisk(
     // 凭据/密钥文件 → high，auto-safe 也要走审批。聚合形态（. / -A / --all）静态
     // 无法核验暂存文件 → 哨兵项，medium + 建议改用 git 工具（自带敏感文件筛查）。
     // 检测器不抛——不可解析命令只是漏报，不会崩。
-    const gitAddHits = detectSensitiveGitAdd(cmd)
+    // 双视图并检（与 DANGEROUS/INJECTION 清单同口径）：只测原始视图时，
+    // `git${IFS}add` / `g\it add` / `git "a"dd` 这类归一化可消除的混淆会把
+    // high 降级为 medium——沙箱开启的 auto-safe/manual 档下凭据文件被静默暂存。
+    const gitAddHits = [
+      ...detectSensitiveGitAdd(cmd),
+      ...detectSensitiveGitAdd(normalizeBashCommand(cmd)),
+    ]
     if (gitAddHits.some(h => h !== AGGREGATE_ADD_MARKER)) {
       reasons.push('git add stages credential/key files — prompt hard-gate')
       level = 'high'
