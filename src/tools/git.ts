@@ -1,6 +1,7 @@
 import { spawnGit } from './spawn-git.js'
 import { repositoryCapability, NonRepositoryError } from '../agent/repository-capability.js'
 import { readFile as fsReadFile, stat as fsStat } from 'node:fs/promises'
+import { lstatSync } from 'node:fs'
 import { dirname, isAbsolute, resolve } from 'node:path'
 import type { Tool, ToolCallParams } from './types.js'
 import { relativePosix, toPosixPath } from '../path-format.js'
@@ -407,10 +408,20 @@ async function backfillUntrackedAdditions(cwd: string, files: WorkingTreeFile[])
       .map(async (f) => {
         const rel = normalizeProjectRelativePath(cwd, f.path)
         if (!rel) return
+        const abs = resolve(cwd, rel)
+        // 硬链接门禁（见 assertNotHardlink）：行数回填会 open() 跟随硬链接，
+        // 把工作区外文件读进内存计数——既是越界读取也是行数预言机。跳过，
+        // badge 留 0，与不可读文件同语义。
         try {
-          const stat = await fsStat(resolve(cwd, rel))
+          const lst = lstatSync(abs)
+          if (lst.isFile() && lst.nlink > 1) return
+        } catch {
+          // 不存在——交由下文 fsStat 的 catch 保持原语义
+        }
+        try {
+          const stat = await fsStat(abs)
           if (!stat.isFile() || stat.size > UNTRACKED_COUNT_MAX_BYTES) return
-          const content = await fsReadFile(resolve(cwd, rel), 'utf8')
+          const content = await fsReadFile(abs, 'utf8')
           if (content.includes('\u0000')) return // binary — leave badge at 0
           if (content.length === 0) return
           // Count lines like git: a trailing newline doesn't add an empty line.
@@ -480,6 +491,30 @@ function assertOutsidePathReadable(filePath: string): void {
 }
 
 /**
+ * Hardlink gate — fail-closed.
+ *
+ * #491 在 path-validate.ts 给文件工具加了 nlink>1 门禁，但 git.ts 的 diff
+ * 读取走独立路径（normalizeProjectRelativePath + assertOutsidePathReadable），
+ * 同样会被工作区内硬链接带到工作区外/敏感文件：`ln ~/.ssh/id_rsa proj/notes.txt`
+ * 后，lstat 看到的是普通文件、realpath 不越界、文件名门禁不触发，而 git 的
+ * diff 读取（`diff <base> --` 与 `diff --no-index`）用 open() 跟随硬链接——
+ * 内容照样被读出，经 GET /git/diff 等路由返回。2026-10-16 经 live PoC 验证：
+ * getFileDiff(repo, 'notes.txt') 把链接目标全文当 additions 返回。
+ * 与 #491 同口径：目录不能被硬链接，只查文件。
+ */
+function assertNotHardlink(absPath: string, displayPath: string): void {
+  let st
+  try {
+    st = lstatSync(absPath)
+  } catch {
+    return // 不存在——git 会自己报错，保持原有降级语义
+  }
+  if (st.isFile() && st.nlink > 1) {
+    throw new GitPathError(`无效文件路径：${displayPath}（硬链接，可能指向工作区外或敏感文件）`)
+  }
+}
+
+/**
  * Whole-file-as-addition rendering of one path via `--no-index` against the
  * platform null device. Used for an untracked file inside cwd, and for any file
  * outside it (which has no repository baseline at all). `git diff --no-index`
@@ -515,8 +550,12 @@ export async function getFileDiff(cwd: string, path: string, baseRef = 'HEAD'): 
     // cwd is a traversal shape and stays rejected.
     if (!isAbsolute(path)) throw new GitPathError(`无效文件路径：${path}`)
     assertOutsidePathReadable(path)
+    assertNotHardlink(resolve(path), path)
     return noIndexDiff(cwd, path)
   }
+  // 硬链接门禁（见 assertNotHardlink）：必须在第一次 git 读取之前，
+  // `git diff <base> --` 同样会 open() 跟随硬链接读出目标内容。
+  assertNotHardlink(resolve(cwd, rel), path)
   const base = safeBaseRef(baseRef)
   // Tracked changes (modified/deleted/staged) diff cleanly against the base.
   const tracked = await runGitSafe(['diff', base, '--', rel], cwd)

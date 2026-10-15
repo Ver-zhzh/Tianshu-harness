@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, linkSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execSync } from 'node:child_process'
@@ -330,6 +330,43 @@ describe('getWorkingTreeFiles / getFileDiff (desktop changes tab)', () => {
     assert.ok(diff.includes('+base changed'), 'new content should appear as addition')
   })
 
+  // 硬链接门禁（#491 在 path-validate.ts 的门禁未覆盖 git.ts 的独立读取路径）：
+  // 工作区内的硬链接可指向任意 inode（`ln ~/.ssh/id_rsa proj/notes.txt`），
+  // lstat 是普通文件、realpath 不越界、文件名门禁不触发，而 git diff 的读取
+  // 用 open() 跟随硬链接——未修复前 getFileDiff 会把目标全文当 additions 返回。
+  it('refuses a hardlink inside cwd pointing outside it (fail-closed)', async () => {
+    const outside = mkdtempSync(join(tmpdir(), 'rivet-git-hl-out-'))
+    try {
+      const target = join(outside, 'id_rsa_mock')
+      writeFileSync(target, 'POC-SYNTHETIC-SECRET\n')
+      linkSync(target, join(TMP2, 'notes.txt'))
+      await assert.rejects(() => getFileDiff(TMP2, 'notes.txt'), /无效文件路径/)
+      await assert.rejects(() => getFileDiff(TMP2, 'notes.txt', 'HEAD~1'), /无效文件路径/)
+    } finally {
+      rmSync(outside, { recursive: true, force: true })
+    }
+  })
+
+  it('skips addition backfill for a hardlink (no out-of-workspace read)', async () => {
+    const outside = mkdtempSync(join(tmpdir(), 'rivet-git-hl-out2-'))
+    try {
+      const target = join(outside, 'data.txt')
+      writeFileSync(target, 'a\nb\nc\nd\ne\n')
+      linkSync(target, join(TMP2, 'linked.txt'))
+      const { files } = await getWorkingTreeFiles(TMP2)
+      const linked = files.find((f) => f.path === 'linked.txt')
+      assert.ok(linked, 'hardlink should still be listed')
+      assert.equal(linked!.additions, 0, 'backfill must not read through the hardlink')
+    } finally {
+      rmSync(outside, { recursive: true, force: true })
+    }
+  })
+
+  it('still diffs a normal new file after the hardlink gate', async () => {
+    writeFileSync(join(TMP2, 'ok.txt'), 'fine\n')
+    assert.ok((await getFileDiff(TMP2, 'ok.txt')).includes('+fine'))
+  })
+
   it('returns notARepo gracefully outside a git repo', async () => {
     // Must live outside the project repo, else git finds the parent repo.
     const nonRepo = mkdtempSync(join(tmpdir(), 'git-nonrepo-'))
@@ -534,6 +571,17 @@ describe('getFileDiff / getFileAtBase outside the session cwd (#358)', () => {
     writeFileSync(outside, '++ not a header\n')
     const diff = await getFileDiff(INSIDE, outside)
     assert.ok(diff.includes('+++ not a header'), `content line mangled into a header:\n${diff}`)
+  })
+
+  // 工作区外分支同样有独立读取路径（assertOutsidePathReadable 是纯文件名/
+  // 路径字面判断）：staging 区里一个名字无害的硬链接指向敏感文件，
+  // resolve() 不解引用，文件名门禁不触发——git diff --no-index 会跟随读出内容。
+  it('refuses a hardlink outside cwd even when its own name is innocuous', async () => {
+    const target = join(OUTSIDE, 'id_rsa_mock')
+    writeFileSync(target, 'POC-SYNTHETIC-SECRET\n')
+    const link = join(OUTSIDE, 'staging-notes.txt')
+    linkSync(target, link)
+    await assert.rejects(() => getFileDiff(INSIDE, link), /无效文件路径/)
   })
 })
 
