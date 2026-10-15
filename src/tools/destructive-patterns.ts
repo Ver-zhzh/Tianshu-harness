@@ -40,7 +40,10 @@ const CMD_START = String.raw`(?:^|[\s;&|(])`
  * 匹配的真实命令样本(禁止的行为):
  *   `git stash`(非 pop/list/show/apply/drop)
  *   `git reset --hard` / `git reset --mixed`
- *   `git checkout -- .`
+ *   `git checkout -- .` / `git checkout --.`(pathspec 分隔符形态)
+ *   `git checkout -f .` / `git checkout -qf.` / `git checkout --force.`
+ *     (强制旗标形态:-f / --force / 组合短旗标如 -qf——同样用 index/HEAD
+ *      覆盖工作区、丢弃本地改动,与 `checkout --` 语义等价)
  *   `git restore .`
  *   `git clean -fd`
  * 以上任意形态前置全局参数(`git -C <dir> reset --hard` / `git --no-pager stash`)同样命中。
@@ -53,5 +56,5 @@ export const GIT_CLEAR_RE = new RegExp(
   CMD_START +
     String.raw`git` +
     GIT_GLOBAL_OPTS_SRC +
-    String.raw`\s+(?:stash(?!\s+(?:pop|list|show|apply|drop|branch))|reset\s+(?:--hard|--mixed)|checkout\s+--|restore\s+\S|clean\s+-[a-z]*f)`,
+    String.raw`\s+(?:stash(?!\s+(?:pop|list|show|apply|drop|branch))|reset\s+(?:--hard|--mixed)|checkout\s+(?:--|-[a-zA-Z]*f)|restore\s+\S|clean\s+-[a-z]*f)`,
 )

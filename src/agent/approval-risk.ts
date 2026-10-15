@@ -154,7 +154,11 @@ export const DANGEROUS_BASH_PATTERNS: ReadonlyArray<Readonly<RegExp>> = [
   // git clean 强制旗标位置任意：-fd / -fdx / -xdf / 分开写 -d -f / --force。旧式要求 f 为组合旗标
   // 末字母（-[a-zA-Z]*f\b），最常见的 `git clean -fd`、`git clean -fdx` 全部漏判。
   /\bgit\s+clean\b[^\n;&|]*\s(?:-[a-zA-Z]*f|--force\b)/,
-  /\bgit\s+checkout\s+--(?:\s|$)/,      // discard working-tree changes (panic-chain 事故: checkout -- 不可逆销毁)
+  // discard working-tree changes. 强制旗标形态(-f / --force / 组合短旗标如 -qf)
+  // 与 `checkout --`(panic-chain 事故)语义等价:同样用 index/HEAD 覆盖工作区、
+  // 丢弃本地改动。双视图(testBoth)下均需命中——归一化不改写子命令参数,故这里
+  // 直接匹配命令文本,不依赖视图差异。
+  /\bgit\s+checkout\s+(?:--|-[a-zA-Z]*f)/,
   /\bgit\s+restore\b/,                  // discard working-tree / staged changes
   /\bgit\s+stash\b(?!(?:\s+(?:pop|list|show|apply|drop|branch)))/,  // git stash without safe subcommand = destructive clear
   /\bkillall\b/,

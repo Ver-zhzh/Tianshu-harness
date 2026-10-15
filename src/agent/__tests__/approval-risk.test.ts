@@ -1113,6 +1113,12 @@ describe('git 全局参数不绕过判定（收编公开仓 PR #410）', () => {
     'git --git-dir=.git --work-tree=. checkout -- .',
     'git --git-dir .git stash',
     'git -C a -C b reset --hard',
+    // 强制旗标形态与 checkout -- 语义等价（同样用 index/HEAD 覆盖工作区、
+    // 丢弃本地改动），必须同门禁
+    'git checkout -f .',
+    'git checkout --force .',
+    'git checkout -qf .',
+    'git -C repo checkout -f .',
     // 值型短旗标紧贴形态（git 同样合法）
     'git -C/tmp reset --hard',
     'git -cfoo.bar=baz clean -fd',
@@ -1142,8 +1148,15 @@ describe('git 全局参数不绕过判定（收编公开仓 PR #410）', () => {
     })
   }
 
-  it('归一化只剥全局参数，不动子命令参数', () => {
-    assert.equal(normalizeBashCommand('git -C repo log --oneline -5'), 'git log --oneline -5')
+  it('checkout 强制旗标扩展不误伤普通切分支/建分支', () => {
+    // -f/--force 扩展只认含 f 的旗标簇；-b/裸分支名不得进 DANGEROUS 清单
+    //（注：assessToolRisk 对 checkout 切分支本就评 medium，此处只锁审批门误报）
+    for (const cmd of ['git checkout main', 'git checkout -b newbranch', 'git -C repo checkout main']) {
+      assert.equal(matchesDangerousBash(cmd), false, `不应误报：${cmd}`)
+    }
+  })
+
+  it('归一化只剥全局参数，不动子命令参数', () => {    assert.equal(normalizeBashCommand('git -C repo log --oneline -5'), 'git log --oneline -5')
     assert.equal(normalizeBashCommand('git -C/tmp reset --hard'), 'git reset --hard')
     assert.equal(normalizeBashCommand('git -C "my repo" stash'), 'git stash')
   })

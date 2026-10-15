@@ -66,6 +66,24 @@ describe('destructive-gate 决策矩阵', () => {
     assert.equal(gate.evaluate('bash', { command: 'git checkout -- .' }).block, false)
   })
 
+  // 强制旗标形态与 `checkout --` 语义等价——同样用 index/HEAD 覆盖工作区、
+  // 丢弃本地改动。旧判据只认 pathspec 分隔符形态,`git checkout -f.` 在恐慌窗口
+  // 静默通过;其语义孪生 `git checkout --.` 却被拦截。
+  test('checkout 强制旗标形态同门禁(-f/-qf/--force)', () => {
+    for (const cmd of ['git checkout -f.', 'git checkout --force.', 'git checkout -qf.']) {
+      const gate = createDestructiveGateState()
+      gate.noteVerification('failed')
+      assert.equal(gate.evaluate('bash', { command: cmd }).block, true, `应拦截: ${cmd}`)
+    }
+  })
+
+  test('无 -f/-- 的 checkout 不误伤(仍有其他手段不改工作区)', () => {
+    const gate = createDestructiveGateState()
+    gate.noteVerification('failed')
+    assert.equal(gate.evaluate('bash', { command: 'git checkout main' }).block, false)
+    assert.equal(gate.evaluate('bash', { command: 'git checkout -b newbranch' }).block, false)
+  })
+
   test('窗口按实际执行的工具计数过期(默认 3)', () => {
     const gate = createDestructiveGateState()
     gate.noteVerification('failed')
