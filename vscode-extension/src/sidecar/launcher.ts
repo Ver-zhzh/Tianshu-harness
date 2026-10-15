@@ -19,6 +19,7 @@
  */
 import { spawn, type ChildProcess } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
+import * as fs from 'node:fs'
 import { createServer } from 'node:net'
 import * as os from 'node:os'
 import { join } from 'node:path'
@@ -191,6 +192,44 @@ export async function launchSidecar(opts: LauncherOptions): Promise<SidecarHandl
   const desktopDir = opts.desktopDir?.trim()
   const env: NodeJS.ProcessEnv = { ...process.env, RIVET_SERVER_TOKEN: token }
   if (desktopDir) env.RIVET_DESKTOP_DIR = desktopDir
+
+  // 规范化 RIVET_HOME 为真实物理路径（避免 Windows Junction / ReparsePoint 触发 symlink 拦截）
+  let targetRivetHome = process.env.RIVET_HOME?.trim()
+  if (!targetRivetHome && typeof fs?.existsSync === 'function') {
+    const userHome = typeof os.homedir === 'function' ? os.homedir() : process.env.USERPROFILE || process.env.HOME || ''
+    const candidateUser = userHome ? join(userHome, '.rivet') : ''
+    const candidateAppData = join(process.env.LOCALAPPDATA || (userHome ? join(userHome, 'AppData', 'Local') : ''), '.rivet')
+    if (candidateUser && fs.existsSync(candidateUser)) targetRivetHome = candidateUser
+    else if (candidateAppData && fs.existsSync(candidateAppData)) targetRivetHome = candidateAppData
+  }
+  if (targetRivetHome && typeof fs?.existsSync === 'function' && fs.existsSync(targetRivetHome)) {
+    try {
+      targetRivetHome = fs.realpathSync.native(targetRivetHome)
+    } catch {}
+    env.RIVET_HOME = targetRivetHome
+  }
+
+  // 确保 DeepSeek API Key 透传进 sidecar
+  if (!env.DEEPSEEK_API_KEY) {
+    const directKey = process.env.DEEPSEEK_API_KEY
+    if (directKey) {
+      env.DEEPSEEK_API_KEY = directKey
+    } else if (typeof fs?.existsSync === 'function') {
+      try {
+        const userHome = typeof os.homedir === 'function' ? os.homedir() : process.env.USERPROFILE || process.env.HOME || ''
+        const homeForSecrets = env.RIVET_HOME || targetRivetHome || (userHome ? join(userHome, '.rivet') : '')
+        if (homeForSecrets) {
+          const secretsFile = join(homeForSecrets, 'secrets.json')
+          if (fs.existsSync(secretsFile)) {
+            const parsed = JSON.parse(fs.readFileSync(secretsFile, 'utf8'))
+            const dsKey = parsed?.keys?.deepseek
+            if (dsKey) env.DEEPSEEK_API_KEY = dsKey
+          }
+        }
+      } catch {}
+    }
+  }
+
   // MCP 审批门（#443 审查修复）：sidecar stdout 是 pipe（非 TTY），#443 后无 UI
   // 缺省 fail-closed——不注入则用户配置的 MCP 被拦且 IDE 内无审批 UI 恢复路径。
   // IDE 是有人值守环境（用户看得见并自己配置 MCP），显式 open 与 desktop
