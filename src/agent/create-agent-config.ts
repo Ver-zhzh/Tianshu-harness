@@ -41,6 +41,7 @@ export interface ModelSpec {
 }
 
 export interface AgentConfigInput {
+  network?: Config['network']
   apiKey: string
   model: ModelSpec
   cwd: string
@@ -119,7 +120,7 @@ export interface MainAgentConfigInputParams {
   apiKey: string
   model: ModelSpec
   cwd: string
-  config: Pick<Config, 'agent' | 'compact' | 'runtime'>
+  config: Pick<Config, 'agent' | 'compact' | 'runtime'> & Partial<Pick<Config, 'network'>>
   sessionId: string
   toolDefinitions: ToolDefinition[]
   provider: ProviderConfig
@@ -148,6 +149,7 @@ export function createMainAgentConfigInput(params: MainAgentConfigInputParams): 
     model: params.model,
     cwd: params.cwd,
     compact: params.config.compact,
+    network: params.config.network,
     sessionId: params.sessionId,
     toolDefinitions: params.toolDefinitions,
     provider: params.provider,
@@ -217,6 +219,7 @@ export function createAgentConfig(input: AgentConfigInput): Pick<
   const retryBudgetHolder: { current?: import('../api/retry-budget.js').RetryBudget } = {}
   const credentialOwner = snapshotSessionBinding(provider, model.id, apiKey)
   const primaryClient = createProviderClient(provider, capabilities, {
+    network: input.network,
     apiKey,
     credentialScope: `${provider.name}:${credentialOwner.keyId ?? provider.keyRef ?? provider.apiKeyEnv ?? provider.auth?.type ?? 'default'}`,
     model: model.id,
@@ -317,7 +320,7 @@ export function createAgentConfig(input: AgentConfigInput): Pick<
       ...(modelPricing ? { pricing: modelPricing } : {}),
     }),
     primaryClient: primaryClient,
-    budgetSummaryClient: createReportClientFactory(provider, capabilities, { apiKey, model: model.id, auth: input.auth, sessionId: input.sessionId }),
+    budgetSummaryClient: createReportClientFactory(provider, capabilities, { apiKey, model: model.id, auth: input.auth, sessionId: input.sessionId, network: input.network }),
     compactClient,
     sessionId: input.sessionId,
     approvalMode: input.approvalMode,
@@ -482,6 +485,7 @@ function buildFallbackChain(
           )
         }
         return createProviderClient(fp, fCaps, {
+          network: input.network,
           apiKey: fApiKey,
           model: fModel.id,
           maxTokens: fModel.maxTokens,
@@ -544,7 +548,7 @@ function buildCompactClient(
   let auth: AuthProvider | undefined
   try {
     if (prov.auth?.type === 'oauth') {
-      auth = prov.name === input.provider.name ? input.auth : createAuthProvider(prov.auth, process.env)
+      auth = prov.name === input.provider.name ? input.auth : createAuthProvider(prov.auth, process.env, undefined, { ...input.network, proxy: prov.proxy ?? input.network?.proxy })
       if (!auth?.isAuthenticated()) return undefined
     } else {
       apiKey = resolveApiKey(prov)
@@ -561,6 +565,7 @@ function buildCompactClient(
   // mid-sentence — 16K chars is ~10K tokens for Chinese, far above a 4K cap.
   const maxTokens = Math.min(16_384, spec.maxTokens)
   return createProviderClient(prov, caps, {
+    network: input.network,
     apiKey,
     model: spec.id,
     reasoningEffort: spec.reasoningEffort,
@@ -610,7 +615,7 @@ function tryBuildVisionClientFrom(
   let auth: AuthProvider | undefined
   try {
     if (prov.auth?.type === 'oauth') {
-      auth = prov.name === input.provider.name ? input.auth : createAuthProvider(prov.auth, process.env)
+      auth = prov.name === input.provider.name ? input.auth : createAuthProvider(prov.auth, process.env, undefined, { ...input.network, proxy: prov.proxy ?? input.network?.proxy })
       if (!auth?.isAuthenticated()) return { error: `${prov.name} 未完成 OAuth 登录——运行 /login（或 rivet config login ${prov.name}）完成浏览器授权` }
     } else {
       apiKey = resolveApiKey(prov)
@@ -629,6 +634,7 @@ function tryBuildVisionClientFrom(
   const caps = resolveCapabilities(prov.name, prov.capabilities, spec.capabilities)
   const maxTokens = Math.min(requestedMaxTokens, spec.maxTokens)
   const client = createProviderClient(prov, caps, {
+    network: input.network,
     apiKey,
     model: spec.id,
     // 桥是工具化描述调用，中等强度推理是纯粹的预算浪费，且在 OCR 结构化 prompt

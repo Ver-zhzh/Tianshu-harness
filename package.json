@@ -59,7 +59,7 @@
     "test:unit": "node --import tsx scripts/run-node-tests.ts --unit",
     "test:integration": "node --import tsx scripts/run-node-tests.ts --integration",
     "test:fast": "node --import tsx scripts/run-node-tests.ts --exclude-tui",
-    "test:desktop": "node --import tsx desktop/scripts/run-tests.ts 'src/**/__tests__/*.test.ts' 'src/**/__tests__/*.test.tsx' 'scripts/__tests__/*.test.ts'",
+    "test:desktop": "node --import tsx desktop/scripts/run-tests.ts \"src/**/__tests__/*.test.ts\" \"src/**/__tests__/*.test.tsx\" \"scripts/__tests__/*.test.ts\"",
     "test:incremental": "node --import tsx scripts/test-incremental.ts",
     "structure:check": "node --import tsx --test-timeout=120000 --test src/__tests__/architecture-guards.test.ts",
     "contributors:check": "node --import tsx scripts/contributors.ts --check",

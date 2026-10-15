@@ -16,9 +16,11 @@ import { contractModels } from '../config/contract-models.js'
 import type { AuthProvider } from '../auth/types.js'
 import { PROCESS_SESSION_ID } from './caller-identity.js'
 import { withExecutionContinuity } from './execution-continuity.js'
+import type { ProviderNetwork } from './provider-network.js'
 
 /** Runtime parameters that vary per-model or per-call, not stored in config */
 export interface RuntimeParams {
+  network?: ProviderNetwork
   singleAttempt?: boolean
   credentialScope?: string
   expectedPrincipal?: string
@@ -157,8 +159,9 @@ function createRawProviderClient(
   if (proFactory) return proFactory(provider, capabilities, params)
 
   // Codex OAuth uses the Responses API, not chat/completions
-  if (provider.name === 'codex' && provider.auth?.type === 'oauth') {
+  if (provider.auth?.type === 'oauth' && provider.auth.provider === 'codex') {
     return new CodexClient({
+      network: { ...params.network, proxy: provider.proxy ?? params.network?.proxy },
       sessionId: params.sessionId, providerName: provider.name,
     retryBudget: params.retryBudget,
       baseUrl: provider.baseUrl,

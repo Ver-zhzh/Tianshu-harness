@@ -203,12 +203,13 @@ async function bootAndRunInWorkspace(
     const workerRegistry = filterToolRegistry(registry, presentTools)
 
     // 4) client/promptEngine 按 runtimeDecision 忠实重建（不重跑路由）。
-    const actual = resolveModelBinding(config.provider.providers, { provider: decision.providerName, model: decision.model, keyId: decision.keyId, baseUrl: decision.baseUrl })
+    const actual = resolveModelBinding(config.provider.providers, { provider: decision.providerName, model: decision.model, keyId: decision.keyId, baseUrl: decision.baseUrl }, config.network)
     const providerForDecision = actual.provider
     const modelSpec = actual.spec
     const capabilities = resolveCapabilities(decision.providerName, providerForDecision.capabilities, modelSpec?.capabilities)
     const blocks = subagentPromptBlocks()
     const client = createProviderClient(providerForDecision, capabilities, {
+      network: config.network,
       singleAttempt: true,
       credentialScope: `${decision.providerName}:${decision.keyId ?? 'default'}`,
       expectedPrincipal: decision.expectedPrincipal,

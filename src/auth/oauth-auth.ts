@@ -4,11 +4,14 @@ import { join } from 'node:path'
 import type { AuthProvider } from './types.js'
 import { generatePKCE, buildAuthorizeUrl } from './oauth.js'
 import { TokenStore, type TokenData } from './token-store.js'
-import { readCodexCliToken, isCodexCliImportSkipped, clearCodexCliImportSkip } from './codex-cli-auth.js'
+import { readCodexCliToken, isCodexCliImportSkipped, clearCodexCliImportSkip, codexAccountId } from './codex-cli-auth.js'
 import { shouldRefresh } from './refresh.js'
 import { rivetHome } from '../config/paths.js'
+import { providerDispatcher, type ProviderNetwork } from '../api/provider-network.js'
+import { fetch as undiciFetch } from 'undici'
 
 export interface OAuthConfig {
+  network?: ProviderNetwork
   clientId: string
   tokenEndpoint: string
   authorizeBase?: string
@@ -95,7 +98,7 @@ export class OAuthAuth implements AuthProvider {
 
   isAuthenticated(): boolean {
     const token = this.loadWithImport()
-    return token !== null && token.expiresAt > Date.now()
+    return token !== null && (token.expiresAt > Date.now() || !!token.refreshToken?.trim())
   }
 
   async getHeaders(): Promise<Record<string, string>> {
@@ -111,7 +114,8 @@ export class OAuthAuth implements AuthProvider {
       token = await this.refreshOnce(token)
     }
 
-    return { 'Authorization': `Bearer ${token.accessToken}` }
+    const accountId = token.accountId ?? codexAccountId(token.accessToken)
+    return { 'Authorization': `Bearer ${token.accessToken}`, ...(accountId ? { 'ChatGPT-Account-ID': accountId } : {}) }
   }
 
   async authenticate(): Promise<void> {
@@ -222,8 +226,7 @@ export class OAuthAuth implements AuthProvider {
   }
 
   private async exchangeCode(code: string, codeVerifier: string, redirectUri: string): Promise<TokenData> {
-    const fetchFn = this.config.fetch ?? globalThis.fetch
-    const resp = await fetchFn(this.config.tokenEndpoint, {
+    const resp = await this.fetch(this.config.tokenEndpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
@@ -254,6 +257,7 @@ export class OAuthAuth implements AuthProvider {
 
     return {
       accessToken: data.access_token,
+      accountId: codexAccountId(data.id_token, data.access_token),
       refreshToken: typeof data.refresh_token === 'string' ? data.refresh_token : undefined,
       expiresAt: Date.now() + ((data.expires_in as number) ?? 3600) * 1000,
     }
@@ -284,8 +288,7 @@ export class OAuthAuth implements AuthProvider {
       )
     }
 
-    const fetchFn = this.config.fetch ?? globalThis.fetch
-    const resp = await fetchFn(this.config.tokenEndpoint, {
+    const resp = await this.fetch(this.config.tokenEndpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
@@ -312,12 +315,20 @@ export class OAuthAuth implements AuthProvider {
 
     const refreshed: TokenData = {
       accessToken: data.access_token,
+      accountId: token.accountId ?? codexAccountId(data.id_token, data.access_token, token.accessToken),
       refreshToken: typeof data.refresh_token === 'string' ? data.refresh_token : token.refreshToken,
       expiresAt: Date.now() + ((data.expires_in as number) ?? 3600) * 1000,
     }
 
     this.store.save(refreshed)
     return refreshed
+  }
+
+  private fetch(url: string, init: RequestInit): Promise<Response> {
+    if (this.config.fetch) return this.config.fetch(url, init)
+    const dispatcher = providerDispatcher(url, this.config.network)
+    if (!dispatcher) return fetch(url, init)
+    return undiciFetch(url, { ...init, dispatcher } as Parameters<typeof undiciFetch>[1]) as unknown as Promise<Response>
   }
 
   private startAutoRefresh(): void {

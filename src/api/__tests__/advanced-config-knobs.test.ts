@@ -12,6 +12,8 @@
 import { describe, it, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { ProxyAgent } from 'undici'
+import { createServer } from 'node:http'
+import { once } from 'node:events'
 import { OpenAIClient, type OpenAIClientConfig } from '../openai-client.js'
 import { AnthropicClient } from '../anthropic-client.js'
 import type { OaiChatRequest } from '../oai-types.js'
@@ -162,13 +164,25 @@ describe('advanced.requestTimeoutMs consumption', () => {
 })
 
 describe('advanced.proxy consumption', () => {
-  it('materializes a ProxyAgent and passes it as the fetch dispatcher', async () => {
-    const m = mockFetch(() => sseResponse(doneStream()))
+  it('sends the request through the configured proxy using its matching transport', async () => {
+    let destination = ''
+    const proxy = createServer((request, response) => {
+      destination = request.url ?? ''
+      response.writeHead(200, { 'content-type': 'text/event-stream' })
+      response.end('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')
+    })
+    proxy.listen(0, '127.0.0.1')
+    await once(proxy, 'listening')
     try {
-      const client = new OpenAIClient({ ...BASE, model: 'm', proxy: 'http://127.0.0.1:7890' })
+      const port = (proxy.address() as import('node:net').AddressInfo).port
+      const client = new OpenAIClient({ ...BASE, baseUrl: 'http://fixture.invalid/v1', model: 'm',
+        maxRetries: 0, proxy: `http://127.0.0.1:${port}` })
       await client.stream(REQUEST, NOOP)
-      assert.ok(m.inits[0]!.dispatcher instanceof ProxyAgent)
-    } finally { m.restore() }
+      assert.equal(destination, 'http://fixture.invalid/v1/chat/completions')
+    } finally {
+      proxy.closeAllConnections()
+      await new Promise<void>(resolve => proxy.close(() => resolve()))
+    }
   })
 
   it('no proxy → no dispatcher (default fetch routing)', async () => {

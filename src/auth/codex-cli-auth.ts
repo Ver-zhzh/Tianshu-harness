@@ -19,7 +19,22 @@ import type { TokenData } from './token-store.js'
 /** 官方 CLI 的登录态文件路径（所有平台都在用户主目录；可用 RIVET_CODEX_CLI_AUTH 覆盖——测试与自定义安装用）。 */
 export function codexCliAuthPath(env: Record<string, string | undefined> = process.env): string {
   const override = env.RIVET_CODEX_CLI_AUTH
-  return override && override.trim() ? override : join(homedir(), '.codex', 'auth.json')
+  return override && override.trim() ? override : join(env.CODEX_HOME?.trim() || join(homedir(), '.codex'), 'auth.json')
+}
+
+/** Routing metadata only; the server still verifies the bearer credential. */
+export function codexAccountId(...credentials: unknown[]): string | undefined {
+  for (const credential of credentials) {
+    if (typeof credential !== 'string') continue
+    try {
+      const part = credential.split('.')[1]
+      if (!part) continue
+      const claims = JSON.parse(Buffer.from(part, 'base64url').toString('utf8'))
+      const account = claims?.['https://api.openai.com/auth']?.chatgpt_account_id
+      if (typeof account === 'string' && account.trim()) return account
+    } catch { /* Opaque credentials carry no locally readable routing metadata. */ }
+  }
+  return undefined
 }
 
 /** 从 JWT payload 解 exp（秒 → ms）；不是三段 JWT 或解不出 exp 返回 null。 */

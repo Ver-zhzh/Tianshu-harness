@@ -14,6 +14,7 @@ import { withExecutionContinuity, prepareExecutionSend } from '../../api/executi
 import type { OaiChatRequest, OaiMessage } from '../../api/oai-types.js'
 import type { StreamClient, StreamCallbacks } from '../../api/stream-client.js'
 import * as loopFactory from '../../agent/loop-factory.js'
+import { buildReplacementAgent } from '../../agent/runtime-rebuild.js'
 
 function productionFacade(agent: AgentLoop, rebuild: (model: string) => AgentLoop, unconfigured: boolean): ManagedAgent {
   const source = readFileSync(new URL('../serve-agent.ts', import.meta.url), 'utf8')
@@ -33,7 +34,7 @@ function productionFacade(agent: AgentLoop, rebuild: (model: string) => AgentLoo
   }).outputText
   const evaluate = new Function('agent', 'spec', 'stores', 'ctx', 'reload', 'shared', 'sessionId', 'isModelSpecUsable',
     'rewindAgentSession', 'waitForAgentRewind', 'resolveModelSpecWithReload', 'assembleAgentLoop',
-    'cwd', 'registry', 'allowedTools', code)
+    'cwd', 'registry', 'allowedTools', 'buildReplacementAgent', code)
   const resolve = (_context: unknown, model: string) => ({ apiKey: 'fixture', provider: { name: 'fixture' }, model: { id: model } })
   return evaluate(agent, { ...resolve({}, 'fixture'), apiKey: unconfigured ? '' : 'fixture' },
     { historyRestore: { restored: agent.session.getMessages().length }, refs: { coordinator: null },
@@ -41,7 +42,7 @@ function productionFacade(agent: AgentLoop, rebuild: (model: string) => AgentLoo
     {}, () => ({}), undefined, 'rewind-fixture', isModelSpecUsable,
     Reflect.get(loopFactory, 'rewindAgentSession'), Reflect.get(loopFactory, 'waitForAgentRewind'), resolve,
     (_context: unknown, _cwd: string, _sessionId: string, _stores: unknown, spec: { model: { id: string } }) => rebuild(spec.model.id),
-    '/controlled-fixture', undefined, undefined) as ManagedAgent
+    '/controlled-fixture', undefined, undefined, buildReplacementAgent) as ManagedAgent
 }
 
 function syntheticHistory(engine: PromptEngine): OaiMessage[] {
@@ -353,10 +354,10 @@ test('automatic model-spec healing cannot bypass an in-flight explicit rewind', 
   await new Promise<void>(resolve => setImmediate(resolve))
   assert.equal(setup.rebuilt.length, 1)
   assert.equal(setup.requests.length, 1)
-  assert.equal(setup.order.length, 0)
+  assert.deepEqual(setup.order, ['shutdown-cleanup'])
   setup.writeGate.resolve()
   await run
-  assert.deepEqual(setup.order, ['history-committed', 'rebuilt-client:explicit_user_rewind', 'rebuilt-engine-authorized'])
+  assert.deepEqual(setup.order, ['shutdown-cleanup', 'history-committed', 'rebuilt-client:explicit_user_rewind', 'rebuilt-engine-authorized'])
   assert.equal(setup.requests[1]!.messages.length, 60)
   await setup.facade.flushPersistence!()
 })

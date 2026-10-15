@@ -21,6 +21,7 @@
  */
 
 import { fetchCauseDetail } from './error-classifier.js'
+import { fetch as undiciFetch } from 'undici'
 import { beginCallAudit, auditConfigFingerprint, type CallAuditContext } from './call-audit.js'
 import { observeAuditResponse } from './transport-audit.js'
 import { prepareExecutionSend, credentialPrincipal, currentExecutionScope } from './execution-continuity.js'
@@ -85,7 +86,9 @@ export async function fetchWithTimeout(
     // 重定向只剥 Authorization/Cookie——Anthropic 协议的 x-api-key 会原样转发
     // 到重定向目标（凭证泄漏）。显式传 init.redirect 的调用方不受影响。
     const redirect = init.redirect ?? 'error'
-    const response = await fetch(url, { ...init, redirect, signal: combinedSignal, ...(dispatcher ? { dispatcher } : {}) } as RequestInit)
+    // A dispatcher must use its own undici version; Node 24's bundled handler protocol differs.
+    const fetchFn = dispatcher ? undiciFetch as unknown as typeof fetch : fetch
+    const response = await fetchFn(url, { ...init, redirect, signal: combinedSignal, ...(dispatcher ? { dispatcher } : {}) } as RequestInit)
     return audit ? observeAuditResponse(response, context, audit) : response
   } catch (err) {
     audit?.finish({ status: userSignal?.aborted ? 'aborted' : 'failed', errorName: (err as Error).name })

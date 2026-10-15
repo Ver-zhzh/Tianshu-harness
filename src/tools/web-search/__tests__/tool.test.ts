@@ -42,10 +42,10 @@ describe('createWebSearchTool', () => {
     assert.match(out.content, /未找到与「nothing here」相关的搜索结果/)
   })
 
-  it('labels an all-off-topic result set as low-confidence fallback', async () => {
-    // 2026-09 cn.bing.com 故障形态：结构完好但无关/降级的 SERP。用户可见结果是
-    // 「带低相关标注的兜底结果」——结果保留（单后端配置下不至于什么都搜不到），
-    // 标注必须让模型/用户明白不能把它当答案采信。
+  it('discards an all-off-topic result set instead of delivering it (issue #483)', async () => {
+    // 2026-09 cn.bing.com 故障形态：结构完好但无关/降级的 SERP。旧契约把这批
+    // 已判跑题的结果加「低相关」标注后交付，实测弱模型仍采信并据此编造答案——
+    // 泛结果冒充答案比「没搜到」更糟。新契约：弃置正文，只说明降级事实与出路。
     const tool = createWebSearchTool({
       backends: [backend('bing', async () => [
         { title: '西南交通大学研究生院（党委研究生工作部）', url: 'https://gsnews.swjtu.edu.cn/', snippet: '与查询无关。' },
@@ -54,10 +54,12 @@ describe('createWebSearchTool', () => {
     })
     const out = await tool.execute(params({ query: '杭州西湖 门票预约' }))
     assert.equal(out.isError, undefined)
-    assert.match(out.content, /低相关/)
-    assert.match(out.content, /只覆盖了查询中的个别词/)
-    assert.match(out.content, /请勿直接采信/)
-    assert.match(out.content, /西南交通大学/, '兜底结果随标注一并给出')
+    assert.match(out.content, /未找到相关结果/)
+    assert.match(out.content, /与查询无关/)
+    assert.match(out.content, /已弃置/)
+    assert.match(out.content, /bocha/, '出路建议应指向 API key 后端')
+    assert.ok(!out.content.includes('西南交通大学'), '判跑题的结果正文不得交付')
+    assert.ok(!out.content.includes('gsnews.swjtu.edu.cn'), '判跑题的结果 URL 不得交付')
   })
 
   it('keeps a relevant result set unlabelled', async () => {

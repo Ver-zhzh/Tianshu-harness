@@ -3266,7 +3266,9 @@ export class RuntimeSessionManager {
     if (switched) {
       if (session.agent) {
         // Live agent on the wrong model — hot-swap it (emits model_switched).
-        if (!(await this.switchModel(id, target!))) {
+        let changed = false
+        try { changed = await this.switchModel(id, target!) } catch { /* preserve the resume failure result */ }
+        if (!changed) {
           return { ok: false, code: 'model_unavailable', error: `目标模型 ${target} 切换失败——请开新会话继续` }
         }
       } else {
@@ -3671,12 +3673,8 @@ export class RuntimeSessionManager {
     const session = this.sessions.get(id)
     if (!session || session.running) return false
     const agent = await this.ensureAgentAsync(session)
-    let resolved: string | null
-    try {
-      resolved = await agent.switchModel?.(modelId) ?? null
-    } catch {
-      return false
-    }
+    if (session.running || this.sessions.get(id) !== session) return false
+    const resolved = await agent.switchModel?.(modelId) ?? null
     if (!resolved) return false
     // The rebuild produced a fresh AgentLoop — re-bind per-session selections.
     this.applySelections(session)

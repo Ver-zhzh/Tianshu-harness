@@ -185,18 +185,21 @@ describe('跨语言一致性 fixture（JS 侧消费 Rust 侧同一份）', { ski
 
   it('符号链接不参与摘要（不能靠链到 bundle 外绕过）', () => {
     const dir = mkdtempSync(join(tmpdir(), 'rivet-integrity-js-link-'))
+    const outside = mkdtempSync(join(tmpdir(), 'rivet-integrity-outside-'))
     try {
       for (const rel of fixture.expectedIncludedPaths) {
         const abs = join(dir, rel)
         mkdirSync(dirname(abs), { recursive: true })
         writeFileSync(abs, fixture.files[rel] ?? '')
       }
-      symlinkSync('/etc/hosts', join(dir, 'linked.js'))
+      writeFileSync(join(outside, 'outside.js'), 'must not enter the bundle')
+      symlinkSync(outside, join(dir, 'linked.js'), process.platform === 'win32' ? 'junction' : 'dir')
       const { bundleHash, fileCount } = computeBundle(dir, fixture.mode)
       assert.equal(fileCount, fixture.expectedFileCount, '符号链接被算进去了')
       assert.equal(bundleHash, fixture.expectedBundleHash)
     } finally {
       rmSync(dir, { recursive: true, force: true })
+      rmSync(outside, { recursive: true, force: true })
     }
   })
 })

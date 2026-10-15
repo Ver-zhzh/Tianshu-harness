@@ -11,14 +11,7 @@ import { combineSearchFailures } from './errors.js'
 const MAX_RESULTS = 20
 const DEFAULT_TIMEOUT_MS = 15_000
 
-/**
- * 低置信兜底的用户可见标注：结果只覆盖查询中的个别词时（判据见 relevance.ts），
- * 必须让模型/用户明白这批结果不能直接采信——它们多半是搜索后端降级返回的宽泛匹配。
- */
-const LOW_CONFIDENCE_NOTICE =
-  '⚠ 相关性提示：以下结果只覆盖了查询中的个别词，可能不是你要找的内容。请勿直接采信为答案——建议换用更具体的查询词，或与其他来源交叉验证。'
-
-/** 结果渲染（正常路径与低置信兜底共用同一份实现，避免双实现漂移）。 */
+/** 结果渲染（正常路径使用）。 */
 function formatResults(results: readonly SearchResult[]): string {
   return results
     .map((r, i) => {
@@ -119,14 +112,12 @@ export function createWebSearchTool(deps: WebSearchDeps = {}): Tool {
             errorKind: combineSearchFailures(hardErrors.map(e => e.errorKind ?? 'unknown')),
           }
         }
-        // 判跑题的批次降级返回而非静默丢弃：单后端配置下，「后端降级返回泛结果」
-        // 若变成「未找到结果」，用户丢掉的是唯一可得的信息。标注低相关把采信
-        // 判断权交回使用者，同时不让泛结果冒充答案。
+        // 判跑题的批次不交付正文（issue #483）：曾把已判跑题的泛结果加「低相关」
+        // 标注后交付，实测弱模型仍会采信并据此编造答案——泛结果冒充答案比「没搜到」
+        // 更糟。只说明后端降级事实与出路，检索方向由用户/模型换词重来。
         if (offTopicFallback) {
           return {
-            content: `「${query}」的网页搜索结果（经 ${offTopicFallback.backend}，低相关）：\n\n`
-              + `${LOW_CONFIDENCE_NOTICE}\n\n`
-              + formatResults(offTopicFallback.results),
+            content: `「${query}」未找到相关结果：${offTopicFallback.backend} 返回的内容与查询无关（搜索后端降级，只命中了查询中的个别泛词），已弃置。建议换用更具体的查询词重试；若反复出现，可配置 API key 搜索后端（bocha / brave / tavily / serply）。`,
           }
         }
         return { content: `未找到与「${query}」相关的搜索结果` }

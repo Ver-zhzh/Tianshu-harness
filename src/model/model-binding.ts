@@ -2,6 +2,7 @@ import type { ProviderConfig } from '../config/schema.js'
 import { findModelInKey, findModelOwner } from '../config/provider-keys.js'
 import { resolveApiKey, resolveCredentialKey } from '../api/factory.js'
 import { createAuthProvider } from '../auth/registry.js'
+import type { ProviderNetwork } from '../api/provider-network.js'
 
 /** Serializable identity only; credentials never cross the worker protocol. */
 export interface ModelBindingRef {
@@ -19,7 +20,7 @@ export class ModelBindingUnavailable extends Error {
 }
 
 /** Exact lookup, with the same model-owner and credential rules as main sessions. */
-export function resolveModelBinding(providers: Record<string, ProviderConfig>, target: ModelBindingRef) {
+export function resolveModelBinding(providers: Record<string, ProviderConfig>, target: ModelBindingRef, network?: ProviderNetwork) {
   const configured = providers[target.provider]
   if (!configured) throw new ModelBindingUnavailable('provider_deleted')
   const found = target.keyId
@@ -31,7 +32,7 @@ export function resolveModelBinding(providers: Record<string, ProviderConfig>, t
   let auth: ReturnType<typeof createAuthProvider> | undefined
   if (provider.auth?.type === 'oauth') {
     try {
-      auth = createAuthProvider(provider.auth, process.env, provider.apiKey)
+      auth = createAuthProvider(provider.auth, process.env, provider.apiKey, { ...network, proxy: provider.proxy ?? network?.proxy })
       if (!auth.isAuthenticated()) throw new ModelBindingUnavailable('oauth_not_authenticated')
     } catch { throw new ModelBindingUnavailable('oauth_not_authenticated') }
   } else {

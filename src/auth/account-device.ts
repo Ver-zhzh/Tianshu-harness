@@ -22,6 +22,7 @@ export function parseNativeDeviceFingerprint(platform: string, output: string): 
 
 /** Same OS sources and casing as Rust machine-uid; the value is never logged. */
 export function readNativeDeviceFingerprint(): string | undefined {
+  for (let attempt=0;attempt<2;attempt++) {
   try {
     if (process.platform === 'darwin') return parseNativeDeviceFingerprint('darwin',execFileSync('/usr/sbin/ioreg',['-rd1','-c','IOPlatformExpertDevice'],{encoding:'utf8',timeout:2000,stdio:['ignore','pipe','ignore']}))
     if (process.platform === 'win32') return parseNativeDeviceFingerprint('win32',execFileSync('reg.exe',['query','HKLM\\SOFTWARE\\Microsoft\\Cryptography','/v','MachineGuid','/reg:64'],{encoding:'utf8',timeout:2000,windowsHide:true,stdio:['ignore','pipe','ignore']}))
@@ -30,7 +31,11 @@ export function readNativeDeviceFingerprint(): string | undefined {
         try {const id=parseNativeDeviceFingerprint('linux',readFileSync(path,'utf8'));if(id)return id} catch {}
       }
     }
-  } catch { /* share the native persistent fallback below */ }
+  } catch (error) {
+    if (attempt===0 && (error as NodeJS.ErrnoException).code==='ETIMEDOUT') continue
+  }
+  break
+  }
   return undefined
 }
 

@@ -6,6 +6,7 @@ import { skipCodexCliImport } from './codex-cli-auth.js'
 import type { AuthConfig } from '../config/schema.js'
 import { join } from 'node:path'
 import { rivetHome } from '../config/paths.js'
+import type { ProviderNetwork } from '../api/provider-network.js'
 
 const CODEX_OAUTH_CONFIG: OAuthConfig = {
   clientId: 'app_EMoamEEZ73f0CkXaXp7hrann',
@@ -24,6 +25,7 @@ export function createAuthProvider(
   authConfig: AuthConfig | undefined,
   env: Record<string, string | undefined>,
   legacyApiKey?: string,
+  network?: ProviderNetwork,
 ): AuthProvider {
   if (!authConfig || authConfig.type === 'api-key') {
     const keyEnv = authConfig?.type === 'api-key' ? authConfig.keyEnv : undefined
@@ -41,7 +43,7 @@ export function createAuthProvider(
     if (!oauthConfig) {
       throw new Error(`Unknown OAuth provider: ${authConfig.provider}`)
     }
-    return new OAuthAuth(oauthConfig)
+    return new OAuthAuth({ ...oauthConfig, network })
   }
 
   throw new Error(`Unknown auth type: ${(authConfig as { type: string }).type}`)
@@ -52,10 +54,10 @@ export function createAuthProvider(
  * 与 createAuthProvider 的运行时实例分开——登录是一次性用户动作，不进 agent 装配。
  * （背景：authenticate() 曾长期零生产调用，connect-flow 指引的 /login 是幽灵命令。）
  */
-export function createOAuthLoginAuth(provider: string, onUserCode?: (url: string) => void): OAuthAuth {
+export function createOAuthLoginAuth(provider: string, onUserCode?: (url: string) => void, network?: ProviderNetwork): OAuthAuth {
   const base = provider === 'codex' ? CODEX_OAUTH_CONFIG : null
   if (!base) throw new Error(`Unknown OAuth provider: ${provider}`)
-  return new OAuthAuth({ ...base, ...(onUserCode ? { onUserCode } : {}) })
+  return new OAuthAuth({ ...base, network, ...(onUserCode ? { onUserCode } : {}) })
 }
 
 /**

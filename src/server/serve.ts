@@ -137,7 +137,7 @@ export function resolveServeContext(loader: () => Config = loadConfig): ServeCon
   let configured = true
   if (provider.auth?.type === 'oauth') {
     try {
-      auth = createAuthProvider(provider.auth, process.env, provider.apiKey)
+      auth = createAuthProvider(provider.auth, process.env, provider.apiKey, { ...config.network, proxy: provider.proxy ?? config.network.proxy })
       if (!auth.isAuthenticated()) configured = false
     } catch {
       configured = false
@@ -241,7 +241,7 @@ export function resolveModelSpec(ctx: ServeContext, modelId: string): ResolvedMo
         // 未认证 oauth provider 排在前面会截胡裸别名（返回不可用 spec，下游
         // 请求时才 401），与下方「无 key provider 跳过继续扫」的穿透修复意图
         // 不对称。用 isAuthenticated() 判凭据，未认证同样 continue。
-        const oauth = createAuthProvider(prov.auth, process.env, prov.apiKey)
+        const oauth = createAuthProvider(prov.auth, process.env, prov.apiKey, { ...ctx.config.network, proxy: prov.proxy ?? ctx.config.network?.proxy })
         if (!oauth.isAuthenticated()) continue
         provider = prov
         apiKey = ''

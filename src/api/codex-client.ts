@@ -9,8 +9,10 @@ import { fetchWithTimeout } from './fetch-timeout.js'
 import { wireAbortToReaderCancel, wrapBodyTimeoutError } from './abort-reader.js'
 import { acquireRateLimitSlot } from './rate-limiter.js'
 import type { ProviderRetryConfig } from '../config/retry-schema.js'
+import { providerDispatcher, type ProviderNetwork } from './provider-network.js'
 
 export interface CodexClientConfig {
+  network?: ProviderNetwork
   sessionId?: string
   providerName?: string
   baseUrl: string
@@ -101,7 +103,7 @@ export class CodexClient implements StreamClient {
         },
         body: JSON.stringify(body),
         signal: lifecycle.signal,
-      }, 180_000, undefined, auditContext)
+      }, 180_000, providerDispatcher(url, this.config.network), auditContext)
 
       if (!response.ok) {
         const errorBody = await response.text().catch(() => '')

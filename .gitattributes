@@ -1,0 +1,16 @@
+# 换行转换策略——只登记「字节被摘要锁定」的文件，不改仓库整体换行政策。
+#
+# release-catalog.json 的字节被 update-control.json 的 stable/candidate.catalogSha256
+# 锁定：scripts/releases/update-control.mjs 的 assertPinnedCatalog 直接对**原始字节**
+# 取 sha256（不经 canonical/JSON 规范化）。因此任何检出期的换行转换都会让摘要失配。
+#
+# 2026-10-15 实测：缺这条规则时，Windows 上 core.autocrlf 的检出把 LF 转成 CRLF →
+# windows-smoke 的「版本一致性守卫（issue #278）」报
+#   Error: Controlled catalog bytes are immutable; finish or revoke rollout before replacing metadata
+# 本地复现：把 release-catalog.json 换成 CRLF 字节后，checkWorkspaceMetadata 抛出逐字相同的
+# 错误（LF 字节的 sha256 = 4342994ef93925e7ed18639e908bc66af22c9b9f0192c35ed071af3dd60ae006，
+# CRLF 版本 = bf632c6c5a7e53f8e29db293e5fb2934f9693dd600e51f58529567fc86fa61f5）。
+# 该缺陷长期不可见的原因是 windows-smoke 在更早的用例就中止，从未跑到这条测试。
+#
+# 新增「字节被摘要锁定」的文件时，在这里加一行并说明锁它的消费者。
+release-catalog.json -text

@@ -93,6 +93,7 @@ import { withAuth } from './route-auth.js'
 import { buildStorageCleanupHandler } from './storage-cleanup-route.js'
 import { buildScratchRoutes } from './scratch-cleanup.js'
 import { isSafeFileName } from '../utils/safe-path.js'
+import { isLocalWorkerPolicyError } from '../api/continuation-prefix.js'
 
 export type ArtifactKind = 'plan' | 'task-list' | 'walkthrough' | 'diff' | 'screenshot' | 'test-result' | 'markdown' | 'html'
 
@@ -663,7 +664,19 @@ export function buildSessionRoutes(
         return { status: 400, body: { error: 'Missing or invalid "modelId"' } }
       }
       const modelId = data.modelId.trim()
-      if (!(await manager.switchModel(params!.id!, modelId))) {
+      let switched: boolean
+      try {
+        switched = await manager.switchModel(params!.id!, modelId)
+      } catch (error) {
+        const historyBlocked = isLocalWorkerPolicyError(error)
+        return { status: 409, body: {
+          code: historyBlocked ? 'history_recovery_required' : 'model_initialization_failed',
+          error: historyBlocked
+            ? '会话历史完整性校验未通过，无法切换模型；请保留原会话，并显式开始新会话。'
+            : '目标模型初始化失败，未完成切换；请检查模型配置后重试。',
+        } }
+      }
+      if (!switched) {
         // A1（2026-09-07 审查）：switchModel 在 session missing/running 时直接
         // return false（session-manager 早退，不触碰模型解析）——此前无条件
         // classify 附因会把用户引向查 key/模型配置，而实际原因是会话状态

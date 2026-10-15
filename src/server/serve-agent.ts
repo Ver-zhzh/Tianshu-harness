@@ -6,6 +6,7 @@
 import { join, dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { createDelegationActivityMapper } from '../tools/worker-activity-stream.js'
+import { buildReplacementAgent } from '../agent/runtime-rebuild.js'
 import type { DelegationActivity, DelegationIdentity } from '../tools/types.js'
 import type { DelegateWorkerInput, DelegateActivityUpdate, ManagedAgent, RuntimeSessionManager } from './session-manager.js'
 import { SessionPersist, getSessionDir } from '../agent/session-persist.js'
@@ -619,7 +620,7 @@ function assembleAgentLoop(
   shared?: SharedRuntime,
   allowedTools?: string[],
   reload?: () => ServeContext,
-  inheritFrozenFrom?: import('../prompt/engine.js').PromptEngine,
+  inheritFrozenFrom?: import('../prompt/engine.js').PromptEngine | import('../prompt/frozen-snapshot.js').FrozenSnapshotData,
 ): AgentLoop {
   // Wave J: domainKnowledgeStore 优先从 sidecar SharedRuntime.domainStores
   // 按 cwd 取；fallback 是 per-call new（与 bootstrap 单 session 行为一致——
@@ -868,17 +869,12 @@ export function buildManagedAgent(
   // Rebuild the loop on a new spec, preserving conversation + stores. Shared
   // by switchModel and the run pre-flight self-heal below.
   const rebuildOnSpec = (next: ResolvedModelSpec, explicitModelChange = false) => {
-    const oldCoordinator = stores.refs.coordinator
     const oldAgent = agent
-    if (explicitModelChange) oldAgent.config.promptEngine.authorizeCacheGeneration()
-    void oldAgent.cancelIdleCompaction()
-    spec = next
     const liveApprovalMode = oldAgent.config.approvalMode
-    agent = assembleAgentLoop(ctx, cwd, sessionId, stores, spec, liveApprovalMode, registry, shared, allowedTools, reload, oldAgent.config.promptEngine)
-    if (explicitModelChange) agent.config.client.authorizeCacheGeneration?.('explicit_user_model')
-    if (oldCoordinator && oldCoordinator !== stores.refs.coordinator) {
-      try { oldCoordinator.shutdown() } catch { /* best-effort: shutdown is fail-open */ }
-    }
+    const candidate = buildReplacementAgent(oldAgent, stores.refs, stores.deepRecallAgentRef, explicitModelChange,
+      inherited => assembleAgentLoop(ctx, cwd, sessionId, stores, next, liveApprovalMode, registry, shared, allowedTools, reload, inherited))
+    spec = next
+    agent = candidate
     return oldAgent
   }
   return {
@@ -936,7 +932,7 @@ export function buildManagedAgent(
     switchModel: (modelId) => {
       // First-install / post-startup config edits: resolve against the live
       // config, not just the startup snapshot. See resolveModelSpecWithReload.
-      const next = resolveModelSpecWithReload(ctx, modelId)
+      const next = resolveModelSpecWithReload(ctx, modelId, reload)
       if (!next) return null
       // Audit: capture the outgoing model before the rebuild replaces it.
       // (rebuildOnSpec cancels the old loop's idle compaction — it shares this

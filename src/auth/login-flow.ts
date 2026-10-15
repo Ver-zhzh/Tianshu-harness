@@ -42,7 +42,7 @@ export async function runOAuthLogin(
   if (provider.auth?.type !== 'oauth') {
     return { ok: false, message: `"${providerName}" 不是 OAuth 型 provider（API key 走 /connect 或 rivet config set-key ${providerName}）` }
   }
-  const auth = createOAuthLoginAuth(provider.auth.provider, onUrl)
+  const auth = createOAuthLoginAuth(provider.auth.provider, onUrl, { ...cfg.network, proxy: provider.proxy ?? cfg.network.proxy })
   try {
     if (auth.isAuthenticated()) {
       return { ok: true, message: `${providerName} 已登录（token 仍有效），无需重复登录` }

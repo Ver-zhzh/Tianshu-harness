@@ -4,6 +4,31 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { accountDeviceFingerprint, parseNativeDeviceFingerprint, readNativeDeviceFingerprint, isValidDeviceFingerprint } from '../account-device.js'
+import ts from 'typescript'
+
+test('native identity queries retry a cold-start timeout once without retrying other failures', () => {
+  const source = readFileSync(new URL('../account-device.ts', import.meta.url), 'utf8')
+  const parsed = ts.createSourceFile('account-device.ts', source, ts.ScriptTarget.Latest, true)
+  const declaration = parsed.statements.find(statement => ts.isFunctionDeclaration(statement)
+    && statement.name?.text === 'readNativeDeviceFingerprint')
+  assert.ok(declaration && ts.isFunctionDeclaration(declaration) && declaration.body)
+  const code = ts.transpileModule(declaration.body.getText(parsed), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+  }).outputText
+  for (const platform of ['win32', 'darwin']) for (const failure of ['cold', 'permanent', 'repeated']) {
+    let calls = 0
+    const run = new Function('process', 'execFileSync', 'parseNativeDeviceFingerprint', code)
+    const value = run({ platform }, () => {
+      calls++
+      if (failure !== 'cold' || calls === 1) {
+        throw Object.assign(new Error('synthetic query failure'), { code: failure === 'permanent' ? 'EACCES' : 'ETIMEDOUT' })
+      }
+      return platform === 'win32' ? 'MachineGuid REG_SZ native-fixture-id' : '"IOPlatformUUID" = "native-fixture-id"'
+    }, parseNativeDeviceFingerprint)
+    assert.equal(value, failure === 'cold' ? 'native-fixture-id' : undefined)
+    assert.equal(calls, failure === 'permanent' ? 1 : 2)
+  }
+})
 
 test('Windows MachineGuid 与 macOS IOPlatformUUID 使用和原生壳相同的值与大小写', () => {
   assert.equal(parseNativeDeviceFingerprint('win32','    MachineGuid    REG_SZ    ABCDEF12-1234-5678-9ABC-DEF123456789'), 'ABCDEF12-1234-5678-9ABC-DEF123456789')
