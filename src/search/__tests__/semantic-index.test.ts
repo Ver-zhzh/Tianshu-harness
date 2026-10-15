@@ -3,7 +3,7 @@
  */
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { SemanticIndex } from '../semantic-index.js'
@@ -188,6 +188,58 @@ describe('semantic-index', () => {
 
     writeFileSync(join(dir, 'src', 'z.ts'), 'const z = 2')
     assert.equal(idx.isStale(), true) // every call rescans
+  })
+
+  it('rebuild 不跟随指向工作区外的符号链接（工作区隔离绕过回归）', () => {
+    const dir = join(TEST_DIR, 'symlink-escape')
+    const vault = join(TEST_DIR, 'symlink-vault')
+    for (const d of [dir, vault]) {
+      if (existsSync(d)) rmSync(d, { recursive: true })
+      mkdirSync(d, { recursive: true })
+    }
+    mkdirSync(join(dir, 'src'), { recursive: true })
+    writeFileSync(join(dir, 'src', 'ok.ts'), 'export function ok() { return 1 }')
+    writeFileSync(join(vault, 'secret-config.json'), '{"db_password": "CANARY_SYMLINK_ESCAPE"}')
+    try {
+      symlinkSync(vault, join(dir, 'evil-link'))
+    } catch {
+      return // 平台不支持 symlink（如 Windows 无权限 CI）时跳过
+    }
+
+    const idx = new SemanticIndex(dir, undefined, { staleTtlMs: 0 })
+    const stats = idx.rebuild(50)
+    assert.equal(stats.indexed, 1) // 只索引了 src/ok.ts
+    assert.equal(idx.search('db_password', 10).length, 0) // 搜索无泄漏
+    const snapshot = readFileSync(join(dir, '.rivet', 'semantic-index.json'), 'utf-8')
+    assert.ok(!snapshot.includes('CANARY_SYMLINK_ESCAPE')) // 快照无泄漏
+    assert.ok(idx.chunkCount > 0) // 正常文件仍被索引
+  })
+
+  it('目录被换成 symlink 后重读不越界（TOCTOU 回归）', () => {
+    const dir = join(TEST_DIR, 'dirswap-escape')
+    const vault = join(TEST_DIR, 'dirswap-vault')
+    for (const d of [dir, vault]) {
+      if (existsSync(d)) rmSync(d, { recursive: true })
+      mkdirSync(d, { recursive: true })
+    }
+    mkdirSync(join(dir, 'sub'), { recursive: true })
+    writeFileSync(join(dir, 'sub', 'notes.json'), '{"note": "harmless"}')
+    writeFileSync(join(vault, 'notes.json'), '{"db_password": "CANARY_DIRSWAP_ESCAPE"}')
+
+    const idx = new SemanticIndex(dir, undefined, { staleTtlMs: 0 })
+    idx.rebuild(50)
+    assert.equal(idx.isStale(), false)
+
+    // 索引完成后把 sub 换成指向外部 vault 的 symlink
+    renameSync(join(dir, 'sub'), join(dir, 'sub-real'))
+    try {
+      symlinkSync(vault, join(dir, 'sub'))
+    } catch {
+      return // 平台不支持 symlink 时跳过
+    }
+    assert.equal(idx.isStale(), true) // 内容变化被检出（fail-closed 判 stale）
+    idx.incrementalUpdate()
+    assert.equal(idx.search('db_password', 10).length, 0) // 外部内容未入库
   })
 
   teardown()

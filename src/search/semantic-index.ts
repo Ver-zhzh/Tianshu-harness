@@ -2,8 +2,8 @@
  * Semantic index — file-level BM25 index with incremental updates.
  */
 
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync, mkdirSync } from 'node:fs'
-import { join, relative } from 'node:path'
+import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, writeFileSync, mkdirSync } from 'node:fs'
+import { join, relative, sep } from 'node:path'
 import { createHash } from 'node:crypto'
 import { BM25Index, type SearchHit } from './text-index.js'
 import { chunkByDefinitions } from './chunker-treesitter.js'
@@ -25,6 +25,24 @@ const isMetadataPath = (file: string): boolean => toPosixPath(file).split('/').s
 
 const INDEX_VERSION = 1
 const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.rivet', 'coverage', 'target', 'vendor', '__pycache__', '.venv', 'venv'])
+
+/**
+ * lstat that refuses to follow symlinks. The index walk must never traverse a
+ * symlink: a link planted in the workspace (malicious repo content, prompt
+ * injection) pointing at ~/.ssh, /etc, ... would otherwise have its target's
+ * content indexed, persisted into .rivet/semantic-index.json, returned by
+ * search, and — with an embedding provider configured — POSTed to the remote
+ * endpoint. Fail-closed: symlinks are skipped, never followed.
+ */
+function statNoFollow(abs: string): ReturnType<typeof lstatSync> | null {
+  let st: ReturnType<typeof lstatSync>
+  try {
+    st = lstatSync(abs)
+  } catch {
+    return null
+  }
+  return st.isSymbolicLink() ? null : st
+}
 // Polyglot: index a broad set of source languages, not just the TS/JS family.
 const SOURCE_EXT = new Set([
   '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs',
@@ -60,11 +78,18 @@ export class SemanticIndex {
   /** Last isStale() verdict; reused for staleTtlMs to skip redundant rescans. */
   private staleCache: { at: number; stale: boolean } | null = null
   private readonly staleTtlMs: number
+  /** realpath of the workspace root — anchor for the containment check in readWorkspaceFile. */
+  private readonly cwdReal: string
 
   constructor(cwd: string, provider: EmbeddingProvider = new NullEmbeddingProvider(), opts?: { staleTtlMs?: number }) {
     this.cwd = cwd
     this.provider = provider
     this.staleTtlMs = opts?.staleTtlMs ?? STALE_CHECK_TTL_MS
+    try {
+      this.cwdReal = realpathSync(cwd)
+    } catch {
+      this.cwdReal = cwd
+    }
     this.loadMeta()
     this.loadVectors()
   }
@@ -79,6 +104,29 @@ export class SemanticIndex {
 
   private hashContent(content: string): string {
     return createHash('sha256').update(content).digest('hex').slice(0, 16)
+  }
+
+  /**
+   * Read a workspace-lexical relative path only when its real location stays
+   * inside the workspace. Guards the re-read paths (isStale/incrementalUpdate)
+   * against a directory component being swapped for a symlink after indexing —
+   * readFileSync would otherwise follow it outside the workspace. Fail-closed:
+   * returns null when missing, unreadable, or escaping.
+   */
+  private readWorkspaceFile(relPath: string): string | null {
+    const abs = join(this.cwd, relPath)
+    let real: string
+    try {
+      real = realpathSync(abs)
+    } catch {
+      return null
+    }
+    if (real !== this.cwdReal && !real.startsWith(this.cwdReal + sep)) return null
+    try {
+      return readFileSync(real, 'utf-8')
+    } catch {
+      return null
+    }
   }
 
   /** Load persisted snapshot on cold start. Restores fileHashes and chunks so
@@ -128,12 +176,9 @@ export class SemanticIndex {
         if (indexed >= maxFiles) break
         if (isFilesystemMetadata(entry) || SKIP_DIRS.has(entry)) continue
         const abs = join(dir, entry)
-        let st: ReturnType<typeof statSync>
-        try {
-          st = statSync(abs)
-        } catch {
-          continue
-        }
+        // Never follow symlinks — see statNoFollow.
+        const st = statNoFollow(abs)
+        if (!st) continue
 
         if (st.isDirectory()) {
           walk(abs, depth + 1)
@@ -195,8 +240,9 @@ export class SemanticIndex {
         for (const entry of entries) {
           if (isFilesystemMetadata(entry) || SKIP_DIRS.has(entry)) continue
           const abs = join(dir, entry)
-          let st: ReturnType<typeof statSync>
-          try { st = statSync(abs) } catch { continue }
+          // Never follow symlinks — see statNoFollow.
+          const st = statNoFollow(abs)
+          if (!st) continue
           if (st.isDirectory()) { walk(abs, depth + 1) }
           else if (st.isFile()) {
             const ext = entry.slice(entry.lastIndexOf('.'))
@@ -209,14 +255,10 @@ export class SemanticIndex {
     if (diskCount > this.fileHashes.size) return true
 
     for (const [relPath, storedHash] of this.fileHashes) {
-      const absPath = join(this.cwd, relPath)
-      if (!existsSync(absPath)) return true // file deleted
-      try {
-        const content = readFileSync(absPath, 'utf-8')
-        if (this.hashContent(content) !== storedHash) return true
-      } catch {
-        return true // unreadable
-      }
+      // Fail-closed on missing / unreadable / symlink-escaped paths (treated as stale).
+      const content = this.readWorkspaceFile(relPath)
+      if (content === null) return true // file deleted, unreadable, or escaped the workspace
+      if (this.hashContent(content) !== storedHash) return true
     }
     return false
   }
@@ -242,8 +284,9 @@ export class SemanticIndex {
       for (const entry of entries) {
         if (isFilesystemMetadata(entry) || SKIP_DIRS.has(entry)) continue
         const abs = join(dir, entry)
-        let st: ReturnType<typeof statSync>
-        try { st = statSync(abs) } catch { continue }
+        // Never follow symlinks — see statNoFollow.
+        const st = statNoFollow(abs)
+        if (!st) continue
         if (st.isDirectory()) { walk(abs, depth + 1) }
         else if (st.isFile()) {
           const ext = entry.slice(entry.lastIndexOf('.'))
@@ -261,17 +304,16 @@ export class SemanticIndex {
       if (!currentFiles.has(relPath)) toRemove.push(relPath)
     }
 
-    // Find new/modified files
+    // Find new/modified files (fail-closed: unreadable/escaped → drop from index)
     for (const relPath of currentFiles) {
-      const absPath = join(this.cwd, relPath)
-      try {
-        const content = readFileSync(absPath, 'utf-8')
-        if (content.length > 200_000) continue
-        const hash = this.hashContent(content)
-        if (this.fileHashes.get(relPath) !== hash) toReindex.push(relPath)
-      } catch {
+      const content = this.readWorkspaceFile(relPath)
+      if (content === null) {
         toRemove.push(relPath)
+        continue
       }
+      if (content.length > 200_000) continue
+      const hash = this.hashContent(content)
+      if (this.fileHashes.get(relPath) !== hash) toReindex.push(relPath)
     }
 
     // Fallback: if too many files changed, do a full rebuild
@@ -298,17 +340,15 @@ export class SemanticIndex {
       this.vectors.removeFile(relPath)
       this.fileHashes.delete(relPath)
 
-      const absPath = join(this.cwd, relPath)
-      try {
-        const content = readFileSync(absPath, 'utf-8')
-        const hash = this.hashContent(content)
-        this.fileHashes.set(relPath, hash)
-        const ext = relPath.slice(relPath.lastIndexOf('.'))
-        for (const c of chunkByDefinitions(content, ext)) {
-          this.index.addChunk(relPath, c.startLine, c.endLine, c.text)
-        }
-        reindexed++
-      } catch { /* skip unreadable */ }
+      const content = this.readWorkspaceFile(relPath)
+      if (content === null) continue // skip unreadable / workspace-escaping paths
+      const hash = this.hashContent(content)
+      this.fileHashes.set(relPath, hash)
+      const ext = relPath.slice(relPath.lastIndexOf('.'))
+      for (const c of chunkByDefinitions(content, ext)) {
+        this.index.addChunk(relPath, c.startLine, c.endLine, c.text)
+      }
+      reindexed++
     }
 
     this.persistMeta()
