@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { isSafeFileName } from '../safe-path.js'
+import { isSafeFileName, stripTerminalEscapes } from '../safe-path.js'
 
 test('accepts ordinary single-segment names including unicode and dots', () => {
   for (const name of ['pdf-tools', 'foo.bar', 'wo_1737123', '计划-技能', 'a.b.c', 'Group-1_x']) {
@@ -55,4 +55,24 @@ test('rejects colons, ADS streams, drive-relative prefixes, and Windows forbidde
   ]) {
     assert.equal(isSafeFileName(name), false, name)
   }
+})
+
+// C1 单字节控制符（U+0080-U+009F）同样是终端转义引入器：xterm 类终端在 UTF-8
+// 模式下会把 U+009B 当 CSI 执行。落盘前守卫必须与 ESC 序列、C0 一并剥净，
+// 否则会话标题里夹带的 C1 CSI 可在回放路径清屏或切 alt-screen。
+test('stripTerminalEscapes strips C1 single-byte controls', () => {
+  assert.equal(stripTerminalEscapes('A\u009b2JB'), 'A 2JB')
+  assert.equal(stripTerminalEscapes('A\u009b?1049hB'), 'A ?1049hB')
+  assert.equal(stripTerminalEscapes('A\u009d0;spoof\u0007B'), 'A 0;spoof B')
+  assert.equal(stripTerminalEscapes('A\u0085B'), 'A B')
+})
+
+test('stripTerminalEscapes keeps ordinary unicode titles intact', () => {
+  assert.equal(stripTerminalEscapes('plain title'), 'plain title')
+  assert.equal(stripTerminalEscapes('会话标题 v2.0'), '会话标题 v2.0')
+})
+
+test('stripTerminalEscapes still strips ESC-initiated sequences', () => {
+  assert.equal(stripTerminalEscapes('A\u001b[2JB'), 'AB')
+  assert.equal(stripTerminalEscapes('A\u001b]0;spoof\u0007B'), 'AB')
 })

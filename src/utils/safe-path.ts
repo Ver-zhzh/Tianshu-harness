@@ -20,7 +20,7 @@ export function stripTerminalEscapes(text: string): string {
   // eslint-disable-next-line no-control-regex
   return text.replace(ANSI_SEQ_RE, '')
     // eslint-disable-next-line no-control-regex
-    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, ' ')
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, ' ')
 }
 
 /**
