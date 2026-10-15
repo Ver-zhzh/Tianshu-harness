@@ -109,6 +109,30 @@ export function validatePathSafe(cwd: string, inputPath: string, mode: 'read' | 
     }
   }
 
+  // Hardlink check — fail-closed, AFTER containment so genuinely out-of-
+  // workspace paths keep the request_path_access hint above. A hardlink
+  // created inside the workspace can point at any inode on the filesystem
+  // (`ln ~/.ssh/id_rsa proj/notes.txt`): lstat sees a regular file and
+  // realpath returns the in-workspace path, so neither the containment check
+  // nor the sensitive-file gate fires — yet read_file (no approval) and
+  // write_file append (non-atomic) follow the link straight to the external
+  // target. Verified 2026-10-16 with a live PoC: validatePathSafe returned ok
+  // for such a link and appendFile modified the outside file, while the atomic
+  // overwrite path (rename) was unaffected. Directories cannot be hardlinked,
+  // so only files are checked. Fail-closed cost: pnpm-style content-addressed
+  // hardlinks also trip this — copy the file into the workspace instead.
+  try {
+    const st = lstatSync(real)
+    if (st.isFile() && st.nlink > 1) {
+      return {
+        ok: false,
+        error: `Hardlink blocked: ${inputPath} is a hard link (${st.nlink} links) and may point at a file outside the workspace or at a sensitive file. Copy the file into the workspace instead of linking it.`,
+      }
+    }
+  } catch {
+    // Target does not exist (yet) — nothing to check.
+  }
+
   return { ok: true, path: resolved }
 }
 

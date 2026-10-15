@@ -1,6 +1,6 @@
 import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync, linkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve as resolvePath } from 'node:path'
 import { validatePath, validatePathSafe } from '../path-validate.js'
@@ -237,6 +237,72 @@ describe('validatePathSafe — sensitive file hard gate across path forms (M3)',
     try {
       const r = validatePathSafe(cwd, join('src', 'a.ts'), 'read')
       assert.deepEqual(r, { ok: true, path: join(cwd, 'src', 'a.ts') })
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('validatePathSafe — hardlink gate (fail-closed)', () => {
+  beforeEach(() => _resetGrantsForTest())
+
+  function makeCwd(): string {
+    const cwd = mkdtempSync(join(tmpdir(), 'rivet-hardlink-'))
+    mkdirSync(join(cwd, 'proj'), { recursive: true })
+    return cwd
+  }
+
+  it('blocks a hardlink inside cwd pointing at a file outside it (read + write)', () => {
+    const cwd = makeCwd()
+    const outside = mkdtempSync(join(tmpdir(), 'rivet-hardlink-out-'))
+    try {
+      const target = join(outside, 'secret.txt')
+      writeFileSync(target, 'SECRET')
+      const link = join(cwd, 'proj', 'notes.txt')
+      linkSync(target, link)
+      for (const mode of ['read', 'write'] as const) {
+        const r = validatePathSafe(cwd, join('proj', 'notes.txt'), mode)
+        assert.equal(r.ok, false, `mode=${mode}`)
+        if (!r.ok) assert.match(r.error, /Hardlink blocked/)
+      }
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+      rmSync(outside, { recursive: true, force: true })
+    }
+  })
+
+  it('blocks a hardlink even when all links look workspace-local', () => {
+    const cwd = makeCwd()
+    try {
+      const a = join(cwd, 'proj', 'a.txt')
+      writeFileSync(a, 'x')
+      linkSync(a, join(cwd, 'proj', 'b.txt'))
+      const r = validatePathSafe(cwd, join('proj', 'b.txt'), 'read')
+      assert.equal(r.ok, false)
+      if (!r.ok) assert.match(r.error, /Hardlink blocked/)
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('still allows normal single-link files and not-yet-existing paths', () => {
+    const cwd = makeCwd()
+    try {
+      writeFileSync(join(cwd, 'proj', 'real.txt'), 'x')
+      const okFile = validatePathSafe(cwd, join('proj', 'real.txt'), 'write')
+      assert.equal(okFile.ok, true)
+      const okNew = validatePathSafe(cwd, join('proj', 'new-file.txt'), 'write')
+      assert.equal(okNew.ok, true)
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('does not trip on directories (subdir nlink > 1 is normal)', () => {
+    const cwd = makeCwd()
+    try {
+      const r = validatePathSafe(cwd, 'proj', 'read')
+      assert.equal(r.ok, true)
     } finally {
       rmSync(cwd, { recursive: true, force: true })
     }
