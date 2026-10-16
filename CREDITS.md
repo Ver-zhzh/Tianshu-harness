@@ -460,3 +460,4 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 - #485 fix(git): git checkout 强制旗标形态(-f/--force/-qf)纳入清场门禁（OPEN）
 - #498 fix(web-search): 渲染前剥离标题/摘要中的 markdown 链接语法，堵超链接劫持（OPEN）
 - #497 fix(security): 转义 volatile 附录两处未转义插值（session-state/mention），堵提示词注入（OPEN）
+- #496 fix(security): bash git commit 暂存区敏感文件硬门（OPEN）
