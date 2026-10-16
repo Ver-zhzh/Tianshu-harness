@@ -471,3 +471,4 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 - #488 fix(security): stripTerminalEscapes 剥离 C1 单字节控制符（OPEN）
 - #487 fix(web-search): 跑题兜底不再冒充答案 + bing 301 区域跳转跟随（CLOSED）
 - #505 fix(auth): 桌面端登录 purpose 与账号服务端契约不一致（client-login → account-login）（OPEN）
+- #503 fix(platform): harden multi-key pool credential resolution, test isolation and Windows test runners（OPEN）
