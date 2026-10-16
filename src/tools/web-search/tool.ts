@@ -22,6 +22,12 @@ const DEFAULT_TIMEOUT_MS = 15_000
  * "XX银行官网登录"、实际指向钓鱼站的链接；snippet 里自带的 `[文字](url)` 同理
  * 会被直接 linkify）。与 web-fetch 图片 alt 的处理同口径：渲染前剥掉方括号，
  * 从源头中断链接语法，而不是依赖每个消费端的解析器都做转义。
+ *
+ * 覆盖全部插值字段：title / snippet / url / siteName / publishedAt。
+ * url 看似只是 href 槽位，但 TUI 行内解析器按 `indexOf(')')` 截断 href——
+ * url 里的 `)` 会提前闭合外层链接，其后尾随的 `[文字](url)` 会被当成新的
+ * markdown 链接链化；siteName / publishedAt 直接拼进 snippet 行，
+ * 自带完整 `[文字](url)` 同样可注入（#498 补遗，曾漏掉这三个字段）。
  */
 function stripMarkdownBrackets(text: string): string {
   return text.replace(/[[\]]/g, '')
@@ -31,10 +37,11 @@ function stripMarkdownBrackets(text: string): string {
 function formatResults(results: readonly SearchResult[]): string {
   return results
     .map((r, i) => {
-      // 来源站点与发布时间（博查等后端提供）附在 snippet 后，帮助判断可信度与时效
-      const meta = [r.siteName, r.publishedAt].filter(Boolean).join(' · ')
+      // 来源站点与发布时间（博查等后端提供）附在 snippet 后，帮助判断可信度与时效；
+      // 同为不可信外部输入，与 title/snippet 同口径剥方括号
+      const meta = [r.siteName, r.publishedAt].filter((s): s is string => !!s).map(stripMarkdownBrackets).join(' · ')
       const snippet = stripMarkdownBrackets(r.snippet) + (meta ? `（${meta}）` : '')
-      return `${i + 1}. [${stripMarkdownBrackets(r.title)}](${r.url})\n   ${snippet}`
+      return `${i + 1}. [${stripMarkdownBrackets(r.title)}](${stripMarkdownBrackets(r.url)})\n   ${snippet}`
     })
     .join('\n\n')
 }

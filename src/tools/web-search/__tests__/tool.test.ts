@@ -178,4 +178,42 @@ describe('createWebSearchTool', () => {
     // snippet 里自带的 markdown 链接同样被中和
     assert.doesNotMatch(out.content, /\[点此登录\]\(https:\/\/evil\.example\/y\)/)
   })
+
+  it('strips markdown link syntax from url/siteName/publishedAt too (#498 follow-up)', async () => {
+    // #498 只覆盖了 title/snippet，漏了同样插进渲染输出的三个字段：
+    // - siteName / publishedAt：博查后端直接拼进 snippet 行，自带完整
+    //   `[文字](url)` 会被 TUI 行内解析器链化成可点击链接；
+    // - url：TUI 解析器按 indexOf(')') 截断 href，url 里的 `)` 会提前闭合
+    //   外层链接，其后尾随的 `[文字](url)` 会被当成新链接链化。
+    const tool = createWebSearchTool({
+      backends: [backend('bocha', async () => [{
+        title: 'XX银行 官方网站',
+        url: 'https://bank.example/) [官网直达](https://evil.example/p)',
+        snippet: '正规银行官网介绍',
+        siteName: '[官网直达](https://evil.example/s)',
+        publishedAt: '[2026-10-16](https://evil.example/d)',
+      }])],
+    })
+    const out = await tool.execute(params({ query: 'XX银行官网', count: 1 }))
+    assert.equal(out.isError, undefined)
+    // 三个注入向量全部被中和：输出里不再存在指向 evil 的 markdown 链接语法
+    assert.doesNotMatch(out.content, /\[官网直达\]\(https:\/\/evil\.example/)
+    assert.doesNotMatch(out.content, /\[2026-10-16\]\(https:\/\/evil\.example/)
+    // 真实 URL 的主体仍在（方括号被剥，`)` 截断是 TUI 解析器既有行为，
+    // 与 Wikipedia 含 `)` 的合法 URL 同等对待，不属本修复范围）
+    assert.match(out.content, /bank\.example/)
+  })
+
+  it('keeps legitimate urls with parens working after the guard', async () => {
+    const tool = createWebSearchTool({
+      backends: [backend('ddg', async () => [{
+        title: 'X (消歧义)',
+        url: 'https://en.wikipedia.org/wiki/X_(disambiguation)',
+        snippet: '正常结果',
+      }])],
+    })
+    const out = await tool.execute(params({ query: 'X 消歧义', count: 1 }))
+    assert.equal(out.isError, undefined)
+    assert.match(out.content, /X_\(disambiguation\)/)
+  })
 })
