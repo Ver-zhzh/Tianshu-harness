@@ -465,3 +465,4 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 - #494 fix(git): destructive-gate 补 git clean 分开写/长旗标强制形态（OPEN）
 - #493 fix(security): git diff 读取跟随工作区内硬链接越界读敏感文件（OPEN）
 - #492 fix(security): 语义索引 walk 跟随符号链接越界读取工作区外文件（OPEN）
+- #491 fix(security): 硬链接绕过工作区隔离与敏感文件门禁（OPEN）
