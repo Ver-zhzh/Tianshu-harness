@@ -11,14 +11,43 @@ import { combineSearchFailures } from './errors.js'
 const MAX_RESULTS = 20
 const DEFAULT_TIMEOUT_MS = 15_000
 
+/**
+ * 外部显示文本（title/snippet/siteName/publishedAt）净化：
+ *  - 剥方括号——不能闭合标题链接、也不能自行生成 Markdown 链接；
+ *  - 控制符（含 \r\n\t 与 C0/C1/DEL）压成空格——不能靠换行伪造出一条新的结果行。
+ * 两者同源自不可信外部输入，必须同口径处理（#498 续）。
+ */
+function sanitizeDisplayText(text: string): string {
+  return text.replace(/[[\]]/g, '').replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
+}
+
+/** 编码目标中的 Markdown 分隔符，保留 IPv6/查询参数的方括号及已有百分号编码。 */
+function encodeSearchUrl(raw: string): string | null {
+  const url = raw.trim()
+  if (!/^https?:\/\//i.test(url) || /[\u0000-\u001f\u007f]/u.test(url) || url.includes('\\')) return null
+  try {
+    new URL(url)
+  } catch {
+    return null
+  }
+  // encodeURIComponent 本身保留括号和单引号，需要补编码，避免提前结束链接。
+  return url.replace(/[()\s<>"'`]/gu, char =>
+    encodeURIComponent(char).replace(/[()']/g, delimiter => '%' + delimiter.charCodeAt(0).toString(16).toUpperCase()),
+  )
+}
+
 /** 结果渲染（正常路径使用）。 */
 function formatResults(results: readonly SearchResult[]): string {
   return results
     .map((r, i) => {
-      // 来源站点与发布时间（博查等后端提供）附在 snippet 后，帮助判断可信度与时效
-      const meta = [r.siteName, r.publishedAt].filter(Boolean).join(' · ')
-      const snippet = r.snippet + (meta ? `（${meta}）` : '')
-      return `${i + 1}. [${r.title}](${r.url})\n   ${snippet}`
+      // 来源站点与发布时间（博查等后端提供）附在 snippet 后，帮助判断可信度与时效；
+      // 同为不可信外部输入，与 title/snippet 同口径剥方括号
+      const meta = [r.siteName, r.publishedAt].filter((s): s is string => !!s).map(sanitizeDisplayText).join(' · ')
+      const snippet = sanitizeDisplayText(r.snippet) + (meta ? `（${meta}）` : '')
+      const title = sanitizeDisplayText(r.title)
+      const url = encodeSearchUrl(r.url)
+      const link = url === null ? title : `[${title}](${url})`
+      return `${i + 1}. ${link}\n   ${snippet}`
     })
     .join('\n\n')
 }

@@ -5,6 +5,7 @@ import { buildTaskRoutes, type TaskRoutesDeps } from './task-routes.js'
 import { isAuthorizedRequest } from './auth.js'
 import { renewLease } from './parent-watchdog.js'
 import { requestShutdown } from './shutdown-registry.js'
+import { denyRuntimeProAuthorization } from '../config/pro-license.js'
 
 export interface BanditStatusEntry {
   source: string
@@ -48,6 +49,11 @@ export function withAuth(handler: RouteHandler, apiToken?: string): RouteHandler
 export function createRoutes(state: ServerState, deps?: PromptRouteDeps, taskDeps?: TaskRoutesDeps): Record<string, RouteHandler> {
   const apiToken = state.apiToken ?? taskDeps?.apiToken
   const routes: Record<string, RouteHandler> = {
+    'POST /runtime/pro-deny': withAuth(async () => {
+      try { await denyRuntimeProAuthorization() }
+      catch { return { status: 503, body: { error: 'Managed Pro denial is not confirmed' } } }
+      return { status: 200, body: { denied: true } }
+    }, apiToken),
     'GET /status': withAuth(() => ({
       status: 200,
       body: {

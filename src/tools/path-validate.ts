@@ -4,6 +4,7 @@ import { realpathSync, lstatSync, readlinkSync } from 'fs'
 import { isReadGranted, isWriteGranted } from './path-grants.js'
 import { translateWindowsShellPath } from '../path-format.js'
 import { detectSensitiveFile } from './sensitive-file-detector.js'
+import { assertSingleLinkFile } from '../utils/file-links.js'
 
 export interface ValidatedPath {
   ok: true
@@ -86,10 +87,6 @@ export function validatePathSafe(cwd: string, inputPath: string, mode: 'read' | 
 
   const rel = relative(realCwd, real)
 
-  if (rel === '') {
-    return { ok: true, path: resolved }
-  }
-
   if (rel.startsWith('..') || isAbsolute(rel)) {
     // Out of workspace — allow only if the user has granted access to this
     // subtree at the requested mode (the grant store is widened solely through
@@ -97,15 +94,23 @@ export function validatePathSafe(cwd: string, inputPath: string, mode: 'read' | 
     // Scoped to this workspace's cwd: the sidecar hosts sessions from many
     // workspaces in one process, so only grants approved by (or persisted for)
     // THIS workspace — plus user-level config/cache grants — may widen it.
-    if (isWorkspacePath(cwd, real)) return { ok: true, path: resolved }
     const granted = mode === 'write' ? isWriteGranted(real, cwd) : isReadGranted(real, cwd)
-    if (granted) return { ok: true, path: resolved }
-    return {
+    if (!isWorkspacePath(cwd, real) && !granted) return {
       ok: false,
       error: `Path outside project directory: ${inputPath} (workspace root: ${realCwd}). `
         + `If this path is wrong, re-check the workspace root above and use a path under it. `
         + `If the user authorized working there, call request_path_access (or approve the prompt) to grant ${mode} access; `
         + `standing grants can also be configured via permissions.additionalReadDirs / additionalWriteDirs.`,
+    }
+  }
+
+  // Every allowed root shares this policy; ungranted paths keep the access hint above.
+  try {
+    assertSingleLinkFile(inputPath, lstatSync(real))
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code !== 'ENOENT' && code !== 'ENOTDIR') {
+      return { ok: false, error: (error as Error).message }
     }
   }
 

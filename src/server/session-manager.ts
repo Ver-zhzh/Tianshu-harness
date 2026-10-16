@@ -37,6 +37,7 @@ import { touchActivity, setActivityPhase, beginRun as beginActivityRun, finishRu
 import { randomUUID } from 'node:crypto'
 import { describeFailure } from '../api/failure-scope.js'
 import { errorRecoveryGuidance } from '../api/error-classifier.js'
+import { isColdStartEvidenceError } from '../api/continuation-prefix.js'
 import { debugLog } from '../utils/debug.js'
 import { collectPostBoundaryEditIds, type BlockedRewindFile } from '../agent/file-history.js'
 import { makeOwnershipGuard } from '../agent/checkpoint.js'
@@ -89,8 +90,8 @@ import { resolveBareSkillPrompt } from '../tui/prompt-input-resolver.js'
 import { getSkillLoadErrorsForSession } from './skill-load-errors.js'
 import type { MissionStore } from './mission-store.js'
 import { join, resolve, dirname } from 'node:path'
-import { readFile, mkdtemp, writeFile, rm, realpath, stat } from 'node:fs/promises'
-import { existsSync, copyFileSync, createReadStream, statSync, mkdirSync } from 'node:fs'
+import { readFile, mkdtemp, writeFile, rm } from 'node:fs/promises'
+import { existsSync, copyFileSync, statSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { renderPdfPageImages } from '../tools/doc-extract.js'
 import { resolveSessionWorkspaceForSession, type SessionWorkspaceMode } from './workspace.js'
@@ -128,7 +129,8 @@ import type {
   ForkDestination,
 } from './protocol.js'
 import { redactValue, redactText, truncateUtf16Safe } from './redact.js'
-import { MAX_ARCHIVES, MAX_ARCHIVE_BYTES, MAX_DOCUMENTS, MAX_IMAGES } from './attachment-limits.js'
+import { MAX_ARCHIVES, MAX_DOCUMENTS, MAX_IMAGES } from './attachment-limits.js'
+import { withArchiveSource } from './archive-source.js'
 import type { SessionArchivePayload } from './attachment-validation.js'
 import { applyRingLimits } from './session-ring-limits.js'
 import { resolveSessionDefaults } from './session-defaults.js'
@@ -2783,6 +2785,9 @@ export class RuntimeSessionManager {
    */
   private failureFields(err: unknown): { scope?: 'local' | 'provider'; kind?: string; guidance?: string } {
     try {
+      // resume 证据门（冷启动证据缺失）：不是故障，是待用户抉择——kind 供桌面渲染
+      // 「以当前配置继续」动作，guidance 说清代价（缓存全量重建一次）。
+      if (isColdStartEvidenceError(err)) return { kind: 'cold_start_evidence', guidance: '可显式开始新会话；或点「以当前配置继续」放弃连续性证明——缓存将全量重建一次，之后恢复正常。' }
       const f = describeFailure(err)
       const guidance = err instanceof Error && err.name === 'AbortError'
         ? undefined
@@ -7331,9 +7336,8 @@ export class RuntimeSessionManager {
    * 拒绝路径（busy/预算）不留 discard 钩子：同内容文件可能被另一在途请求引用，
    *  误删活引用比留孤儿更糟（孤儿随会话目录生命周期回收）。
    *
-   * path 形态的持久化时核验（存在/regular file/≤MAX_ARCHIVE_BYTES）在这里——
-   * 线缆校验（validateArchivesPayload）只查绝对路径；realpath 后再 copyFile，
-   * 用户原文件绝不被写。sha256 流式计算，hex 前 8 位进句柄。
+   * path 形态由 withArchiveSource 核验私密路径、文件身份、链接数和字节上限，
+   * 从同一描述符流式计算 sha256 并生成受控副本，持久化不再重开用户路径。
    */
   async persistArchives(sessionId: string, archives: SessionArchivePayload[]): Promise<{ refs: SessionArchiveRef[] } | { error: string }> {
     if (!this.persistence?.saveArchive) return { error: 'Archive attachments are unavailable (persistence missing)' }
@@ -7342,24 +7346,11 @@ export class RuntimeSessionManager {
       const name = sanitizeArchiveDisplayName(archive.name)
       try {
         if (archive.path !== undefined) {
-          // realpath 解符号链接后核 regular file——对链接本身 stat 会跟到目录
-          // 也放行 copyFile 一个目录的假象（copyFile 会失败，但错误文案不可读）。
-          const srcPath = await realpath(archive.path)
-          const st = await stat(srcPath)
-          if (!st.isFile()) return { error: `${name}: not a regular file` }
-          if (st.size > MAX_ARCHIVE_BYTES) {
-            return { error: `${name}: archive exceeds ${Math.round(MAX_ARCHIVE_BYTES / 1024 / 1024)}MB limit` }
-          }
-          const hash = createHash('sha256')
-          await new Promise<void>((resolveHash, rejectHash) => {
-            const stream = createReadStream(srcPath)
-            stream.on('data', (chunk) => hash.update(chunk))
-            stream.on('error', rejectHash)
-            stream.on('end', () => resolveHash())
+          const ref = await withArchiveSource(archive.path, ({ srcPath, bytes, sha256hex }) => {
+            const savedPath = this.persistence!.saveArchive!(sessionId, sha256hex, { srcPath }, archive.name)
+            return { id: sha256hex, name, bytes, sha256short: sha256hex.slice(0, 8), savedPath }
           })
-          const sha256hex = hash.digest('hex')
-          const savedPath = this.persistence.saveArchive(sessionId, sha256hex, { srcPath }, archive.name)
-          refs.push({ id: sha256hex, name, bytes: st.size, sha256short: sha256hex.slice(0, 8), savedPath })
+          refs.push(ref)
         } else {
           const base64 = archive.dataUrl!.split(',')[1] ?? ''
           const bytes = Buffer.from(base64, 'base64')

@@ -24,7 +24,8 @@ import { fetchCauseDetail } from './error-classifier.js'
 import { fetch as undiciFetch } from 'undici'
 import { beginCallAudit, auditConfigFingerprint, type CallAuditContext } from './call-audit.js'
 import { observeAuditResponse } from './transport-audit.js'
-import { prepareExecutionSend, credentialPrincipal, currentExecutionScope } from './execution-continuity.js'
+import { prepareExecutionSend, credentialPrincipal, currentExecutionScope, assertExecutionAccess } from './execution-continuity.js'
+import { proRegistry } from './pro-registry.js'
 
 const DEFAULT_TIMEOUT_MS = 45_000
 
@@ -88,6 +89,8 @@ export async function fetchWithTimeout(
     const redirect = init.redirect ?? 'error'
     // A dispatcher must use its own undici version; Node 24's bundled handler protocol differs.
     const fetchFn = dispatcher ? undiciFetch as unknown as typeof fetch : fetch
+    assertExecutionAccess()
+    proRegistry.assertProviderAccess(execution?.provider ?? auditContext?.provider ?? '')
     const response = await fetchFn(url, { ...init, redirect, signal: combinedSignal, ...(dispatcher ? { dispatcher } : {}) } as RequestInit)
     return audit ? observeAuditResponse(response, context, audit) : response
   } catch (err) {

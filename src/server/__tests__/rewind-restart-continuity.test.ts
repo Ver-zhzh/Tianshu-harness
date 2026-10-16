@@ -34,7 +34,7 @@ function facadeFor(agent: AgentLoop): Pick<ManagedAgent, 'rewindToMessages' | 'f
     { claimStore: { async flushWrites() {} }, refs: {} }, undefined, 'rewind-restart', rewindAgentSession, waitForAgentRewind)
 }
 
-test('committed rewind survives a fresh persistence, engine and transport without accepting altered history or binding', async context => {
+test('committed rewind survives restart; sealed edits are rejected, legacy resume can recover, binding stays fixed', async context => {
   const workspace = mkdtempSync(join(tmpdir(), 'rivet-rewind-restart-'))
   const previousDirectory = process.env['RIVET_SESSION_DIR']
   process.env['RIVET_SESSION_DIR'] = join(workspace, 'sessions')
@@ -149,11 +149,22 @@ test('committed rewind survives a fresh persistence, engine and transport withou
   const savedHistory = restartedPersist.loadOai()
   await restartedPersist.compactOaiAsync([{ role: 'user', content: 'changed on disk' }, ...savedHistory.slice(1)])
   const alteredSnapshot = restartedPersist.readFrozenSnapshot()!
-  const alteredClient = makeClient()
-  alteredClient.restoreExecutionSnapshot!(alteredSnapshot.executionSnapshot!)
-  const alteredDiskEngine = new PromptEngine({ ...configuration, inheritFrozenFrom: alteredSnapshot })
-  await assert.rejects(alteredClient.stream(alteredDiskEngine.buildOaiRequest(restartedPersist.loadOai()), callbacks), /prefix diverged/)
+  assert.ok(alteredSnapshot.publishedHistory?.length)
+  const sealedClient = makeClient()
+  sealedClient.restoreExecutionSnapshot!(alteredSnapshot.executionSnapshot!)
+  const sealedEngine = new PromptEngine({ ...configuration, inheritFrozenFrom: alteredSnapshot })
+  await assert.rejects(sealedClient.stream(sealedEngine.buildOaiRequest(restartedPersist.loadOai()), callbacks), /prefix diverged at source/)
   assert.equal(sends, 3)
+  assert.deepEqual(sealedClient.getMainPrefixProof!(), alteredSnapshot.executionSnapshot)
+  const { publishedHistory: _history, publishedUserCount: _count, ...legacySnapshot } = alteredSnapshot
+  const alteredClient = makeClient()
+  alteredClient.restoreExecutionSnapshot!(legacySnapshot.executionSnapshot!)
+  const alteredDiskEngine = new PromptEngine({ ...configuration, inheritFrozenFrom: legacySnapshot })
+  // Legacy snapshots have no raw source seal; retain their first-request
+  // recovery contract while sealed snapshots reject the same rewrite above.
+  await assert.doesNotReject(alteredClient.stream(alteredDiskEngine.buildOaiRequest(restartedPersist.loadOai()), callbacks))
+  assert.equal(alteredClient.getMainPrefixProof!()!.generationReason, 'resume_prefix_drift')
+  assert.equal(sends, 4)
   await restartedPersist.compactOaiAsync(savedHistory)
   const durableAfterSend = restartedPersist.readFrozenSnapshot()!
   assert.equal(durableAfterSend.rewindAuthorization, undefined)
@@ -163,7 +174,7 @@ test('committed rewind survives a fresh persistence, engine and transport withou
   facade.rewindToMessages!([])
   await assert.rejects(facade.flushPersistence!(), /durable checkpoint write denied/)
   assert.equal(engine.getRewindAuthorization()!.cacheGenerationId, beforeFailure)
-  assert.equal(sends, 3)
+  assert.equal(sends, 4)
 })
 
 test('real desktop assembly and terminal rewind use the same durable authorization on restart', async context => {

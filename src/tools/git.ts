@@ -1,6 +1,5 @@
 import { spawnGit } from './spawn-git.js'
 import { repositoryCapability, NonRepositoryError } from '../agent/repository-capability.js'
-import { readFile as fsReadFile, stat as fsStat } from 'node:fs/promises'
 import { dirname, isAbsolute, resolve } from 'node:path'
 import type { Tool, ToolCallParams } from './types.js'
 import { relativePosix, toPosixPath } from '../path-format.js'
@@ -9,6 +8,7 @@ import { createWorkspaceGuard } from '../agent/workspace-guard.js'
 import { killProcessTreeAsync, killProcessTree } from './process-kill.js'
 import { detectSensitiveFile } from './sensitive-file-detector.js'
 import { isForbiddenGrantRoot } from './request-path-access.js'
+import { backfillUntrackedAdditions, inspectDiffFile, safeNumstat } from './git-file-access.js'
 
 const ACTIONS = ['status', 'diff_summary', 'commit', 'log', 'log_graph', 'stash', 'stash_pop'] as const
 type GitAction = (typeof ACTIONS)[number]
@@ -267,14 +267,16 @@ function parseWorkingTreeFiles(numstat: string, statusPorcelain: string): Workin
     if (xy[1] === '?' || xy === '??') {
       // untracked — not in numstat; add with 0/0, status untracked
       if (!existing) files.set(rawPath, { path: rawPath, status: 'untracked', additions: 0, deletions: 0 })
-    } else if (existing) {
+    } else {
       // refine status from porcelain xy code
       const code = xy[0] !== ' ' ? xy[0] : xy[1]
-      existing.status =
+      const entry = existing ?? { path: rawPath, status: 'modified' as const, additions: 0, deletions: 0 }
+      entry.status =
         code === 'A' ? 'added'
         : code === 'D' ? 'deleted'
         : code === 'R' ? 'renamed'
         : 'modified'
+      files.set(rawPath, entry)
     }
   }
   return [...files.values()].sort((a, b) => a.path.localeCompare(b.path))
@@ -338,14 +340,17 @@ export async function getWorkingTreeFiles(
   includeIgnored = false,
 ): Promise<{ files: WorkingTreeFile[]; isRepo: boolean }> {
   const base = safeBaseRef(baseRef)
-  const { ok: numstatOk, output: numstat } = await runGitSafe(['diff', base, '--numstat'], cwd)
-  // git diff <base> fails if the ref doesn't exist (empty repo) — treat as "no tracked diff yet"
-  const { ok: statusOk, output: statusOut } = await runGitSafe(['status', '--porcelain', '-uall'], cwd)
-  if (!statusOk && !numstatOk) {
+  const [baseline, status] = await Promise.all([
+    runGitSafe(['diff', '--cached', base, '--name-only', '-z'], cwd),
+    runGitSafe(['status', '--porcelain', '-uall'], cwd),
+  ])
+  if (!status.ok && !baseline.ok) {
     // Both failed — likely not a git repo
     return { files: [], isRepo: false }
   }
-  let files = parseWorkingTreeFiles(numstatOk ? numstat : '', statusOk ? statusOut : '')
+  const candidates = [...baseline.output.split('\0').filter(Boolean), ...parseWorkingTreeFiles('', status.ok ? status.output : '').map(file => file.path)]
+  const numstat = await safeNumstat(cwd, base, candidates, runGitSafe)
+  let files = parseWorkingTreeFiles(numstat, status.ok ? status.output : '')
   if (!includeIgnored) {
     files = files.filter((f) => !isChangesIgnored(f.path))
   } else {
@@ -398,31 +403,6 @@ export function isChangesIgnored(path: string): boolean {
 }
 
 /** Max bytes to read when counting lines of an untracked file for its +N badge. */
-const UNTRACKED_COUNT_MAX_BYTES = 1_000_000
-
-async function backfillUntrackedAdditions(cwd: string, files: WorkingTreeFile[]): Promise<void> {
-  await Promise.all(
-    files
-      .filter((f) => f.status === 'untracked' && f.additions === 0)
-      .map(async (f) => {
-        const rel = normalizeProjectRelativePath(cwd, f.path)
-        if (!rel) return
-        try {
-          const stat = await fsStat(resolve(cwd, rel))
-          if (!stat.isFile() || stat.size > UNTRACKED_COUNT_MAX_BYTES) return
-          const content = await fsReadFile(resolve(cwd, rel), 'utf8')
-          if (content.includes('\u0000')) return // binary — leave badge at 0
-          if (content.length === 0) return
-          // Count lines like git: a trailing newline doesn't add an empty line.
-          const nl = (content.match(/\n/g) ?? []).length
-          f.additions = content.endsWith('\n') ? nl : nl + 1
-        } catch {
-          // unreadable — leave badge at 0
-        }
-      }),
-  )
-}
-
 /**
  * Reject base refs that could be parsed as git options or revision ranges.
  * Accepts commit hashes, HEAD, and simple branch/tag names.
@@ -505,6 +485,8 @@ async function noIndexDiff(cwd: string, anchorPath: string): Promise<string> {
  * no textual diff (binary file, or untracked with no base to diff against).
  */
 export async function getFileDiff(cwd: string, path: string, baseRef = 'HEAD'): Promise<string> {
+  try { inspectDiffFile(resolve(cwd, path)) }
+  catch (error) { throw new GitPathError(`无效文件路径：${path}（${(error as Error).message}）`) }
   // Guard against path traversal / pathspec injection — pathspec must be relative
   const rel = normalizeProjectRelativePath(cwd, path)
   if (!rel) {
@@ -519,7 +501,7 @@ export async function getFileDiff(cwd: string, path: string, baseRef = 'HEAD'): 
   }
   const base = safeBaseRef(baseRef)
   // Tracked changes (modified/deleted/staged) diff cleanly against the base.
-  const tracked = await runGitSafe(['diff', base, '--', rel], cwd)
+  const tracked = await runGitSafe(['--literal-pathspecs', 'diff', base, '--', rel], cwd)
   if (tracked.ok && tracked.output.trim()) return tracked.output
   // New / untracked file: not in HEAD, so `git diff HEAD` is empty — render the
   // whole file as additions (see noIndexDiff for the null-device contract).

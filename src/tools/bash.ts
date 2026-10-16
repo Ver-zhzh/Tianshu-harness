@@ -5,7 +5,7 @@ import { execFileSync } from 'child_process'
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { INJECTION_PATTERNS, matchesDangerousBash, testBoth } from '../agent/approval-risk.js'
+import { INJECTION_PATTERNS, matchesDangerousBash, normalizeBashCommand, testBoth } from '../agent/approval-risk.js'
 import {
   DEFAULT_INTERRUPT_HINT_MS,
   executionYieldMessage,
@@ -1149,8 +1149,13 @@ export const BASH_TOOL: Tool = {
     // 凭据/密钥文件 → 需审批。聚合形态（. / -A / --all）只返回哨兵项，不在此
     // 收审批（`git add -A && git commit` 属常规流）；哨兵由 assessToolRisk 消费
     // 为 medium 风险理由。检测器 fail-closed 且不抛——不可解析的命令最多漏报。
-    return detectSensitiveGitAdd(rawCommand).some(h => h !== AGGREGATE_ADD_MARKER)
-      || detectSensitiveGitAdd(rewrittenCommand).some(h => h !== AGGREGATE_ADD_MARKER)
+    // 双视图并检：rtk 缺失/损坏时 rewrittenCommand 透传原文，归一化视图是
+    // `git${IFS}add` / `g\it add` / `git "a"dd` 这类混淆形态的最后一道网
+    // （与 assessToolRisk 侧同口径）。
+    const sensitiveGitAddHit = (c: string): boolean =>
+      detectSensitiveGitAdd(c).some(h => h !== AGGREGATE_ADD_MARKER)
+      || detectSensitiveGitAdd(normalizeBashCommand(c)).some(h => h !== AGGREGATE_ADD_MARKER)
+    return sensitiveGitAddHit(rawCommand) || sensitiveGitAddHit(rewrittenCommand)
   },
 
   isConcurrencySafe: () => false,

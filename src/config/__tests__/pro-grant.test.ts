@@ -13,6 +13,44 @@ import { buildGrantPayload, makeTestSigner, signGrant } from './grant-fixtures.j
 
 const DAY = 86_400_000
 
+describe('verifyProGrant — paid tier admission', () => {
+  it('preserves authenticated pre-iat tierless grants only until their original signed expiration', () => {
+    const { privateKey, publicKeyB64 } = makeTestSigner()
+    const now = Date.now()
+    for (const iat of [undefined, 0]) {
+      const token = signGrant(buildGrantPayload({ tier: undefined, iat, exp: now + DAY }), privateKey)
+      assert.equal(verifyProGrant(token, { publicKeyB64, now, deviceId: 'dev-test-0001' }).ok, true)
+      assert.equal(verifyProGrant(token, { publicKeyB64, now: now + DAY + 1 }).reason, 'expired')
+      assert.equal(verifyProGrant(token, { publicKeyB64, now, deviceId: 'different-device' }).reason, 'device_mismatch')
+    }
+  })
+
+  it('a tierless modern offline policy is not authenticated legacy evidence', () => {
+    const { privateKey, publicKeyB64 } = makeTestSigner()
+    const token = signGrant(buildGrantPayload({ tier: undefined, iat: 0, maxOfflineMs: 10 * DAY }), privateKey)
+    assert.equal(verifyProGrant(token, { publicKeyB64 }).reason, 'tier_not_allowed')
+  })
+
+  for (const tier of ['pro', 'max', 'lifetime']) {
+    it(`accepts signed ${tier} grants without changing legacy offline policy`, () => {
+      const { privateKey, publicKeyB64 } = makeTestSigner()
+      const now = Date.now()
+      const token = signGrant(buildGrantPayload({ tier, iat: now - 2 * DAY, exp: now - DAY }), privateKey)
+      assert.equal(verifyProGrant(token, { publicKeyB64, now }).reason, 'grace')
+    })
+  }
+
+  for (const tier of ['basic', 'free', 'unknown', '', undefined, null, 1]) {
+    it(`rejects signed unpaid or missing tier ${String(tier)}`, () => {
+      const { privateKey, publicKeyB64 } = makeTestSigner()
+      const token = signGrant(buildGrantPayload({ tier }), privateKey)
+      const result = verifyProGrant(token, { publicKeyB64 })
+      assert.equal(result.ok, false)
+      assert.equal(result.reason, 'tier_not_allowed')
+    })
+  }
+})
+
 describe('verifyProGrant — 签名与格式', () => {
   it('接受自己签发的合法凭证', () => {
     const { privateKey, publicKeyB64 } = makeTestSigner()

@@ -16,7 +16,11 @@ test('budget reaches the real request builder, transport callbacks and desktop w
   assert.match(source('../../server/serve-agent.ts'), /getContextBudget: \(\) => agent\.getContextBudget\(\)/)
   assert.match(source('../../server/session-manager.ts'), /this\.append\(session, 'context_budget'/)
   assert.match(source('../create-agent-config.ts'), /requestBudgetPolicy: primaryClient\.previewContextRequest \? deepSeekBudgetPolicy\(provider\.baseUrl, model\.id, model\.contextWindow\)/)
-  assert.match(source('../../api/factory.ts'), /contextWindow: provider\.models\?\.find\(m => m\.id === params\.model\)\?\.contextWindow/)
+  // wire 侧的输出封顶窗口必须与预算侧同源（issue #372 F3）：`agent.config.contextWindow`
+  // 取自解析后的 model spec（走 key 池 contractModels），工厂侧若直接读顶层 provider.models
+  // 迁移快照会取到另一个数，两侧各自的 capOutputReserve 于是算出不同预留，
+  // `input + max_tokens ≤ window` 失去保障。原先这里钉的是顶层查找——等于把缺陷写成了契约。
+  assert.match(source('../../api/factory.ts'), /contextWindow: modelContextWindow\(provider, params\.model\)/)
 })
 
 test('manual and isolated entry points use the same budget contract', () => {

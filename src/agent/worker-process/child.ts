@@ -21,6 +21,7 @@ import { withWorkspaceRoots } from '../../tools/workspace-context.js'
  */
 
 import { createInterface } from 'node:readline'
+import { acknowledgeManagedProDenial, withManagedProAuthorization } from '../../api/managed-pro-authorization.js'
 import { join } from 'node:path'
 import { loadConfig } from '../../config/manager.js'
 import { createProviderClient } from '../../api/factory.js'
@@ -112,7 +113,9 @@ async function runChild(): Promise<void> {
   const stdin = createInterface({ input: process.stdin })
   stdin.on('line', (line: string) => {
     for (const msg of decoder.feed(`${line}\n`)) {
-      if (msg.t === 'init') {
+      if (msg.t === 'pro-deny') {
+        void acknowledgeManagedProDenial(() => writeFrame({ t: 'pro-denied', id: msg.id })).catch(error => childLog(String(error)))
+      } else if (msg.t === 'init') {
         initPayload = msg.payload
         if (msg.payload.steerSeed) steerQueue.push(msg.payload.steerSeed)
         void bootAndRun(msg.payload, steerQueue, abortController)
@@ -125,7 +128,7 @@ async function runChild(): Promise<void> {
   })
   // stdin 关闭（父进程死了）而 init 未到——无事可做，退出。
   stdin.on('close', () => {
-    if (!initPayload) process.exit(0)
+    void acknowledgeManagedProDenial(() => {}).finally(() => process.exit(initPayload ? 1 : 0))
   })
 
   // 心跳：watchdog 在父侧以 activity/tick 任一重置——boot 期间也得跳。
@@ -134,7 +137,7 @@ async function runChild(): Promise<void> {
 }
 
 function bootAndRun(init: WorkerChildInitPayload, steerQueue: string[], abortController: AbortController): Promise<void> {
-  return withWorkspaceRoots(init.config.workspaceRoots ?? [init.config.cwd], () => bootAndRunInWorkspace(init, steerQueue, abortController))
+  return withManagedProAuthorization(init.proAuthorization, () => withWorkspaceRoots(init.config.workspaceRoots ?? [init.config.cwd], () => bootAndRunInWorkspace(init, steerQueue, abortController)))
 }
 
 async function bootAndRunInWorkspace(
@@ -291,6 +294,7 @@ async function bootAndRunInWorkspace(
     // 等 stdout flush 再退（end 的 callback 在冲刷完成后触发）：process.exit()
     // 不等待 pipe 写缓冲，真实 session 的 result 帧（transcript + messages 可达
     // 数十 KB）会被截断，父侧只能合成 worker_crash（2026-09-10 烧机实测）。
+    await acknowledgeManagedProDenial(() => writeFrame({ t: 'pro-drained' }))
     process.stdout.end(() => process.exit(0))
   } catch (err) {
     childLog(`[worker-child] boot/run failed: ${err instanceof Error ? err.stack ?? err.message : String(err)}`)
@@ -315,7 +319,8 @@ async function bootAndRunInWorkspace(
         turnCount: 0,
       },
     })
-    process.exit(1)
+    try { await acknowledgeManagedProDenial(() => writeFrame({ t: 'pro-drained' })) } catch {}
+    process.stdout.end(() => process.exit(1))
   }
 }
 

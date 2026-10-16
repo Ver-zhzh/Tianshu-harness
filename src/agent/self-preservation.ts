@@ -51,9 +51,27 @@ const NODE_IMAGE_KILL_PATTERNS: ReadonlyArray<RegExp> = [
   /\bwmic\b[\s\S]*\bnode(?:\.exe)?\b[\s\S]*\b(?:delete|terminate)\b/i, // wmic ... node.exe ... delete
 ]
 
-/** Does this single segment kill a PID that belongs to the agent's own tree? */
 function killsOwnPidInSegment(segment: string, pids: ReadonlySet<number>): boolean {
-  const trimmed = segment.trimStart()
+  let trimmed = segment.trimStart()
+  while (/^\w+=/.test(trimmed)) {
+    const m = /^\w+=(?:"[^"]*"|'[^']*'|\S*)\s*/.exec(trimmed)
+    if (!m) break
+    trimmed = trimmed.slice(m[0].length)
+  }
+  // Strip wrappers, escapes, quotes
+  while (/^[({]\s*/.test(trimmed)) {
+    trimmed = trimmed.replace(/^[({]\s*/, '')
+  }
+  while (/\s*[)};]$/.test(trimmed)) {
+    trimmed = trimmed.replace(/\s*[)};]$/, '')
+  }
+  if (trimmed.startsWith('\\')) trimmed = trimmed.slice(1)
+  trimmed = trimmed.replace(/^(""|'')/, '')
+  const quoted = trimmed.match(/^("([^"]+)"|'([^']+)')(\s+[\s\S]*|$)/)
+  if (quoted) {
+    trimmed = (quoted[2] ?? quoted[3] ?? '') + (quoted[4] ?? '')
+  }
+  trimmed = trimmed.trim()
 
   // Windows: taskkill /PID <n> (also //PID under MSYS/Git-Bash).
   if (/\btaskkill\b/i.test(trimmed)) {
@@ -70,7 +88,8 @@ function killsOwnPidInSegment(segment: string, pids: ReadonlySet<number>): boole
   if (tokens[0] === 'kill') {
     for (const tok of tokens.slice(1)) {
       if (tok.startsWith('-')) continue // signal flag, not a PID
-      const n = Number(tok)
+      const cleanTok = tok.replace(/[);]+$/, '')
+      const n = Number(cleanTok)
       if (Number.isInteger(n) && n > 0 && pids.has(n)) return true
     }
   }

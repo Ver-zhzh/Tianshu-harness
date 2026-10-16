@@ -11,21 +11,76 @@ import { existsSync, readFileSync } from 'node:fs'
 import { writeFileAtomicSync, writeFileAtomicAsync, writeFileAtomicDurableAsync } from '../fs-atomic.js'
 import type { CompactEvent, SessionMetadata } from '../context/types.js'
 import type { FrozenSnapshotData } from '../prompt/frozen-snapshot.js'
+import { LocalWorkerPolicyError } from '../api/continuation-prefix.js'
 
 export class FrozenSnapshotWriter {
   private writes: Promise<void> = Promise.resolve()
+  private compactionLease?: FrozenSnapshotData
+  private durableEpoch = 0
+  private durableSnapshot?: FrozenSnapshotData
+  private retiredAuthorizations = new Set<string>()
+  private retiredProofs = new Set<string>()
   error?: string
   constructor(private readonly path: () => string) {}
   queue(data: FrozenSnapshotData): void {
+    const snapshot = structuredClone(this.compactionLease ?? data)
+    const epoch = this.durableEpoch
     this.writes = this.writes.then(async () => {
-      await writeFileAtomicAsync(this.path(), JSON.stringify(data))
+      if (epoch !== this.durableEpoch || this.obsolete(snapshot)) return
+      await writeFileAtomicAsync(this.path(), JSON.stringify(snapshot))
+      this.recordWritten(snapshot)
       this.error = undefined
     }).catch(() => { this.error = 'snapshot_save_failed' })
   }
+  private obsolete(snapshot: FrozenSnapshotData): boolean {
+    const authorization = snapshot.pendingCompaction?.authorization ?? snapshot.rewindAuthorization
+    if (authorization && this.retiredAuthorizations.has(authorization.cacheGenerationId)) return true
+    const current = this.durableSnapshot
+    if (!current) return false
+    const active = current.pendingCompaction?.authorization ?? current.rewindAuthorization
+    if (authorization) return !!snapshot.pendingCompaction && !current.pendingCompaction
+      && active?.cacheGenerationId === authorization.cacheGenerationId
+    const requestId = snapshot.executionSnapshot?.requestId
+    return !!current.executionSnapshot && (!requestId || this.retiredProofs.has(requestId) || active?.prior.requestId === requestId)
+  }
+  private recordWritten(snapshot: FrozenSnapshotData): void {
+    const previous = this.durableSnapshot
+    const authorizations = [snapshot.pendingCompaction?.authorization, snapshot.rewindAuthorization]
+    const proofs = [snapshot.executionSnapshot, ...authorizations.map(authorization => authorization?.prior)]
+    if (!snapshot.pendingCompaction) {
+      for (const authorization of [previous?.pendingCompaction?.authorization, previous?.rewindAuthorization]) {
+        if (authorization && !authorizations.some(next => next?.cacheGenerationId === authorization.cacheGenerationId)) {
+          this.retiredAuthorizations.add(authorization.cacheGenerationId)
+        }
+      }
+      for (const proof of [previous?.executionSnapshot, previous?.pendingCompaction?.authorization.prior, previous?.rewindAuthorization?.prior]) {
+        if (proof && !proofs.some(next => next?.requestId === proof.requestId)) this.retiredProofs.add(proof.requestId)
+      }
+    }
+    this.durableSnapshot = structuredClone(snapshot)
+  }
   async drain(): Promise<void> { await this.writes }
-  async commit(data: FrozenSnapshotData): Promise<void> {
+  async commit(data: FrozenSnapshotData, cancelPending?: string): Promise<void> {
+    const requested = data.pendingCompaction?.authorization ?? data.rewindAuthorization
+    if (requested && this.retiredAuthorizations.has(requested.cacheGenerationId)) {
+      throw new LocalWorkerPolicyError('压缩授权已消费或被替代；禁止重新提交')
+    }
+    const pendingId = this.compactionLease?.pendingCompaction?.authorization.cacheGenerationId
+    if (cancelPending && cancelPending !== pendingId) throw new LocalWorkerPolicyError('压缩提交标记身份不匹配；禁止取消')
+    if (pendingId && data.pendingCompaction?.authorization.cacheGenerationId !== pendingId
+      && data.rewindAuthorization?.cacheGenerationId !== pendingId && cancelPending !== pendingId) {
+      throw new LocalWorkerPolicyError('压缩快照事务尚未完成；禁止覆盖提交标记')
+    }
+    if (data.pendingCompaction && !this.compactionLease) this.compactionLease = structuredClone(data)
     const write = this.writes.then(async () => {
+      const authorization = data.pendingCompaction?.authorization ?? data.rewindAuthorization
+      if (authorization && this.retiredAuthorizations.has(authorization.cacheGenerationId)) {
+        throw new LocalWorkerPolicyError('压缩授权已消费或被替代；禁止重新提交')
+      }
       await writeFileAtomicDurableAsync(this.path(), JSON.stringify(data))
+      this.recordWritten(data)
+      this.durableEpoch++
+      if (!data.pendingCompaction) this.compactionLease = undefined
       this.error = undefined
     })
     this.writes = write.catch(() => { this.error = 'snapshot_save_failed' })

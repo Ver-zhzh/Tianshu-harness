@@ -59,6 +59,27 @@ function defaultLicensePath(): string {
  * 本缝隙不改变威胁模型（那条路要靠 Rust 侧完整性校验 + 原生签名兜）。
  */
 let testPublicKeyOverride: string | null = null
+const invalidatedDesktopGrants = new Map<string, string>()
+let runtimeProDenied = false
+const managedProDenials = new Set<() => Promise<void>>()
+
+export function runtimeProAuthorizationDenied(): boolean { return runtimeProDenied }
+
+export function registerManagedProDenial(deny: () => Promise<void>): () => void {
+  managedProDenials.add(deny)
+  return () => { managedProDenials.delete(deny) }
+}
+
+export async function denyRuntimeProAuthorization(): Promise<void> {
+  runtimeProDenied = true
+  const completed = new Set<() => Promise<void>>()
+  for (;;) {
+    const pending = [...managedProDenials].filter(deny => !completed.has(deny))
+    if (!pending.length) return
+    await Promise.all(pending.map(deny => deny()))
+    for (const deny of pending) completed.add(deny)
+  }
+}
 
 /** 仅测试用：注入验签公钥；传 null 恢复生产公钥。 */
 export function __setProGrantPublicKeyForTests(publicKeyB64: string | null): void {
@@ -97,16 +118,16 @@ function readDeviceIdFor(licensePath: string): string | undefined {
 }
 
 /** 读 `<rivet_home>/license.json` 里的 token（桌面端 `StoredLicense` 结构）；任何异常返回 undefined（fail closed）。 */
-function readStoredToken(licensePath: string): string | undefined {
+function readStoredToken(licensePath: string, onMissing?: () => void): string | undefined {
   try {
     const parsed = JSON.parse(readFileSync(licensePath, 'utf8')) as { token?: unknown }
     return typeof parsed.token === 'string' && parsed.token.length > 0 ? parsed.token : undefined
-  } catch {
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') onMissing?.()
     return undefined
   }
 }
 
-/** 桌面端入口：凭证只来自 shell 注入，不信任何文件。 */
 function resolveDesktopGrant(config: Config, licensePath: string): ProLicenseInfo {
   const grant = process.env.RIVET_PRO_GRANT
   if (!grant) {
@@ -127,7 +148,19 @@ function resolveDesktopGrant(config: Config, licensePath: string): ProLicenseInf
     }
     return { enabled: false, source: 'none', reason: 'no_grant' }
   }
-  return resolveGrant(grant, process.env.RIVET_PRO_DEVICE_ID)
+  const native = resolveGrant(grant, process.env.RIVET_PRO_DEVICE_ID)
+  if (!native.enabled) return native
+  const invalidated = invalidatedDesktopGrants.get(grant)
+  if (invalidated) return { enabled: false, source: 'none', reason: invalidated }
+  let missing = false
+  const current = readStoredToken(licensePath, () => { missing = true })
+  const stored = current ? resolveGrant(current, process.env.RIVET_PRO_DEVICE_ID) : undefined
+  if (!stored?.enabled) {
+    const reason = stored?.reason ?? (missing ? 'grant_removed' : 'grant_unavailable')
+    if (current || missing) invalidatedDesktopGrants.set(grant, reason)
+    return { enabled: false, source: 'none', reason }
+  }
+  return native
 }
 
 /**
@@ -167,13 +200,12 @@ function resolveCliGrant(config: Config, licensePath: string): ProLicenseInfo {
  * 内容都不再是凭据（v3.21.1 的三条软 gate 已关闭，否则未付费用户能直接在 CLI
  * 用上 Pro 权益）。
  *
- * 两边都 fail closed 到 Basic。激活/吊销/过期后需重启进程生效（桌面端 shell
- * respawn 时会重新注入或移除凭证，见 lib.rs spawn_from_spec）。
  */
 export function resolveProLicense(
   config: Config,
   licensePath = defaultLicensePath()
 ): ProLicenseInfo {
+  if (runtimeProDenied) return { enabled: false, source: 'none', reason: 'grant_native_denied' }
   return process.env.RIVET_DESKTOP === '1'
     ? resolveDesktopGrant(config, licensePath)
     : resolveCliGrant(config, licensePath)
@@ -195,6 +227,20 @@ export function isProEnabled(config: Config): boolean {
 export function isProFeatureEnabled(config: Config, feature: ProFeature): boolean {
   if (!isProEnabled(config)) return false
   return config.pro?.features?.[feature] !== false
+}
+
+export class ProAuthorizationError extends Error {
+  readonly code = 'PRO_AUTHORIZATION_REQUIRED'
+  constructor(readonly feature: ProFeature, readonly reason: string) {
+    super(`Pro authorization required for ${feature}: ${reason}; operation not executed`)
+    this.name = 'ProAuthorizationError'
+  }
+}
+
+export function assertProFeatureEnabled(config: Config, feature: ProFeature): void {
+  const license = resolveProLicense(config)
+  if (!license.enabled) throw new ProAuthorizationError(feature, license.reason ?? 'not_licensed')
+  if (config.pro?.features?.[feature] === false) throw new ProAuthorizationError(feature, 'feature_disabled')
 }
 
 /** 诊断信息：把判定结果摊平成可上报/可打日志的一行（不含凭证本体）。 */

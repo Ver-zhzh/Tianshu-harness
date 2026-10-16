@@ -20,9 +20,8 @@ import { SessionContext } from './context.js'
 import { RequestContextController } from './request-context-controller.js'
 import type { ContextBudgetSnapshot } from '../server/protocol.js'
 import { SessionPersist, getSessionDir, shouldAutoWriteHandoff } from './session-persist.js'
-import { attachSessionPersistListener } from './session-persist-listener.js'
+import { attachSessionPersistListener, commitCompactedHistory } from './session-persist-listener.js'
 import { PrewarmCache } from './prewarm.js'
-import { invalidateSessionReadDedup } from '../tools/read-file.js'
 import { getTodos, getTodoRegressionStats } from '../tools/todo.js'
 import { resolveDecisionsArm } from './decisions-experiment.js'
 import { gateToolDefinitions, isExtendedTool } from './tool-tiers.js'
@@ -147,7 +146,7 @@ import { createPermissionOverlay } from './permissions.js'
 import { recordToolHistory, RECENT_TOOL_HISTORY_CAP } from "./tool-history-recorder.js";
 import { OutputWindowTracker } from './output-window-tracker.js'
 import { requestThetaCheck } from "./theta-controller.js";
-import { createTurnStreamController, createTurnCompletionController, createToolExecutionController, createPlanTraceCoordinator, createCompactBoundaryCoordinator, createTurnOrchestrator, createTurnStepProducer, createReasoningEffortController, createIntentRetrievalRouteController, createAntiAnchoringController, createModelRoutingShadowController, createPrewarmController, createRuntimeHooksPipeline, buildRuntimeSnapshot, createSidePathUsageRecorder, createReclaimDecisionRecorder, resolveHookDisabledEnv, waitForAgentRewind } from "./loop-factory.js";
+import { createTurnStreamController, createTurnCompletionController, createToolExecutionController, createPlanTraceCoordinator, createCompactBoundaryCoordinator, createTurnOrchestrator, createTurnStepProducer, createReasoningEffortController, createIntentRetrievalRouteController, createAntiAnchoringController, createModelRoutingShadowController, createPrewarmController, createRuntimeHooksPipeline, buildRuntimeSnapshot, createSidePathUsageRecorder, createReclaimDecisionRecorder, resolveHookDisabledEnv, waitForAgentRewind, createCompactionInputBoundary, rollbackActiveUserInput } from "./loop-factory.js";
 import type { TurnStepProducer } from './turn-step-producer.js'
 import { ReasoningEffortController } from './reasoning-effort-controller.js'
 import { IntentRetrievalRouteController } from './intent-retrieval-route-controller.js'
@@ -814,6 +813,7 @@ export class AgentLoop {
       if (config.primaryClient === raw) config.primaryClient = config.client
     }
     this.config = config; this.session = session;
+    session.setPublishedHistoryProbe(userOrdinal => userOrdinal < this.config.promptEngine.getPublishedUserCount(), userOrdinal => userOrdinal < this.config.promptEngine.getMergeProtectedUserCount())
     if (config.sessionId) config.promptEngine.setSkillRegistry(sessionSkillSnapshot(cwd ?? process.cwd(), config.sessionId))
     if (!this.config.permissionsOverlay) {
       this.config.permissionsOverlay = createPermissionOverlay()
@@ -1075,11 +1075,11 @@ export class AgentLoop {
         } catch { /* non-critical: memories are already persisted to disk */ }
       },
       getAbortSignal: () => this.abortController?.signal,
-      getActiveContract: () => this.taskContract,
-      // After any compaction rewrite the historical tool_results that read-ref
-      // points at may be gone — drop this session's read-dedup records so the
+      ...createCompactionInputBoundary(this),
+      // Commit history and its generation authorization together, then drop
+      // read-dedup records whose tool_results may have disappeared, so the
       // next read_file re-serves real content instead of a dangling reference.
-      onHistoryRewritten: () => { invalidateSessionReadDedup(this.config.sessionId) },
+      commitHistory: (expected, candidate) => commitCompactedHistory(this, expected, candidate),
       // Layered archival: persist discarded history as a recallable
       // compact-history artifact. Disk-only write, never touches the prefix.
       archiveHistory: async (input) => {
@@ -3342,7 +3342,7 @@ export class AgentLoop {
         debug: debugLog,
         onPhaseChange: callbacks.onPhaseChange,
       })
-      if (!assistantResponded && !userMessageConsumed) this.session.removeLastMessage()
+      if (!assistantResponded && !userMessageConsumed) rollbackActiveUserInput(this)
       callbacks.onAbort(stopReasonAbortTag(stopReason))
       return { action: 'abort' }
     }

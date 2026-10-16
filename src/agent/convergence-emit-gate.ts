@@ -68,10 +68,15 @@ export function planConvergenceEmit(input: ConvergenceEmitInput): ConvergenceEmi
   // 不等冷却到期提前发射。
   const verifyFailEscalated = input.verifyFailStreak >= 2
     && input.verifyFailStreak > state.lastEmitVerifyFailStreak
-  // 墙钟下限只约束非升级发射（只读诊断轮墙钟极短，"3 轮冷却"只有几秒）；
-  // 升级是真实信号跃迁，必须穿透。
+  // 墙钟下限约束所有发射；「升级」分型（2026-10-17 #502 误告修复 A）：
+  // - 信号型升级（升级 + score 骤降 >0.15，与 scoreDropped 同口径）：真实信号
+  //   跃迁，保持 Layer 2 语义——穿透墙钟与轮次冷却（会话 74f350c9 设计依据）；
+  // - 门槛型升级（升级但 score 未变差）：如 L2→L3 仅因 turn 越过 tier.nHigh——
+  //   实测会话 20261016a569949ff589 seq 16949→17436 间隔 34s 的连发即此形态。
+  //   它不再穿透，落入与同 level 重复相同的普通通道（墙钟 + 轮次冷却）。
   const wallClockElapsed = input.nowMs - state.lastEmitAtMs >= state.minIntervalMs
-  const emit = escalated || (wallClockElapsed && (cooledDown || changedDirection || verifyFailEscalated))
+  const signalEscalation = escalated && scoreDropped
+  const emit = signalEscalation || (wallClockElapsed && (cooledDown || changedDirection || verifyFailEscalated))
   const suppressedBy = emit ? null : !wallClockElapsed ? 'wall-clock' : 'cooldown'
   return { emit, suppressedBy, msgKey, changedDirection, escalated, verifyFailStreak: input.verifyFailStreak }
 }

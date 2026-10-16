@@ -128,6 +128,7 @@ export function createProviderClient(
   capabilities: ProviderCapabilities,
   params: RuntimeParams,
 ): StreamClient {
+  proRegistry.assertProviderAccess(provider.name)
   const effective = params.singleAttempt ? { ...provider, maxRetries: 0 } : provider
   return withExecutionContinuity(createRawProviderClient(effective, capabilities, params), {
     provider: provider.name, model: params.model,
@@ -285,7 +286,11 @@ function createRawProviderClient(
     apiKey: params.apiKey,
     model: params.model,
     maxTokens: params.maxTokens,
-    contextWindow: provider.models?.find(m => m.id === params.model)?.contextWindow,
+    // 必须与预算侧的窗口同源（agent.config.contextWindow 取自解析后的 model spec）：
+    // capOutputReserve 两侧各算一次，窗口不同就会算出不同预留，`input + max_tokens ≤ window`
+    // 失去保障（issue #372 F3）。顶层 provider.models 是迁移快照，key 级增删不回写——
+    // 走 modelContextWindow（contractModels + 两级回落），不要直接读顶层。
+    contextWindow: modelContextWindow(provider, params.model),
     auth: params.auth,
     thinking: provider.thinking as 'enabled' | 'disabled' | undefined,
     thinkingStallTimeoutMs: provider.thinkingStallTimeoutMs ?? wire?.thinkingStallTimeoutMs,

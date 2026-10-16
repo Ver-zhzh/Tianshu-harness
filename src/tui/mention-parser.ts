@@ -46,8 +46,20 @@ export function renderMentionContext(refs: MentionReference[]): string | null {
 
   const lines = ['<mentions>']
   for (const ref of refs) {
-    lines.push(`  <${ref.type} ref="${ref.value}" />`)
+    // ref.value 源自用户原始输入（@file: 后缀），直接拼进 ref 属性可造成属性逃逸
+    // （如 a" /><context-update …），伪造附录 markup。转义后再拼接。
+    // ref.type 是字面量联合类型，作标签名安全，无需转义。
+    lines.push(`  <${ref.type} ref="${escapeXml(ref.value)}" />`)
   }
   lines.push('</mentions>', '', 'Resolve these @mentions before proceeding. Use read_file/grep/semantic_search as needed.')
   return lines.join('\n')
+}
+
+/** XML 转义：与 src/prompt/volatile.ts 的 escapeXml 同契约（含属性引号）。 */
+function escapeXml(text: string): string {
+  return text
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
 }

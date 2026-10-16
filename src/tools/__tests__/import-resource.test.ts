@@ -224,8 +224,12 @@ describe('import_resource', () => {
     })
 
     it('surfaces HTTP errors from the remote server', async () => {
-      const originalFetch = globalThis.fetch
-      globalThis.fetch = async () => new Response('not found', { status: 404 })
+      setHttpFetchForTests(async (url) => ({
+        status: 404,
+        finalUrl: url,
+        contentType: 'text/plain',
+        bytes: new Uint8Array(),
+      }))
       try {
         const result = await IMPORT_RESOURCE_TOOL.execute(
           makeParams({ source: 'http://example.com/missing.txt' }, tmpCwd),
@@ -233,7 +237,7 @@ describe('import_resource', () => {
         assert.equal(result.isError, true)
         assert.match(result.content, /HTTP 404/)
       } finally {
-        globalThis.fetch = originalFetch
+        setHttpFetchForTests(null)
       }
     })
   })

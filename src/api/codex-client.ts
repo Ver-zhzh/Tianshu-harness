@@ -1,6 +1,6 @@
 import { requestAuditContext } from './call-audit.js'
 import type { StreamClient } from './stream-client.js'
-import type { OaiChatRequest } from './oai-types.js'
+import type { OaiChatRequest, OaiUserMessage } from './oai-types.js'
 import type { ContentBlock } from './types.js'
 import type { StreamCallbacks } from './stream-client.js'
 import { withStructuredRetry } from './retry-engine.js'
@@ -58,6 +58,18 @@ function extractCacheTokens(usage: Record<string, unknown>): { read: number; wri
     read: typeof read === 'number' ? read : 0,
     write: typeof write === 'number' ? write : 0,
   }
+}
+
+/** 多模态 user content → Responses content parts（issue #504：数组原样塞进
+ *  `input_text.text` 会被 Codex API 400「expected a string, but got an array」）。
+ *  与 responses-client.ts 的 toResponsesUserContent 有意重复——改一个要检查另一个。 */
+function toCodexUserContent(content: OaiUserMessage['content']): Record<string, unknown>[] {
+  if (typeof content === 'string') {
+    return [{ type: 'input_text', text: content }]
+  }
+  return content.map(part => part.type === 'image_url'
+    ? { type: 'input_image', image_url: part.image_url.url }
+    : { type: 'input_text', text: part.text })
 }
 
 export class CodexClient implements StreamClient {
@@ -152,7 +164,7 @@ export class CodexClient implements StreamClient {
     // Messages — function_call and function_call_output are top-level input items
     for (const msg of nonSystemMessages) {
       if (msg.role === 'user') {
-        input.push({ type: 'message', role: 'user', content: [{ type: 'input_text', text: msg.content }] })
+        input.push({ type: 'message', role: 'user', content: toCodexUserContent(msg.content) })
       } else if (msg.role === 'assistant') {
         const textContent = msg.content ?? ''
         if (textContent) {

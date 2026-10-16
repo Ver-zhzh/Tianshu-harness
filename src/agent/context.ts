@@ -5,6 +5,7 @@ import { estimateOaiMessageTokens, estimateOaiTokens } from '../compact/micro.js
 import { stableStringify } from '../api/stable-json.js'
 import { sanitizeForJsonTransport } from '../utils/sanitize.js'
 import { wrapSystemReminder } from '../prompt/system-reminder.js'
+import { SessionInputBoundary, removeUserMessageAt } from './session-input-boundary.js'
 
 import { trimToolResultForMemory } from './tool-result-memory.js'
 import { ToolArgPostProcessorRegistry } from './tool-arg-post-processor.js'
@@ -159,6 +160,7 @@ export class SessionContext {
 
   private state: SessionState
   private onMutation: ((m: MessageMutation) => void) | null = null
+  private inputBoundary = new SessionInputBoundary()
   /** Goal-anchor tracking（spec 3c 动作 B 补强）：user 消息进入时提取当前
    *  目标，仅在实质变化时回调（延续指令/系统注入不触发）。
    *  开源侧只提供挂钩；提取器由装配方按 provider 注入（非 spark 恒 null →
@@ -235,6 +237,14 @@ export class SessionContext {
     this.onMutation = fn
   }
 
+  setPublishedHistoryProbe(probe: (userOrdinal: number) => boolean, prepared?: (userOrdinal: number) => boolean): void {
+    this.inputBoundary.setProbes(probe, prepared)
+  }
+
+  private isTailPublished(): boolean {
+    return this.inputBoundary.isPublished(this.state.oaiMessages)
+  }
+
   /**
    * Goal-anchor tracking（spec 3c 动作 B 补强）：装配方注入目标提取器与变更
    * 回调（spark provider 注册了 goalExtractor 才调用；非 spark 不调用 →
@@ -267,6 +277,7 @@ export class SessionContext {
   getGoalAnchor(): string | null {
     return this.currentGoal
   }
+  restoreGoalAnchor(goal: string | null): void { this.currentGoal = goal; this.onGoalChanged?.(goal) }
 
   addUserMessage(content: string, images?: string[], origin: import('./input-origin.js').InputOrigin = 'human'): void {
     let msg: OaiMessage
@@ -311,14 +322,12 @@ export class SessionContext {
    * of its stated goal (regression 5fedd9b6).
    *
    * We only ever touch the tail:
-   *   - tail is a string user message → merge into it (still append-only: the
-   *     tail is the newest position, nothing is cached after it, and merging
-   *     avoids producing two consecutive user messages);
-   *   - otherwise (tail is assistant/tool, or non-string) → push a new SR user
-   *     message at the end. The SR marker keeps PromptEngine from treating it as
-   *     a real user boundary.
+   *   - tail is an unpublished, unprepared string user message and mergeTail
+   *     is not false → merge into it before an immutable request baseline exists;
+   *   - otherwise → push a new SR user message at the end.
+   *   The SR marker keeps PromptEngine from treating it as a real user boundary.
    */
-  appendSystemReminder(text: string, cls?: SrClass): void {
+  appendSystemReminder(text: string, cls?: SrClass, opts?: { mergeTail?: boolean }): void {
     // W1 通道分级：user / functional 不限流，不占 discipline 额度。
     // 默认 'discipline' 保持存量调用行为不变。
     const effectiveCls = cls ?? 'discipline'
@@ -330,10 +339,11 @@ export class SessionContext {
     const wrapped = wrapSystemReminder(text)
     const msgs = this.state.oaiMessages
     const last = msgs[msgs.length - 1]
-    if (last && last.role === 'user' && typeof last.content === 'string') {
+    if (opts?.mergeTail !== false && last && last.role === 'user' && typeof last.content === 'string' && !this.inputBoundary.mergeProtected(msgs)) {
       const oldTokens = estimateOaiMessageTokens(last)
       const merged = { ...last, content: last.content + '\n' + sanitizeForJsonTransport(wrapped) }
       msgs[msgs.length - 1] = merged
+      this.inputBoundary.trackReplacement(last, merged)
       const delta = estimateOaiMessageTokens(merged) - oldTokens
       this.state.estimatedTokens += delta
       this.state.tailEstimate += delta
@@ -372,10 +382,11 @@ export class SessionContext {
     const wrapped = wrapSystemReminder(text)
     const msgs = this.state.oaiMessages
     const last = msgs[msgs.length - 1]
-    if (last && last.role === 'user' && typeof last.content === 'string') {
+    if (last && last.role === 'user' && typeof last.content === 'string' && !this.inputBoundary.mergeProtected(msgs)) {
       const oldTokens = estimateOaiMessageTokens(last)
       const merged = { ...last, content: last.content + '\n' + sanitizeForJsonTransport(wrapped) }
       msgs[msgs.length - 1] = merged
+      this.inputBoundary.trackReplacement(last, merged)
       const delta = estimateOaiMessageTokens(merged) - oldTokens
       this.state.estimatedTokens += delta
       this.state.tailEstimate += delta
@@ -390,32 +401,21 @@ export class SessionContext {
    * Remove the most recently appended message. Used to roll back a user
    * message when the turn is aborted or fails before any assistant response
    * is produced. Returns the removed message, or `undefined` if the session
-   * is empty.
+   * is empty or its user boundary is protected by a published request.
    */
   removeLastMessage(): OaiMessage | undefined {
-    const msg = this.state.oaiMessages.pop()
-    if (msg) {
-      if (msg.role !== 'user') {
-        // Put the message back — this method is contractually for user-message
-        // rollback only. Non-user removal indicates a caller bug.
-        this.state.oaiMessages.push(msg)
-        throw new Error(
-          `removeLastMessage: expected user message but top was ${msg.role}. ` +
-          'This method may only be used to roll back user messages on abort/error.',
-        )
-      }
-      const t = estimateOaiMessageTokens(msg)
-      this.state.estimatedTokens -= t
-      this.state.tailEstimate = Math.max(0, this.state.tailEstimate - t)
-      this.state.turnCount--
-      // Emit a replace mutation so the persistence layer rewrites the file
-      // without the removed message. We use 'replace' (full rewrite) rather
-      // than a hypothetical 'remove' type because the persistence listener
-      // already handles 'replace' → compactOai(), and removals only happen
-      // on abort/error (rare, not performance-sensitive).
-      this.onMutation?.({ type: 'replace', messages: this.state.oaiMessages.slice() })
-    }
-    return msg
+    if (this.state.oaiMessages.at(-1)?.role === 'user' && this.isTailPublished()) return undefined
+    return removeUserMessageAt(this.state, this.state.oaiMessages.length - 1, messages => this.onMutation?.({ type: 'replace', messages }))
+  }
+
+  resolveUserInput(input?: OaiMessage): OaiMessage | undefined { return this.inputBoundary.resolve(this.state.oaiMessages, input) }
+  linkUserInput(previous: OaiMessage, next: OaiMessage): void { this.inputBoundary.trackReplacement(previous, next) }
+  isUserInputPublished(input?: OaiMessage): boolean { const current = this.resolveUserInput(input); return !!current && this.inputBoundary.isPublished(this.state.oaiMessages, this.state.oaiMessages.indexOf(current)) }
+
+  removeUserInput(active?: OaiMessage, prepared?: OaiMessage): OaiMessage | undefined {
+    const target = this.inputBoundary.rollbackTarget(this.state.oaiMessages, active, prepared)
+    if (!target) return undefined
+    return removeUserMessageAt(this.state, this.state.oaiMessages.indexOf(target), messages => this.onMutation?.({ type: 'replace', messages }))
   }
 
   replaceMessages(messages: OaiMessage[], options?: { alreadyPersisted: boolean }): void {

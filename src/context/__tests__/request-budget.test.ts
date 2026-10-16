@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { buildContextBudget, deepSeekBudgetPolicy, DEEPSEEK_WINDOW, estimateBudgetInput } from '../request-budget.js'
+import { buildContextBudget, capOutputReserve, deepSeekBudgetPolicy, DEEPSEEK_WINDOW, estimateBudgetInput } from '../request-budget.js'
 import { estimateOaiMessageTokens } from '../../compact/micro.js'
 
 test('multimodal CJK uses the same text accounting as plain text', () => {
@@ -30,6 +30,27 @@ test('unknown relays do not inherit official budgets and smaller configured wind
   assert.equal(deepSeekBudgetPolicy('https://relay.example/v1', 'deepseek-flash'), undefined)
   assert.equal(deepSeekBudgetPolicy('https://api.deepseek.com', 'unknown-model'), undefined)
   assert.equal(deepSeekBudgetPolicy('https://api.deepseek.com', 'deepseek-flash', 500_000)?.windowTokens, 500_000)
+})
+
+test('relay 回退 policy 的输出预留同样封顶——不再被 maxTokens 能力上限压死（issue #372）', () => {
+  // RequestContextController.prepare 的回退形态：window=maxOutputTokens=contextWindow、transportLimits 'none'。
+  // 旧行为：outputReserve = max_tokens = 393_216 → 512K 窗口的 inputBudget 只剩 104_857（20%），
+  // 长会话在 ~105K 输入处硬断（ContextBudgetExceededError）。
+  const fallback = { windowTokens: 524_288, maxOutputTokens: 524_288, transportLimits: 'none' as const }
+  const budget = buildContextBudget(
+    { model: 'cn:deepseek-v4.1-flash', max_tokens: 393_216, messages: [{ role: 'user', content: 'hi' }] },
+    fallback, { requestId: 'relay', revision: 1 })
+  assert.equal(budget.outputReserve, 256_000)
+  assert.equal(budget.inputBudget, 242_073) // 524_288 − 256_000 − 26_215
+  assert.notEqual(budget.state, 'blocked')
+})
+
+test('输出预留封顶只压病态值：256K 与窗口一半以内的显式配置原样保留', () => {
+  assert.equal(capOutputReserve(4_096, 1_048_576), 4_096)
+  assert.equal(capOutputReserve(65_536, 524_288), 65_536, '窗口一半以内的显式配置不得被削减')
+  assert.equal(capOutputReserve(393_216, 524_288), 256_000)
+  assert.equal(capOutputReserve(393_216, 32_768), 16_384, '小窗口至少留一半给输入，否则 inputBudget 归零死锁')
+  assert.equal(capOutputReserve(393_216, undefined), 256_000)
 })
 
 test('wire accounting includes tools, reasoning and native image budget exactly once', () => {

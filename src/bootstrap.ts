@@ -134,7 +134,7 @@ import { cleanupOldArtifactSessions } from './artifact/store.js'
 import { createLspManager } from './lsp/manager.js'
 import { createMultiLspManager } from './lsp/multi-manager.js'
 import { availableServers } from './lsp/server-registry.js'
-import { createGotoDefinitionTool, createFindReferencesTool } from './lsp/tools.js'
+import { registerLspTools } from './lsp/tools.js'
 import { createCoordinatorReviewDeps } from './agent/review-coordinator-deps.js'
 import { persistTeamWaveTelemetry, type TeamWaveTelemetry } from './agent/team-wave-telemetry.js'
 import { buildTeamSchedulerRewardEvent, persistTeamSchedulerReward, persistTeamSchedulerShadow, type TeamSchedulerShadowEvent } from './agent/team-scheduler-shadow.js'
@@ -1348,8 +1348,7 @@ export async function initializeLsp(
   try {
     await lspManager.initialize()
     if (lspManager.isReady()) {
-      toolRegistry.register(createGotoDefinitionTool(lspManager))
-      toolRegistry.register(createFindReferencesTool(lspManager))
+      registerLspTools(lspManager, toolRegistry)
       if (process.env['RIVET_DEBUG']) {
         const servers = availableServers().map(s => s.id).join(', ')
         console.error(`[LSP] polyglot LSP ready — available servers: ${servers}`)

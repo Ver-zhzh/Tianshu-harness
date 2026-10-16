@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { OpenAIClient } from '../openai-client.js'
-import { withExecutionContinuity } from '../execution-continuity.js'
+import { validateExecutionHistory, withExecutionContinuity } from '../execution-continuity.js'
 import type { OaiChatRequest, OaiMessage } from '../oai-types.js'
 
 /**
@@ -75,4 +75,106 @@ test('resume contract: a regenerated injection must not fail-close the first req
     'resumed worker whose engine regenerated volatile injection must start a new cache generation, not be refused before HTTP',
   )
   assert.equal(bodies.length, 2, 'the resumed request must reach HTTP, not be blocked by the prefix guard')
+}))
+
+// ── 主会话（非 singleAttempt）的 resume 首请求 ─────────────────────────────
+// 2026-10-16 现场（revit-4213e2/2026101609914b2d8192）：打断标记原位改写了已发送的
+// 尾消息，resume 回来 baseline 与历史永久错位；而 10-14 的放宽只覆盖 worker
+// （singleAttempt），主会话 resume 照抛 → 会话砖死。放宽推广到所有 restored
+// 首请求；model 档 binding 同放宽（换模型=换缓存命名空间，开新代次是诚实语义），
+// provider/endpoint/凭证仍恒 fail-closed（信任边界）。
+const newMainClient = (model = 'deepseek-flash') => withExecutionContinuity(
+  new OpenAIClient({ providerName: 'deepseek', baseUrl: 'https://api.deepseek.com', apiKey: 'fixture', model, maxTokens: 2048, thinking: 'enabled', thinkingBlockType: 'enabled' }),
+  { provider: 'deepseek', model },  // 主会话形态：非 singleAttempt（loop.ts:813）
+)
+
+test('dry history validation preserves the signal that authorizes a later abort-tail rebuild', async () => withFetch(async bodies => {
+  const client = newMainClient()
+  const controller = new AbortController()
+  const request: OaiChatRequest = { model: 'deepseek-flash', prefixProbe: true, messages: [systemMessage, firstUser(1)] }
+  await client.stream(request, cb, controller.signal)
+  const proof = client.getMainPrefixProof!()
+  await validateExecutionHistory(client, request)
+  assert.equal(bodies.length, 1)
+  assert.deepEqual(client.getMainPrefixProof!(), proof)
+  controller.abort()
+  await client.stream({ ...request, messages: [systemMessage, firstUser(2)] }, cb)
+  assert.equal(bodies.length, 2)
+  assert.equal(client.getMainPrefixProof!()!.generationReason, 'abort_tail_rebuild')
+}))
+
+test('main-session resume: injection drift on the restored first request opens a new generation', async () => withFetch(async bodies => {
+  const snapshot = await baseline()
+  const resumed = newMainClient()
+  resumed.restoreExecutionSnapshot!(snapshot)
+  await assert.doesNotReject(
+    resumed.stream({ model: 'deepseek-flash', prefixProbe: true, messages: [systemMessage, firstUser(2), { role: 'user', content: '继续' }] }, cb),
+    'main-session resume must unbrick on legitimate first-request drift, not refuse',
+  )
+  assert.equal(bodies.length, 2)
+  assert.equal(resumed.getMainPrefixProof?.()?.generationReason, 'resume_prefix_drift')
+}))
+
+test('main-session resume: model-only binding drift opens a new generation', async () => withFetch(async bodies => {
+  const snapshot = await baseline()
+  const resumed = newMainClient('deepseek-flash-pro')
+  resumed.restoreExecutionSnapshot!(snapshot)
+  await assert.doesNotReject(
+    resumed.stream({ model: 'deepseek-flash-pro', prefixProbe: true, messages: [systemMessage, firstUser(1), { role: 'user', content: '继续' }] }, cb),
+    'resume with an explicit model switch must start a new cache namespace, not refuse',
+  )
+  assert.equal(bodies.length, 2)
+  assert.equal(resumed.getMainPrefixProof?.()?.generationReason, 'resume_model_switch')
+}))
+
+test('main-session resume: a model switch with simultaneous injection drift is labelled model_switch', async () => withFetch(async bodies => {
+  const snapshot = await baseline()
+  const resumed = newMainClient('deepseek-flash-pro')
+  resumed.restoreExecutionSnapshot!(snapshot)
+  // 两个原因并存：既换了模型（缓存命名空间必变），消息也漂移。
+  // 标签取 model_switch——换模型是更强的因果，运维按它筛会话时不能漏。
+  await assert.doesNotReject(
+    resumed.stream({ model: 'deepseek-flash-pro', prefixProbe: true, messages: [systemMessage, firstUser(2), { role: 'user', content: '继续' }] }, cb),
+    'model switch accompanied by injection drift must still open the new namespace',
+  )
+  assert.equal(bodies.length, 2)
+  assert.equal(resumed.getMainPrefixProof?.()?.generationReason, 'resume_model_switch')
+}))
+
+for (const singleAttempt of [false, true]) {
+  test(`resume cannot send an unselected model (worker=${singleAttempt})`, async () => withFetch(async bodies => {
+    const snapshot = await baseline()
+    const resumed = withExecutionContinuity(
+      new OpenAIClient({ providerName: 'deepseek', baseUrl: 'https://api.deepseek.com', apiKey: 'fixture', model: 'deepseek-flash', maxTokens: 2048, thinking: 'enabled', thinkingBlockType: 'enabled' }),
+      { provider: 'deepseek', model: 'deepseek-flash', singleAttempt },
+    )
+    resumed.restoreExecutionSnapshot!(snapshot)
+    await assert.rejects(resumed.stream({ model: 'never-selected-model', prefixProbe: true, messages: [systemMessage, firstUser(1)] }, cb), /prefix diverged at binding/)
+    assert.equal(bodies.length, 1, '未选择的模型不得到达 HTTP')
+  }))
+}
+
+test('worker resume retains its fixed model even when the replacement client selects another model', async () => withFetch(async bodies => {
+  const snapshot = await baseline()
+  const resumed = withExecutionContinuity(
+    new OpenAIClient({ providerName: 'deepseek', baseUrl: 'https://api.deepseek.com', apiKey: 'fixture', model: 'deepseek-flash-pro', maxTokens: 2048, thinking: 'enabled', thinkingBlockType: 'enabled' }),
+    { provider: 'deepseek', model: 'deepseek-flash-pro', singleAttempt: true },
+  )
+  resumed.restoreExecutionSnapshot!(snapshot)
+  await assert.rejects(resumed.stream({ model: 'deepseek-flash-pro', prefixProbe: true, messages: [systemMessage, firstUser(1)] }, cb), /prefix diverged at binding/)
+  assert.equal(bodies.length, 1)
+}))
+
+test('main-session resume: provider/credential drift stays fail-closed', async () => withFetch(async bodies => {
+  const snapshot = await baseline()
+  const resumed = withExecutionContinuity(
+    new OpenAIClient({ providerName: 'other-provider', baseUrl: 'https://api.deepseek.com', apiKey: 'fixture', model: 'deepseek-flash', maxTokens: 2048, thinking: 'enabled', thinkingBlockType: 'enabled' }),
+    { provider: 'other-provider', model: 'deepseek-flash' },
+  )
+  resumed.restoreExecutionSnapshot!(snapshot)
+  await assert.rejects(
+    resumed.stream({ model: 'deepseek-flash', prefixProbe: true, messages: [systemMessage, firstUser(1), { role: 'user', content: '继续' }] }, cb),
+    /continuation prefix diverged at binding/,
+  )
+  assert.equal(bodies.length, 1, 'provider 变化不得借 resume 放行')
 }))

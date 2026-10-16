@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { RequestContextController } from '../request-context-controller.js'
+import { SessionContext } from '../context.js'
 import { buildContextBudget } from '../../context/request-budget.js'
 import type { AgentLoop } from '../loop.js'
 import type { OaiMessage } from '../../api/oai-types.js'
@@ -12,9 +13,13 @@ test('a failed small reclaim does not resummarize on every tool round', async ()
   let calls = 0, events = 0
   const messages: OaiMessage[] = [{ role: 'user', content: 'old' }, { role: 'assistant', content: 'x'.repeat(1_800_000) },
     { role: 'user', content: 'active' }, { role: 'assistant', content: 'answer' }, { role: 'user', content: '<system-reminder>note</system-reminder>' }, { role: 'assistant', content: 'answer' }]
+  const session = new SessionContext()
+  session.replaceMessages(messages)
+  const recordCompactEvent = session.recordCompactEvent.bind(session)
+  session.recordCompactEvent = event => { events++; recordCompactEvent(event) }
   const fake = {
     persist: {}, artifactStore: {}, config: { client: { stream: async () => { throw new Error('execution client must stay separate') } }, budgetSummaryClient: () => ({ stream: async () => { calls++ } }), promptEngine: { getModel: () => 'deepseek-flash' } },
-    session: { getMessages: () => messages, getTurnCount: () => 2, recordCompactEvent: () => { events++ } }, drainPersistWrites: async () => {}, recordSidePathUsage: () => {},
+    session, drainPersistWrites: async () => {}, recordSidePathUsage: () => {},
   } as unknown as AgentLoop
   const controller = new RequestContextController(fake)
   controller.record({ ...budget, inputTokens: 600_000 })

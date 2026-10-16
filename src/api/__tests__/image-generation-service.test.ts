@@ -140,3 +140,18 @@ test('download failures retain stage and redact provider credentials from diagno
   assert.equal(done?.error?.stage, 'downloading'); assert.ok(!JSON.stringify(done).includes(request.connection.apiKey))
   assert.equal((await service.list(request.cwd)).records[0]?.state, 'failed')
 })
+
+test('delete removes record and image file; pending generation is cancelled then deleted', async () => {
+  const service = new ImageGenerationService(undefined, async () => result)
+  const request = await input()
+  const record = await service.start(request)
+  const done = await service.wait(request.cwd, record.id)
+  assert.equal(done?.state, 'succeeded')
+  const dir = imageDirectory(request.cwd)
+  assert.equal((await readdir(dir)).filter(f => f.endsWith('.png')).length, 1)
+  const deleted = await service.delete(request.cwd, record.id)
+  assert.equal(deleted.deleted, true)
+  assert.equal((await readdir(dir)).filter(f => f.endsWith('.json')).length, 0)
+  assert.equal((await readdir(dir)).filter(f => f.endsWith('.png')).length, 0)
+  assert.equal((await service.delete(request.cwd, record.id)).deleted, false)
+})

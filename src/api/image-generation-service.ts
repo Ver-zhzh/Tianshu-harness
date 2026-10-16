@@ -138,5 +138,18 @@ export class ImageGenerationService {
     if (!record) throw new Error('Image not found')
     return { bytes: await this.store.image(record), mimeType: record.mimeType ?? 'image/png' }
   }
+
+  /** 删除一条生成记录。generating/downloading/saving 中的记录先取消再删。 */
+  async delete(cwd: string, id: string): Promise<{ deleted: boolean; reason?: string }> {
+    cwd = await realpath(resolve(cwd))
+    // 活跃条目（内存中的 generating 状态）不允许直接删——先取消
+    const entry = [...this.entries.values()].find(e => e.record.cwd === resolve(cwd) && e.record.id === id)
+    if (entry && imageGenerationPending(entry.record.state)) {
+      entry.controller.abort()
+      // 等状态落地（abort 是异步的，给一拍让状态机走到 cancelled）
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+    return this.store.delete(cwd, id)
+  }
 }
 export const imageGenerationService = new ImageGenerationService()

@@ -1,4 +1,4 @@
-import { isCompleteExecutionSnapshot, assertRewindHistory, LocalWorkerPolicyError } from '../api/continuation-prefix.js'
+import { isCompleteExecutionSnapshot, assertRewindHistory, LocalWorkerPolicyError, ColdStartEvidenceError } from '../api/continuation-prefix.js'
 import { readHandoffWithCoverage, writeHandoffCoverage, writeHandoffTail } from './handoff-coverage.js'
 import { readFile } from 'node:fs/promises'
 import { setImmediate as yieldToLoop } from 'node:timers/promises'
@@ -12,7 +12,8 @@ import type { OaiMessage, OaiToolCall } from '../api/oai-types.js'
 import { legacyMessageToOaiMessages } from './session-message-conversion.js'
 import { isSafeToRerun } from '../tools/write-tool-helpers.js'
 import { JSON_VALUE_KEEP_RATIO, MAX_SESSION_MESSAGE_JSON_CHARS } from '../compact/constants.js'
-import { parseFrozenSnapshotData, type FrozenSnapshotData } from '../prompt/frozen-snapshot.js'
+import type { FrozenSnapshotData } from '../prompt/frozen-snapshot.js'
+import { hasSnapshotHistory, recoverCompactionSnapshot } from '../prompt/compaction-recovery.js'
 
 import type { SessionMetadata } from '../context/types.js'
 import type { CompactEvent } from '../context/types.js'
@@ -134,7 +135,7 @@ export class SessionPersist {
   private readonly frozenWriter = new FrozenSnapshotWriter(() => this.frozenPath)
   queueFrozenSnapshot(data: FrozenSnapshotData): void { this.frozenWriter.queue(data) }
   async drainFrozenSnapshots(): Promise<void> { await this.frozenWriter.drain() }
-  async commitFrozenSnapshot(data: FrozenSnapshotData): Promise<void> { await this.frozenWriter.commit(data) }
+  async commitFrozenSnapshot(data: FrozenSnapshotData, cancelPending?: string): Promise<void> { await this.frozenWriter.commit(data, cancelPending) }
   getFrozenSnapshotError(): string | undefined { return this.frozenWriter.error }
   private filePath: string
   private metadataPath: string
@@ -680,14 +681,25 @@ export class SessionPersist {
    * 读回冻结前缀快照（resume 缓存继承的读侧）。
    * 不存在 / 坏 JSON / 形状校验失败一律 undefined——调用方降级为全量重建。
    */
+  /** 用户显式确认「放弃连续性证据、以当前配置冷启动续跑」（缓存全量重建一次）。
+   *  立即落盘——下一步就是重建 agent 时读它。 */
+  markColdStartConsent(): void {
+    this.updateMetadata({ coldStartConsentAt: Date.now() })
+    this.metaStore.flush()
+  }
+
+  hasColdStartConsent(): boolean {
+    return typeof this.loadMetadata()?.coldStartConsentAt === 'number'
+  }
+
   readFrozenSnapshot(): FrozenSnapshotData | undefined {
     const logPath = join(getSessionDir(this.cwd), this.sessionId, 'cache-log.jsonl')
-    const hasLog = existsSync(logPath) && statSync(logPath).size > 0
-    const hasRequests = hasLog || (existsSync(this.filePath) && statSync(this.filePath).size > 0 && this.loadOai().length > 0)
-    let data: FrozenSnapshotData | undefined
+    const { hasLog, hasRequests } = hasSnapshotHistory(logPath, this.filePath, () => this.loadOai())
+    let raw: unknown
     try {
-      if (existsSync(this.frozenPath)) data = parseFrozenSnapshotData(JSON.parse(readFileSync(this.frozenPath, 'utf8')))
+      if (existsSync(this.frozenPath)) raw = JSON.parse(readFileSync(this.frozenPath, 'utf8'))
     } catch { this.frozenWriter.error = 'snapshot_corrupt' }
+    let data = recoverCompactionSnapshot(raw, () => this.loadOai())
     if (data?.rewindAuthorization) {
       assertRewindHistory(data.rewindAuthorization, this.loadOai())
       if (JSON.stringify(data.executionSnapshot) !== JSON.stringify(data.rewindAuthorization.prior)) {
@@ -696,7 +708,10 @@ export class SessionPersist {
       return data
     }
     if (!hasRequests) return data
-    if (!data) throw new LocalWorkerPolicyError('历史会话缺少完整冻结快照；本次请求受阻，请显式开始新会话')
+    // 显式同意（桌面错误卡按钮写入 meta 标记 / CLI 用 RIVET_ALLOW_COLD_START）：
+    // 放弃连续性证据、全新装配——首请求开新缓存代次，后续快照自愈。
+    if (this.hasColdStartConsent() || process.env.RIVET_ALLOW_COLD_START) return undefined
+    if (!data) throw new ColdStartEvidenceError('历史会话缺少完整冻结快照；本次请求受阻，请显式开始新会话')
     if (!isCompleteExecutionSnapshot(data.executionSnapshot)) {
       // Diagnostics contain hashes and normalized options only, never credentials or request bodies.
       const lines = hasLog ? readFileSync(logPath, 'utf8').trim().split('\n') : []
@@ -711,7 +726,7 @@ export class SessionPersist {
         } catch { /* incomplete trailing row */ }
       }
     }
-    if (!isCompleteExecutionSnapshot(data.executionSnapshot)) throw new LocalWorkerPolicyError('历史请求的模型、凭据归属或执行选项证据不足；禁止静默冷启动，请显式开始新会话')
+    if (!isCompleteExecutionSnapshot(data.executionSnapshot)) throw new ColdStartEvidenceError('历史请求的模型、凭据归属或执行选项证据不足；禁止静默冷启动，请显式开始新会话')
     return data
   }
 

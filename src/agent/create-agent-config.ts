@@ -759,7 +759,7 @@ function buildVisionClient(input: AgentConfigInput): VisionBridgeBuild | undefin
       if ('error' in fbBuilt) {
         warnVisionBridge(`fbkey:${fbRef}`, `备用识图桥 ${fbRef} 起不来：${fbBuilt.error}，降级为单桥`)
       } else {
-        client = new FallbackStreamClient(built.client, ref, [{ name: fbRef, create: () => fbBuilt.client }])
+        client = new FallbackStreamClient(built.client, { provider: prov.name, name: ref }, [{ name: fbRef, create: () => fbBuilt.client }])
         refLabel = `${ref} → ${fbRef}`
       }
     }

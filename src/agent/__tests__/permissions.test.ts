@@ -107,9 +107,35 @@ describe('isBashCommandDenied', () => {
     assert.equal(isBashCommandDenied('rmdir foo', ['rm']), false)
     // Leading env assignment does not hide the denied command.
     assert.equal(isBashCommandDenied('FOO=bar rm -rf /', ['rm']), true)
+    assert.equal(isBashCommandDenied('FOO="bar baz" rm -rf /', ['rm']), true)
     // Empty command / empty denylist → not denied.
     assert.equal(isBashCommandDenied('', ['rm']), false)
     assert.equal(isBashCommandDenied('rm -rf /', []), false)
+  })
+
+  it('detects evasions via subshells, braces, wrappers, backslashes, and whitespace', () => {
+    const denylist = ['rm', 'rm -rf', 'sudo', 'taskkill']
+    // Subshells and nested parens
+    assert.equal(isBashCommandDenied('(rm -rf /tmp)', denylist), true)
+    assert.equal(isBashCommandDenied('((rm -rf /tmp))', denylist), true)
+    assert.equal(isBashCommandDenied('(echo ok; rm -rf /tmp)', denylist), true)
+    assert.equal(isBashCommandDenied('(sudo ls)', denylist), true)
+    // Braces
+    assert.equal(isBashCommandDenied('{ rm -rf /tmp; }', denylist), true)
+    assert.equal(isBashCommandDenied('{ echo 1; rm -rf /tmp; }', denylist), true)
+    // Eval / interpreter wrappers
+    assert.equal(isBashCommandDenied('eval "rm -rf /tmp"', denylist), true)
+    assert.equal(isBashCommandDenied('bash -c "rm -rf /tmp"', denylist), true)
+    assert.equal(isBashCommandDenied('sh -c "echo a; rm -rf /tmp"', denylist), true)
+    // Backslash & quotes escaping
+    assert.equal(isBashCommandDenied('\\rm -rf /tmp', denylist), true)
+    assert.equal(isBashCommandDenied('""rm -rf /tmp', denylist), true)
+    assert.equal(isBashCommandDenied("''rm -rf /tmp", denylist), true)
+    assert.equal(isBashCommandDenied('"rm" -rf /tmp', denylist), true)
+    assert.equal(isBashCommandDenied("'rm' -rf /tmp", denylist), true)
+    // Whitespace variations
+    assert.equal(isBashCommandDenied('rm   -rf   /tmp', ['rm -rf']), true)
+    assert.equal(isBashCommandDenied('rm\t-rf\t/tmp', ['rm -rf']), true)
   })
 })
 

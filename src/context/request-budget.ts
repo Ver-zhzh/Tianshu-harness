@@ -55,6 +55,27 @@ export function deepSeekBudgetPolicy(baseUrl: string, model: string, configuredW
   }
 }
 
+/**
+ * 单次请求的**现实输出预留**封顶——预算侧 `outputReserve` 与 wire `max_tokens` 共用同一函数。
+ * 两侧必须同源：只压一侧会破坏 `input + max_tokens ≤ window`（大输入时上游 400，见
+ * DEEPSEEK_OUTPUT_RESERVE 注释）。
+ *
+ * 两层上限，只封顶、不放大、不削减合理配置：
+ *   - `DEEPSEEK_OUTPUT_RESERVE`(256K) —— 现实预留的经验上限（拿能力上限当预留会挤掉输入侧）。
+ *   - `windowTokens / 2` —— 保证窗口至少一半留给输入。没有这层时，「maxTokens 被填成模型
+ *     能力上限」会把输入预算压死：自定义中转上报 `max_output_tokens=393216` + 默认 512K
+ *     窗口 ⇒ inputBudget 只剩 104_857，长会话在 ~105K 输入处硬断（issue #372）。小窗口同理：
+ *     32K 窗口 + 32K maxTokens ⇒ inputBudget 归零、闸门死锁。
+ *
+ * `windowTokens` 缺省（模型不在 provider 池里）时退化为单层封顶。
+ */
+export function capOutputReserve(maxTokens: number, windowTokens?: number): number {
+  const windowCap = windowTokens !== undefined && Number.isFinite(windowTokens) && windowTokens > 0
+    ? Math.floor(windowTokens / 2)
+    : DEEPSEEK_OUTPUT_RESERVE
+  return Math.min(maxTokens, DEEPSEEK_OUTPUT_RESERVE, windowCap)
+}
+
 export function inputBudgetFor(windowTokens: number, outputReserve: number): { inputBudget: number; safetyMargin: number } {
   const safetyMargin = Math.max(Math.min(16_384, Math.ceil(windowTokens * 0.1)), Math.ceil(windowTokens * 0.05))
   return { inputBudget: Math.max(0, windowTokens - outputReserve - safetyMargin), safetyMargin }
@@ -82,8 +103,11 @@ export function estimateBudgetInput(messages: OaiMessage[], tools?: unknown): Pi
 }
 
 export function buildContextBudget(request: Pick<OaiChatRequest, 'messages' | 'tools' | 'model' | 'max_tokens'>, policy: RequestBudgetPolicy, identity: { requestId: string; revision: number }): ContextBudgetSnapshot {
-  // outputReserve 封顶到「现实输出预留」而非能力上限——见 DEEPSEEK_OUTPUT_RESERVE 注释。
-  const outputReserve = policy.transportLimits === 'none' ? (request.max_tokens ?? policy.maxOutputTokens) : Math.min(request.max_tokens ?? policy.maxOutputTokens, DEEPSEEK_OUTPUT_RESERVE)
+  // outputReserve 封顶到「现实输出预留」而非能力上限——对**所有** policy 生效，包括未知
+  // endpoint 的回退 policy（见 capOutputReserve）。`transportLimits` 只管传输面（body 字节 /
+  // 图片数上限），不再兼任「是否封顶输出预留」的开关——那正是 issue #372 的入口：
+  // 回退 policy 一律 transportLimits:'none'，于是 relay 的预留被 maxTokens 能力上限填满。
+  const outputReserve = capOutputReserve(request.max_tokens ?? policy.maxOutputTokens, policy.windowTokens)
   const budget = inputBudgetFor(policy.windowTokens, outputReserve)
   const counts = estimateBudgetInput(request.messages, request.tools)
   const ratio = budget.inputBudget > 0 ? counts.inputTokens / budget.inputBudget : Infinity

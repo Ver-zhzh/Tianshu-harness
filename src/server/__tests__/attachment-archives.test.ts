@@ -10,7 +10,7 @@
 import './disable-cpu-pool.js'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, linkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
@@ -147,6 +147,25 @@ test('validateArchivesPayload: 非白名单压缩格式拒绝（rar/7z/单文件
   for (const name of ['../a.zip', '.env.zip', 'a/b.zip']) {
     assert.ok(validateArchivesPayload([{ name, path: '/tmp/x' }]).error, `${name} 应被拒`)
   }
+})
+
+test('validateArchivesPayload: path 指向私密文件拒绝（.env/私钥/credentials/token）', () => {
+  // name 是展示名、path 才是真实读取的文件：只校验 name 扩展名会被绕过。
+  const base = process.platform === 'win32' ? 'C:\\Users\\u' : '/home/u'
+  for (const p of [
+    join(base, '.env'), join(base, '.env.local'), join(base, '.ssh', 'id_rsa'),
+    join(base, 'credentials.json'), join(base, 'my-token.txt'), join(base, 'private.key'),
+    join(base, 'secrets.yaml'), join(base, 'app.pem'),
+  ]) {
+    const res = validateArchivesPayload([{ name: 'backup.zip', path: p }])
+    assert.ok(res.error, `${p} 应被拒`)
+    assert.match(res.error!, /private\/secret/)
+  }
+  // 非私密路径不受影响
+  assert.equal(validateArchivesPayload([{ name: 'backup.zip', path: join(base, 'backup.zip') }]).error, undefined)
+  // dataUrl 形态不受私密路径策略影响（内容即载荷，无路径读取）
+  const ok = validateArchivesPayload([{ name: 'b.zip', dataUrl: `data:application/zip;base64,${ZIP_BYTES.toString('base64')}` }])
+  assert.equal(ok.error, undefined)
 })
 
 test('validateArchivesPayload: 个数上限与空数组', () => {
@@ -305,6 +324,39 @@ test('POST /prompt 压缩包校验失败（rar / 相对路径 / 源文件不存�
   } finally { await cleanup() }
 })
 
+test('POST /prompt 压缩包 path 指向私密文件（.env）→ 400（线缆层即拦）', async () => {
+  const { dir, manager, router, cleanup } = setup()
+  try {
+    // 无害占位内容：回归测试只断言"被拒绝"，不读取真实私密文件
+    const envPath = join(dir, '.env')
+    writeFileSync(envPath, 'HARMLESS_TEST_MARKER=1\n')
+    const rec = manager.createSession({ cwd: dir })
+    const res = await router('POST', `/sessions/${rec.id}/prompt`, {
+      prompt: 'x', archives: [{ name: 'backup.zip', path: envPath }],
+    }, AUTH)
+    assert.equal(res.status, 400)
+    assert.match((res.body as { error: string }).error, /private\/secret/)
+  } finally { await cleanup() }
+})
+
+test('POST /prompt 压缩包 path 经符号链接指向私密文件 → 400（持久化层 realpath 后拦）', async function () {
+  if (process.platform === 'win32') return // Windows 建符号链接需提权，CI 上跳过
+  const { dir, manager, router, cleanup } = setup()
+  try {
+    const envPath = join(dir, '.env')
+    writeFileSync(envPath, 'HARMLESS_TEST_MARKER=1\n')
+    // 链接名干净：线缆层基名检查看不到目标，靠 persistArchives 的 realpath 后检查
+    const linkPath = join(dir, 'clean-link')
+    symlinkSync(envPath, linkPath)
+    const rec = manager.createSession({ cwd: dir })
+    const res = await router('POST', `/sessions/${rec.id}/prompt`, {
+      prompt: 'x', archives: [{ name: 'backup.zip', path: linkPath }],
+    }, AUTH)
+    assert.equal(res.status, 400)
+    assert.match((res.body as { error: string }).error, /private\/secret/)
+  } finally { await cleanup() }
+})
+
 // ── 路由级：queue 路径 ──────────────────────────────────────────────────
 
 test('queue 路径：排队压缩包入队时落盘 + 句柄拼接，归并后句柄/引用随下轮发出', async () => {
@@ -406,5 +458,47 @@ test('同内容压缩包两次发送落同一路径（content-addressed），事
     const path2 = /Saved verbatim at: (.+)/.exec(p2)![1]
     assert.equal(path1, path2, '同内容应落同一路径（句柄文本字节一致 → ledger 指纹去重成立）')
     assert.deepEqual(readFileSync(path1!), ZIP_BYTES)
+  } finally { await cleanup() }
+})
+
+test('POST /prompt rejects hardlinked archive sources', async () => {
+  const { dir, manager, agents, router, cleanup } = setup()
+  const vault = mkdtempSync(join(tmpdir(), 'review490-vault-'))
+  try {
+    const target = join(vault, '.env')
+    const marker = 'SYNTHETIC_ARCHIVE_CANARY'
+    writeFileSync(target, marker)
+    const alias = join(dir, 'backup.zip')
+    linkSync(target, alias)
+    const rec = manager.createSession({ cwd: dir })
+    const result = await router('POST', `/sessions/${rec.id}/prompt`, {
+      prompt: 'fixture', archives: [{ name: 'backup.zip', path: alias }],
+    }, AUTH)
+    assert.equal(result.status, 400, 'hardlink alias must not launder private source bytes')
+    assert.equal(agents.length, 0)
+  } finally {
+    await cleanup()
+    rmSync(vault, {recursive: true, force: true})
+  }
+})
+
+test('archive publication uses the verified snapshot even if the source path changes before persistence', async () => {
+  const { dir, persistence, manager, agents, router, cleanup } = setup()
+  try {
+    const source = makeSourceArchive(dir, 'snapshot.zip')
+    const save = persistence.saveArchive.bind(persistence)
+    persistence.saveArchive = (sessionId, docId, input, fileName) => {
+      writeFileSync(source, 'replacement after hashing')
+      return save(sessionId, docId, input, fileName)
+    }
+    const rec = manager.createSession({ cwd: dir })
+    const result = await router('POST', `/sessions/${rec.id}/prompt`, {
+      prompt: 'fixture', archives: [{ name: 'snapshot.zip', path: source }],
+    }, AUTH)
+    assert.equal(result.status, 200)
+    const saved = /Saved verbatim at: (.+)/.exec(agents[0]!.runs[0]!.prompt)?.[1]
+    assert.ok(saved)
+    assert.deepEqual(readFileSync(saved), ZIP_BYTES)
+    assert.ok(saved.endsWith(`${ZIP_SHA256}.zip`))
   } finally { await cleanup() }
 })

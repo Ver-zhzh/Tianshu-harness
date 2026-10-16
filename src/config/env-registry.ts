@@ -46,6 +46,12 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
     description: '',
   },
   {
+    name: 'RIVET_ALLOW_COLD_START',
+    defaultHint: '',
+    files: ['agent/session-persist.ts'],
+    description: 'resume 证据门绕行：证据缺失/不完整时不再 fail-closed，放弃连续性证据全新装配（CLI/TUI 逃生通道；桌面端走 meta.coldStartConsentAt 标记）。首请求开新缓存代次。',
+  },
+  {
     name: 'RIVET_AMBIGUOUS_WIDTH',
     defaultHint: '\'\'',
     files: ['tui/width.ts', 'tui/format/__tests__/reading-layout.test.ts', 'tui/format/__tests__/welcome-width-policy.test.ts', 'tui/format/__tests__/worker-fleet-width-policy.test.ts', 'tui/engine/__tests__/decision-card-visibility.test.ts', 'tui/engine/__tests__/decision-continuity.test.ts', 'tui/engine/__tests__/live-engine-ghost-render.test.ts', 'tui/__tests__/side-panel.test.ts', 'tui/__tests__/width.test.ts'],

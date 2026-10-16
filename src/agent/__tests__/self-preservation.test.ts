@@ -54,6 +54,17 @@ describe('isSelfDestructiveKill — kill by own/ancestor PID', () => {
     assert.equal(isSelfDestructiveKill('taskkill /F /PID 4242', TREE), true)
   })
 
+  it('blocks kill of own PID wrapped in subshell, brace, or escaping', () => {
+    assert.equal(isSelfDestructiveKill('(kill -9 4242)', TREE), true)
+    assert.equal(isSelfDestructiveKill('((kill -9 4242))', TREE), true)
+    assert.equal(isSelfDestructiveKill('{ kill -9 4242; }', TREE), true)
+    assert.equal(isSelfDestructiveKill('\\kill -9 4242', TREE), true)
+    assert.equal(isSelfDestructiveKill('""kill -9 4242', TREE), true)
+    assert.equal(isSelfDestructiveKill('"kill" -9 4242', TREE), true)
+    assert.equal(isSelfDestructiveKill('(taskkill /F /PID 4242)', TREE), true)
+    assert.equal(isSelfDestructiveKill('(taskkill /F /IM node.exe)', TREE), true)
+  })
+
   it('does not treat the signal number as a PID', () => {
     // -9 is the signal; 9 must NOT be read as a PID even if 9 were in the tree.
     const tree: SelfProcessTree = { selfPid: 9, ancestorPids: [] }

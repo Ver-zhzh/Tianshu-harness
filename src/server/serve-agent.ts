@@ -43,9 +43,8 @@ import { scheduleMeridianBackfill } from '../repo/meridian-backfill.js'
 import { resetLegacyMemoryIfNeeded } from '../agent/memory-epoch.js'
 import { buildCockpitSnapshot } from '../tui/cockpit/state.js'
 import { computeUsageCost, findModelPricing } from '../utils/pricing.js'
-import { createMultiLspManager } from '../lsp/multi-manager.js'
 import type { LspManager } from '../lsp/manager.js'
-import { createGotoDefinitionTool, createFindReferencesTool } from '../lsp/tools.js'
+import { getOrCreateLspEntry, attachLspTools } from './serve-lsp.js'
 import { runCouncil, runCouncilDebate, type CouncilInput } from '../agent/council/council-orchestrator.js'
 import type { CouncilSeat } from '../agent/council/council-routing.js'
 import { renderCouncilPlan, summarizeCouncilPlan } from '../agent/council/council-render.js'
@@ -157,45 +156,7 @@ export function getOrCreateMeridianIndexer(shared: SharedRuntime, cwd: string): 
   return indexer
 }
 
-/** 按 cwd 取/建 LSP manager entry。首个触达某 cwd 的会话触发 initialize()
- *  （异步，不阻塞会话创建）；后续会话复用同一 entry。ready resolve 为
- *  isReady()——false 表示该 cwd 没有可用的语言服务器（工具不注册）。 */
-function getOrCreateLspEntry(
-  shared: SharedRuntime,
-  cwd: string,
-): { manager: LspManager; ready: Promise<boolean> } {
-  const existing = shared.lspManagers.get(cwd)
-  if (existing) return existing
-  const manager = createMultiLspManager(cwd)
-  const ready = manager
-    .initialize()
-    .then(() => manager.isReady())
-    .catch(() => false)
-  const entry = { manager, ready }
-  shared.lspManagers.set(cwd, entry)
-  return entry
-}
-
-/** Wave G: LSP late-init 订阅（照 TUI bootstrap.ts initializeLsp 的 .then 语义）。
- *  设计约束（switchModel 安全性）：每次 assembleAgentLoop 调用时挂载——捕获
- *  当次的新 agent。Promise 已 resolve 时晚订阅立即触发，所以 switchModel
- *  重建的 agent 照样收到 updateTools()；重复 register 无害（ToolRegistry.register
- *  是 Map.set 幂等覆盖）。老 agent 的旧回调对废弃对象空刷一次，无害。
- *  exported for tests（注入 mock entry，不真实 spawn 语言服务器）。 */
-export function attachLspTools(
-  entry: { manager: LspManager; ready: Promise<boolean> },
-  toolRegistry: Pick<ReturnType<typeof createDefaultToolRegistry>, 'register'>,
-  refs: Pick<RuntimeRefs, 'lspManager'>,
-  updateTools: () => void,
-): Promise<void> {
-  return entry.ready.then((ok) => {
-    if (!ok) return
-    toolRegistry.register(createGotoDefinitionTool(entry.manager))
-    toolRegistry.register(createFindReferencesTool(entry.manager))
-    refs.lspManager = entry.manager
-    updateTools()
-  })
-}
+// getOrCreateLspEntry / attachLspTools 已拆至 ./serve-lsp.ts（2026-10-16，issue #500 配套；serve-agent 行数棘轮只降不升）。
 
 /** Wave G: 释放 per-cwd 共享资源（runServe close()）。每个调用 try-catch
  *  包裹（防御习惯；MeridianDb.close 本身幂等，LspManager.dispose 内部已

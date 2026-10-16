@@ -94,6 +94,7 @@ import { buildStorageCleanupHandler } from './storage-cleanup-route.js'
 import { buildScratchRoutes } from './scratch-cleanup.js'
 import { isSafeFileName } from '../utils/safe-path.js'
 import { isLocalWorkerPolicyError } from '../api/continuation-prefix.js'
+import { SessionPersist } from '../agent/session-persist.js'
 
 export type ArtifactKind = 'plan' | 'task-list' | 'walkthrough' | 'diff' | 'screenshot' | 'test-result' | 'markdown' | 'html'
 
@@ -685,6 +686,17 @@ export function buildSessionRoutes(
         return { status: 409, body: { error: describeModelSwitchFailure(rec, config, modelId, dependencies.reloadConfig) } }
       }
       return { status: 200, body: manager.getSession(params!.id!) }
+    }, apiToken),
+
+    // Write — 用户显式确认「放弃连续性证据、以当前配置冷启动续跑」。
+    // resume 证据门（session-persist readFrozenSnapshot）缺/坏快照时 fail-closed
+    // 会砖死会话；此路由把同意标记写进 meta，下次构建 agent 时门绕行（全新装配，
+    // 首请求开新缓存代次）。桌面端错误卡「以当前配置继续」按钮调这里。
+    'POST /sessions/:id/cold-start-consent': withAuth((_body, params) => {
+      const rec = manager.getSession(params!.id!)
+      if (!rec) return { status: 404, body: { error: 'Session not found' } }
+      new SessionPersist(params!.id!, rec.cwd).markColdStartConsent()
+      return { status: 200, body: { ok: true } }
     }, apiToken),
 
     // ── PlusMenu: star-domain picker ──

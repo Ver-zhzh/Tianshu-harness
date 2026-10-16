@@ -1,6 +1,9 @@
 import { createHash } from 'node:crypto'
 import { stableStringify } from './stable-json.js'
 import type { Usage } from './types.js'
+import { isValidNativeProof } from './native-continuation.js'
+import type { NativeCacheAnnotation } from './native-continuation.js'
+export type { NativeSourceBoundaries } from './native-continuation.js'
 
 export interface ContinuationPrefixProof {
   version: 1 | 2
@@ -15,11 +18,14 @@ export interface ContinuationPrefixProof {
   optionsHash: string
   toolsHash: string
   messages: Array<{ hash: string; chars: number; role: string }>
+  canonicalSource?: string[]
+  nativeTail?: { blockCount: number; hash: string }
+  nativeCacheLayout?: NativeCacheAnnotation[]
 }
 
 export interface RewindGenerationAuthorization {
   version: 1
-  reason: 'explicit_user_rewind'
+  reason: 'explicit_user_rewind' | 'context_limit' | 'explicit_user_compact'
   cacheGenerationId: string
   model: string
   history: ContinuationPrefixProof['messages']
@@ -29,7 +35,7 @@ export interface RewindGenerationAuthorization {
 export function isRewindGenerationAuthorization(value: unknown): value is RewindGenerationAuthorization {
   if (!value || typeof value !== 'object') return false
   const authorization = value as RewindGenerationAuthorization
-  return authorization.version === 1 && authorization.reason === 'explicit_user_rewind'
+  return authorization.version === 1 && ['explicit_user_rewind', 'context_limit', 'explicit_user_compact'].includes(authorization.reason)
     && typeof authorization.cacheGenerationId === 'string' && authorization.cacheGenerationId.length > 0
     && typeof authorization.model === 'string' && authorization.model.length > 0
     && isCompleteExecutionSnapshot(authorization.prior)
@@ -63,7 +69,7 @@ export interface RequestDiagnostics {
 }
 
 export class LocalWorkerPolicyError extends Error {
-  readonly code = 'LOCAL_WORKER_POLICY'
+  readonly code: string = 'LOCAL_WORKER_POLICY'
   constructor(message: string) { super(message); this.name = 'LocalWorkerPolicyError' }
 }
 
@@ -74,11 +80,36 @@ export class ContinuationPrefixError extends LocalWorkerPolicyError {
   }
 }
 
+/** resume 证据门（session-persist）专用：历史请求的模型/凭据/选项证据缺失或不完整。
+ *  区别于一般策略错误——桌面端据此渲染「以当前配置继续」动作（kind: cold_start_evidence）。 */
+export class ColdStartEvidenceError extends LocalWorkerPolicyError {
+  readonly code = 'COLD_START_EVIDENCE'
+  constructor(message: string) { super(message); this.name = 'ColdStartEvidenceError' }
+}
+
+export function isColdStartEvidenceError(error: unknown): error is ColdStartEvidenceError {
+  return error instanceof ColdStartEvidenceError || (error instanceof Error && error.name === 'ColdStartEvidenceError')
+}
+
 export function isLocalWorkerPolicyError(error: unknown): error is LocalWorkerPolicyError {
-  return error instanceof LocalWorkerPolicyError || (error instanceof Error && ['ContinuationPrefixError', 'LocalWorkerPolicyError'].includes(error.name))
+  return error instanceof LocalWorkerPolicyError || (error instanceof Error && ['ContinuationPrefixError', 'LocalWorkerPolicyError', 'ColdStartEvidenceError'].includes(error.name))
 }
 
 const hash = (value: unknown): string => createHash('sha256').update(stableStringify(value)).digest('hex')
+
+export function proveCanonicalSource(messages: readonly unknown[]): string[] {
+  return messages.map(hash)
+}
+
+export function assertCanonicalSourcePrefix(previous: ContinuationPrefixProof, next: ContinuationPrefixProof): void {
+  if (!isValidNativeProof(previous) || !isValidNativeProof(next)) {
+    throw new LocalWorkerPolicyError('Execution snapshot has invalid continuation evidence; request not sent')
+  }
+  if (previous.canonicalSource?.some((message, index) => next.canonicalSource?.[index] !== message)) {
+    const at = previous.messages.findIndex((message, index) => next.messages[index]?.hash !== message.hash)
+    throw new ContinuationPrefixError(at === -1 ? 'source' : at, previous, next)
+  }
+}
 
 export function isCompleteExecutionSnapshot(value: unknown): value is ContinuationPrefixProof & { options: Record<string, unknown> } {
   if (!value || typeof value !== 'object') return false
@@ -87,17 +118,19 @@ export function isCompleteExecutionSnapshot(value: unknown): value is Continuati
     && typeof p.endpointHash === 'string' && typeof p.provider === 'string' && typeof p.model === 'string'
     && typeof p.requestId === 'string' && typeof p.toolsHash === 'string' && typeof p.optionsHash === 'string'
     && !!p.options && !Array.isArray(p.options) && hash(p.options) === p.optionsHash
-    && Array.isArray(p.messages) && p.messages.every(m => typeof m.hash === 'string' && typeof m.role === 'string' && Number.isFinite(m.chars))
+    && Array.isArray(p.messages) && p.messages.every(m => m && typeof m.hash === 'string' && typeof m.role === 'string' && Number.isFinite(m.chars))
+    && isValidNativeProof(p)
 }
 
 /** Hash the final transport body, after every send-time transformation. No content or headers. */
 export function proveWirePrefix(body: Record<string, unknown>, provider: string, requestId: string, endpoint?: string): ContinuationPrefixProof {
+  const messages = (body.messages ?? []) as Array<Record<string, unknown>>
   return {
     version: 2, provider, model: String(body.model), requestId,
     options: wireOptions(body),
     ...(endpoint ? { endpointHash: hash(endpoint) } : {}),
     optionsHash: hash(wireOptions(body)), toolsHash: hash(body.tools ?? []),
-    messages: ((body.messages ?? []) as Array<Record<string, unknown>>).map(m => ({
+    messages: messages.map(m => ({
       hash: hash(m), chars: JSON.stringify(m).length, role: String(m.role),
     })),
   }

@@ -2,7 +2,7 @@
  * Semantic index — file-level BM25 index with incremental updates.
  */
 
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync, mkdirSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import { createHash } from 'node:crypto'
 import { BM25Index, type SearchHit } from './text-index.js'
@@ -13,6 +13,7 @@ import { type EmbeddingProvider, NullEmbeddingProvider } from './embedding-provi
 import { rankSearchCandidates } from './search-salience.js'
 import { isFilesystemMetadata } from '../utils/file-metadata.js'
 import { toPosixPath } from '../path-format.js'
+import { WorkspaceFileReader } from './workspace-file-reader.js'
 
 /** Cap on chunks embedded in one pass to bound first-search latency/cost. */
 const MAX_EMBED_CHUNKS = 4000
@@ -60,9 +61,11 @@ export class SemanticIndex {
   /** Last isStale() verdict; reused for staleTtlMs to skip redundant rescans. */
   private staleCache: { at: number; stale: boolean } | null = null
   private readonly staleTtlMs: number
+  private readonly reader: WorkspaceFileReader
 
   constructor(cwd: string, provider: EmbeddingProvider = new NullEmbeddingProvider(), opts?: { staleTtlMs?: number }) {
     this.cwd = cwd
+    this.reader = new WorkspaceFileReader(cwd)
     this.provider = provider
     this.staleTtlMs = opts?.staleTtlMs ?? STALE_CHECK_TTL_MS
     this.loadMeta()
@@ -92,12 +95,12 @@ export class SemanticIndex {
       const snapshot = JSON.parse(raw) as SemanticIndexSnapshot
       if (snapshot.version === INDEX_VERSION && snapshot.fileHashes) {
         for (const [relPath, hash] of Object.entries(snapshot.fileHashes)) {
-          if (!isMetadataPath(relPath)) this.fileHashes.set(relPath, hash)
+          if (!isMetadataPath(relPath) && this.reader.stat(join(this.cwd, relPath))?.isFile()) this.fileHashes.set(relPath, hash)
         }
         // Restore chunks so cold-start searches work without rebuild
         if (snapshot.chunks) {
           for (const c of snapshot.chunks) {
-            if (!isMetadataPath(c.file)) this.index.addChunk(c.file, c.startLine, c.endLine, c.text)
+            if (!isMetadataPath(c.file) && this.fileHashes.has(c.file)) this.index.addChunk(c.file, c.startLine, c.endLine, c.text)
           }
         }
       }
@@ -116,7 +119,7 @@ export class SemanticIndex {
     let skipped = 0
 
     const walk = (dir: string, depth = 0): void => {
-      if (depth > 8 || indexed >= maxFiles) return
+      if (depth > 8 || indexed >= maxFiles || !this.reader.stat(dir)?.isDirectory()) return
       let entries: string[]
       try {
         entries = readdirSync(dir)
@@ -128,12 +131,8 @@ export class SemanticIndex {
         if (indexed >= maxFiles) break
         if (isFilesystemMetadata(entry) || SKIP_DIRS.has(entry)) continue
         const abs = join(dir, entry)
-        let st: ReturnType<typeof statSync>
-        try {
-          st = statSync(abs)
-        } catch {
-          continue
-        }
+        const st = this.reader.stat(abs)
+        if (!st) continue
 
         if (st.isDirectory()) {
           walk(abs, depth + 1)
@@ -144,14 +143,8 @@ export class SemanticIndex {
             continue
           }
           const rel = relative(this.cwd, abs)
-          let content: string
-          try {
-            content = readFileSync(abs, 'utf-8')
-          } catch {
-            skipped++
-            continue
-          }
-          if (content.length > 200_000) {
+          const content = this.reader.read(rel)
+          if (content === null) {
             skipped++
             continue
           }
@@ -189,14 +182,14 @@ export class SemanticIndex {
     let diskCount = 0
     try {
       const walk = (dir: string, depth = 0): void => {
-        if (depth > 8 || diskCount > this.fileHashes.size + 10) return
+        if (depth > 8 || diskCount > this.fileHashes.size + 10 || !this.reader.stat(dir)?.isDirectory()) return
         let entries: string[]
         try { entries = readdirSync(dir) } catch { return }
         for (const entry of entries) {
           if (isFilesystemMetadata(entry) || SKIP_DIRS.has(entry)) continue
           const abs = join(dir, entry)
-          let st: ReturnType<typeof statSync>
-          try { st = statSync(abs) } catch { continue }
+          const st = this.reader.stat(abs)
+          if (!st) continue
           if (st.isDirectory()) { walk(abs, depth + 1) }
           else if (st.isFile()) {
             const ext = entry.slice(entry.lastIndexOf('.'))
@@ -209,14 +202,8 @@ export class SemanticIndex {
     if (diskCount > this.fileHashes.size) return true
 
     for (const [relPath, storedHash] of this.fileHashes) {
-      const absPath = join(this.cwd, relPath)
-      if (!existsSync(absPath)) return true // file deleted
-      try {
-        const content = readFileSync(absPath, 'utf-8')
-        if (this.hashContent(content) !== storedHash) return true
-      } catch {
-        return true // unreadable
-      }
+      const content = this.reader.read(relPath)
+      if (content === null || this.hashContent(content) !== storedHash) return true
     }
     return false
   }
@@ -232,7 +219,7 @@ export class SemanticIndex {
 
     // Collect current source files
     const walk = (dir: string, depth = 0): void => {
-      if (depth > 8 || scanned >= maxFiles) return
+      if (depth > 8 || scanned >= maxFiles || !this.reader.stat(dir)?.isDirectory()) return
       let entries: string[]
       try {
         entries = readdirSync(dir)
@@ -242,8 +229,8 @@ export class SemanticIndex {
       for (const entry of entries) {
         if (isFilesystemMetadata(entry) || SKIP_DIRS.has(entry)) continue
         const abs = join(dir, entry)
-        let st: ReturnType<typeof statSync>
-        try { st = statSync(abs) } catch { continue }
+        const st = this.reader.stat(abs)
+        if (!st) continue
         if (st.isDirectory()) { walk(abs, depth + 1) }
         else if (st.isFile()) {
           const ext = entry.slice(entry.lastIndexOf('.'))
@@ -263,15 +250,10 @@ export class SemanticIndex {
 
     // Find new/modified files
     for (const relPath of currentFiles) {
-      const absPath = join(this.cwd, relPath)
-      try {
-        const content = readFileSync(absPath, 'utf-8')
-        if (content.length > 200_000) continue
-        const hash = this.hashContent(content)
-        if (this.fileHashes.get(relPath) !== hash) toReindex.push(relPath)
-      } catch {
-        toRemove.push(relPath)
-      }
+      const content = this.reader.read(relPath)
+      if (content === null) { toRemove.push(relPath); continue }
+      const hash = this.hashContent(content)
+      if (this.fileHashes.get(relPath) !== hash) toReindex.push(relPath)
     }
 
     // Fallback: if too many files changed, do a full rebuild
@@ -298,17 +280,14 @@ export class SemanticIndex {
       this.vectors.removeFile(relPath)
       this.fileHashes.delete(relPath)
 
-      const absPath = join(this.cwd, relPath)
-      try {
-        const content = readFileSync(absPath, 'utf-8')
-        const hash = this.hashContent(content)
-        this.fileHashes.set(relPath, hash)
-        const ext = relPath.slice(relPath.lastIndexOf('.'))
-        for (const c of chunkByDefinitions(content, ext)) {
-          this.index.addChunk(relPath, c.startLine, c.endLine, c.text)
-        }
-        reindexed++
-      } catch { /* skip unreadable */ }
+      const content = this.reader.read(relPath)
+      if (content === null) continue
+      this.fileHashes.set(relPath, this.hashContent(content))
+      const ext = relPath.slice(relPath.lastIndexOf('.'))
+      for (const c of chunkByDefinitions(content, ext)) {
+        this.index.addChunk(relPath, c.startLine, c.endLine, c.text)
+      }
+      reindexed++
     }
 
     this.persistMeta()

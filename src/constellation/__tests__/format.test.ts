@@ -57,3 +57,42 @@ test('formatConstellationHistory reports total and empty state', () => {
   empty.milestones.push(m('a'))
   assert.match(formatConstellationHistory(empty), /1 total/)
 })
+
+// §6 security: milestone fields come from git-tracked .rivet/constellation.json
+// (pre-seeded by a malicious repo). formatMilestoneLine output goes straight to
+// the Starmap overlay (renderStarmap → overlay-engine stdout.write) without
+// passing enforceTextContract, so the line itself must strip terminal escapes.
+test('formatMilestoneLine strips OSC 52 clipboard-overwrite from summary', () => {
+  const line = formatMilestoneLine(m('osc', { summary: 'pwn\x1b]52;c;aGFjaw==\x07end' }))
+  assert.ok(!line.includes('\x1b'), 'ESC must not survive')
+  assert.ok(!line.includes('\x07'), 'BEL must not survive')
+  assert.match(line, /pwn/)
+  assert.match(line, /end/)
+})
+
+test('formatMilestoneLine strips CSI clear-screen from summary', () => {
+  const line = formatMilestoneLine(m('csi', { summary: 'a\x1b[2Jb' }))
+  assert.ok(!line.includes('\x1b'))
+  assert.match(line, /ab/)
+})
+
+test('formatMilestoneLine sanitizes C1 controls and C0 from every field', () => {
+  const line = formatMilestoneLine(
+    m('c1', {
+      summary: 'sum\u009b2J\u0001x',
+      sessionId: 's\u009b',
+      agentMark: { numericId: 1, symbol: '\u009b\u001b', domain: 'dom\u0090' },
+      type: 'fix',
+    }),
+  )
+  assert.ok(!/\x1b/.test(line), 'no ESC')
+  assert.ok(!/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/.test(line), 'no C0/DEL')
+  assert.ok(!/[\u0080-\u009F]/.test(line), 'no C1')
+})
+
+test('formatMilestoneLine preserves legit glyphs after sanitizing', () => {
+  const line = formatMilestoneLine(m('glyph', { type: 'refactor', verificationStatus: 'blocked' }))
+  assert.match(line, /♻/)
+  assert.match(line, /⚠/)
+  assert.match(line, /⚘/)
+})

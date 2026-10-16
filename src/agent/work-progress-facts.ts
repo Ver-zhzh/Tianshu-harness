@@ -114,6 +114,8 @@ export class WorkProgressFacts {
   get taskStartModelTurn(): number { return this.taskStartTurn }
   get explicitNoMutation(): boolean | undefined { return this.humanConstraint === null ? undefined : this.humanConstraint === 'read-only' }
   get explicitMutationAllowed(): boolean { return this.humanConstraint === 'mutation-allowed' }
+  captureHumanConstraint() { return this.humanConstraint }
+  restoreHumanConstraint(value: ReturnType<WorkProgressFacts['captureHumanConstraint']>): void { this.humanConstraint = value; this.frozen = null }
 
   editExpectation(taskKinds: readonly IntentTaskKind[], legacyInput: string) {
     const snapshot = this.currentSnapshot()

@@ -1,4 +1,6 @@
 import { createSidePathUsageRecorder } from './side-path-usage-recorder.js'
+import { getCompactionTaskContract, getCompactionGoalAnchor, rollbackActiveUserInput } from './human-input-boundary.js'
+export { rollbackActiveUserInput } from './human-input-boundary.js'
 export { createSidePathUsageRecorder } from './side-path-usage-recorder.js'
 import { sessionStateAdvice } from './runtime-advice-facts.js'
 import { cacheDiagnosticClass } from '../cache/cache-diagnostic-class.js'
@@ -1032,6 +1034,10 @@ export function createPlanTraceCoordinator(self: AgentLoop): PlanTraceCoordinato
   })
 }
 
+export function createCompactionInputBoundary(self: AgentLoop) {
+  return { getActiveContract: () => getCompactionTaskContract(self), getPublishedGoalAnchor: () => getCompactionGoalAnchor(self) }
+}
+
 export function createCompactBoundaryCoordinator(self: AgentLoop): CompactBoundaryCoordinator {
   return new CompactBoundaryCoordinator({
     getCompactFailures: () => self.compactFailures,
@@ -1245,11 +1251,11 @@ export function createTurnOrchestrator(self: AgentLoop): TurnOrchestrator {
     syncPlanModeToConfig: () => { self.syncPlanModeToConfig() },
 
     // === Session ===
-    removeLastMessage: () => { self.session.removeLastMessage() },
+    removeLastMessage: () => { rollbackActiveUserInput(self) },
     preserveUserOnError: () => !!self.config.promptEngine.getRequestBudgetPolicy(),
     recoverContextBudget: self.config.inputOrigin === 'worker_task' ? undefined : () => self.compactContextBudget(false),
     addUserMessage: (content) => { self.session.addUserMessage(content) },
-    appendSystemReminder: (content, cls) => { self.session.appendSystemReminder(content, cls) },
+    appendSystemReminder: (content, cls, opts) => { self.session.appendSystemReminder(content, cls, opts) },
     appendSystemReminderAndReport: (content) => self.session.appendSystemReminderAndReport(content),
     resetSrCount: () => { self.session.resetSrCount() },
     addAssistantBlocks: (blocks) => {

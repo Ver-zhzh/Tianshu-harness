@@ -69,6 +69,32 @@ describe('git-clear-after-fail-hook', () => {
     assert.equal(submitted.length, 1)
   })
 
+  it('shares quoted pathspec and revision handling with the execution gate', () => {
+    for (const [command, count] of [
+      ["git checkout '.'", 1], ['git checkout "./file with spaces.txt"', 1],
+      ['git checkout HEAD~1', 0], ['git checkout HEAD^', 0],
+      ['git checkout --detach HEAD~1', 0],
+    ] as const) {
+      const { submitted, hook } = collectAdvisories()
+      hook.run(makeCtx(1), makeTestFail())
+      hook.run(makeCtx(1), makeBashOk(command))
+      assert.equal(submitted.length, count, command)
+    }
+  })
+
+  it('shares force-argument handling with the pre-execution and approval gates', () => {
+    for (const command of ['git checkout -q --force .', 'git checkout HEAD -f -- file.txt']) {
+      const { submitted, hook } = collectAdvisories()
+      hook.run(makeCtx(1), makeTestFail())
+      hook.run(makeCtx(1), makeBashOk(command))
+      assert.equal(submitted.length, 1, command)
+    }
+    const { submitted, hook } = collectAdvisories()
+    hook.run(makeCtx(1), makeTestFail())
+    hook.run(makeCtx(1), makeBashOk('git checkout --orphan newbranch'))
+    assert.equal(submitted.length, 0)
+  })
+
   it('fires on test fail → git restore', () => {
     const { submitted, hook } = collectAdvisories()
     hook.run(makeCtx(1), makeTestFail())

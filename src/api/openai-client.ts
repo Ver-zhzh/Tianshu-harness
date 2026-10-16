@@ -18,7 +18,7 @@ import { parseRetryAfterMs } from './error-classifier.js'
 import { resolveWireEffort } from './provider.js'
 import { ReasoningRepetitionGuard, REASONING_REPETITION_CORRECTION } from './reasoning-repetition.js'
 import { deepSeekImageLimitError } from '../context/image-input-limits.js'
-import { isOfficialDeepSeek, deepSeekBudgetPolicy, buildContextBudget, assertContextBudget, DEEPSEEK_BODY_LIMIT, DEEPSEEK_OUTPUT_RESERVE } from '../context/request-budget.js'
+import { isOfficialDeepSeek, deepSeekBudgetPolicy, buildContextBudget, assertContextBudget, DEEPSEEK_BODY_LIMIT, capOutputReserve } from '../context/request-budget.js'
 import type { ContextBudgetSnapshot } from '../server/protocol.js'
 import { classifyApiError } from './error-classifier.js'
 import { normalizeBaseUrl } from './endpoint-map.js'
@@ -545,15 +545,16 @@ export class OpenAIClient implements StreamClient {
 
   previewContextRequest(request: OaiChatRequest): OaiChatRequest {
     const model = request.model || this.config.model
-    return { ...request, model, max_tokens: this.capOutputTokens(request.max_tokens ?? this.config.maxTokens, model),
+    return { ...request, model, max_tokens: this.capOutputTokens(request.max_tokens ?? this.config.maxTokens),
       messages: this.mapWireMessages(request.messages, { toolsPresent: !!request.tools?.length,
         suppressStickyPreserve: this.requestInvariant.hasObserved(request) }) }
   }
 
-  /** 官方 DeepSeek 的单次输出封顶到「现实预留」（DEEPSEEK_OUTPUT_RESERVE）——与预算侧
-   *  outputReserve 同源，保证 `input + max_tokens ≤ window` 不被大输入破坏。其他 provider 原样。 */
-  private capOutputTokens(maxTokens: number, model: string): number {
-    return isOfficialDeepSeek(this.config.baseUrl, model) ? Math.min(maxTokens, DEEPSEEK_OUTPUT_RESERVE) : maxTokens
+  /** 单次输出封顶到「现实预留」——与预算侧 outputReserve 共用 `capOutputReserve`（必须同源，
+   *  否则 `input + max_tokens ≤ window` 被大输入破坏）。此前只对官方 DeepSeek 生效，非官方
+   *  endpoint 原样放行「能力上限」，512K 窗口因此只剩 ~105K 输入、长会话硬断（issue #372）。 */
+  private capOutputTokens(maxTokens: number): number {
+    return capOutputReserve(maxTokens, this.config.contextWindow)
   }
 
   async stream(
@@ -582,7 +583,7 @@ export class OpenAIClient implements StreamClient {
     }
 
     // MiMo API uses max_completion_tokens, standard OpenAI uses max_tokens
-    const wireMaxTokens = this.capOutputTokens(request.max_tokens ?? this.config.maxTokens, String(body.model))
+    const wireMaxTokens = this.capOutputTokens(request.max_tokens ?? this.config.maxTokens)
     if (this.config.useMaxCompletionTokens) {
       body.max_completion_tokens = wireMaxTokens
     } else {
@@ -990,7 +991,7 @@ export class OpenAIClient implements StreamClient {
         },
         body: guard.serializedBody ?? JSON.stringify(guard.body),
         signal: lifecycle.signal,
-      }, fetchTimeout, this.proxyDispatcher)
+      }, fetchTimeout, this.proxyDispatcher, { provider: this.config.providerName })
 
       if (!response.ok) {
         const errorBody = await response.text().catch(() => '')

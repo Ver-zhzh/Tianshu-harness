@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { rivetHome } from '../config/paths.js'
 import type { ModelConfig } from '../config/schema.js'
 import { computeUsageCost } from '../utils/pricing.js'
-import { currentExecutionScope } from './execution-continuity.js'
+import { currentExecutionScope, isExecutionValidation } from './execution-continuity.js'
 
 export interface CallAuditContext {
   requestId?: string
@@ -39,6 +39,7 @@ function append(record: CallAuditRecord): void {
 
 /** Accepts only diagnostic fields, never request bodies or authentication headers. */
 export function beginCallAudit(context: CallAuditContext) {
+  const validationOnly = isExecutionValidation()
   const execution = currentExecutionScope()
   context = { ...context, sessionId: execution?.sessionId ?? context.sessionId }
   if (execution && context.requestId) {
@@ -48,12 +49,12 @@ export function beginCallAudit(context: CallAuditContext) {
   const operationId = context.attemptId ?? randomUUID()
   const identity: CallAuditContext = Object.fromEntries(Object.entries(context).filter(([key, value]) =>
     ['requestId', 'attemptId', 'sessionId', 'parentRequestId', 'workOrderId', 'provider', 'model', 'purpose', 'routeReason', 'configFingerprint'].includes(key) && typeof value === 'string'))
-  append({ ...identity, operationId, t: Date.now(), phase: 'started' })
+  if (!validationOnly) append({ ...identity, operationId, t: Date.now(), phase: 'started' })
   let finished = false
   return {
     operationId,
     finish(result: Pick<CallAuditRecord, 'status' | 'responseId' | 'responseModel' | 'systemFingerprint' | 'finishReason' | 'usage' | 'errorName'>) {
-      if (finished) return
+      if (finished || validationOnly) return
       finished = true
       const usage = result.usage && Object.fromEntries(Object.entries(result.usage).filter(([key, n]) => /^(?:input_tokens|output_tokens|cache_read_input_tokens|cache_creation_input_tokens|reasoning_tokens|prompt_tokens|completion_tokens|total_tokens|prompt_cache_hit_tokens|prompt_cache_miss_tokens)$/.test(key) && Number.isFinite(n) && n >= 0))
       append({ ...identity, operationId, t: Date.now(), phase: 'finished', status: result.status,

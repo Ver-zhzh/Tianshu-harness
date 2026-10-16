@@ -32,6 +32,7 @@ import {
   type SessionRecord,
 } from '../session-manager.js'
 import type { AgentCallbacks } from '../../agent/loop-types.js'
+import { ColdStartEvidenceError } from '../../api/continuation-prefix.js'
 import type { Artifact } from '../../artifact/types.js'
 import type { OaiMessage } from '../../api/oai-types.js'
 import type { ActiveStarDomain } from '../../agent/star-domain.js'
@@ -2502,6 +2503,16 @@ test('error 事件携带 guidance（errorRecoveryGuidance 的「下一步」）�
   a.callbacks!.onError(Object.assign(new Error('The operation was aborted'), { name: 'AbortError' }))
   const aborted = manager.getEvents(s.id, 0)!.events.filter((e) => e.type === 'error').at(-1)
   assert.equal(aborted?.data.guidance, undefined, 'AbortError 不得携带指引')
+})
+
+test('冷启动证据门错误携带 cold_start_evidence 类别与代价指引（桌面据此渲染继续按钮）', () => {
+  const { manager, agents } = makeManager()
+  const s = manager.createSession({ prompt: 'go' })
+  const a = agents[0]!
+  a.callbacks!.onError(new ColdStartEvidenceError('历史请求的模型、凭据归属或执行选项证据不足；禁止静默冷启动，请显式开始新会话'))
+  const ev = manager.getEvents(s.id, 0)!.events.filter((e) => e.type === 'error').at(-1)
+  assert.equal(ev?.data.kind, 'cold_start_evidence', '桌面靠这个 kind 渲染「以当前配置继续」')
+  assert.ok(typeof ev?.data.guidance === 'string' && ev.data.guidance.includes('以当前配置继续'))
 })
 
 
