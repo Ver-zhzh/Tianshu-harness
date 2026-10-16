@@ -467,3 +467,4 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 - #492 fix(security): 语义索引 walk 跟随符号链接越界读取工作区外文件（OPEN）
 - #491 fix(security): 硬链接绕过工作区隔离与敏感文件门禁（OPEN）
 - #490 fix(security): 压缩包附件 path 形态应用私密文件策略（OPEN）
+- #489 fix(security): Starmap 里程碑行剥离终端转义序列（OPEN）
