@@ -461,3 +461,4 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 - #498 fix(web-search): 渲染前剥离标题/摘要中的 markdown 链接语法，堵超链接劫持（OPEN）
 - #497 fix(security): 转义 volatile 附录两处未转义插值（session-state/mention），堵提示词注入（OPEN）
 - #496 fix(security): bash git commit 暂存区敏感文件硬门（OPEN）
+- #495 fix(security): git add 敏感文件硬门增加归一化双视图检测（OPEN）
