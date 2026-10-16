@@ -469,3 +469,4 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 - #490 fix(security): 压缩包附件 path 形态应用私密文件策略（OPEN）
 - #489 fix(security): Starmap 里程碑行剥离终端转义序列（OPEN）
 - #488 fix(security): stripTerminalEscapes 剥离 C1 单字节控制符（OPEN）
+- #487 fix(web-search): 跑题兜底不再冒充答案 + bing 301 区域跳转跟随（CLOSED）
