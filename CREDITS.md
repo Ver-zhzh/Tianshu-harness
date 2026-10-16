@@ -458,3 +458,4 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 - #480 docs: 完善中英双语文档体系、对齐 README 认知运行时结构与 v3.31.0 基线（CLOSED）
 - #481 修复 CLI 与扩展会话生命周期、跨平台兼容及官网交互（CLOSED）
 - #485 fix(git): git checkout 强制旗标形态(-f/--force/-qf)纳入清场门禁（OPEN）
+- #498 fix(web-search): 渲染前剥离标题/摘要中的 markdown 链接语法，堵超链接劫持（OPEN）
