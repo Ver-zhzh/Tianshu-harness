@@ -29,8 +29,9 @@ export function serializeSessionMessage(message: Message, maxChars = MAX_SESSION
   }))
 }
 
-export function serializeOaiSessionMessage(message: OaiMessage, maxChars = MAX_SESSION_MESSAGE_JSON_CHARS): string {
+export function serializeOaiSessionMessage(message: OaiMessage, maxChars?: number): string {
   const normalized = normalizeOaiMessage(message)
+  if (maxChars === undefined) return JSON.stringify(normalized)
   // Attachments are protocol data. Truncating a URL/base64 value corrupts it.
   if (normalized.role === 'user' && Array.isArray(normalized.content)) return JSON.stringify(normalized)
   // A signature and the associated function arguments are opaque protocol data.

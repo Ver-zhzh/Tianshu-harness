@@ -4,13 +4,14 @@ import { randomUUID } from 'node:crypto'
 import type { OaiChatRequest } from '../api/oai-types.js'
 import { assertContextBudget, buildContextBudget, DEEPSEEK_BODY_LIMIT, type RequestBudgetPolicy } from '../context/request-budget.js'
 import type { ContextBudgetSnapshot } from '../server/protocol.js'
+import { isContextLengthError } from '../api/error-classifier.js'
 
 /** Only an explicit pre-generation server rejection permits one model-call replay. */
 export function canRecoverContextRejection(error: unknown, outputChars: number, blocks: number): boolean {
   if (!(error instanceof Error) || outputChars > 0 || blocks > 0) return false
   const status = (error as Error & { status?: number }).status
   return (status === 400 || status === 422)
-    && /context_length_exceeded|prompt is too long|maximum context length/i.test(error.message)
+    && isContextLengthError(error.message)
 }
 
 export async function prepareContextRequest(deps: {

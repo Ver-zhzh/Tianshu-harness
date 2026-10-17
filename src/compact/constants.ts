@@ -387,8 +387,8 @@ export const INLINE_TOOL_RESULT_MAX_CHARS = 120_000
 export const JSON_VALUE_KEEP_RATIO = 0.8
 
 /**
- * 单条会话消息落盘 JSON 的字符上限。物理家在此：它与 INLINE_TOOL_RESULT_MAX_CHARS
- * 是同一组约束的两面，分开定义过就会漂移。
+ * Legacy Message 日志与显式 OAI 预览的 JSON 字符上限；canonical OAI 转录必须无损。
+ * 它与 INLINE_TOOL_RESULT_MAX_CHARS 同源，但不能在协议历史落盘后再次截断内容。
  *
  * 必须容得下内存侧允许保留的单条工具结果——内存留下的内容若在落盘时被二次削小，
  * resume / 重放拿到的历史就与当时真正发给模型的内容不一致。逐字符串裁剪按

@@ -28,7 +28,7 @@ export class RequestContextController {
   snapshot?: ContextBudgetSnapshot
   private revision = 0
   activeUserMessage?: OaiMessage
-  private failedAt?: { input: number; model: string; budget: number }
+  private failedAt?: { input: number; model: string; budget: number; userBoundary?: OaiMessage }
   /** 上一次压缩的拒绝原因——仅在预算闸门最终拒绝时用于向 UI 透出（见 describeCompactBlock）。 */
   private lastCompactReason?: string
   constructor(private readonly agent: AgentLoop) {}
@@ -79,7 +79,7 @@ export class RequestContextController {
     this.record(buildContextBudget(visible, policy, { requestId: randomUUID(), revision: 0 }), true)
   }
 
-  async compact(force = false): Promise<boolean> {
+  async compact(force = false, reason: 'explicit_user_compact' | 'context_limit' = force ? 'explicit_user_compact' : 'context_limit'): Promise<boolean> {
     const self = this.agent, budget = this.snapshot
     if (!force && (!budget || budget.inputTokens <= budget.inputBudget)) return false
     // This is explicit or hard-limit recovery, not discretionary ratio compaction.
@@ -87,6 +87,7 @@ export class RequestContextController {
     const summaryPolicy = this.getBudgetPolicy()
     if (!summaryPolicy) return false
     if (!force && budget && this.failedAt?.model === budget.model && this.failedAt.budget === budget.inputBudget
+      && this.failedAt.userBoundary === this.activeUserMessage
       && budget.inputTokens < this.failedAt.input + 32_768) return false
     const signal = self.abortController?.signal
     await self.drainPersistWrites()
@@ -102,7 +103,9 @@ export class RequestContextController {
     const changed = await compactBudgetHistory(source, {
       client: self.config.budgetSummaryClient(),
       model: self.config.promptEngine.getModel(), signal, protectedUser: activeUser,
-      targetTokens: budget ? Math.max(0, Math.floor(budget.inputBudget * 0.7) - 16_384) : undefined,
+      // 手动整理按当前占用计算目标（PR #1 补充）：目标不再只随窗口容量变化，
+      // 避免明明存在可整理历史却把全部历史都划进保留区；下限 1_024。
+      targetTokens: budget ? Math.max(1_024, Math.floor(Math.min(budget.inputTokens, budget.inputBudget) * 0.7) - 16_384) : undefined,
       summaryPolicy, summaryMaxTokens: self.config.budgetSummaryMaxTokens,
       // Preserve the paid prefix under ordinary pressure, but do not reject a
       // useful emergency reclaim merely because it is smaller than the 32K cost floor.
@@ -126,12 +129,12 @@ export class RequestContextController {
         if (JSON.stringify(self.session.getMessages()) !== sourceJson) throw new LocalWorkerPolicyError('历史在压缩摘要期间发生变化；禁止替换')
         const activeIndex = activeUser ? messages.indexOf(activeUser) : -1
         if (activeUser && activeIndex < 0) throw new LocalWorkerPolicyError('压缩候选缺少当前用户边界；禁止替换')
-        await commitCompactedHistory(self, source, messages, force ? 'explicit_user_compact' : 'context_limit')
+        await commitCompactedHistory(self, source, messages, reason)
         this.activeUserMessage = activeIndex >= 0 ? self.session.getMessages()[activeIndex] : undefined
         self.config.promptEngine.resetAppendixBaseline()
       },
     })
-    this.failedAt = changed || !budget ? undefined : { input: budget.inputTokens, model: budget.model, budget: budget.inputBudget }
+    this.failedAt = changed || !budget ? undefined : { input: budget.inputTokens, model: budget.model, budget: budget.inputBudget, userBoundary: this.activeUserMessage }
     return changed
   }
 }

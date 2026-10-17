@@ -1254,7 +1254,7 @@ export function createTurnOrchestrator(self: AgentLoop): TurnOrchestrator {
     // === Session ===
     removeLastMessage: () => { rollbackActiveUserInput(self) },
     preserveUserOnError: () => !!self.config.promptEngine.getRequestBudgetPolicy(),
-    recoverContextBudget: self.config.inputOrigin === 'worker_task' ? undefined : () => self.compactContextBudget(false),
+    recoverContextBudget: self.config.inputOrigin === 'worker_task' ? undefined : () => self.requestContext.compact(true, 'context_limit'),
     addUserMessage: (content) => { self.session.addUserMessage(content) },
     appendSystemReminder: (content, cls, opts) => { self.session.appendSystemReminder(content, cls, opts) },
     appendSystemReminderAndReport: (content) => self.session.appendSystemReminderAndReport(content),

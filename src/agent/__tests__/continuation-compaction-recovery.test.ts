@@ -416,6 +416,14 @@ async function verifyCompactionRecovery(context: TestContext, entry: 'automatic'
       return
     }
     if (persistence === 'serialized-mismatch') {
+      const rewrite = persist!.compactOaiAsync.bind(persist)
+      context.mock.method(persist!, 'compactOaiAsync', async (messages: OaiMessage[], durable?: boolean) => {
+        const corrupted = structuredClone(messages)
+        const target = corrupted.find(message => typeof message.content === 'string')
+        assert.ok(target && typeof target.content === 'string')
+        target.content += '\nCORRUPTED_TRANSCRIPT_FIXTURE'
+        await rewrite(corrupted, durable)
+      })
       await assert.rejects(agent.compaction.maybeCompact({ loopTurn: 0, failures: agent.compactFailures }), /持久化历史不完整/)
       const frozenPath = join(dirname(persist!.getFilePath()), 'compaction-fixture.frozen.json')
       const journal = JSON.parse(readFileSync(frozenPath, 'utf8'))

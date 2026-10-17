@@ -76,6 +76,11 @@ export interface ClassifiedError {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+export function isContextLengthError(message: string): boolean {
+  return /context[_ -](?:length|window)[_ -]exceed(?:ed|s)?|maximum context length|prompt is too long|context(?: window)? (?:exceeded|overflow)/i.test(message)
+    || /input tokens? (?:count )?exceed(?:s|ed)? (?:the )?(?:limit(?:\s*\(request id:[^)]*\))?[.!]?\s*$|maximum (?:supported )?input length[.!]?\s*$)/i.test(message)
+}
+
 /** Extract HTTP status code from various error shapes. */
 function extractStatus(error: unknown): number | null {
   if (error != null && typeof error === 'object') {
@@ -466,7 +471,7 @@ function classifyByPattern(error: unknown): ClassifiedError {
   }
   // Context overflow patterns
   if (
-    /prompt is too long|context_length_exceeded|max.*token|context.*overflow/i.test(message)
+    isContextLengthError(message)
   ) {
     return {
       retryable: false,
@@ -573,7 +578,7 @@ export function classifyApiError(error: unknown): ClassifiedError {
     return { retryable: false, retryDelayMs: 0, shouldReconnect: false,
       category: 'client_error', userMessage: error.message, maxRetries: 0 }
   }
-  if (error instanceof Error && /context_length_exceeded|prompt is too long|maximum context length/i.test(error.message)) {
+  if (error instanceof Error && isContextLengthError(error.message)) {
     return { retryable: false, retryDelayMs: 0, shouldReconnect: false,
       category: 'context_overflow', userMessage: error.message, maxRetries: 0 }
   }
