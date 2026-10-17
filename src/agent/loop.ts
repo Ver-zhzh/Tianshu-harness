@@ -198,6 +198,7 @@ export class AgentLoop {
       await waitForAgentRewind(this)
       await this.cancelIdleCompaction()
       this.abortController = new AbortController()
+      this.requestContext.refreshSnapshot()
       const changed = await this.compactContextBudget(true)
       this.requestContext.refreshSnapshot()
       return changed
