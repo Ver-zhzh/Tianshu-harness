@@ -1,5 +1,6 @@
 import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
 import { join } from 'node:path'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -76,7 +77,7 @@ describe('spawnShell (job launcher wiring)', () => {
 
   it('falls back to spawning the shell directly when no launcher is available (fail-open)', () => {
     const { calls, spawnFn } = record()
-    spawnShell(shell, 'echo hi', { cwd: '/tmp' }, null, spawnFn)
+    spawnShell(shell, 'echo hi', { cwd: '/tmp' }, null, spawnFn, 'linux')
 
     assert.equal(calls.length, 1)
     const call = calls[0]
@@ -86,9 +87,71 @@ describe('spawnShell (job launcher wiring)', () => {
     assert.deepEqual(call.options, { cwd: '/tmp' })
   })
 
+  it('keeps a tracked Bash root for the Windows fallback, including trailing comments', () => {
+    const { calls, spawnFn } = record()
+    const command = 'node worker.js # the epilogue must not become part of this comment'
+    spawnShell(shell, command, { cwd: '/tmp' }, null, spawnFn, 'win32')
+    assert.deepEqual(calls[0]?.args, ['-c', `${command}\nexit $?`])
+  })
+
+  it('does not rewrite Windows cmd or PowerShell commands', () => {
+    for (const executable of ['cmd.exe', 'powershell.exe']) {
+      const { calls, spawnFn } = record()
+      spawnShell({ cmd: executable, args: ['-c'] }, 'exit 7', {}, null, spawnFn, 'win32')
+      assert.deepEqual(calls[0]?.args, ['-c', 'exit 7'])
+    }
+  })
+
+  it('the Windows Bash epilogue prevents tail-exec from replacing the tracked root', {
+    skip: process.platform === 'win32' && 'POSIX PID-identity probe; Windows runs the real job-store cleanup integration',
+    timeout: 15_000,
+  }, async () => {
+    const command = `${JSON.stringify(process.execPath)} -e 'console.log(JSON.stringify({pid:process.pid})); setInterval(() => {}, 1000)'`
+    const child = spawnShell({ cmd: 'bash', args: ['-c'] }, command, {
+      stdio: ['ignore', 'pipe', 'pipe'], detached: true,
+      env: { ...process.env, BASH_ENV: undefined },
+    }, null, spawn, 'win32')
+    const closed = new Promise<void>(resolve => child.once('close', () => resolve()))
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      const report = await new Promise<{ pid: number }>((resolve, reject) => {
+        let output = ''
+        timer = setTimeout(() => reject(new Error('child identity marker was not received')), 5000)
+        child.once('error', reject)
+        child.stdout!.on('data', chunk => {
+          output += chunk.toString()
+          const end = output.indexOf('\n')
+          if (end >= 0) {
+            try { resolve(JSON.parse(output.slice(0, end))) } catch (error) { reject(error) }
+          }
+        })
+      })
+      assert.notEqual(report.pid, child.pid, 'the tracked PID must remain Bash rather than become the foreground Node child')
+      assert.doesNotThrow(() => process.kill(child.pid!, 0), 'the tracked root must stay alive while its child runs')
+    } finally {
+      clearTimeout(timer)
+      killProcessTree(child, 'SIGKILL')
+      await closed
+    }
+  })
+
+  it('the Windows Bash epilogue preserves a nonzero foreground exit status', {
+    skip: process.platform === 'win32' && 'POSIX execution probe; Windows exit status is covered by job-store integration',
+    timeout: 15_000,
+  }, async () => {
+    const child = spawnShell({ cmd: 'bash', args: ['-c'] },
+      `${JSON.stringify(process.execPath)} -e 'process.exit(17)' # trailing comment`,
+      { stdio: 'ignore', env: { ...process.env, BASH_ENV: undefined } }, null, spawn, 'win32')
+    const code = await new Promise<number | null>((resolve, reject) => {
+      child.once('error', reject)
+      child.once('close', resolve)
+    })
+    assert.equal(code, 17)
+  })
+
   it('routes through the launcher, passing cwd and parent pid before the real command', () => {
     const { calls, spawnFn } = record()
-    spawnShell(shell, 'echo hi', { cwd: '/tmp/work' }, 'C:\\tools\\job-launch.exe', spawnFn)
+    spawnShell(shell, 'echo hi', { cwd: '/tmp/work' }, 'C:\\tools\\job-launch.exe', spawnFn, 'win32')
 
     assert.equal(calls.length, 1)
     const call = calls[0]
