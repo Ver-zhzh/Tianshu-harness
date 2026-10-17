@@ -229,7 +229,7 @@ export function jobLaunchArgv(
 /**
  * 统一的 shell 启动出口：Windows 且 helper 可用时由 helper 持有作业；否则原样 `spawn`（行为不变）。
  *
- * `launcher` / `spawnFn` / `platform` 是测试接缝（与 `killProcessTree` 的 `platform` / `runTaskkill` 同风格），
+ * `launcher` / `spawnFn` 是测试接缝（与 `killProcessTree` 的 `platform` / `runTaskkill` 同风格），
  * 让"走没走 helper、argv 拼得对不对"能在任意 CI 主机上断言。
  */
 export function spawnShell(
@@ -238,17 +238,8 @@ export function spawnShell(
   options: SpawnOptions,
   launcher: string | null = resolveJobLauncher(),
   spawnFn: typeof spawn = spawn,
-  platform: NodeJS.Platform = process.platform,
 ): ChildProcess {
-  if (!launcher) {
-    // Keep a root PID for taskkill /T: Bash may otherwise tail-exec the last
-    // foreground command, losing the tracked Windows parent and its pipe tree.
-    // A separate line preserves trailing comments and the original exit status.
-    const trackedCommand = platform === 'win32' && /(?:^|[\\/])(?:bash|sh)(?:\.exe)?$/i.test(shell.cmd)
-      ? `${command}\nexit $?`
-      : command
-    return spawnFn(shell.cmd, [...shell.args, trackedCommand], options)
-  }
+  if (!launcher) return spawnFn(shell.cmd, [...shell.args, command], options)
   const cwd = typeof options.cwd === 'string' ? options.cwd : process.cwd()
   return spawnFn(launcher, jobLaunchArgv(shell, command, cwd), options)
 }
