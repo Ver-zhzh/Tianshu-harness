@@ -82,6 +82,31 @@ describe('SessionPersist', () => {
     assert.equal(parsed.tool_call_id, 'call-1')
     assert.equal(parsed.content, content, '整条内容应原样落盘（含尾部）')
   })
+
+  it('canonical OAI history preserves long human text, output, reasoning and tool arguments across append and rewrites', async () => {
+    const persist = new SessionPersist('canonical-large-history', tempDir)
+    const content = 'canonical text. '.repeat(20_000)
+    const messages: OaiMessage[] = [
+      { role: 'user', origin: 'human', content },
+      { role: 'assistant', content, reasoning_content: 'reasoning. '.repeat(30_000) },
+      { role: 'assistant', content: null, tool_calls: [{ id: 'canonical-call', type: 'function', function: { name: 'read_file', arguments: JSON.stringify({ value: content }) } }] },
+      { role: 'tool', tool_call_id: 'canonical-call', content: 'tool result' },
+    ]
+    for (const message of messages) await persist.appendOaiWithChecksum(message, { flush: true })
+    assert.deepEqual(persist.loadOai(), messages)
+    await persist.compactOaiAsync(messages, true)
+    assert.deepEqual(persist.loadOai(), messages)
+    persist.compactOai(messages)
+    assert.deepEqual(persist.loadOai(), messages)
+  })
+
+  it('explicit OAI preview budgets remain bounded without altering canonical default serialization', () => {
+    const message: OaiMessage = { role: 'assistant', content: 'output'.repeat(50_000) }
+    assert.deepEqual(JSON.parse(serializeOaiSessionMessage(message)), message)
+    const preview = serializeOaiSessionMessage(message, 1_000)
+    assert.ok(preview.length <= 1_512)
+    assert.match(preview, /session-message-truncated/)
+  })
 })
 
 describe('SessionPersist — metadata (P1)', () => {

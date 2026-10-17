@@ -146,14 +146,16 @@ describe('native request budgeting owns compaction', () => {
 describe('AgentLoop manual context compaction for self-hosted models', () => {
   it('accepts a configured context window without an official-provider policy', async () => {
     const agent = makeAgent(false)
-    const compact = mock.method(agent, 'compactContextBudget', async (_force = false) => true)
-    const refresh = mock.method(agent.requestContext, 'refreshSnapshot', () => {})
+    const order: string[] = []
+    const compact = mock.method(agent, 'compactContextBudget', async (_force = false) => { order.push('compact'); return true })
+    const refresh = mock.method(agent.requestContext, 'refreshSnapshot', () => { order.push('refresh') })
     assert.equal(agent.config.promptEngine.getRequestBudgetPolicy(), undefined)
 
     assert.equal(await agent.compactContext(), true)
 
     assert.deepEqual(compact.mock.calls[0]!.arguments, [true])
-    assert.equal(refresh.mock.callCount(), 1)
+    assert.equal(refresh.mock.callCount(), 2)
+    assert.deepEqual(order, ['refresh', 'compact', 'refresh'])
     assert.equal(agent.abortController, null, 'manual compaction must release the running state')
     assert.equal(await agent.compactContext(), true, 'a second manual attempt is not locked out')
   })
