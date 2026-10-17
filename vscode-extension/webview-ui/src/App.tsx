@@ -511,6 +511,20 @@ export function App() {
     send({ type: 'saveDefaultDomain', defaultDomain: domain.value })
   }
 
+  const handleRefresh = useCallback(() => {
+    setErrorBanner('')
+    send({ type: 'ready' })
+    send({ type: 'listProviders' })
+    send({ type: 'listCatalog' })
+    if (activeId) {
+      send({ type: 'listPickers', sessionId: activeId })
+      send({ type: 'getCockpit', sessionId: activeId })
+      send({ type: 'listRewindPoints', sessionId: activeId })
+    }
+    setNoticeBanner('已刷新模型与会话数据')
+    setTimeout(() => setNoticeBanner(''), 2000)
+  }, [activeId])
+
   return (
     <div className="app">
       <Header
@@ -520,6 +534,7 @@ export function App() {
         sidecar={sidecar}
         onSessions={() => openPanel('sessions')}
         onSettings={() => openPanel('settings')}
+        onRefresh={handleRefresh}
         onNew={() => {
           const curM = catalogModels.find((m) => m.current)
           const curD = catalogDomains.find((d) => d.current)
@@ -721,6 +736,7 @@ function Header(props: {
   sidecar: SidecarState
   onSessions: () => void
   onSettings: () => void
+  onRefresh: () => void
   onNew: () => void
 }) {
   return (
@@ -731,6 +747,9 @@ function Header(props: {
       </button>
       <button className={props.panel === 'settings' ? 'active' : ''} onClick={props.onSettings} title="默认权限与检查点">
         设置
+      </button>
+      <button onClick={props.onRefresh} title="手动刷新模型列表与会话状态">
+        刷新
       </button>
       <button className="new-session" onClick={props.onNew} title="清空当前对话，用上方模型和星域开新会话">
         ＋ 新会话

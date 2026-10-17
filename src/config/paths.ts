@@ -16,7 +16,7 @@
  *   - RIVET_CONFIG_PATH
  */
 
-import { existsSync } from 'node:fs'
+import { existsSync, realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
@@ -24,14 +24,25 @@ import { createHash } from 'node:crypto'
 /** Platform default data root, ignoring RIVET_HOME. */
 export function defaultRivetHome(): string {
   if (process.platform === 'win32') {
-    return join(process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local'), '.rivet')
+    const userRivet = join(homedir(), '.rivet')
+    const appDataRivet = join(process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local'), '.rivet')
+    if (existsSync(join(userRivet, 'config.json')) || existsSync(join(userRivet, 'meridian.db'))) {
+      return userRivet
+    }
+    return appDataRivet
   }
   return join(homedir(), '.rivet')
 }
 
 /** Active data root. Honors RIVET_HOME then falls back to the platform default. */
 export function rivetHome(): string {
-  return process.env.RIVET_HOME || defaultRivetHome()
+  const home = process.env.RIVET_HOME || defaultRivetHome()
+  try {
+    if (existsSync(home)) {
+      return realpathSync.native(home)
+    }
+  } catch {}
+  return home
 }
 
 /** User global config file path. */

@@ -60,8 +60,10 @@ type InboundMsg =
   | { type: 'listRewindPoints'; sessionId: string }
   | { type: 'rewind'; sessionId: string; messageIndex: number; rollbackFiles?: boolean }
 
-export class CockpitProvider {
+export class CockpitProvider implements vscode.WebviewViewProvider {
+  public static readonly viewType = 'tianshu.cockpitView'
   private panel: vscode.WebviewPanel | undefined
+  private view: vscode.WebviewView | undefined
   private client: SidecarClient | undefined
   private unsubscribe: (() => void) | undefined
   private activeSessionId: string | undefined
@@ -80,6 +82,26 @@ export class CockpitProvider {
     private readonly getClient: () => Promise<SidecarClient>,
     private readonly workspaceCwd: string,
   ) {}
+
+  /**
+   * 挂载于左侧活动栏（Activity Bar）的 WebviewView 提供者（Continue 风格）。
+   */
+  resolveWebviewView(webviewView: vscode.WebviewView): void {
+    this.view = webviewView
+    webviewView.webview.options = {
+      enableScripts: true,
+      enableForms: true,
+      localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, 'dist'), vscode.Uri.joinPath(this.extensionUri, 'media')],
+    }
+    webviewView.webview.html = this.renderHtml(webviewView.webview)
+    webviewView.webview.onDidReceiveMessage((msg: InboundMsg) => void this.onMessage(msg))
+    webviewView.onDidDispose(() => {
+      this.view = undefined
+      if (!this.panel) {
+        this.teardownBridge()
+      }
+    })
+  }
 
   /**
    * 在编辑区打开座舱，不抢资源管理器。无打开文件时铺满中间；
@@ -107,8 +129,58 @@ export class CockpitProvider {
     this.panel.webview.onDidReceiveMessage((msg: InboundMsg) => void this.onMessage(msg))
     this.panel.onDidDispose(() => {
       this.panel = undefined
-      this.teardownBridge()
+      if (!this.view) {
+        this.teardownBridge()
+      }
     })
+  }
+
+  /** 手动刷新座舱：重新获取模型与会话，并通知前端更新 */
+  async refresh(): Promise<void> {
+    try {
+      const client = await this.getClient()
+      this.replaceClient(client)
+      await this.refreshSessions(client, false)
+      const providers = await client.listProviders().catch(() => ({ providers: [] as Awaited<ReturnType<SidecarClient['listProviders']>>['providers'] }))
+      const defModel = await client.getDefaultModelConfig().catch(() => ({ defaultModel: null }))
+      const defDomain = await client.getDefaultDomainConfig().catch(() => ({
+        defaultDomain: 'auto',
+        domains: [] as { id: string; name: string; motto: string }[],
+      }))
+      const catalog = buildSessionCatalog(
+        providers.providers ?? [],
+        defModel.defaultModel,
+        defDomain.defaultDomain,
+        defDomain.domains ?? [],
+      )
+      this.post({ type: 'catalog', models: catalog.models, domains: catalog.domains })
+      if (this.activeSessionId) {
+        await this.pushRewindPoints(client, this.activeSessionId)
+        const snap = await client.getCockpit(this.activeSessionId).catch(() => null)
+        this.post({ type: 'cockpit', sessionId: this.activeSessionId, snapshot: snap })
+      }
+      vscode.window.setStatusBarMessage('天枢座舱已刷新', 2500)
+    } catch {
+      if (this.view) this.view.webview.html = this.renderHtml(this.view.webview)
+      if (this.panel) this.panel.webview.html = this.renderHtml(this.panel.webview)
+    }
+  }
+
+  /** 新建会话并聚焦 */
+  newSession(): void {
+    this.closeActive()
+    this.focus()
+  }
+
+  /** 聚焦座舱视图 */
+  focus(): void {
+    if (this.view) {
+      this.view.show?.(true)
+    } else if (this.panel) {
+      this.panel.reveal()
+    } else {
+      this.openInEditor()
+    }
   }
 
   private teardownBridge(): void {
@@ -119,6 +191,7 @@ export class CockpitProvider {
 
   private post(msg: Record<string, unknown>): void {
     if (this.panel) void this.panel.webview.postMessage(msg)
+    if (this.view) void this.view.webview.postMessage(msg)
   }
 
   private async onMessage(msg: InboundMsg): Promise<void> {
@@ -134,7 +207,7 @@ export class CockpitProvider {
       try {
         await handleTokenLedgerMessage(ledgerMsg, {
           getClient: this.getClient,
-          active: () => this.panel === panel && !!panel,
+          active: () => (this.panel === panel && !!panel) || !!this.view,
           post: message => this.post(message),
           promptKey: async () => vscode.window.showInputBox({
             title: '设置 Token 账本同步密钥',
@@ -545,7 +618,7 @@ export class CockpitProvider {
   replaceClient(client: SidecarClient): void {
     if (this.client === client) return
     this.client = client
-    if (this.activeSessionId && this.panel) this.attachSession(this.activeSessionId)
+    if (this.activeSessionId && (this.panel || this.view)) this.attachSession(this.activeSessionId)
     else this.teardownBridge()
   }
 

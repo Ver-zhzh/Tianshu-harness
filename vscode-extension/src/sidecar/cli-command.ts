@@ -49,5 +49,25 @@ export function resolveCliCommand(cli: string, args: string[], cwd: string): { c
     entry && node && existsSync(entry)) {
     return { command: node, args: [entry, ...args] }
   }
+
+  // 1. 支持通用 npm / pnpm / yarn 包装的 Node 脚本入口（降级路径：排除包含自定义副作用脚本的 cmd）
+  const lines = shim.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
+  const isCustomWrapper = lines.some((l) => !/^(?:@?echo\s+off|goto\b|:[a-z0-9_]+|call\b|setlocal\b|set\b|endlocal\b|if\b|\)\s*(?:else\b)?|\(|\bexit\b|title\b|rem\b|::)/i.test(l) && !/%\*/.test(l))
+  if (!isCustomWrapper) {
+    const runLine = lines.find((l) => /%\*/.test(l) && (/"%_prog%"/i.test(l) || /node/i.test(l)))
+    if (runLine) {
+      const match = runLine.match(/"%_prog%"\s+(?:(.*?)\s+)?(?:"([^"]+\.(?:c|m)?js)"|([^\s"]+\.(?:c|m)?js))\s+%\*/i)
+      if (match) {
+        const extraFlags = (match[1] || '').trim().split(/\s+/).filter(Boolean)
+        const rawEntry = match[2] || match[3] || ''
+        const entryRel = rawEntry.replace(/^"?%~?dp0%?[\\/]?/i, '').replace(/"$/, '')
+        const targetEntry = resolve(dir, entryRel)
+        if (node && existsSync(targetEntry)) {
+          return { command: node, args: [...extraFlags, targetEntry, ...args] }
+        }
+      }
+    }
+  }
+
   throw new Error('无法安全解析 CLI 的 cmd/bat 包装。请指定标准 rivet Node 运行时或可执行文件。')
 }
