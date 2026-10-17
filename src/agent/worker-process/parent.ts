@@ -32,6 +32,7 @@ import {
   type SerializedWorkerRun, type WorkerChildInitPayload, type ChildMessage,
 } from './protocol.js'
 import { runWorkerSession } from '../worker-session.js'
+import { captureManagedProAuthorization, manageProChild } from '../../api/managed-pro-authorization.js'
 
 export type WorkerIsolationMode = 'off' | 'all' | 'review'
 
@@ -129,6 +130,7 @@ export async function runWorkerSessionOop(
 
   const decision = config.runtimeDecision
   const initPayload: WorkerChildInitPayload = {
+    proAuthorization: captureManagedProAuthorization(),
     config: {
       order: { ...config.order, allowedTools: config.toolRegistry.getDefinitions().map(tool => tool.name) },
       cwd: config.cwd,
@@ -189,6 +191,7 @@ export async function runWorkerSessionOop(
   const stdin = child.stdin
   const stdout = child.stdout
   const stderr = child.stderr
+  const proChild = manageProChild(child, id => { stdin.write(encodeFrame({ t: 'pro-deny', id })) })
   stdout.setEncoding('utf8')
   stderr.setEncoding('utf8')
 
@@ -299,6 +302,8 @@ export async function runWorkerSessionOop(
     const decoder = createFrameDecoder()
     stdout.on('data', (chunk: string) => {
       for (const msg of decoder.feed(chunk) as ChildMessage[]) {
+        if (msg.t === 'pro-denied') { proChild.acknowledge(msg.id); continue }
+        if (msg.t === 'pro-drained') { proChild.acknowledge(undefined, true); continue }
         if (settled) continue
         switch (msg.t) {
           case 'activity':
@@ -371,6 +376,7 @@ export async function runWorkerSessionOop(
 
     armWatchdog()
     try {
+      initPayload.proAuthorization = captureManagedProAuthorization()
       stdin.write(encodeFrame({ t: 'init', payload: initPayload }))
     } catch (err) {
       synthesizeFailure('worker_crash', `failed to write init frame: ${err instanceof Error ? err.message : String(err)}`)

@@ -55,8 +55,8 @@ function prepareModel(deps: WorkerRuntimeDeps, order: WorkOrder): PreparedModel 
   let binding: Binding
   if ('provider' in policy.target) {
     if (policy.unavailableReason) throw new ModelBindingUnavailable(policy.unavailableReason)
-    binding = resolveModelBinding(deps.config.provider.providers, policy.target)
-  } else binding = resolveModelBinding(deps.config.provider.providers, root)
+    binding = resolveModelBinding(deps.config.provider.providers, policy.target, deps.config.network)
+  } else binding = resolveModelBinding(deps.config.provider.providers, root, deps.config.network)
   return { deps, policy, root, binding }
 }
 
@@ -88,7 +88,7 @@ function assembleWorkerRuntime(prepared: PreparedModel, _order: WorkOrder, card:
   const fallbackReason = undefined
   if (!binding) {
     // Only an explicit automatic policy reaches the recommendation's candidate.
-    binding = resolveModelBinding(config.provider.providers, { provider: root.provider, model: card.model })
+    binding = resolveModelBinding(config.provider.providers, { provider: root.provider, model: card.model }, config.network)
   }
   const workerProvider = binding.provider
   const workerApiKey = binding.apiKey
@@ -128,6 +128,7 @@ function assembleWorkerRuntime(prepared: PreparedModel, _order: WorkOrder, card:
     baseUrl: workerProvider.baseUrl,
     slowThinking: workerProvider.slowThinking,
     client: createProviderClient(workerProvider, workerCapabilities, {
+      network: config.network,
       singleAttempt: true,
       credentialScope: `${binding.ref.provider}:${binding.ref.keyId ?? 'default'}`,
       expectedPrincipal,

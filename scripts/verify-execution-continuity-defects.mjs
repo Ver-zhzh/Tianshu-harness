@@ -8,7 +8,7 @@ const root = resolve(import.meta.dirname, '..')
 const temporary = mkdtempSync(join(tmpdir(), 'execution-continuity-defects-'))
 const mirror = join(temporary, 'repo')
 mkdirSync(mirror)
-const dirty = execFileSync('rtk', ['proxy', 'git', 'diff', '--name-only'], { cwd: root, encoding: 'utf8' }).trim().split('\n')
+const dirty = execFileSync('rtk', ['proxy', 'git', 'diff', '--name-only'], { cwd: root, encoding: 'utf8', windowsHide: true }).trim().split('\n')
 const owned = new Set([...dirty.filter(p => /^(src|desktop\/src)\//.test(p)),
   'src/api/execution-continuity.ts', 'src/api/__tests__/execution-continuity.test.ts',
   'src/agent/worker-terminal-policy.ts', 'src/agent/__tests__/worker-fixed-execution.integration.test.ts',
@@ -33,23 +33,23 @@ const hands = 'src/agent/__tests__/hands-session-write-gate.test.ts'
 const diagnostic = 'src/cache/__tests__/cache-diagnostic-class.test.ts'
 const cases = [
   ['effort-lock', 'src/api/execution-continuity.ts', "if (!unlocked) return", "if (false) return", [api]],
-  ['execution-options', 'src/api/execution-continuity.ts', "if (proof.optionsHash !== next.optionsHash) throw new ContinuationPrefixError('options', proof, next)", '', [api]],
-  ['model-binding-change', 'src/api/execution-continuity.ts', "if (proof.provider !== next.provider || proof.model !== next.model || proof.endpointHash !== next.endpointHash\n              || proof.credentialScope !== next.credentialScope) throw new ContinuationPrefixError('binding', proof, next)", '', [api]],
-  ['tool-catalog', 'src/api/execution-continuity.ts', "if (proof.toolsHash !== next.toolsHash) throw new ContinuationPrefixError('tools', proof, next)", '', [api]],
-  ['history-prefix', 'src/api/execution-continuity.ts', "if (at !== -1) throw new ContinuationPrefixError(at, proof, next)", '', [api]],
+  ['execution-options', 'src/api/execution-continuity.ts', "if (baseline.optionsHash !== next.optionsHash) throw new ContinuationPrefixError('options', baseline, next)", '', [api]],
+  ['model-binding-change', 'src/api/execution-continuity.ts', "const modelDrift = baseline.model !== next.model\n              if (modelDrift && (!restoredFirstRequest || scope.singleAttempt || next.model !== options.model)) {", '', [api]],
+  ['tool-catalog', 'src/api/execution-continuity.ts', "if (baseline.toolsHash !== next.toolsHash) throw new ContinuationPrefixError('tools', baseline, next)", '', [api]],
+  ['history-prefix', 'src/api/execution-continuity.ts', "if (at !== -1 && nativeContinues !== true && !driftReason) throw new ContinuationPrefixError(at, baseline, next)", '', [api]],
   ['single-attempt-retry', 'src/api/retry-engine.ts', 'currentExecutionScope()?.singleAttempt ? 0 : options?.maxTotalRetries', 'options?.maxTotalRetries', [api]],
-  ['resume-effort', 'src/api/execution-continuity.ts', "if (typeof savedEffort === 'string') client.setReasoningEffort?.(savedEffort)", '', [api]],
+  ['resume-effort', 'src/api/execution-continuity.ts', "if (typeof effort === 'string') client.setReasoningEffort?.(effort)", '', [api]],
   ['unavailable-model-fallback', 'src/agent/worker-runtime.ts', 'binding = resolveModelBinding(deps.config.provider.providers, policy.target)', 'try { binding = resolveModelBinding(deps.config.provider.providers, policy.target) } catch { binding = resolveModelBinding(deps.config.provider.providers, root) }', [integration]],
   ['coordinator-rerun', 'src/agent/coordinator.ts', 'this.captureAbortCheckpoint(order, workerRun.checkpoint, workerRun.result)', "if (workerRun.result.status !== 'passed') await this.runWorker(workerConfig)\n        this.captureAbortCheckpoint(order, workerRun.checkpoint, workerRun.result)", [integration]],
   ['paid-report-repair', 'src/agent/worker-session.ts', 'const failureRaw = rejectedReports.at(-1)?.raw || latestText', "const repair = typeof config.reportRepairClient === 'function' ? config.reportRepairClient() : config.reportRepairClient\n        if (repair) await repair.stream({ model: workerModel, messages: [{ role: 'user', content: latestText }] }, { onTextDelta() {}, onThinkingDelta() {}, onContentBlock() {}, onStopReason() {}, onError() {} })\n        const failureRaw = rejectedReports.at(-1)?.raw || latestText", [report]],
   ['isolated-fallback', 'src/agent/worker-process/parent.ts', 'return (config) => runWorkerSessionOop(config, opts)', 'return async (config) => { try { return await runWorkerSessionOop(config, opts) } catch { return runWorkerSession(config) } }', [integration]],
   ['terminal-task-recreation', 'src/agent/worker-terminal-policy.ts', "if (this.failed.has(key) || (path && existsSync(path) && !inherited))", 'if (false)', [integration]],
-  ['silent-legacy-restore', 'src/agent/session-persist.ts', "if (!isCompleteExecutionSnapshot(data.executionSnapshot)) throw new LocalWorkerPolicyError('历史请求的模型、凭据归属或执行选项证据不足；禁止静默冷启动，请显式开始新会话')", '', [integration]],
+  ['silent-legacy-restore', 'src/agent/session-persist.ts', "if (!isCompleteExecutionSnapshot(data.executionSnapshot)) throw new ColdStartEvidenceError('历史请求的模型、凭据归属或执行选项证据不足；禁止静默冷启动，请显式开始新会话')", '', [integration]],
   ['missing-log-cold-restore', 'src/agent/session-persist.ts', 'hasLog || (existsSync(this.filePath) && statSync(this.filePath).size > 0 && this.loadOai().length > 0)', 'hasLog', [integration]],
   ['historical-dedup', 'src/prompt/engine.ts', 'if (!sidePath) this.recordPrefixDivergence(request.messages)', "if (!sidePath) { const seen = new Set(); for (let i = request.messages.length - 1; i >= 0; i--) { const m = request.messages[i]; if (m.role !== 'tool') continue; if (seen.has(m.content)) request.messages[i] = { ...m, content: '[duplicate content, see later tool result]' }; else seen.add(m.content) } }\n    if (!sidePath) this.recordPrefixDivergence(request.messages)", [history]],
   ['desktop-terminal-wiring', 'desktop/src/state/event-reducer.ts', "terminalFailure: typeof ev.data.terminalFailure === 'boolean' ? ev.data.terminalFailure : prev?.terminalFailure", 'terminalFailure: prev?.terminalFailure', [desktop]],
   ['late-tool-registration', 'src/prompt/engine.ts', 'if (this.toolCatalogPublished) return', '', [engine]],
-  ['effort-change-reopens-tools', 'src/prompt/engine.ts', 'authorizeCacheGeneration(): void { this.executionSnapshot = undefined }', 'authorizeCacheGeneration(): void { this.executionSnapshot = undefined; this.toolCatalogPublished = false }', [engine]],
+  ['effort-change-reopens-tools', 'src/prompt/engine.ts', 'authorizeCacheGeneration(): void { this.executionSnapshot = undefined; this.rewindAuthorization = undefined }', 'authorizeCacheGeneration(): void { this.executionSnapshot = undefined; this.rewindAuthorization = undefined; this.toolCatalogPublished = false }', [engine]],
   ['quality-history-compaction', 'src/agent/compact-boundary-coordinator.ts', 'return { compacted: false, shouldAbort:', 'await this.deps.maybeCompact({ loopTurn: _turn, failures: this.deps.getCompactFailures() })\n    return { compacted: false, shouldAbort:', [boundary]],
   ['write-gate-compensation', 'src/agent/hands-session.ts', 'const repairCount = 0', 'if (report.outcome === \'failed\') await config.runAgent(buildHandsPrompt(config), {} as never, wt.path, { continueSession: true })\n      const repairCount = 0', [hands]],
   ['opaque-credential-change', 'src/api/execution-continuity.ts', "return opaque ? createHash('sha256').update(`opaque:${opaque}`).digest('hex') : undefined", 'return undefined', [api]],
@@ -75,7 +75,7 @@ for (const name of ['package.json', 'tsconfig.json', 'node_modules']) {
 const results = []
 function run(name, files) {
   const result = spawnSync('rtk', ['proxy', 'node', '--preserve-symlinks', '--import', 'tsx', '--test', '--test-concurrency=1', ...files], {
-    cwd: mirror, encoding: 'utf8', timeout: 60_000, maxBuffer: 8_000_000,
+    cwd: mirror, encoding: 'utf8', timeout: 60_000, maxBuffer: 8_000_000, windowsHide: true,
     env: { ...process.env, RIVET_HOME: join(temporary, `home-${name}`), RIVET_SESSION_DIR: join(temporary, `sessions-${name}`), RIVET_TEST: '1' },
   })
   writeFileSync(join(temporary, `${name}.log`), `${result.stdout ?? ''}\n${result.stderr ?? ''}`)

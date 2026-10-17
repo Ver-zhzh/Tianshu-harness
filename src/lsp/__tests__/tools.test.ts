@@ -1,8 +1,8 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { createGotoDefinitionTool, createFindReferencesTool } from '../tools.js'
+import { createGotoDefinitionTool, createFindReferencesTool, registerLspTools } from '../tools.js'
 import type { LspManager } from '../manager.js'
-import type { ToolCallParams } from '../../tools/types.js'
+import type { Tool, ToolCallParams } from '../../tools/types.js'
 
 function makeParams(input: Record<string, unknown>): ToolCallParams {
   return { input, toolUseId: 'tu_1', cwd: '/project' }
@@ -36,11 +36,14 @@ describe('createGotoDefinitionTool', () => {
     assert.equal(tool.isConcurrencySafe(), true)
   })
 
-  it('disabled when LSP not ready', () => {
+  it('存在性不随进程状态波动：isEnabled 恒 true；未就绪在 execute 报错', async () => {
+    // 2026-10-16（issue #500 配套修复）：存在性由注册决定（registerLspTools 仅在
+    // ready + 能力支持时注册）；「就绪」判定在 execute——工具不再随 LSP 进程
+    // 状态从 wire 表出现/消失（工具表波动会触发 continuation 守卫拒发）。
     const mgr: LspManager = {
       initialize: async () => {},
       isReady: () => false,
-      supportsDefinition: () => false,
+      supportsDefinition: () => true,
       supportsReferences: () => false,
       gotoDefinition: async () => [],
       findReferences: async () => [],
@@ -50,24 +53,10 @@ describe('createGotoDefinitionTool', () => {
     }
 
     const tool = createGotoDefinitionTool(mgr)
-    assert.equal(tool.isEnabled(), false)
-  })
-
-  it('disabled when server lacks definition support', () => {
-    const mgr: LspManager = {
-      initialize: async () => {},
-      isReady: () => true,
-      supportsDefinition: () => false,
-      supportsReferences: () => false,
-      gotoDefinition: async () => [],
-      findReferences: async () => [],
-      changeFile: () => {},
-      getFileDiagnostics: async () => [],
-      dispose: () => {},
-    }
-
-    const tool = createGotoDefinitionTool(mgr)
-    assert.equal(tool.isEnabled(), false)
+    assert.equal(tool.isEnabled(), true, '注册后存在性稳定——不随 LSP 进程状态从 wire 表消失')
+    const result = await tool.execute(makeParams({ file_path: 'a.ts', line: 1, column: 0 }))
+    assert.equal(result.isError, true)
+    assert.ok(result.content.includes('未就绪'))
   })
 
   it('returns definition location', async () => {
@@ -187,7 +176,7 @@ describe('createFindReferencesTool', () => {
     assert.ok(result.content.includes('No references found'))
   })
 
-  it('disabled when not ready', () => {
+  it('存在性不随进程状态波动：isEnabled 恒 true；未就绪在 execute 报错', async () => {
     const mgr: LspManager = {
       initialize: async () => {},
       isReady: () => false,
@@ -201,6 +190,55 @@ describe('createFindReferencesTool', () => {
     }
 
     const tool = createFindReferencesTool(mgr)
-    assert.equal(tool.isEnabled(), false)
+    assert.equal(tool.isEnabled(), true)
+    const result = await tool.execute(makeParams({ file_path: 'a.ts', line: 1, column: 0 }))
+    assert.equal(result.isError, true)
+    assert.ok(result.content.includes('未就绪'))
+  })
+})
+
+describe('registerLspTools（注册决定存在性 / 能力过滤）', () => {
+  function mkMgr(over: Partial<LspManager> = {}): LspManager {
+    return {
+      initialize: async () => {},
+      isReady: () => true,
+      supportsDefinition: () => true,
+      supportsReferences: () => true,
+      gotoDefinition: async () => [],
+      findReferences: async () => [],
+      changeFile: () => {},
+      getFileDiagnostics: async () => [],
+      dispose: () => {},
+      ...over,
+    }
+  }
+
+  function collector(): { names: string[]; registry: { register(tool: Tool): void } } {
+    const names: string[] = []
+    return { names, registry: { register: (tool: Tool) => { names.push(tool.definition.name) } } }
+  }
+
+  it('ready 且能力支持时注册两个工具', () => {
+    const { names, registry } = collector()
+    registerLspTools(mkMgr(), registry)
+    assert.deepEqual(names.sort(), ['lsp_find_references', 'lsp_goto_definition'])
+  })
+
+  it('未就绪不注册（存在性由注册决定）', () => {
+    const { names, registry } = collector()
+    registerLspTools(mkMgr({ isReady: () => false }), registry)
+    assert.deepEqual(names, [])
+  })
+
+  it('按能力过滤：不支持 definition 的服务器不注册 goto 工具', () => {
+    const { names, registry } = collector()
+    registerLspTools(mkMgr({ supportsDefinition: () => false }), registry)
+    assert.deepEqual(names, ['lsp_find_references'])
+  })
+
+  it('按能力过滤：不支持 references 的服务器不注册 find 工具', () => {
+    const { names, registry } = collector()
+    registerLspTools(mkMgr({ supportsReferences: () => false }), registry)
+    assert.deepEqual(names, ['lsp_goto_definition'])
   })
 })

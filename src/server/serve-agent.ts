@@ -6,13 +6,14 @@
 import { join, dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { createDelegationActivityMapper } from '../tools/worker-activity-stream.js'
+import { buildReplacementAgent } from '../agent/runtime-rebuild.js'
 import type { DelegationActivity, DelegationIdentity } from '../tools/types.js'
 import type { DelegateWorkerInput, DelegateActivityUpdate, ManagedAgent, RuntimeSessionManager } from './session-manager.js'
 import { SessionPersist, getSessionDir } from '../agent/session-persist.js'
 import { captureGitBaselineAsync } from '../agent/git-baseline-async.js'
 import type { BaselineSnapshot } from '../agent/worktree-baseline.js'
 import { findRecentUnrecordedWritesAsync, formatDiskReconciliationNote, shouldReconcileDisk } from '../context/write-evidence-probe.js'
-import { runGateCompletion } from '../agent/gate-completion.js'
+import { runGateCompletion, rewindAgentSession, waitForAgentRewind } from '../agent/loop-factory.js'
 import { memoryBackfillEnabled, runMemoryBackfill } from '../memory/backfill.js'
 import { restoreGoalTracker } from '../agent/goal-persist.js'
 import { FileHistory } from '../agent/file-history.js'
@@ -42,9 +43,8 @@ import { scheduleMeridianBackfill } from '../repo/meridian-backfill.js'
 import { resetLegacyMemoryIfNeeded } from '../agent/memory-epoch.js'
 import { buildCockpitSnapshot } from '../tui/cockpit/state.js'
 import { computeUsageCost, findModelPricing } from '../utils/pricing.js'
-import { createMultiLspManager } from '../lsp/multi-manager.js'
 import type { LspManager } from '../lsp/manager.js'
-import { createGotoDefinitionTool, createFindReferencesTool } from '../lsp/tools.js'
+import { getOrCreateLspEntry, attachLspTools } from './serve-lsp.js'
 import { runCouncil, runCouncilDebate, type CouncilInput } from '../agent/council/council-orchestrator.js'
 import type { CouncilSeat } from '../agent/council/council-routing.js'
 import { renderCouncilPlan, summarizeCouncilPlan } from '../agent/council/council-render.js'
@@ -156,45 +156,7 @@ export function getOrCreateMeridianIndexer(shared: SharedRuntime, cwd: string): 
   return indexer
 }
 
-/** 按 cwd 取/建 LSP manager entry。首个触达某 cwd 的会话触发 initialize()
- *  （异步，不阻塞会话创建）；后续会话复用同一 entry。ready resolve 为
- *  isReady()——false 表示该 cwd 没有可用的语言服务器（工具不注册）。 */
-function getOrCreateLspEntry(
-  shared: SharedRuntime,
-  cwd: string,
-): { manager: LspManager; ready: Promise<boolean> } {
-  const existing = shared.lspManagers.get(cwd)
-  if (existing) return existing
-  const manager = createMultiLspManager(cwd)
-  const ready = manager
-    .initialize()
-    .then(() => manager.isReady())
-    .catch(() => false)
-  const entry = { manager, ready }
-  shared.lspManagers.set(cwd, entry)
-  return entry
-}
-
-/** Wave G: LSP late-init 订阅（照 TUI bootstrap.ts initializeLsp 的 .then 语义）。
- *  设计约束（switchModel 安全性）：每次 assembleAgentLoop 调用时挂载——捕获
- *  当次的新 agent。Promise 已 resolve 时晚订阅立即触发，所以 switchModel
- *  重建的 agent 照样收到 updateTools()；重复 register 无害（ToolRegistry.register
- *  是 Map.set 幂等覆盖）。老 agent 的旧回调对废弃对象空刷一次，无害。
- *  exported for tests（注入 mock entry，不真实 spawn 语言服务器）。 */
-export function attachLspTools(
-  entry: { manager: LspManager; ready: Promise<boolean> },
-  toolRegistry: Pick<ReturnType<typeof createDefaultToolRegistry>, 'register'>,
-  refs: Pick<RuntimeRefs, 'lspManager'>,
-  updateTools: () => void,
-): Promise<void> {
-  return entry.ready.then((ok) => {
-    if (!ok) return
-    toolRegistry.register(createGotoDefinitionTool(entry.manager))
-    toolRegistry.register(createFindReferencesTool(entry.manager))
-    refs.lspManager = entry.manager
-    updateTools()
-  })
-}
+// getOrCreateLspEntry / attachLspTools 已拆至 ./serve-lsp.ts（2026-10-16，issue #500 配套；serve-agent 行数棘轮只降不升）。
 
 /** Wave G: 释放 per-cwd 共享资源（runServe close()）。每个调用 try-catch
  *  包裹（防御习惯；MeridianDb.close 本身幂等，LspManager.dispose 内部已
@@ -619,7 +581,7 @@ function assembleAgentLoop(
   shared?: SharedRuntime,
   allowedTools?: string[],
   reload?: () => ServeContext,
-  inheritFrozenFrom?: import('../prompt/engine.js').PromptEngine,
+  inheritFrozenFrom?: import('../prompt/engine.js').PromptEngine | import('../prompt/frozen-snapshot.js').FrozenSnapshotData,
 ): AgentLoop {
   // Wave J: domainKnowledgeStore 优先从 sidecar SharedRuntime.domainStores
   // 按 cwd 取；fallback 是 per-call new（与 bootstrap 单 session 行为一致——
@@ -868,17 +830,12 @@ export function buildManagedAgent(
   // Rebuild the loop on a new spec, preserving conversation + stores. Shared
   // by switchModel and the run pre-flight self-heal below.
   const rebuildOnSpec = (next: ResolvedModelSpec, explicitModelChange = false) => {
-    const oldCoordinator = stores.refs.coordinator
     const oldAgent = agent
-    if (explicitModelChange) oldAgent.config.promptEngine.authorizeCacheGeneration()
-    void oldAgent.cancelIdleCompaction()
-    spec = next
     const liveApprovalMode = oldAgent.config.approvalMode
-    agent = assembleAgentLoop(ctx, cwd, sessionId, stores, spec, liveApprovalMode, registry, shared, allowedTools, reload, oldAgent.config.promptEngine)
-    if (explicitModelChange) agent.config.client.authorizeCacheGeneration?.('explicit_user_model')
-    if (oldCoordinator && oldCoordinator !== stores.refs.coordinator) {
-      try { oldCoordinator.shutdown() } catch { /* best-effort: shutdown is fail-open */ }
-    }
+    const candidate = buildReplacementAgent(oldAgent, stores.refs, stores.deepRecallAgentRef, explicitModelChange,
+      inherited => assembleAgentLoop(ctx, cwd, sessionId, stores, next, liveApprovalMode, registry, shared, allowedTools, reload, inherited))
+    spec = next
+    agent = candidate
     return oldAgent
   }
   return {
@@ -894,13 +851,10 @@ export function buildManagedAgent(
         // against the live config and rebuild in place — the session then
         // just works instead of demanding a sidecar restart.
         const healed = reload ? resolveModelSpecWithReload(ctx, spec.model.id, reload) : null
-        if (healed && isModelSpecUsable(healed)) {
-          rebuildOnSpec(healed)
-        } else {
-          return Promise.reject(new Error(unconfiguredSpecMessage(spec)))
-        }
+        if (healed && isModelSpecUsable(healed)) rebuildOnSpec(healed)
+        else return Promise.reject(new Error(unconfiguredSpecMessage(spec)))
       }
-      return agent.run(prompt, callbacks, images, options)
+      return waitForAgentRewind(agent).then(() => agent.run(prompt, callbacks, images, options))
     },
     abort: () => agent.abort(),
     setApprovalMode: (mode) => {
@@ -919,7 +873,7 @@ export function buildManagedAgent(
     getMessages: () => agent.session.getMessages(),
     getHistoryRestore: () => stores.historyRestore,
     replaceMessages: (msgs) => { agent.session.replaceMessages(msgs); agent.config.promptEngine.resetAppendixBaseline() },
-    rewindToMessages: (msgs) => { agent.session.rewindToMessages(msgs); agent.config.promptEngine.resetAppendixBaseline() },
+    rewindToMessages: (msgs) => rewindAgentSession(agent, msgs, () => agent),
     getFileHistory: () => agent.getFileHistory(),
     // PlusMenu — star domain (delegate to the live agent).
     setSessionDomain: (domain) => agent.setSessionDomain(domain),
@@ -939,7 +893,7 @@ export function buildManagedAgent(
     switchModel: (modelId) => {
       // First-install / post-startup config edits: resolve against the live
       // config, not just the startup snapshot. See resolveModelSpecWithReload.
-      const next = resolveModelSpecWithReload(ctx, modelId)
+      const next = resolveModelSpecWithReload(ctx, modelId, reload)
       if (!next) return null
       // Audit: capture the outgoing model before the rebuild replaces it.
       // (rebuildOnSpec cancels the old loop's idle compaction — it shares this
@@ -1032,15 +986,13 @@ export function buildManagedAgent(
     },
     // Wave L: 进程退出释放本 session 的 coordinator timer + in-flight worker
     // 句柄。abort() 仅中止当前 turn；shutdown() 是终结性操作。
-    flushPersistence: () => agent.drainPersistWrites(),
-    getRecoverySnapshot: () => ({
-      messages: agent.session.getMessages(),
-      frozen: agent.config.promptEngine.exportFrozenSnapshot(),
-      usage: agent.session.getTotalUsage(),
+    flushPersistence: () => waitForAgentRewind(agent).then(() => agent.drainPersistWrites()),
+    getRecoverySnapshot: () => ({ messages: agent.session.getMessages(),
+      frozen: agent.config.promptEngine.exportFrozenSnapshot(), usage: agent.session.getTotalUsage(),
     }),
     shutdown: async () => {
       let persistenceError: unknown
-      try { await agent.drainPersistWrites() } catch (error) { persistenceError = error }
+      try { await waitForAgentRewind(agent); await agent.drainPersistWrites() } catch (error) { persistenceError = error }
       // config 热载 watcher 是 AgentLoop 级句柄：sidecar 空闲回收/归档 agent 时必须
       // 显式 close，否则每次漏 2-3 个 FSWatcher 并经闭包钉住整个旧 AgentLoop 对象图。
       // （TUI switch 三路径已在 bootstrap 显式调 stop——此处补齐 serve 释放链。）

@@ -48,7 +48,7 @@ function resolveCredentials(
 ): CredentialResult {
   if (prov.auth?.type === 'oauth') {
     if (provName !== ctx.provider?.name) {
-      const auth = createAuthProvider(prov.auth, process.env, prov.apiKey)
+      const auth = createAuthProvider(prov.auth, process.env, prov.apiKey, { ...ctx.config.network, proxy: prov.proxy ?? ctx.config.network.proxy })
       return { ok: true, cred: { apiKey: '', auth } }
     }
     return { ok: true, cred: { apiKey: ctx.apiKey, auth: ctx.auth } }

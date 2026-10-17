@@ -1,6 +1,23 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
+describe('sensitive git add normalization', () => {
+  it('requires approval without rtk for obfuscated sensitive staging', async () => {
+    const { BASH_TOOL, __setRtkExecForTests } = await import('../bash.js')
+    __setRtkExecForTests(() => { throw new Error('rtk unavailable') })
+    try {
+      for (const command of ['git${IFS}add .env', 'g\\it add .env', 'git "a"dd .env', 'git add ".e"nv']) {
+        assert.equal(BASH_TOOL.requiresApproval!({ toolUseId: command, cwd: '/repo', input: { command } }), true, command)
+      }
+      for (const command of ['g\\it add README.md', 'git "a"dd .env.example']) {
+        assert.equal(BASH_TOOL.requiresApproval!({ toolUseId: command, cwd: '/repo', input: { command } }), false, command)
+      }
+    } finally {
+      __setRtkExecForTests(undefined)
+    }
+  })
+})
+
 describe('bash tool requiresApproval', () => {
   async function getBashTool() {
     const { BASH_TOOL } = await import('../bash.js')

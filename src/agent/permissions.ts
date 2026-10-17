@@ -62,6 +62,53 @@ export function isToolDenied(toolName: string, input: Record<string, unknown>, r
   return isToolAllowed(toolName, input, rules)
 }
 
+function unwrapShellWrappers(cmd: string): string[] {
+  const result: string[] = []
+  const queue = [cmd]
+  const seen = new Set<string>()
+
+  while (queue.length > 0) {
+    let cur = queue.shift()!.trim()
+    if (!cur || seen.has(cur)) continue
+    seen.add(cur)
+
+    // unwrap outer ( ... ) if parens match all the way
+    while (cur.startsWith('(') && cur.endsWith(')')) {
+      let depth = 0
+      let fullMatch = true
+      for (let i = 0; i < cur.length - 1; i++) {
+        if (cur[i] === '(') depth++
+        else if (cur[i] === ')') depth--
+        if (depth === 0) { fullMatch = false; break }
+      }
+      if (fullMatch && depth === 1) {
+        cur = cur.slice(1, -1).trim()
+        if (!cur || seen.has(cur)) break
+        seen.add(cur)
+      } else {
+        break
+      }
+    }
+
+    // Check for eval or bash/sh/zsh -c
+    const evalMatch = cur.match(/^(?:eval|sh\s+-[a-z]*c|bash\s+-[a-z]*c|zsh\s+-[a-z]*c)\s+["']([\s\S]+)["']$/i)
+    if (evalMatch && evalMatch[1]) {
+      queue.push(evalMatch[1])
+    }
+
+    // Check for brace { ... }
+    while (/^\{\s*([\s\S]+?);?\s*\}$/.test(cur)) {
+      cur = cur.replace(/^\{\s*([\s\S]+?);?\s*\}$/, '$1').trim()
+      if (!cur || seen.has(cur)) break
+      seen.add(cur)
+    }
+
+    result.push(cur)
+  }
+
+  return result
+}
+
 /** Split a bash command into the individual commands the shell would run, for
  *  denylist scanning. Splits on sequencing/pipe operators (`;` `&&` `||` `|`
  *  `&` and newlines) and additionally surfaces command-substitution bodies
@@ -71,32 +118,94 @@ export function isToolDenied(toolName: string, input: Record<string, unknown>, r
  *  same command, so the leading token stays the command binary. */
 export function splitShellSegments(command: string): string[] {
   const segments: string[] = []
-  const subshellRe = /\$\(([^()]*)\)|`([^`]*)`/g
-  let m: RegExpExecArray | null
-  while ((m = subshellRe.exec(command)) !== null) {
-    const inner = m[1] ?? m[2] ?? ''
-    if (inner.trim()) segments.push(...inner.split(/[;\n|&]+/))
+  const seen = new Set<string>()
+
+  function recurse(cmd: string) {
+    const trimmed = cmd.trim()
+    if (!trimmed || seen.has(trimmed)) return
+    seen.add(trimmed)
+
+    // Recursively extract and strip $(...) and `...`
+    let current = trimmed
+    const subshellRe = /\$\(([^()]*)\)|`([^`]*)`/
+    let m: RegExpExecArray | null
+    while ((m = subshellRe.exec(current)) !== null) {
+      const inner = (m[1] ?? m[2] ?? '').trim()
+      if (inner) {
+        recurse(inner)
+      }
+      current = current.slice(0, m.index) + ' ' + current.slice(m.index + m[0].length)
+    }
+
+    // Split on sequencing / pipe operators
+    const rawParts = current.split(/[;\n|&]+/)
+    for (const rawPart of rawParts) {
+      const part = rawPart.trim()
+      if (!part) continue
+      const unwrapped = unwrapShellWrappers(part)
+      for (const u of unwrapped) {
+        if (u === current) {
+          segments.push(u)
+        } else if (/[;\n|&]+/.test(u) || /\$\(([^()]*)\)|`([^`]*)`/.test(u)) {
+          recurse(u)
+        } else {
+          segments.push(u)
+        }
+      }
+    }
   }
-  // Strip subshell bodies from the top level so their operators don't confuse
-  // the primary split, then split the remaining top-level command.
-  const stripped = command.replace(subshellRe, ' ')
-  segments.push(...stripped.split(/[;\n|&]+/))
-  return segments.map(s => s.trim()).filter(Boolean)
+
+  recurse(command)
+  return Array.from(new Set(segments.map(s => s.trim()).filter(Boolean)))
+}
+
+function normalizeCommandText(cmd: string): string {
+  let trimmed = cmd.trimStart()
+  // strip env assignments: FOO=BAR or FOO="BAR BAZ" or FOO='BAR'
+  while (/^\w+=/.test(trimmed)) {
+    const m = /^\w+=(?:"[^"]*"|'[^']*'|\S*)\s*/.exec(trimmed)
+    if (!m) break
+    trimmed = trimmed.slice(m[0].length)
+  }
+  // strip leading parenthesis / brace
+  while (/^[({]\s*/.test(trimmed)) {
+    trimmed = trimmed.replace(/^[({]\s*/, '')
+  }
+  while (/\s*[)};]$/.test(trimmed)) {
+    trimmed = trimmed.replace(/\s*[)};]$/, '')
+  }
+  // strip backslash on first token: \rm -> rm
+  if (trimmed.startsWith('\\')) {
+    trimmed = trimmed.slice(1)
+  }
+  // strip empty quotes on first token: ""cmd or ''cmd
+  trimmed = trimmed.replace(/^(""|'')/, '')
+  // unquote single/double quoted command token: "rm" -> rm, 'rm' -> rm
+  const quotedToken = trimmed.match(/^("([^"]+)"|'([^']+)')(\s+[\s\S]*|$)/)
+  if (quotedToken) {
+    const token = quotedToken[2] ?? quotedToken[3] ?? ''
+    const rest = quotedToken[4] ?? ''
+    trimmed = token + rest
+  }
+  // normalize consecutive whitespace
+  trimmed = trimmed.replace(/\s+/g, ' ').trim()
+  return trimmed
 }
 
 /** Does a single command segment's leading command binary match a denylist
- *  prefix? Strips leading `VAR=value` env assignments and enforces a token
- *  boundary so `rm` matches `rm -rf` but not `rmdir`, and an argument that
- *  merely contains the word (`echo taskkill`) never matches. */
+ *  prefix? Strips leading `VAR=value` env assignments, normalizes wrapper
+ *  syntax / escaping / whitespace, and enforces a token boundary so `rm`
+ *  matches `rm -rf` but not `rmdir`, and an argument that merely contains the
+ *  word (`echo taskkill`) never matches. */
 function segmentMatchesDenyPrefix(segment: string, denylist: readonly string[]): boolean {
-  let trimmed = segment.trimStart()
-  while (/^\w+=\S*\s+/.test(trimmed)) {
-    trimmed = trimmed.replace(/^\w+=\S*\s+/, '')
-  }
-  if (!trimmed) return false
+  const normalized = normalizeCommandText(segment)
+  if (!normalized) return false
+
   return denylist.some(entry => {
-    if (!entry || !trimmed.startsWith(entry)) return false
-    const nextChar = trimmed[entry.length]
+    if (!entry) return false
+    const normEntry = entry.trim().replace(/\s+/g, ' ')
+    if (!normalized.startsWith(normEntry)) return false
+    const nextChar = normalized[normEntry.length]
     return nextChar === undefined || nextChar === ' ' || nextChar === '\t'
   })
 }
@@ -159,7 +268,11 @@ export function learnFileApproval(
  *    so `echo x > ~/.zshrc` would sail through on an allowlisted `echo`;
  *  - `\` escaping changes what the shell treats as a separator;
  *  - `!` triggers history expansion.
- *  Commands containing these always fall back to an explicit prompt. */
+ *  Commands containing these always fall back to an explicit prompt.
+ *  注：`()`/`{}` 不进此表——unwrapShellWrappers + 递归分段已能建模（deny 侧
+ *  穿透修复，2026-10-16 审计 P0），allow 侧还有 :326 的残余括号兜底拒；
+ *  把它们列进来会让 `git diff $(git merge-base …)` 这类已建模命令永远无法获批
+ *  （bash-allowlist.test.ts 的契约）。 */
 const UNMODELLED_SHELL_CHARS = /[<>\\!]/
 
 /** Binaries that take code as an argument. Matching only the binary name would

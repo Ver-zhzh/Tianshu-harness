@@ -7,6 +7,7 @@
 import type { StreamClient, StreamCallbacks } from './stream-client.js'
 import type { OaiChatRequest } from './oai-types.js'
 import { type ErrorCategory, classifyApiError } from './error-classifier.js'
+import { withProviderRequirement, assertExecutionAccess } from './execution-continuity.js'
 
 export interface FallbackEntry {
   name: string
@@ -16,17 +17,19 @@ export interface FallbackEntry {
 export class FallbackStreamClient implements StreamClient {
   private activeClient: StreamClient
   private activeName: string
+  private readonly primaryProvider: string
   private readonly fallbacks: FallbackEntry[]
   private readonly onFallback?: (from: string, to: string, error: unknown) => void
 
   constructor(
     primary: StreamClient,
-    primaryName: string,
+    primaryIdentity: string | { provider: string; name: string },
     fallbacks: FallbackEntry[],
     onFallback?: (from: string, to: string, error: unknown) => void,
   ) {
     this.activeClient = primary
-    this.activeName = primaryName
+    this.primaryProvider = typeof primaryIdentity === 'string' ? primaryIdentity : primaryIdentity.provider
+    this.activeName = typeof primaryIdentity === 'string' ? primaryIdentity : primaryIdentity.name
     this.fallbacks = fallbacks
     this.onFallback = onFallback
   }
@@ -48,19 +51,26 @@ export class FallbackStreamClient implements StreamClient {
   getMainPrefixProof() { return this.activeClient.getMainPrefixProof?.() }
   authorizeCacheGeneration(reason: string): void { this.activeClient.authorizeCacheGeneration?.(reason) }
   restoreExecutionSnapshot(snapshot: import('./continuation-prefix.js').ContinuationPrefixProof): void { this.activeClient.restoreExecutionSnapshot?.(snapshot) }
+  restoreRewindAuthorization(authorization: import('./continuation-prefix.js').RewindGenerationAuthorization): void { this.activeClient.restoreRewindAuthorization?.(authorization) }
 
   async stream(
     request: OaiChatRequest,
     callbacks: StreamCallbacks,
     signal?: AbortSignal,
   ): Promise<void> {
+    return withProviderRequirement(this.primaryProvider, () => this.streamWithRequirement(request, callbacks, signal))
+  }
+
+  private async streamWithRequirement(request: OaiChatRequest, callbacks: StreamCallbacks, signal?: AbortSignal): Promise<void> {
     let lastError: unknown
     const tried = [this.activeName]
 
     try {
       await this.activeClient.stream(request, callbacks, signal)
+      assertExecutionAccess()
       return
     } catch (err) {
+      assertExecutionAccess()
       lastError = err
       if (signal?.aborted) throw err
       if (this.activeClient.getMainPrefixProof?.() || this.activeClient.getExecutionPolicy?.().singleAttempt) throw err
@@ -74,13 +84,16 @@ export class FallbackStreamClient implements StreamClient {
       tried.push(entry.name)
 
       try {
+        assertExecutionAccess()
         const fallbackClient = entry.create()
         this.onFallback?.(this.activeName, entry.name, lastError)
         this.activeClient = fallbackClient
         this.activeName = entry.name
         await fallbackClient.stream(request, callbacks, signal)
+        assertExecutionAccess()
         return
       } catch (err) {
+        assertExecutionAccess()
         lastError = err
         if (signal?.aborted) throw err
 

@@ -65,13 +65,12 @@ import { parseUsageRows } from '../cache/usage-aggregator.js'
 import { getRollbackPreview, rollbackToCheckpoint, makeOwnershipGuard } from '../agent/checkpoint.js'
 import { rankFiles, listDirEntries } from './file-list.js'
 import { cachedProjectFiles } from './file-context-routes.js'
-import { validateDocumentsPayload, extractDocumentsToText, validateArchivesPayload, buildArchiveHandleText, type SessionArchivePayload } from './attachment-validation.js'
+import { validateImagesPayload, validateDocumentsPayload, extractDocumentsToText, validateArchivesPayload, buildArchiveHandleText, type SessionArchivePayload } from './attachment-validation.js'
 import {
   MAX_ARCHIVES,
   MAX_DOCUMENTS,
   MAX_DOCUMENT_BYTES,
   MAX_IMAGES,
-  MAX_IMAGE_BYTES,
 } from './attachment-limits.js'
 import { listPrs, getPrDetail, isGhAvailable, getPrDiff, submitPrReview, listPrChecks, getCheckRunLog, mergePr, type PrReviewInput } from './gh-cli.js'
 import { pushFixToPrBranch } from './pr-fix-push.js'
@@ -94,6 +93,8 @@ import { withAuth } from './route-auth.js'
 import { buildStorageCleanupHandler } from './storage-cleanup-route.js'
 import { buildScratchRoutes } from './scratch-cleanup.js'
 import { isSafeFileName } from '../utils/safe-path.js'
+import { isLocalWorkerPolicyError } from '../api/continuation-prefix.js'
+import { SessionPersist } from '../agent/session-persist.js'
 
 export type ArtifactKind = 'plan' | 'task-list' | 'walkthrough' | 'diff' | 'screenshot' | 'test-result' | 'markdown' | 'html'
 
@@ -119,39 +120,6 @@ type SessionRouteDependencies = {
 
 /** Cap on a single CI check log payload returned to the desktop (tail-kept). */
 const MAX_CHECK_LOG_CHARS = 200_000
-const ACCEPTED_IMAGE_DATA_URL = /^data:image\/(png|jpeg|webp|gif);base64,.+$/i
-
-/** Decoded byte size of a `data:...;base64,<payload>` URL (without decoding it). */
-function decodedBase64Bytes(dataUrl: string): number {
-  const comma = dataUrl.indexOf(',')
-  if (comma < 0) return 0
-  const b64 = dataUrl.slice(comma + 1)
-  const padding = b64.endsWith('==') ? 2 : b64.endsWith('=') ? 1 : 0
-  return Math.floor((b64.length * 3) / 4) - padding
-}
-
-/** Validate an images payload: array of provider-safe base64 data URLs. Defense in
- *  depth — the desktop already compresses + transcodes, but the server is the
- *  trust boundary (formats the model can't consume, oversized payloads).
- *  Shared by POST /sessions (create-with-images) and POST /sessions/:id/prompt. */
-function validateImagesPayload(value: unknown): { images?: string[]; error?: string } {
-  if (value === undefined) return {}
-  if (!Array.isArray(value) || value.length === 0) {
-    return { error: '"images" must be a non-empty array' }
-  }
-  if (value.length > MAX_IMAGES) {
-    return { error: `Max ${MAX_IMAGES} images allowed` }
-  }
-  for (const img of value) {
-    if (typeof img !== 'string' || !ACCEPTED_IMAGE_DATA_URL.test(img)) {
-      return { error: 'Each image must be a data:image/(png|jpeg|webp|gif);base64 URL' }
-    }
-    if (decodedBase64Bytes(img) > MAX_IMAGE_BYTES) {
-      return { error: `Each image must be <= ${Math.round(MAX_IMAGE_BYTES / 1024 / 1024)}MB` }
-    }
-  }
-  return { images: value as string[] }
-}
 
 /** S — accepted autonomy levels for per-session approval-mode overrides. */
 const APPROVAL_MODES: ReadonlySet<ApprovalMode> = new Set<ApprovalMode>([
@@ -697,7 +665,19 @@ export function buildSessionRoutes(
         return { status: 400, body: { error: 'Missing or invalid "modelId"' } }
       }
       const modelId = data.modelId.trim()
-      if (!(await manager.switchModel(params!.id!, modelId))) {
+      let switched: boolean
+      try {
+        switched = await manager.switchModel(params!.id!, modelId)
+      } catch (error) {
+        const historyBlocked = isLocalWorkerPolicyError(error)
+        return { status: 409, body: {
+          code: historyBlocked ? 'history_recovery_required' : 'model_initialization_failed',
+          error: historyBlocked
+            ? '会话历史完整性校验未通过，无法切换模型；请保留原会话，并显式开始新会话。'
+            : '目标模型初始化失败，未完成切换；请检查模型配置后重试。',
+        } }
+      }
+      if (!switched) {
         // A1（2026-09-07 审查）：switchModel 在 session missing/running 时直接
         // return false（session-manager 早退，不触碰模型解析）——此前无条件
         // classify 附因会把用户引向查 key/模型配置，而实际原因是会话状态
@@ -706,6 +686,17 @@ export function buildSessionRoutes(
         return { status: 409, body: { error: describeModelSwitchFailure(rec, config, modelId, dependencies.reloadConfig) } }
       }
       return { status: 200, body: manager.getSession(params!.id!) }
+    }, apiToken),
+
+    // Write — 用户显式确认「放弃连续性证据、以当前配置冷启动续跑」。
+    // resume 证据门（session-persist readFrozenSnapshot）缺/坏快照时 fail-closed
+    // 会砖死会话；此路由把同意标记写进 meta，下次构建 agent 时门绕行（全新装配，
+    // 首请求开新缓存代次）。桌面端错误卡「以当前配置继续」按钮调这里。
+    'POST /sessions/:id/cold-start-consent': withAuth((_body, params) => {
+      const rec = manager.getSession(params!.id!)
+      if (!rec) return { status: 404, body: { error: 'Session not found' } }
+      new SessionPersist(params!.id!, rec.cwd).markColdStartConsent()
+      return { status: 200, body: { ok: true } }
     }, apiToken),
 
     // ── PlusMenu: star-domain picker ──

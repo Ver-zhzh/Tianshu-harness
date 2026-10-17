@@ -33,6 +33,27 @@ export const GIT_GLOBAL_OPTS_SRC =
 /** 命令起点：行首、空白或 shell 连接符（`;` `&` `|` `(`）——覆盖 `cd x&&git …` 无空格写法。 */
 const CMD_START = String.raw`(?:^|[\s;&|(])`
 
+const ARG_END = String.raw`(?=$|[\s;&|()])`
+const SHELL_WORD = String.raw`(?:"[^"\r\n]*"|'[^'\r\n]*'|\\[^\r\n]|[^\s"'\\;&|()])+`
+const quotedOption = (source: string): string => `(?:${source}|"${source}"|'${source}')`
+// Value-taking options must consume their next word: --orphan '-f' is a branch
+// name, not a force flag. Exclude them from the fallback to prevent backtracking.
+const CHECKOUT_VALUE_OPT = quotedOption(String.raw`(?:--(?:orphan|conflict|pathspec-from-file|unified|inter-hunk-context)|-[bBU])`)
+const CHECKOUT_ARG = String.raw`(?:${CHECKOUT_VALUE_OPT}[ \t]+${SHELL_WORD}|(?!${CHECKOUT_VALUE_OPT}${ARG_END})${SHELL_WORD})`
+// Only boolean short flags can precede f; in -bfeature/-U5, f is an option value.
+const CHECKOUT_CLEAR_OPT = quotedOption(String.raw`(?:--|--f(?:o(?:r(?:c(?:e)?)?)?)?|-[qlmdtp23f]*f[qlmdtp23f]*(?:[bBU][^\s"';&|()]*)?)`)
+// 裸路径形态（无 `--` / `-f`）同样是破坏性清场：`git checkout <pathspec>` 把不匹配 ref
+// 的参数当路径检出，丢弃工作区改动，与 `git checkout -- <pathspec>` 同义。
+// 只认已知路径形态（点开头、..、尾斜线、glob），不把 ~ / ^ 版本语法当路径证据。
+// 各引用上下文保留整词边界，含空格的引号路径也与裸路径同判。
+// 歧义形态如 src/foo.ts 与 ref 同形，宁可漏判也不误判成清场；可用 -- 明确。
+const checkoutPath = (char: string): string => String.raw`(?:\.${char}*|${char}*\.\.${char}*|${char}*/|${char}*[?*\[]${char}*)`
+const CHECKOUT_PATH_ARG = String.raw`(?:${checkoutPath(String.raw`[^\s"'\\;&|()]`)}|"${checkoutPath(String.raw`[^"\r\n]`)}"|'${checkoutPath(String.raw`[^'\r\n]`)}')`
+const CHECKOUT_CLEAR_SRC = String.raw`checkout[ \t]+(?:${CHECKOUT_ARG}[ \t]+)*(?:${CHECKOUT_CLEAR_OPT}${ARG_END}|${CHECKOUT_PATH_ARG}${ARG_END})`
+
+/** Shared checkout argument boundaries for approval, pre-execution and advisory. */
+export const GIT_CHECKOUT_CLEAR_RE = new RegExp(CMD_START + 'git' + GIT_GLOBAL_OPTS_SRC + String.raw`\s+${CHECKOUT_CLEAR_SRC}`)
+
 /**
  * git 清场命令正则——匹配不可逆的 git 清理操作。
  * 来源:AGENTS.md 高危命令纪律 + `<security>` 覆盖范围段
@@ -40,7 +61,8 @@ const CMD_START = String.raw`(?:^|[\s;&|(])`
  * 匹配的真实命令样本(禁止的行为):
  *   `git stash`(非 pop/list/show/apply/drop)
  *   `git reset --hard` / `git reset --mixed`
- *   `git checkout -- .`
+ *   `git checkout -- .` / `git checkout -q -f .` / `git checkout HEAD --force`
+ *   `git checkout .` / `git checkout ./src/x.ts` / `git checkout src/`（裸路径＝pathspec 检出）
  *   `git restore .`
  *   `git clean -fd`
  * 以上任意形态前置全局参数(`git -C <dir> reset --hard` / `git --no-pager stash`)同样命中。
@@ -53,5 +75,5 @@ export const GIT_CLEAR_RE = new RegExp(
   CMD_START +
     String.raw`git` +
     GIT_GLOBAL_OPTS_SRC +
-    String.raw`\s+(?:stash(?!\s+(?:pop|list|show|apply|drop|branch))|reset\s+(?:--hard|--mixed)|checkout\s+--|restore\s+\S|clean\s+-[a-z]*f)`,
+    String.raw`\s+(?:stash(?!\s+(?:pop|list|show|apply|drop|branch))|reset\s+(?:--hard|--mixed)|${CHECKOUT_CLEAR_SRC}|restore\s+\S|clean\s+-[a-z]*f)`,
 )

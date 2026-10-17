@@ -110,3 +110,40 @@ describe('BingBackend request parameters', () => {
     assert.equal(seen.headers['Accept-Language'], 'zh-CN,zh;q=0.9,en;q=0.5')
   })
 })
+
+/**
+ * issue #483 问题 2：cn.bing.com 对海外出口 301 → www.bing.com 验证页。
+ * redirect:'manual' 下 301 必须失败（不变），但错误文案要可诊断——
+ * 裸「HTTP 301」让用户无从知道是出口位置问题。
+ */
+describe('BingBackend offshore redirect diagnostics', () => {
+  it('explains the 301 to www.bing.com instead of a bare status code', async () => {
+    const backend = new BingBackend(async () => new Response(null, {
+      status: 301,
+      headers: { location: 'https://www.bing.com/?q=test&mkt=zh-CN' },
+    }))
+    await assert.rejects(
+      backend.search('python', 10, new AbortController().signal),
+      (err: Error) => {
+        assert.match(err.message, /301/)
+        assert.match(err.message, /海外/)
+        assert.match(err.message, /仅服务中国大陆/)
+        return true
+      },
+    )
+  })
+
+  it('non-bing redirects and other statuses keep the generic SearchHttpError', async () => {
+    const backend = new BingBackend(async () => new Response(null, {
+      status: 302,
+      headers: { location: 'https://example.com/elsewhere' },
+    }))
+    await assert.rejects(
+      backend.search('python', 10, new AbortController().signal),
+      (err: Error) => {
+        assert.equal(err.message, 'HTTP 302')
+        return true
+      },
+    )
+  })
+})

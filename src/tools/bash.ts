@@ -5,7 +5,7 @@ import { execFileSync } from 'child_process'
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { INJECTION_PATTERNS, matchesDangerousBash, testBoth } from '../agent/approval-risk.js'
+import { INJECTION_PATTERNS, matchesDangerousBash, normalizeBashCommand, testBoth } from '../agent/approval-risk.js'
 import {
   DEFAULT_INTERRUPT_HINT_MS,
   executionYieldMessage,
@@ -50,23 +50,7 @@ import { summarizeBashOutput } from '../artifact/summarize.js'
 import { getToolArtifactThreshold } from './artifact-threshold.js'
 import { debugLog } from '../utils/debug.js'
 import { loadConfig } from '../config/manager.js'
-import { buildMirrorEnv, rewriteGitHubUrls } from './mirror-env.js'
-import type { MirrorsConfig } from '../config/schema.js'
-
-/**
- * When autoFallback is enabled, inject git early-fail env vars so that
- * `git clone https://github.com/...` commands abort quickly on slow
- * connections (instead of hanging for 2 minutes). This lets the user see
- * the error and manually try a mirror.
- */
-function gitCloneEarlyFailEnv(command: string, config: MirrorsConfig): Record<string, string> {
-  if (config.autoFallback === false) return {}
-  if (!/\bgit\b.*\bclone\b.*github\.com/.test(command)) return {}
-  return {
-    GIT_HTTP_LOW_SPEED_LIMIT: '1000',
-    GIT_HTTP_LOW_SPEED_TIME: '15',
-  }
-}
+import { buildMirrorEnv, rewriteGitHubUrls, gitCloneEarlyFailEnv } from './mirror-env.js'
 import { buildNotFoundHint, extractMissingCommand } from './env-check.js'
 import { getResolvedEnv } from './resolved-env.js'
 import { OutputStreamBudget } from './output-stream-budget.js'
@@ -1165,8 +1149,13 @@ export const BASH_TOOL: Tool = {
     // 凭据/密钥文件 → 需审批。聚合形态（. / -A / --all）只返回哨兵项，不在此
     // 收审批（`git add -A && git commit` 属常规流）；哨兵由 assessToolRisk 消费
     // 为 medium 风险理由。检测器 fail-closed 且不抛——不可解析的命令最多漏报。
-    return detectSensitiveGitAdd(rawCommand).some(h => h !== AGGREGATE_ADD_MARKER)
-      || detectSensitiveGitAdd(rewrittenCommand).some(h => h !== AGGREGATE_ADD_MARKER)
+    // 双视图并检：rtk 缺失/损坏时 rewrittenCommand 透传原文，归一化视图是
+    // `git${IFS}add` / `g\it add` / `git "a"dd` 这类混淆形态的最后一道网
+    // （与 assessToolRisk 侧同口径）。
+    const sensitiveGitAddHit = (c: string): boolean =>
+      detectSensitiveGitAdd(c).some(h => h !== AGGREGATE_ADD_MARKER)
+      || detectSensitiveGitAdd(normalizeBashCommand(c)).some(h => h !== AGGREGATE_ADD_MARKER)
+    return sensitiveGitAddHit(rawCommand) || sensitiveGitAddHit(rewrittenCommand)
   },
 
   isConcurrencySafe: () => false,

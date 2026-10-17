@@ -124,11 +124,22 @@ describe('createProxyAwareFetch', () => {
       { proxyUrl: 'http://proxy.internal:8080', noProxy: '.internal' },
       spy.fetch,
     )
-    // URL hostname "cn.bing.com" does NOT match ".internal"
-    const res = await wrapped('https://cn.bing.com/search?q=test')
+    // URL hostname "html.duckduckgo.com" does NOT match ".internal"
+    const res = await wrapped('https://html.duckduckgo.com/search?q=test')
     assert.equal(res.status, 200)
     const hasDispatcher = 'dispatcher' in (spy.lastInit ?? {})
     assert.equal(hasDispatcher, true, 'should add dispatcher when host does NOT match noProxy')
+  })
+
+  it('cn.bing.com always goes direct regardless of proxy config (issue #483)', async () => {
+    // cn.bing.com 仅服务中国大陆出口：经海外代理必被 301 到 www.bing.com 验证页。
+    // 内置直连不可被 proxy 配置覆盖——即便用户显式配了 proxy。
+    const spy = spyFetch()
+    const wrapped = createProxyAwareFetch({ proxyUrl: 'http://proxy.internal:8080' }, spy.fetch)
+    const res = await wrapped('https://cn.bing.com/search?q=test')
+    assert.equal(res.status, 200)
+    const hasDispatcher = 'dispatcher' in (spy.lastInit ?? {})
+    assert.equal(hasDispatcher, false, 'cn.bing.com 内置直连，不得注入 dispatcher')
   })
 
   it('empty proxy opts behave same as undefined', async () => {

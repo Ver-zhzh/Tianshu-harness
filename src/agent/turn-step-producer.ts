@@ -1,4 +1,4 @@
-import { applyHumanInputBoundary } from './human-input-boundary.js'
+import { applyHumanInputBoundary, recordHumanInput, rollbackActiveUserInput } from './human-input-boundary.js'
 import { applySessionSkillModes } from '../skills/session-skill-policy.js'
 import { getTodos } from '../tools/todo.js'
 import type { AgentLoop } from './loop.js'
@@ -269,7 +269,7 @@ export class TurnStepProducer {
       }
     }
 
-    this.self.session.addUserMessage(userInput, images, this.self.activeInputOrigin)
+    recordHumanInput(this.self, userInput, images)
     // S2 CCR 可达性：用户边界重置连续只读流水。上一段排查（哪怕是同一个
     // 会话）的只读流水不能当成"新任务也在原地打转"的证据——用户刚重新
     // 定义了问题，CCR P6 的计时从零开始。
@@ -779,7 +779,7 @@ export class TurnStepProducer {
     debugLog(`[turn-boundary] turn=${turn} enforceContextCeiling: ${Date.now() - _tb}ms`)
     // A2: enforceContextCeiling can trigger LLM compact (30s timeout).
     if (this.self.abortController!.signal.aborted) {
-      if (!assistantResponded && !userMessageConsumed && !this.self.config.promptEngine.getRequestBudgetPolicy()) this.self.session.removeLastMessage()
+      if (!assistantResponded && !userMessageConsumed && !this.self.config.promptEngine.getRequestBudgetPolicy()) rollbackActiveUserInput(this.self)
       callbacks.onAbort(this.self.abortReason())
       return { action: 'abort' }
     }

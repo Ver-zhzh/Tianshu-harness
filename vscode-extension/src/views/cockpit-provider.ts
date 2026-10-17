@@ -225,9 +225,10 @@ export class CockpitProvider implements vscode.WebviewViewProvider {
       return
     }
     const generation = this.subscriptionGeneration
+    const sessionRead = ['listRewindPoints', 'loadEarlier', 'listPickers', 'getCockpit', 'readPlan'].includes(msg.type)
     try {
       const client = await this.getClient()
-      if (msg.type === 'listRewindPoints' && generation !== this.subscriptionGeneration) return
+      if (sessionRead && generation !== this.subscriptionGeneration) return
       this.replaceClient(client)
       switch (msg.type) {
         case 'ready':
@@ -403,6 +404,7 @@ export class CockpitProvider implements vscode.WebviewViewProvider {
             client.listModels(msg.sessionId),
             client.listDomains(msg.sessionId),
           ])
+          if (generation !== this.subscriptionGeneration) break
           this.post({ type: 'pickers', sessionId: msg.sessionId, models, domains })
           break
         }
@@ -461,6 +463,7 @@ export class CockpitProvider implements vscode.WebviewViewProvider {
         }
         case 'readPlan': {
           const plan = await client.readPlan(msg.sessionId, msg.slug)
+          if (generation !== this.subscriptionGeneration) break
           this.post({ type: 'plan', sessionId: msg.sessionId, plan, revision: msg.revision })
           break
         }
@@ -512,6 +515,7 @@ export class CockpitProvider implements vscode.WebviewViewProvider {
         case 'loadEarlier': {
           try {
             const page = await client.getHistoryPage(msg.sessionId, msg.before)
+            if (generation !== this.subscriptionGeneration) break
             this.post({
               type: 'earlierEvents',
               sessionId: msg.sessionId,
@@ -519,6 +523,7 @@ export class CockpitProvider implements vscode.WebviewViewProvider {
               firstSeq: page.firstSeq,
             })
           } catch (err) {
+            if (generation !== this.subscriptionGeneration) break
             this.post({ type: 'earlierEvents', sessionId: msg.sessionId, events: [], firstSeq: msg.before, error: (err as Error).message })
           }
           break
@@ -539,14 +544,17 @@ export class CockpitProvider implements vscode.WebviewViewProvider {
           // 旧内核无此路由——失败回 null，webview 静默隐藏统计条（同 listProviders 容错）
           try {
             const snapshot = await client.getCockpit(msg.sessionId)
+            if (generation !== this.subscriptionGeneration) break
             this.post({ type: 'cockpit', sessionId: msg.sessionId, snapshot })
           } catch {
+            if (generation !== this.subscriptionGeneration) break
             this.post({ type: 'cockpit', sessionId: msg.sessionId, snapshot: null })
           }
           break
         }
       }
     } catch (err) {
+      if (sessionRead && generation !== this.subscriptionGeneration) return
       this.post({ type: 'error', message: (err as Error).message })
     }
   }

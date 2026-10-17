@@ -15,6 +15,8 @@ import { PROVIDER_PRESETS, providerPresetKeys } from '../config/provider-presets
 import type { ProviderPreset } from '../config/provider-presets.js'
 import type { ProClientFactory } from './pro-types.js'
 import type { OaiMessage } from './oai-types.js'
+import { assertProFeatureEnabled } from '../config/pro-license.js'
+import type { Config } from '../config/schema.js'
 
 /** wire 变换的会话级上下文（2026-08-07 spark v2 T1）。
  *  截断 N 等参数必须随会话冻结（meta 持久化，resume 读回）——进程级 env 常量
@@ -56,6 +58,8 @@ export interface ProPresetEntry {
 }
 
 export interface ProRegistry {
+  registerAccessGuard(providerName: string, authorize: () => void): void
+  assertProviderAccess(providerName: string): void
   registerPreset(entry: ProPresetEntry): void
   getPreset(key: string): ProPresetEntry | undefined
   keys(): string[]
@@ -79,6 +83,19 @@ export interface ProRegistry {
 }
 
 function createRegistry(): ProRegistry {
+  const builtinAccessGuards = new Map<string, () => void>([
+    ['deepseek-spark', () => assertProFeatureEnabled({} as Config, 'spark')],
+  ])
+  const accessGuards = new Map<string, () => void>()
+  const assertProviderAccess = (providerName: string): void => {
+    builtinAccessGuards.get(providerName)?.()
+    accessGuards.get(providerName)?.()
+  }
+  const guardOperation = <Args extends unknown[], Result>(providerName: string, operation: (...args: Args) => Result) =>
+    (...args: Args): Result => {
+      assertProviderAccess(providerName)
+      return operation(...args)
+    }
   const presets = new Map<string, ProPresetEntry>()
   const clientFactories = new Map<string, ProClientFactory>()
   const wireTransforms = new Map<string, WireTransform>()
@@ -86,6 +103,10 @@ function createRegistry(): ProRegistry {
   const goalExtractors = new Map<string, GoalExtractor>()
   const wireContextDefaults = new Map<string, () => WireTransformContext>()
   return {
+    registerAccessGuard(providerName, authorize) {
+      accessGuards.set(providerName, authorize)
+    },
+    assertProviderAccess,
     registerPreset(entry) {
       presets.set(entry.key, entry)
     },
@@ -96,31 +117,31 @@ function createRegistry(): ProRegistry {
       return [...presets.keys()]
     },
     registerClientFactory(providerName, factory) {
-      clientFactories.set(providerName, factory)
+      clientFactories.set(providerName, builtinAccessGuards.has(providerName) || accessGuards.has(providerName) ? guardOperation(providerName, factory) : factory)
     },
     getClientFactory(providerName) {
       return clientFactories.get(providerName)
     },
     registerWireTransform(providerName, fn) {
-      wireTransforms.set(providerName, fn)
+      wireTransforms.set(providerName, guardOperation(providerName, fn))
     },
     getWireTransform(providerName) {
       return wireTransforms.get(providerName)
     },
     registerAnchorExtractor(providerName, fn) {
-      anchorExtractors.set(providerName, fn)
+      anchorExtractors.set(providerName, guardOperation(providerName, fn))
     },
     getAnchorExtractor(providerName) {
       return anchorExtractors.get(providerName)
     },
     registerGoalExtractor(providerName, fn) {
-      goalExtractors.set(providerName, fn)
+      goalExtractors.set(providerName, guardOperation(providerName, fn))
     },
     getGoalExtractor(providerName) {
       return goalExtractors.get(providerName)
     },
     registerWireContextDefaults(providerName, fn) {
-      wireContextDefaults.set(providerName, fn)
+      wireContextDefaults.set(providerName, guardOperation(providerName, fn))
     },
     getWireContextDefaults(providerName) {
       return wireContextDefaults.get(providerName)

@@ -308,7 +308,7 @@ import type { IntentPreview } from '../../agent/intent-preview.js'
 import { describeIntentNote } from '../../agent/intent-preview.js'
 import type { ApprovalResult } from '../../agent/approval-edit.js'
 import type { DelegationActivity } from '../../tools/types.js'
-import type { AutonomyCheckpointInfo } from '../../agent/loop-types.js'
+import type { AgentCallbacks as RuntimeAgentCallbacks, AutonomyCheckpointInfo } from '../../agent/loop-types.js'
 import { CVM_NOTICE_GATE_DEFAULT, cvmNoticeLevelEnabled, type CvmInterceptionNotice, type CvmNoticeGate } from '../../agent/cvm-notice.js'
 import { CvmNoticeCoalescer, CVM_NOTICE_WINDOW_MS_DEFAULT, type CvmCoalescedLine } from '../cvm-notice-coalescer.js'
 import type { DomainDriftResult } from '../../agent/domain-drift-detector.js'
@@ -343,8 +343,8 @@ export interface AgentCallbacks {
   onPhaseChange?: (phase: string, detail?: { tool?: string; reason?: string; voluntary?: boolean; source?: string }) => void
   onIntentNote?: (intent: IntentPreview) => void
   onDomainDrift?: (drift: DomainDriftResult) => void
-  onSteerDrain?: () => string | null
-  onHumanGuidanceDrain?: () => import('../../agent/course-episodes.js').HumanGuidance | null
+  onSteerDrain?: RuntimeAgentCallbacks['onSteerDrain']
+  onHumanGuidanceDrain?: RuntimeAgentCallbacks['onHumanGuidanceDrain']
   /** C3 — autonomy checkpoint pause (cruise) / progress ping (unleashed). */
   onAutonomyCheckpoint?: (info: AutonomyCheckpointInfo) => void
   /** T4 — structured per-worker delegation status/progress feeding the fleet read model. */
@@ -1949,6 +1949,7 @@ export class TuiApp {
     // 入口先规范化图片数组，后续气泡/渲染/回调看到的是同一份。
     images = normalizeSubmitImages(images)
     let trimmed = text.trim()
+    if (trimmed || images?.length) this.inputHandoffGeneration++
     if (/^\/(?:token-ledger|usage)(?:\s|$)/.test(trimmed) && this.slashRegistry.has(trimmed.split(/\s+/)[0]!)) {
       this.inputLine.clearAll(); await this.tryDispatchSlash(trimmed); return
     }
@@ -5948,6 +5949,10 @@ export class TuiApp {
   private async handleCtrlV(): Promise<void> {
     const generation = this.inputHandoffGeneration
     if (!this.canApplyPaste(generation)) return
+    if (this.inputController.ctrlCPendingSince > 0) {
+      this.inputController.clearExitConfirm()
+      this.renderLive()
+    }
     // 非 input 模式不处理（overlay / approval 等）
     if (this.input.getMode() !== 'input') return
 

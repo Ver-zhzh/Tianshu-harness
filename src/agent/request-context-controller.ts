@@ -8,7 +8,8 @@ import { prepareContextRequest } from './context-budget-preparation.js'
 import { compactBudgetHistory } from './budget-compaction.js'
 import { archiveContextImages } from './context-image-archive.js'
 import { COMPACT_HISTORY_TOOL } from '../compact/recall-marker.js'
-import { invalidateSessionReadDedup } from '../tools/read-file.js'
+import { commitCompactedHistory } from './session-persist-listener.js'
+import { LocalWorkerPolicyError } from '../api/continuation-prefix.js'
 
 /** 把压缩的拒绝原因翻译成用户能读的中文（供 compact-blocked 相位）。 */
 function describeCompactBlock(reason?: string): string {
@@ -83,7 +84,8 @@ export class RequestContextController {
     const signal = self.abortController?.signal
     await self.drainPersistWrites()
     const source = self.session.getMessages().slice()
-    const originalUser = this.activeUserMessage
+    const sourceJson = JSON.stringify(source)
+    const originalUser = self.session.resolveUserInput(this.activeUserMessage)
     const activeUser = originalUser && (source.includes(originalUser) ? originalUser : source.find(m => m.role === 'user'
       && typeof m.content === 'string' && typeof originalUser.content === 'string'
       && m.content.startsWith(originalUser.content + '\n<system-reminder>')))
@@ -111,12 +113,12 @@ export class RequestContextController {
       },
       commit: async messages => {
         signal?.throwIfAborted()
-        await self.commitBudgetHistory(source, messages)
-        self.config.client.authorizeCacheGeneration?.(force ? 'explicit_user_compact' : 'context_limit')
-        self.config.promptEngine.authorizeCacheGeneration()
-        this.activeUserMessage = activeUser
+        if (JSON.stringify(self.session.getMessages()) !== sourceJson) throw new LocalWorkerPolicyError('历史在压缩摘要期间发生变化；禁止替换')
+        const activeIndex = activeUser ? messages.indexOf(activeUser) : -1
+        if (activeUser && activeIndex < 0) throw new LocalWorkerPolicyError('压缩候选缺少当前用户边界；禁止替换')
+        await commitCompactedHistory(self, source, messages, force ? 'explicit_user_compact' : 'context_limit')
+        this.activeUserMessage = activeIndex >= 0 ? self.session.getMessages()[activeIndex] : undefined
         self.config.promptEngine.resetAppendixBaseline()
-        invalidateSessionReadDedup(self.config.sessionId)
       },
     })
     this.failedAt = changed || !budget ? undefined : { input: budget.inputTokens, model: budget.model, budget: budget.inputBudget }

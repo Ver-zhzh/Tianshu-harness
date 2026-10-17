@@ -16,7 +16,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, linkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { RuntimeSessionManager, type ManagedAgent } from '../session-manager.js'
@@ -28,6 +28,31 @@ import type { OaiMessage } from '../../api/oai-types.js'
 
 const TOKEN = 'tok'
 const AUTH = { authorization: `Bearer ${TOKEN}` }
+
+test('GET /git/diff refuses a directory containing a tracked hardlink', async () => {
+  const cwd = initRepo()
+  const vault = mkdtempSync(join(tmpdir(), 'git-directory-vault-'))
+  const manager = new RuntimeSessionManager({ createAgent: () => new NoopAgent(), defaultCwd: cwd })
+  try {
+    mkdirSync(join(cwd, 'sub'))
+    const path = join(cwd, 'sub', 'notes.txt')
+    writeFileSync(path, 'baseline\n')
+    execFileSync('git', ['add', '--', 'sub/notes.txt'], { cwd })
+    execFileSync('git', ['commit', '-m', 'fixture'], { cwd })
+    const target = join(vault, 'fixture.txt')
+    writeFileSync(target, 'SYNTHETIC_ROUTE_CANARY\n')
+    rmSync(path)
+    linkSync(target, path)
+    const router = createRouter(buildSessionRoutes(manager, TOKEN))
+    const result = await router('GET', '/git/diff?path=sub', {}, AUTH)
+    assert.equal(result.status, 400)
+    assert.ok(!JSON.stringify(result.body).includes('SYNTHETIC_ROUTE_CANARY'))
+  } finally {
+    await manager.shutdownAll()
+    rmSync(cwd, { recursive: true, force: true })
+    rmSync(vault, { recursive: true, force: true })
+  }
+})
 
 class NoopAgent implements ManagedAgent {
   run(_prompt: string): Promise<void> { return Promise.resolve() }

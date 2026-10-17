@@ -10,7 +10,6 @@ import { deriveCompactionProfile, cacheKindFromProviderProfile, type CompactionP
 import { estimateReclaim, buildReclaimDecision, type ReclaimDecisionRecord } from '../compact/reclaim-estimate.js'
 
 import { debugLog } from '../utils/debug.js'
-import { runResumePreflightOai } from '../context/resume-preflight.js'
 import type { WriteProbe } from '../context/write-evidence-probe.js'
 import { decideCompactAction, recordCompactFailure, recordCompactSuccess } from '../context/compact-policy.js'
 import type { CompactCircuitBreakerState, CompactTier } from '../context/types.js'
@@ -27,6 +26,8 @@ import { extractSessionMemories, type ExtractedMemory } from './session-memory-e
 import type { ArtifactSection } from '../artifact/types.js'
 import { serializeMessagesForArchive, buildArchiveCatalog, buildRecallRefBlock } from './compact-archive.js'
 import { parseRecallMarker } from '../compact/recall-marker.js'
+import { captureCompactionHistory, commitCompactionHistory, type CompactionHistorySource } from './compaction-history-commit.js'
+import { buildCompactionSummaryRequest } from './compaction-summary-request.js'
 
 /**
  * How many of the most-recent compact-history recall blocks in the recent zone
@@ -319,11 +320,12 @@ export interface CompactionControllerDeps {
   /** Current abort signal from the agent loop, so LLM compact can be cancelled. */
   getAbortSignal?: () => AbortSignal | undefined
   /**
-   * C4: the live authoritative task contract. Re-injected into the appendix
+   * C4: the published authoritative task contract. Re-injected into the appendix
    * region after every compaction so the goal / constraints / forbidden items
    * survive verbatim even when the LLM summary above drifts or drops them.
    */
   getActiveContract?: () => TaskContract | undefined
+  getPublishedGoalAnchor?: () => string | null
   /**
    * Layered archival: persist a discarded message zone as a recallable
    * `compact-history` artifact, returning its id (or null on failure).
@@ -343,7 +345,8 @@ export interface CompactionControllerDeps {
    * read-ref points at ("回看上文") may no longer exist after the rewrite, so
    * "already read" dedup claims must be dropped.
    */
-  onHistoryRewritten?: () => void
+  onHistoryRewritten?: () => void | Promise<void>
+  commitHistory?: (expected: OaiMessage[], candidate: OaiMessage[]) => Promise<void>
   /**
    * Side-path usage accounting (2026-07-06 cost blind spot fix): summary
    * requests carry a large input (anchor + oldZone) and are billed like any
@@ -469,7 +472,8 @@ export class CompactionController {
       return { failures: input.failures, compacted: false }
     }
 
-    const messages = this.deps.session.getMessages()
+    const expected = captureCompactionHistory(this.deps.session)
+    const messages = expected.messages
 
     // Prune removed (C4): pruneStaleToolResults was called here solely for debugLog
     // stats — it never mutated storage. The actual request-time pruning happens in
@@ -530,7 +534,7 @@ export class CompactionController {
       }
 
       debugLog(`[llm-compact] partial compact insufficient — triggering full LLM compact`)
-      const summary = await this.llmCompact(undefined, this.deps.getAbortSignal?.())
+      const summary = await this.llmCompact(undefined, this.deps.getAbortSignal?.(), expected)
       if (this.isAbortRequested()) {
         debugLog('[llm-compact] turn aborted after compact returned — skipping checkpoint replacement')
         return { failures: input.failures, compacted: false }
@@ -543,6 +547,7 @@ export class CompactionController {
         // callback hot-refreshes session memory, which rebuilds the frozen base.
         this.persistExtractedMemories(this.deps.getTrajectoryEntries())
         const committed = await this.replaceWithCheckpoint({
+          expected,
           tier: 2,
           reason: `LLM compact at ${(ratio * 100).toFixed(0)}% context (${actionDecision.action})`,
           summary,
@@ -578,6 +583,7 @@ export class CompactionController {
       return { failures: input.failures, compacted: false }
     }
 
+    let rewriteStarted = false
     try {
       const { messages: compacted } = await this.compactMessages(messages, estimatedTokens)
 
@@ -647,7 +653,8 @@ export class CompactionController {
         }
       }
 
-      this.safeReplaceMessages(compacted)
+      rewriteStarted = true
+      await this.safeReplaceMessages(compacted, expected)
       this.deps.promptEngine.resetAppendixBaseline()
       this.deps.session.markCompacted(input.loopTurn)
       this.deps.pressureMonitor.recordCompaction(this.deps.session.getTurnCount())
@@ -668,7 +675,8 @@ export class CompactionController {
 
       this.deps.refreshLedger()
       return { failures: recordCompactSuccess(input.failures), compacted: true }
-    } catch {
+    } catch (error) {
+      if (rewriteStarted) throw error
       return {
         failures: recordCompactFailure(input.failures, this.deps.session.getTurnCount()),
         compacted: false,
@@ -679,18 +687,20 @@ export class CompactionController {
   async enforceContextCeiling(): Promise<void> {
     const ceiling = this.deps.contextWindow * 0.95
     if (this.deps.session.getEstimatedTokens() <= ceiling) return
+    const expected = captureCompactionHistory(this.deps.session)
 
     this.persistExtractedMemories(this.deps.getTrajectoryEntries())
 
     // Try LLM compact first (short timeout — emergency path, can't wait long)
     if (this.summaryClient()) {
-      const summary = await this.llmCompact(30_000, this.deps.getAbortSignal?.())
+      const summary = await this.llmCompact(30_000, this.deps.getAbortSignal?.(), expected)
       if (this.isAbortRequested()) {
         debugLog('[llm-compact] turn aborted after compact returned — skipping ceiling checkpoint replacement')
         return
       }
       if (summary) {
         await this.replaceWithCheckpoint({
+          expected,
           tier: 4,
           reason: 'context ceiling exceeded; LLM compact checkpoint',
           summary,
@@ -728,6 +738,7 @@ export class CompactionController {
     const resumeContent = `<checkpoint-resume>\n${stateLines.join('\n')}\n</checkpoint-resume>`
 
     await this.replaceWithCheckpoint({
+      expected,
       tier: 4,
       reason: 'context ceiling exceeded; checkpoint-resume required',
       summary: resumeContent,
@@ -747,19 +758,21 @@ export class CompactionController {
 
     const ratio = this.deps.session.getEstimatedTokens() / this.deps.contextWindow
     if (ratio < 0.86) return false
+    const expected = captureCompactionHistory(this.deps.session)
 
     const trajectory = this.deps.getTrajectoryEntries()
     this.persistExtractedMemories(trajectory)
 
     // Try LLM compact first for higher-fidelity summary
     if (this.summaryClient()) {
-      const summary = await this.llmCompact(undefined, this.deps.getAbortSignal?.())
+      const summary = await this.llmCompact(undefined, this.deps.getAbortSignal?.(), expected)
       if (this.isAbortRequested()) {
         debugLog('[llm-compact] turn aborted after compact returned — skipping session-split checkpoint replacement')
         return false
       }
       if (summary) {
         await this.replaceWithCheckpoint({
+          expected,
           tier: 3,
           reason: `session split at ${(ratio * 100).toFixed(0)}% context (LLM compact)`,
           summary,
@@ -778,6 +791,7 @@ export class CompactionController {
     const handoffContent = this.buildHandoffFromState()
 
     await this.replaceWithCheckpoint({
+      expected,
       tier: 3,
       reason: `session split at ${(ratio * 100).toFixed(0)}% context`,
       summary: handoffContent,
@@ -934,30 +948,8 @@ export class CompactionController {
     })
   }
 
-  /**
-   * Replace session messages after running OAI orphan-tool_call preflight.
-   *
-   * Compaction paths (tryPartialCompact, replaceWithCheckpoint, microCompact)
-   * can produce message lists where an assistant(tool_calls) survives but its
-   * matching tool result was deleted. The OpenAI-compatible API rejects such
-   * sequences with: "An assistant message with 'tool_calls' must be followed
-   * by tool messages responding to each 'tool_call_id'."
-   *
-   * runResumePreflightOai detects orphans and inserts synthetic tool results,
-   * making the sequence safe to send.
-   */
-  private safeReplaceMessages(messages: OaiMessage[]): void {
-    // Optional pre-compaction transcript snapshot: capture the CURRENT (pre-replace)
-    // message list before it is overwritten. This is the single choke point for
-    // every compaction path, so one hook covers partial / checkpoint / micro.
-    this.maybeBackupTranscript()
-    const preflight = runResumePreflightOai(messages, { writeProbe: this.deps.writeProbe })
-    if (preflight.repaired) {
-      debugLog(`[compact-preflight] repaired ${preflight.syntheticResultsInserted} orphan tool_call(s)`)
-    }
-    this.deps.session.replaceMessages(preflight.messages)
-    // History rewritten — read-ref's "look above" targets may be gone.
-    try { this.deps.onHistoryRewritten?.() } catch { /* never block compaction */ }
+  private async safeReplaceMessages(messages: OaiMessage[], expected: CompactionHistorySource): Promise<void> {
+    await commitCompactionHistory(this.deps, messages, expected, () => this.maybeBackupTranscript())
   }
 
   private maybeBackupTranscript(): void {
@@ -1052,6 +1044,7 @@ export class CompactionController {
    * Returns whether the rewrite was committed.
    */
   private async replaceWithCheckpoint(params: {
+    expected: CompactionHistorySource
     tier: CompactTier
     reason: string
     summary: string
@@ -1060,7 +1053,7 @@ export class CompactionController {
     action: CompactionAction
     force: boolean
   }): Promise<boolean> {
-    const messages = this.deps.session.getMessages()
+    const messages = params.expected.messages
     const anchorMessages = messages.slice(0, CACHE_ANCHOR_MESSAGES)
 
     // 尾随「尚未消费的 user 消息」保护（desktop 长消息回归根因）：enforceContextCeiling
@@ -1104,12 +1097,12 @@ export class CompactionController {
       ]
     }
 
-    // C4: append the authoritative task anchor at the tail (appendix region —
-    // never the frozen prefix, so prefix-cache stays intact). The anchor is the
+    // C4: keep the authoritative task anchor before a preserved fresh tail (appendix
+    // region, never the frozen prefix, so prefix-cache stays intact). The anchor is the
     // ground truth the model defers to if the summary above drifted.
     const anchorAppendix = this.buildTaskAnchorAppendix()
     if (anchorAppendix) {
-      candidate.push({ role: 'user', content: anchorAppendix })
+      candidate.splice(candidate.length - tailPreserved.length, 0, { role: 'user', content: anchorAppendix })
     }
 
     const decision = buildReclaimDecision(
@@ -1125,7 +1118,7 @@ export class CompactionController {
     }
 
     const beforeTokens = decision.beforeTokens
-    this.safeReplaceMessages(candidate)
+    await this.safeReplaceMessages(candidate, params.expected)
     this.deps.promptEngine.resetAppendixBaseline()
     this.deps.session.recordCompactEvent({
       turn: this.deps.session.getTurnCount(),
@@ -1150,7 +1143,8 @@ export class CompactionController {
     if (!summaryClient) return false
     if (this._llmCompactInFlight) return false
 
-    const messages = this.deps.session.getMessages()
+    const expected = captureCompactionHistory(this.deps.session)
+    const messages = expected.messages
     const anchorCount = CACHE_ANCHOR_MESSAGES
     if (messages.length <= anchorCount + recentToPreserve + 4) {
       debugLog(`[partial-compact] not enough messages to split (${messages.length} total, need > ${anchorCount + recentToPreserve + 4})`)
@@ -1207,13 +1201,7 @@ export class CompactionController {
     this._llmCompactInFlight = true
     try {
       const compactMessages: OaiMessage[] = [...anchor, ...oldZone, summaryPrompt]
-      const request = this.deps.promptEngine.buildOaiRequest(
-        compactMessages,
-        undefined,
-        this.deps.contextWindow,
-        { sidePath: true },
-      )
-      request.tools = undefined
+      const request = buildCompactionSummaryRequest(this.deps, compactMessages)
 
       const chunks: string[] = []
       let errored = false
@@ -1312,7 +1300,7 @@ export class CompactionController {
         debugLog(`[compaction-gate] partial-llm candidate rejected (${decision.reason}): reclaimed=${decision.reclaimedTokens}`)
         return false
       }
-      this.safeReplaceMessages(newMessages)
+      await this.safeReplaceMessages(newMessages, expected)
       this.deps.promptEngine.resetAppendixBaseline()
       this.deps.refreshLedger()
 
@@ -1344,13 +1332,7 @@ export class CompactionController {
     const summaryClient = this.summaryClient()
     if (!summaryClient) return null
 
-    const request = this.deps.promptEngine.buildOaiRequest(
-      requestMessages,
-      undefined,
-      this.deps.contextWindow,
-      { sidePath: true },
-    )
-    request.tools = undefined
+    const request = buildCompactionSummaryRequest(this.deps, requestMessages)
 
     const chunks: string[] = []
     let errored = false
@@ -1391,14 +1373,14 @@ export class CompactionController {
    * @returns compact summary string, or null if primaryClient unavailable
    *          or session has insufficient messages.
    */
-  async llmCompact(timeoutMs = 60_000, userSignal?: AbortSignal): Promise<string | null> {
+  async llmCompact(timeoutMs = 60_000, userSignal?: AbortSignal, source?: CompactionHistorySource): Promise<string | null> {
     const summaryClient = this.summaryClient()
     if (!summaryClient) return null
     if (this._llmCompactInFlight) return null
     this._llmCompactInFlight = true
 
     try {
-      const messages = this.deps.session.getMessages()
+      const messages = source?.messages ?? captureCompactionHistory(this.deps.session).messages
       if (messages.length < CACHE_ANCHOR_MESSAGES + 2) return null
 
       const userIntentChain = extractUserIntentChain(messages)
@@ -1488,7 +1470,8 @@ export class CompactionController {
   }): Promise<{ ok: true; beforeTokens: number; afterTokens: number; replaced: number } | { ok: false; reason: string }> {
     if (!this.summaryClient()) return { ok: false, reason: '未配置可用于摘要的模型客户端' }
 
-    const messages = this.deps.session.getMessages()
+    const expected = captureCompactionHistory(this.deps.session)
+    const messages = expected.messages
     const idx = Math.max(0, Math.min(params.messageIndex, messages.length))
 
     // The replaced span. `to` keeps the cache anchors verbatim for the same
@@ -1552,7 +1535,7 @@ export class CompactionController {
       ...messages.slice(to),
     ]
 
-    this.safeReplaceMessages(candidate)
+    await this.safeReplaceMessages(candidate, expected)
     this.deps.promptEngine.resetAppendixBaseline()
     const afterTokens = this.deps.session.getEstimatedTokens()
     this.deps.session.recordCompactEvent({

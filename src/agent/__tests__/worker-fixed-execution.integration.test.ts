@@ -200,3 +200,34 @@ test('resume recovers complete diagnostic snapshot; incomplete legacy evidence b
   await empty.flushSessionBuffer()
   assert.equal(empty.readFrozenSnapshot(), undefined, 'a model selection alone is not an already-sent conversation')
 }, () => response(report('snapshot-recovery'))))
+
+test('cold-start consent bypasses the evidence gate; env var covers CLI; without consent it stays fail-closed', async () => fetched(async () => {
+  const c = config('cold-start-consent'), completed = await runWorkerSession(c)
+  // 证据不完整（executionSnapshot 缺）+ 有请求史 → 门 fail-closed
+  const persist = new SessionPersist('cold-start-main', root)
+  persist.writeFrozenSnapshot({ ...completed.frozenSnapshot!, executionSnapshot: undefined })
+  const logDir = join(getSessionDir(root), 'cold-start-main')
+  mkdirSync(logDir, { recursive: true })
+  writeFileSync(join(logDir, 'cache-log.jsonl'), '{"input":100}\n')
+  assert.throws(() => persist.readFrozenSnapshot(), /禁止静默冷启动/)
+  // 用户显式确认（meta.coldStartConsentAt）→ 门绕行，返回 undefined = 全新装配
+  persist.initMetadata()
+  persist.markColdStartConsent()
+  assert.equal(persist.hasColdStartConsent(), true)
+  assert.equal(persist.readFrozenSnapshot(), undefined, '同意后证据门必须绕行')
+  // env 逃生通道（CLI/TUI 无按钮可点）
+  const noConsent = new SessionPersist('cold-start-env', root)
+  noConsent.writeFrozenSnapshot({ ...completed.frozenSnapshot!, executionSnapshot: undefined })
+  const envLogDir = join(getSessionDir(root), 'cold-start-env')
+  mkdirSync(envLogDir, { recursive: true })
+  writeFileSync(join(envLogDir, 'cache-log.jsonl'), '{"input":100}\n')
+  assert.throws(() => noConsent.readFrozenSnapshot(), /禁止静默冷启动/)
+  const saved = process.env.RIVET_ALLOW_COLD_START
+  process.env.RIVET_ALLOW_COLD_START = '1'
+  try {
+    assert.equal(noConsent.readFrozenSnapshot(), undefined, 'RIVET_ALLOW_COLD_START 必须绕行')
+  } finally {
+    if (saved === undefined) delete process.env.RIVET_ALLOW_COLD_START
+    else process.env.RIVET_ALLOW_COLD_START = saved
+  }
+}, () => response(report('cold-start-consent'))))

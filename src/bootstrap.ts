@@ -1,4 +1,5 @@
 import { snapshotSessionBinding } from './model/model-binding.js'
+import { buildReplacementAgent } from './agent/runtime-rebuild.js'
 import { resolveDeliveryImpact } from './agent/delivery-impact.js'
 /**
  * bootstrap.ts — 共享初始化层，由 T9 ANSI 唯一生产入口 src/main.ts 调用。
@@ -36,6 +37,7 @@ import { resolveMaxTurns } from './agent/turn-budget-policy.js'
 import { createAgentConfig, createMainAgentConfigInput } from './agent/create-agent-config.js'
 import { SessionContext } from './agent/context.js'
 import { SessionPersist, evictOldSessions, getSessionDir } from './agent/session-persist.js'
+import { waitForAgentRewind } from './agent/session-persist-listener.js'
 import { runGateCompletion } from './agent/gate-completion.js'
 import { memoryBackfillEnabled, runMemoryBackfill } from './memory/backfill.js'
 import { migrateSessionFiles, rebuildStoresAfterCwdMove } from './agent/session-cd.js'
@@ -132,7 +134,7 @@ import { cleanupOldArtifactSessions } from './artifact/store.js'
 import { createLspManager } from './lsp/manager.js'
 import { createMultiLspManager } from './lsp/multi-manager.js'
 import { availableServers } from './lsp/server-registry.js'
-import { createGotoDefinitionTool, createFindReferencesTool } from './lsp/tools.js'
+import { registerLspTools } from './lsp/tools.js'
 import { createCoordinatorReviewDeps } from './agent/review-coordinator-deps.js'
 import { persistTeamWaveTelemetry, type TeamWaveTelemetry } from './agent/team-wave-telemetry.js'
 import { buildTeamSchedulerRewardEvent, persistTeamSchedulerReward, persistTeamSchedulerShadow, type TeamSchedulerShadowEvent } from './agent/team-scheduler-shadow.js'
@@ -302,7 +304,7 @@ export function resolveProviderAndAuth(
   }
 
   if (provider.auth?.type === 'oauth') {
-    const auth = createAuthProvider(provider.auth, process.env, provider.apiKey)
+    const auth = createAuthProvider(provider.auth, process.env, provider.apiKey, { ...config.network, proxy: provider.proxy ?? config.network.proxy })
     return { provider, apiKey: '', auth }
   }
 
@@ -917,6 +919,7 @@ export function createInteractiveToolRegistry(
  * 顶多下次 resume 退化为全量重建）。startup / /resume 切换 / /cd 三处统一挂。
  */
 function wireFrozenSnapshotPersist(persist: SessionPersist, engine: import('./prompt/engine.js').PromptEngine): void {
+  engine.setExecutionSnapshotCommit(snapshot => persist.commitFrozenSnapshot(snapshot))
   engine.setOnFrozenSnapshotChanged(() => persist.queueFrozenSnapshot(engine.exportFrozenSnapshot()))
 }
 
@@ -1345,8 +1348,7 @@ export async function initializeLsp(
   try {
     await lspManager.initialize()
     if (lspManager.isReady()) {
-      toolRegistry.register(createGotoDefinitionTool(lspManager))
-      toolRegistry.register(createFindReferencesTool(lspManager))
+      registerLspTools(lspManager, toolRegistry)
       if (process.env['RIVET_DEBUG']) {
         const servers = availableServers().map(s => s.id).join(', ')
         console.error(`[LSP] polyglot LSP ready — available servers: ${servers}`)
@@ -1419,6 +1421,7 @@ export function createShutdownHandler(ctx: BootstrapContext): () => Promise<void
     if (shutdownPromise) return shutdownPromise
     shutdownPromise = (async () => {
       try {
+        await waitForAgentRewind(ctx.agent)
         // Mark a clean exit. Next startup mints a fresh session by default;
         // returning here requires explicit --continue / --resume <id> (R1).
         try { ctx.persist.updateMetadata({ cleanExit: true }) } catch { /* best-effort */ }
@@ -1510,13 +1513,7 @@ export function switchAgentRuntime(ctx: BootstrapContext, modelId: string, targe
     // worker AbortController 仍在持有句柄。TUI 单 session 进程 + switch 频率低，
     // 影响有限——但与 sidecar 同源 (serve.ts 已修)，一并对齐避免长会话切换密集
     // 场景累积泄漏。
-    const oldCoordinator = ctx.refs.coordinator
-    // 旧 agent 的 fs.watch 句柄随丢弃释放（三条 switch 路径统一纪律）。
-    try { ctx.agent.stopFsWatcher() } catch { /* best-effort */ }
-    // config 热载 watcher 同款释放：不关则旧实例 watcher 僵尸存活，继续回调死管线。
-    try { ctx.agent.stopConfigWatcher() } catch { /* best-effort */ }
-
-    const { agent } = createAgentRuntime({
+    const agent = buildReplacementAgent(ctx.agent, ctx.refs, undefined, true, inherited => createAgentRuntime({
       provider,
       apiKey,
       auth,
@@ -1531,9 +1528,9 @@ export function switchAgentRuntime(ctx: BootstrapContext, modelId: string, targe
       domainKnowledgeStore: ctx.domainKnowledgeStore,
       modelId: resolved.modelId,
       session: ctx.session,
-      inheritFrozenFrom: { ...ctx.agent.config.promptEngine.exportFrozenSnapshot(), executionSnapshot: undefined },
+      inheritFrozenFrom: inherited,
       onStatusLine: text => ctx.setStatusLine?.(text),
-    })
+    }).agent)
 
     // 搬运后台 job 注册表到新 agent：不搬则新 AgentLoop 自建空 SessionJobs，
     // 旧 agent 上在跑的后台 job 被孤立（仍在跑但无人管理/无事件）。setJobs 会
@@ -1542,7 +1539,6 @@ export function switchAgentRuntime(ctx: BootstrapContext, modelId: string, targe
     const carriedJobs = ctx.agent.jobs
     if (carriedJobs) { try { agent.setJobs(carriedJobs) } catch { /* best-effort */ } }
 
-    agent.config.client.authorizeCacheGeneration?.('explicit_user_model')
     ctx.setStatusLine?.('模型已更换，后续请求可能重建缓存')
     ctx.agent = agent
     ctx.onAgentRuntimeChanged?.()
@@ -1557,11 +1553,6 @@ export function switchAgentRuntime(ctx: BootstrapContext, modelId: string, targe
     ctx.provider = provider
     ctx.apiKey = apiKey
     ctx.auth = auth
-
-    // 同一身份判等防御：若装配未实际替换 coordinator（理论不该发生），不动旧的。
-    if (oldCoordinator && oldCoordinator !== ctx.refs.coordinator) {
-      try { oldCoordinator.shutdown() } catch { /* best-effort: shutdown is fail-open */ }
-    }
 
     // 持久化切换：metadata.model/provider 反映当前模型（会话恢复/列表显示用），
     // 并在 JSONL 落一条审计事件（每次切换可溯源）。best-effort，不阻塞切换。

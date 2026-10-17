@@ -88,6 +88,26 @@ test('worker resume restores actual options and dispatch session nonce', async (
   assert.equal(headers[1]!.get('X-Request-Session'), 'worker-task-nonce')
 }))
 
+test('main resume opens a new generation on first-request drift; allowance is consumed after one send', async () => withFetch(async bodies => {
+  // 2026-10-16 起主会话与 worker 同一契约：restored 首请求的 baseline 是上一个
+  // run 的 wire 快照，重注入/落盘投影差导致漂移属预期，开新代次而非砖死会话
+  // （现场：revit-4213e2/2026101609914b2d8192，打断标记改写已发送消息后 resume 也救不回）。
+  const first = client()
+  await first.stream(request(), callbacks)
+  const resumed = client()
+  resumed.restoreExecutionSnapshot!(first.getMainPrefixProof!()!)
+  const changed = request()
+  changed.messages[0] = { role: 'user', content: 'rewritten after resume' }
+  await assert.doesNotReject(resumed.stream(changed, callbacks))
+  assert.equal(resumed.getMainPrefixProof?.()?.generationReason, 'resume_prefix_drift')
+  assert.equal(bodies.length, 2)
+  // 放宽一次性：第二请求再漂移仍 fail-closed
+  const again = request()
+  again.messages[0] = { role: 'user', content: 'rewritten a second time' }
+  await assert.rejects(resumed.stream(again, callbacks), /prefix diverged/)
+  assert.equal(bodies.length, 2)
+}))
+
 test('incomplete legacy proof blocks resume without HTTP', async () => withFetch(async bodies => {
   const c = client(true)
   assert.throws(() => c.restoreExecutionSnapshot!({ version: 1, provider: 'deepseek', model: 'deepseek-flash', requestId: 'legacy', optionsHash: '', toolsHash: '', messages: [] }), /snapshot/)

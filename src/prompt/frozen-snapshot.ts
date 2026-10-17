@@ -8,8 +8,20 @@
  * prompt/engine ↔ agent/session-persist 的循环依赖。
  */
 
+import { isRewindGenerationAuthorization } from '../api/continuation-prefix.js'
+
+export interface PendingCompaction {
+  version: 1
+  priorHistory: import('../api/continuation-prefix.js').ContinuationPrefixProof['messages']
+  authorization: import('../api/continuation-prefix.js').RewindGenerationAuthorization
+}
+
 export interface FrozenSnapshotData {
   executionSnapshot?: import('../api/continuation-prefix.js').ContinuationPrefixProof
+  publishedUserCount?: number
+  publishedHistory?: import('../api/continuation-prefix.js').ContinuationPrefixProof['messages']
+  rewindAuthorization?: import('../api/continuation-prefix.js').RewindGenerationAuthorization
+  pendingCompaction?: PendingCompaction
   v: 1 | 2
   userKeys?: string[]
   anchors?: import('./frozen-anchors.js').FrozenAnchor[]
@@ -24,10 +36,27 @@ export interface FrozenSnapshotData {
   collapseTokenStep: number
 }
 
+function isHistorySeal(value: unknown): value is import('../api/continuation-prefix.js').ContinuationPrefixProof['messages'] {
+  return Array.isArray(value) && Array.from(value).every(message => message && typeof message === 'object'
+    && Object.keys(message).every(key => ['hash', 'role', 'chars'].includes(key))
+    && typeof message.hash === 'string' && /^[a-f0-9]{64}$/.test(message.hash)
+    && typeof message.role === 'string' && Number.isFinite(message.chars) && message.chars >= 0)
+}
+
 /** 盘存快照的最小形状校验（坏文件/旧版本 → undefined，调用方降级为全量重建）。 */
 export function parseFrozenSnapshotData(raw: unknown): FrozenSnapshotData | undefined {
   if (typeof raw !== 'object' || raw === null) return undefined
   const d = raw as Record<string, unknown>
+  if (d.publishedUserCount !== undefined && (!Number.isSafeInteger(d.publishedUserCount) || (d.publishedUserCount as number) < 0)) return undefined
+  if (d.publishedHistory !== undefined && (!isHistorySeal(d.publishedHistory)
+    || (d.publishedUserCount !== undefined && d.publishedHistory.filter(message => message.role === 'user').length !== d.publishedUserCount))) return undefined
+  if (d.rewindAuthorization !== undefined && !isRewindGenerationAuthorization(d.rewindAuthorization)) return undefined
+  if (d.pendingCompaction !== undefined) {
+    const pending = d.pendingCompaction as PendingCompaction | null
+    if (!pending || pending.version !== 1 || !isRewindGenerationAuthorization(pending.authorization)
+      || !['context_limit', 'explicit_user_compact'].includes(pending.authorization.reason)
+      || !isHistorySeal(pending.priorHistory) || !isHistorySeal(pending.authorization.history)) return undefined
+  }
   if (d['v'] !== 1 && d['v'] !== 2) return undefined
   if (d.userKeys !== undefined && (!Array.isArray(d.userKeys) || !d.userKeys.every(k => typeof k === 'string' && /^[a-f0-9]{64}:\d+$/.test(k)))) return undefined
   if (d.frozenBaseHash !== undefined && (typeof d.frozenBaseHash !== 'string' || !/^[a-f0-9]{64}$/.test(d.frozenBaseHash))) return undefined

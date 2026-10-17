@@ -193,7 +193,7 @@ export interface TurnOrchestratorDeps {
   preserveUserOnError?: () => boolean
   recoverContextBudget?: () => Promise<boolean>
   addUserMessage: (content: string) => void
-  appendSystemReminder: (content: string, cls?: SrClass) => void
+  appendSystemReminder: (content: string, cls?: SrClass, opts?: { mergeTail?: boolean }) => void
   /** 同 appendSystemReminder，但返回 boolean 表示是否成功注入（未被 cap 拦截）。
    *  义务门/action-intent gate/steer preempt 续轮前用此方法检查注入结果。
    *  W1 通道分级：functional/user 类不限流 → 注入不可能失败。fail-closed 守卫保留。 */

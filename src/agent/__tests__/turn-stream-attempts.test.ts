@@ -23,7 +23,8 @@ async function run(client: StreamClient) {
     },
   })
   const result = await controller.streamTurn({
-    request: { model: 'fixture', max_tokens: 4096, messages: [{ role: 'user', content: 'fixture' }] },
+    request: { model: 'fixture', max_tokens: 4096, messages: [{ role: 'user', content: 'fixture' }],
+      tools: [{ type: 'function', function: { name: 'write_file', description: 'fixture', parameters: { type: 'object', properties: {} } } }] },
     turn: 1, lastTurnTextFingerprint: '',
     callbacks: { onTextDelta() {}, onThinkingDelta() {}, onToolUse: id => { notifiedTools.push(id) }, onError() {} },
   })
@@ -92,6 +93,7 @@ for (const outputs of [[0], [10, undefined], [undefined, undefined]]) {
     assert.equal(out.total.estimated === true, outputs.includes(undefined))
     assert.equal(out.text, 'previous turn;')
     for (const [index, output] of outputs.entries()) {
+      assert.equal(out.aborted[index]?.turn, 1)
       assert.equal(out.aborted[index]?.usage?.output_tokens, output ?? 4)
       assert.equal(!!out.aborted[index]?.usage?.observation?.fields.output_tokens, output !== undefined)
     }

@@ -3,6 +3,7 @@ import type { StreamClient, StreamCallbacks } from './stream-client.js'
 import type { OaiChatRequest, OaiMessage } from './oai-types.js'
 import { stripOaiImageParts } from './oai-types.js'
 import { withStructuredRetry } from './retry-engine.js'
+import { ToolNameProtocolError } from './tool-call-name.js'
 import { parseRetryAfterMs } from './error-classifier.js'
 import { fetchWithTimeout } from './fetch-timeout.js'
 import { wireAbortToReaderCancel, wrapBodyTimeoutError } from './abort-reader.js'
@@ -17,6 +18,9 @@ import {
   notifyBodyGuard,
 } from './request-body-guard.js'
 import type { ProviderRetryConfig } from '../config/retry-schema.js'
+import { currentExecutionScope, isExecutionValidation } from './execution-continuity.js'
+import { proveCanonicalSource, type NativeSourceBoundaries } from './continuation-prefix.js'
+import { recordNativeCacheLayout } from './native-continuation.js'
 
 export interface AnthropicClientConfig {
   baseUrl: string
@@ -138,15 +142,16 @@ function anthropicBodyHasImages(body: Record<string, unknown>): boolean {
   })
 }
 
-function foldConsecutiveSameRole(messages: AnthropicMessage[]): AnthropicMessage[] {
+function foldConsecutiveSameRole(messages: AnthropicMessage[], onUserBoundary?: (messageIndex: number, blockCount: number, sourceIndex: number) => void): AnthropicMessage[] {
   const out: AnthropicMessage[] = []
-  for (const msg of messages) {
+  for (const [sourceIndex, msg] of messages.entries()) {
     const prev = out[out.length - 1]
     if (prev && prev.role === msg.role) {
       prev.content.push(...msg.content)
     } else {
       out.push({ role: msg.role, content: [...msg.content] })
     }
+    if (msg.role === 'user') onUserBoundary?.(out.length - 1, out.at(-1)!.content.length, sourceIndex)
   }
   return out
 }
@@ -210,7 +215,10 @@ export class AnthropicClient implements StreamClient {
           callbacks.onImageStripped?.({ removedCount: stripped.removedCount, uniqueUrlCount: stripped.uniqueUrlCount })
         }
       }
-      const body = this.buildRequestBody({ ...request, messages: wireMessages })
+      const scope = currentExecutionScope()
+      const mapping: NativeSourceBoundaries | undefined = scope ? { source: proveCanonicalSource(request.messages), boundaries: [], cacheLayout: [] } : undefined
+      const body = this.buildRequestBody({ ...request, messages: wireMessages }, mapping)
+      if (scope) scope.nativeSourceBoundaries = mapping
 
       // 请求体体积护栏（可选）：与 openai-client.sendStream 同一护栏、同一确定性纪律
       // （只截 wire 副本、同输入同字节），差异只是 shape——OpenAI 兼容体的工具输出是
@@ -220,7 +228,7 @@ export class AnthropicClient implements StreamClient {
         body as unknown as Record<string, unknown>,
         { limitBytes: this.config.maxBodyBytes, shape: 'anthropic' },
       )
-      notifyBodyGuard(guard, this.bodyGuardNotify, callbacks.onBodyGuard)
+      if (!isExecutionValidation()) notifyBodyGuard(guard, this.bodyGuardNotify, callbacks.onBodyGuard)
 
       // 共享 lifecycle controller（见 openai-client 同名注释）：传给 fetch，
       // 由外部 signal 联动并在 processSSEStream 的 finally 中 abort。
@@ -297,14 +305,16 @@ export class AnthropicClient implements StreamClient {
     return this.buildRequestBody(request)
   }
 
-  private buildRequestBody(request: OaiChatRequest): AnthropicRequestBody {
+  private buildRequestBody(request: OaiChatRequest, mapping?: NativeSourceBoundaries): AnthropicRequestBody {
     // Extract system messages to top-level system array
     let systemText = ''
-    const nonSystemMessages = request.messages.filter(m => {
+    const sourceEnds: number[] = []
+    const nonSystemMessages = request.messages.filter((m, sourceIndex) => {
       if (m.role === 'system') {
         systemText += (systemText ? '\n\n' : '') + m.content
         return false
       }
+      sourceEnds.push(sourceIndex + 1)
       return true
     })
 
@@ -316,7 +326,9 @@ export class AnthropicClient implements StreamClient {
     // message（严格 Anthropic 实现要求角色交替；官方 API 会自动合并，客户端
     // 折叠 = 官方语义显式化）。BP 计算必须基于折叠后的形态——cache_control
     // 依附加在 block 上，折叠只改消息边界、不动 block 序列。
-    const messages = foldConsecutiveSameRole(nonSystemMessages.map(m => this.convertMessage(m)))
+    const messages = foldConsecutiveSameRole(nonSystemMessages.map(m => this.convertMessage(m)), mapping ? (messageIndex, blockCount, sourceIndex) => {
+      mapping.boundaries.push({ messageIndex: messageIndex + (system.length ? 1 : 0), blockCount, sourceCount: sourceEnds[sourceIndex]! })
+    } : undefined)
 
     // Convert tools — sorted by name for deterministic cache
     const tools: AnthropicRequestBody['tools'] = request.tools && request.tools.length > 0
@@ -387,12 +399,9 @@ export class AnthropicClient implements StreamClient {
       }
     }
 
-    // BP3: last content block of first user message (project-instructions + session-memory)
     if (firstUserIdx >= 0) {
       const blocks = messages[firstUserIdx]!.content
-      if (blocks.length > 0) {
-        blocks[blocks.length - 1]!.cache_control = { type: 'ephemeral' }
-      }
+      if (blocks.length > 0) blocks[blocks.length - 1]!.cache_control = { type: 'ephemeral' }
     }
 
     // BP4: rolling breakpoint — farthest assistant message whose last content
@@ -436,6 +445,7 @@ export class AnthropicClient implements StreamClient {
       }
     }
 
+    recordNativeCacheLayout(mapping, messages, system.length ? 1 : 0)
     return body
   }
 
@@ -542,6 +552,7 @@ export class AnthropicClient implements StreamClient {
     // incremental input_json_delta chunks. We accumulate by block index
     // and emit the complete tool_use only on content_block_stop.
     const toolUseBuffer = new Map<number, { id: string; name: string; partialJson: string }>()
+    const completedToolIds = new Set<string>()
 
     // SSE idle timeout — same pattern as OpenAIClient and CodexClient.
     // Non-thinking requests use shorter timeouts (45s/120s) for faster
@@ -642,6 +653,11 @@ export class AnthropicClient implements StreamClient {
                 const id = block.id as string
                 const name = block.name as string
                 if (id && name) {
+                  const previous = toolUseBuffer.get(index)
+                  if (previous && (previous.id !== id || previous.name !== name)) throw new ToolNameProtocolError('identity')
+                  if (completedToolIds.has(id)) break
+                  if (previous) break
+                  if ([...toolUseBuffer.values()].some(buf => buf.id === id)) throw new ToolNameProtocolError('identity')
                   toolUseBuffer.set(index, { id, name, partialJson: '' })
                 }
               }
@@ -686,6 +702,7 @@ export class AnthropicClient implements StreamClient {
                     argsTruncated = true
                   }
                   callbacks.onContentBlock({ type: 'tool_use', id: buf.id, name: buf.name, input, argsTruncated })
+                  completedToolIds.add(buf.id)
                   toolUseBuffer.delete(index)
                 }
               }

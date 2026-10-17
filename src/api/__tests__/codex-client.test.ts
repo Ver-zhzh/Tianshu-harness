@@ -37,6 +37,34 @@ describe('CodexClient', () => {
     assert.equal(input[0].content[0].text, 'hello')
   })
 
+  it('multimodal user parts → input_text + input_image（issue #504：text 不得是数组）', async () => {
+    const client = new CodexClient({
+      baseUrl: 'https://chatgpt.com/backend-api/codex',
+      model: 'gpt-5.6-sol',
+      maxTokens: 64000,
+    })
+
+    const body = (client as any).buildRequestBody({
+      model: 'gpt-5.6-sol',
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'text', text: 'look at this icon' },
+          { type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } },
+        ],
+      }],
+      max_tokens: 64000,
+    })
+
+    const content = (body.input as any[])[0]!.content as Array<Record<string, unknown>>
+    assert.deepEqual(content, [
+      { type: 'input_text', text: 'look at this icon' },
+      { type: 'input_image', image_url: 'data:image/png;base64,AAAA' },
+    ])
+    // 钉死 #504 的 400 形态：input_text.text 必须是字符串，不得是数组
+    assert.equal(typeof content[0]!['text'], 'string')
+  })
+
   it('converts tool_use to top-level function_call', async () => {
     const client = new CodexClient({
       baseUrl: 'https://chatgpt.com/backend-api/codex',

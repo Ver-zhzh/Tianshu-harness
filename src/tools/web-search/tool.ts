@@ -12,20 +12,42 @@ const MAX_RESULTS = 20
 const DEFAULT_TIMEOUT_MS = 15_000
 
 /**
- * 低置信兜底的用户可见标注：结果只覆盖查询中的个别词时（判据见 relevance.ts），
- * 必须让模型/用户明白这批结果不能直接采信——它们多半是搜索后端降级返回的宽泛匹配。
+ * 外部显示文本（title/snippet/siteName/publishedAt）净化：
+ *  - 剥方括号——不能闭合标题链接、也不能自行生成 Markdown 链接；
+ *  - 控制符（含 \r\n\t 与 C0/C1/DEL）压成空格——不能靠换行伪造出一条新的结果行。
+ * 两者同源自不可信外部输入，必须同口径处理（#498 续）。
  */
-const LOW_CONFIDENCE_NOTICE =
-  '⚠ 相关性提示：以下结果只覆盖了查询中的个别词，可能不是你要找的内容。请勿直接采信为答案——建议换用更具体的查询词，或与其他来源交叉验证。'
+function sanitizeDisplayText(text: string): string {
+  return text.replace(/[[\]]/g, '').replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
+}
 
-/** 结果渲染（正常路径与低置信兜底共用同一份实现，避免双实现漂移）。 */
+/** 编码目标中的 Markdown 分隔符，保留 IPv6/查询参数的方括号及已有百分号编码。 */
+function encodeSearchUrl(raw: string): string | null {
+  const url = raw.trim()
+  if (!/^https?:\/\//i.test(url) || /[\u0000-\u001f\u007f]/u.test(url) || url.includes('\\')) return null
+  try {
+    new URL(url)
+  } catch {
+    return null
+  }
+  // encodeURIComponent 本身保留括号和单引号，需要补编码，避免提前结束链接。
+  return url.replace(/[()\s<>"'`]/gu, char =>
+    encodeURIComponent(char).replace(/[()']/g, delimiter => '%' + delimiter.charCodeAt(0).toString(16).toUpperCase()),
+  )
+}
+
+/** 结果渲染（正常路径使用）。 */
 function formatResults(results: readonly SearchResult[]): string {
   return results
     .map((r, i) => {
-      // 来源站点与发布时间（博查等后端提供）附在 snippet 后，帮助判断可信度与时效
-      const meta = [r.siteName, r.publishedAt].filter(Boolean).join(' · ')
-      const snippet = r.snippet + (meta ? `（${meta}）` : '')
-      return `${i + 1}. [${r.title}](${r.url})\n   ${snippet}`
+      // 来源站点与发布时间（博查等后端提供）附在 snippet 后，帮助判断可信度与时效；
+      // 同为不可信外部输入，与 title/snippet 同口径剥方括号
+      const meta = [r.siteName, r.publishedAt].filter((s): s is string => !!s).map(sanitizeDisplayText).join(' · ')
+      const snippet = sanitizeDisplayText(r.snippet) + (meta ? `（${meta}）` : '')
+      const title = sanitizeDisplayText(r.title)
+      const url = encodeSearchUrl(r.url)
+      const link = url === null ? title : `[${title}](${url})`
+      return `${i + 1}. ${link}\n   ${snippet}`
     })
     .join('\n\n')
 }
@@ -119,14 +141,12 @@ export function createWebSearchTool(deps: WebSearchDeps = {}): Tool {
             errorKind: combineSearchFailures(hardErrors.map(e => e.errorKind ?? 'unknown')),
           }
         }
-        // 判跑题的批次降级返回而非静默丢弃：单后端配置下，「后端降级返回泛结果」
-        // 若变成「未找到结果」，用户丢掉的是唯一可得的信息。标注低相关把采信
-        // 判断权交回使用者，同时不让泛结果冒充答案。
+        // 判跑题的批次不交付正文（issue #483）：曾把已判跑题的泛结果加「低相关」
+        // 标注后交付，实测弱模型仍会采信并据此编造答案——泛结果冒充答案比「没搜到」
+        // 更糟。只说明后端降级事实与出路，检索方向由用户/模型换词重来。
         if (offTopicFallback) {
           return {
-            content: `「${query}」的网页搜索结果（经 ${offTopicFallback.backend}，低相关）：\n\n`
-              + `${LOW_CONFIDENCE_NOTICE}\n\n`
-              + formatResults(offTopicFallback.results),
+            content: `「${query}」未找到相关结果：${offTopicFallback.backend} 返回的内容与查询无关（搜索后端降级，只命中了查询中的个别泛词），已弃置。建议换用更具体的查询词重试；若反复出现，可配置 API key 搜索后端（bocha / brave / tavily / serply）。`,
           }
         }
         return { content: `未找到与「${query}」相关的搜索结果` }

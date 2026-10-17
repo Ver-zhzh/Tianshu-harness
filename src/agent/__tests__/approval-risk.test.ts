@@ -5,6 +5,22 @@ import { assessToolRisk, DANGEROUS_BASH_PATTERNS, BASH_WRITE_PATTERNS, bashComma
 import type { ContextClaim } from '../../context/claims.js'
 import type { Sensorium } from '../sensorium.js'
 
+describe('sensitive git add normalization', () => {
+  for (const command of ['git${IFS}add .env', 'g\\it add .env', 'git "a"dd .env', 'git add ".e"nv']) {
+    it(`raises obfuscated staging to high risk: ${command}`, () => {
+      const risk = assessToolRisk('bash', { command })
+      assert.equal(risk.level, 'high')
+      assert.ok(risk.reasons.includes('git add stages credential/key files — prompt hard-gate'))
+    })
+  }
+
+  it('keeps ordinary paths and templates below high risk', () => {
+    for (const command of ['g\\it add README.md', 'git "a"dd .env.example']) {
+      assert.equal(assessToolRisk('bash', { command }).level, 'medium', command)
+    }
+  })
+})
+
 function antibodyClaim(text: string, evidenceSummary?: string): ContextClaim {
   return {
     id: 'ab1',

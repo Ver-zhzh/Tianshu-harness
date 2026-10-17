@@ -13,6 +13,7 @@ export function guardRuntimeRoutes(routes: Record<string, RouteHandler>, getStat
       const handler = target[key]
       if (typeof handler !== 'function') return handler
       return (...args: Parameters<RouteHandler>) => {
+        if (key === 'POST /runtime/pro-deny') return handler(...args)
         const state = getState()
         if (!state.ownsSessionStore && !key.startsWith('GET ') && !key.startsWith('HEAD ') && key !== 'POST /shutdown') {
           return { status: 503, body: { error: state.initializationError ?? 'data-dir-locked' } }

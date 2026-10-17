@@ -207,6 +207,10 @@ export interface SessionMetadata {
    * silently auto-resumed — only crash-interrupted sessions are (R1).
    */
   cleanExit?: boolean
+  /** 用户显式确认「放弃连续性证据、以当前配置冷启动续跑」的时间戳（2026-10-17）。
+   *  证据门（session-persist readFrozenSnapshot）缺/坏快照时 fail-closed 会砖死
+   *  会话；此标记让门绕行——全新装配、首请求开新缓存代次、后续快照自愈。 */
+  coldStartConsentAt?: number
   /** TUI side panel open state persisted across session resume. */
   sidePanelOpen?: boolean
   /**

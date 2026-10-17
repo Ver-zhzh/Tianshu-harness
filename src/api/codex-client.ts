@@ -1,6 +1,6 @@
 import { requestAuditContext } from './call-audit.js'
 import type { StreamClient } from './stream-client.js'
-import type { OaiChatRequest } from './oai-types.js'
+import type { OaiChatRequest, OaiUserMessage } from './oai-types.js'
 import type { ContentBlock } from './types.js'
 import type { StreamCallbacks } from './stream-client.js'
 import { withStructuredRetry } from './retry-engine.js'
@@ -9,8 +9,10 @@ import { fetchWithTimeout } from './fetch-timeout.js'
 import { wireAbortToReaderCancel, wrapBodyTimeoutError } from './abort-reader.js'
 import { acquireRateLimitSlot } from './rate-limiter.js'
 import type { ProviderRetryConfig } from '../config/retry-schema.js'
+import { providerDispatcher, type ProviderNetwork } from './provider-network.js'
 
 export interface CodexClientConfig {
+  network?: ProviderNetwork
   sessionId?: string
   providerName?: string
   baseUrl: string
@@ -58,6 +60,18 @@ function extractCacheTokens(usage: Record<string, unknown>): { read: number; wri
   }
 }
 
+/** 多模态 user content → Responses content parts（issue #504：数组原样塞进
+ *  `input_text.text` 会被 Codex API 400「expected a string, but got an array」）。
+ *  与 responses-client.ts 的 toResponsesUserContent 有意重复——改一个要检查另一个。 */
+function toCodexUserContent(content: OaiUserMessage['content']): Record<string, unknown>[] {
+  if (typeof content === 'string') {
+    return [{ type: 'input_text', text: content }]
+  }
+  return content.map(part => part.type === 'image_url'
+    ? { type: 'input_image', image_url: part.image_url.url }
+    : { type: 'input_text', text: part.text })
+}
+
 export class CodexClient implements StreamClient {
   constructor(private config: CodexClientConfig) {}
 
@@ -101,7 +115,7 @@ export class CodexClient implements StreamClient {
         },
         body: JSON.stringify(body),
         signal: lifecycle.signal,
-      }, 180_000, undefined, auditContext)
+      }, 180_000, providerDispatcher(url, this.config.network), auditContext)
 
       if (!response.ok) {
         const errorBody = await response.text().catch(() => '')
@@ -150,7 +164,7 @@ export class CodexClient implements StreamClient {
     // Messages — function_call and function_call_output are top-level input items
     for (const msg of nonSystemMessages) {
       if (msg.role === 'user') {
-        input.push({ type: 'message', role: 'user', content: [{ type: 'input_text', text: msg.content }] })
+        input.push({ type: 'message', role: 'user', content: toCodexUserContent(msg.content) })
       } else if (msg.role === 'assistant') {
         const textContent = msg.content ?? ''
         if (textContent) {
@@ -254,8 +268,7 @@ export class CodexClient implements StreamClient {
     let stopReason: string | null = null
     let usage: { input_tokens?: number; output_tokens?: number; reasoning_tokens?: number; cacheRead?: number; cacheWrite?: number } | undefined
 
-    // Track function calls by index
-    const functionCalls = new Map<number, { id: string; name: string; arguments: string }>()
+    const emittedCallIds = new Set<string>()
 
     // Reasoning-before-text ordering buffer.
     // DeepSeek Codex API may emit output_item.done (message) before
@@ -421,14 +434,14 @@ export class CodexClient implements StreamClient {
             case 'response.output_item.done': {
               const item = parsed.item as Record<string, unknown> | undefined
               if (item?.type === 'function_call') {
-                const callId = (item.call_id as string) ?? `call_${functionCalls.size}`
+                const callId = (item.call_id as string) ?? (item.id as string) ?? `call_${crypto.randomUUID()}`
+                if (emittedCallIds.has(callId)) break
                 const name = item.name as string ?? ''
                 const args = item.arguments as string ?? ''
-                functionCalls.set(functionCalls.size, { id: callId, name, arguments: args })
-                try {
-                  const input = JSON.parse(args)
-                  callbacks.onContentBlock({ type: 'tool_use', id: callId, name, input })
-                } catch {}
+                let input: Record<string, unknown>
+                try { input = JSON.parse(args) } catch { break }
+                emittedCallIds.add(callId)
+                callbacks.onContentBlock({ type: 'tool_use', id: callId, name, input })
               } else if (item?.type === 'reasoning') {
                 // Reasoning item — emit BEFORE text so TUI captures thinking first.
                 // The summary array contains sanitized reasoning content.

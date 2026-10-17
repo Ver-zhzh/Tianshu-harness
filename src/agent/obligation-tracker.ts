@@ -59,6 +59,16 @@ export class ObligationTracker {
     return this.#version
   }
 
+  captureInputBoundary() {
+    return { store: this.#store, redGateFired: [...this.#redGateFired], continuedOnce: [...this.#continuedOnce] }
+  }
+
+  restoreInputBoundary(checkpoint: ReturnType<ObligationTracker['captureInputBoundary']>): void {
+    this.#set(checkpoint.store)
+    this.#redGateFired = new Set(checkpoint.redGateFired)
+    this.#continuedOnce = new Set(checkpoint.continuedOnce)
+  }
+
   #set(next: ObligationStore): void {
     if (next !== this.#store) {
       this.#store = next

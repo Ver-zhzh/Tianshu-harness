@@ -179,6 +179,13 @@ export class BingBackend implements SearchBackend {
       redirect: 'manual',
     })
     if (!response.ok) {
+      // cn.bing.com 对海外出口（海外直连 IP 或经海外代理）301 → www.bing.com
+      // （Turnstile 验证页，抓了也解析不出）。给可诊断文案而非裸状态码，
+      // 避免「搜索失败（bing: HTTP 301）」无从定位（issue #483）。
+      const location = response.headers.get('location') ?? ''
+      if (response.status === 301 && /^https?:\/\/(www\.)?bing\.com/i.test(location)) {
+        throw new Error(`HTTP 301：cn.bing.com 把海外网络出口重定向到 ${location}（该镜像仅服务中国大陆网络）。搜索流量不应经海外代理访问 cn.bing.com——直连，或配置 API key 搜索后端`)
+      }
       throw new SearchHttpError(response.status)
     }
     const html = await response.text()

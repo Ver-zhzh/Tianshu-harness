@@ -453,3 +453,22 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 - #475 fix(tui): 修复提问卡与计划审批卡导致对话分层（CLOSED）
 - #474 fix: 修复会话回退事件遗漏与课程文件误判（CLOSED）
 - #476 fix(platform): 消除 protectPrivatePath 的符号链接 TOCTOU 竞态（OPEN）
+- #478 fix: 修复前缀证明污染与回退持久化，补齐全量验收（OPEN）
+- #477 feat(windows): auto-detect local entry.js, support generic npm shims and integrate visual-builder（OPEN）
+- #480 docs: 完善中英双语文档体系、对齐 README 认知运行时结构与 v3.31.0 基线（CLOSED）
+- #481 修复 CLI 与扩展会话生命周期、跨平台兼容及官网交互（CLOSED）
+- #485 fix(git): git checkout 强制旗标形态(-f/--force/-qf)纳入清场门禁（OPEN）
+- #498 fix(web-search): 渲染前剥离标题/摘要中的 markdown 链接语法，堵超链接劫持（OPEN）
+- #497 fix(security): 转义 volatile 附录两处未转义插值（session-state/mention），堵提示词注入（OPEN）
+- #496 fix(security): bash git commit 暂存区敏感文件硬门（OPEN）
+- #495 fix(security): git add 敏感文件硬门增加归一化双视图检测（OPEN）
+- #494 fix(git): destructive-gate 补 git clean 分开写/长旗标强制形态（OPEN）
+- #493 fix(security): git diff 读取跟随工作区内硬链接越界读敏感文件（OPEN）
+- #492 fix(security): 语义索引 walk 跟随符号链接越界读取工作区外文件（OPEN）
+- #491 fix(security): 硬链接绕过工作区隔离与敏感文件门禁（OPEN）
+- #490 fix(security): 压缩包附件 path 形态应用私密文件策略（OPEN）
+- #489 fix(security): Starmap 里程碑行剥离终端转义序列（OPEN）
+- #488 fix(security): stripTerminalEscapes 剥离 C1 单字节控制符（OPEN）
+- #487 fix(web-search): 跑题兜底不再冒充答案 + bing 301 区域跳转跟随（CLOSED）
+- #505 fix(auth): 桌面端登录 purpose 与账号服务端契约不一致（client-login → account-login）（OPEN）
+- #503 fix(platform): harden multi-key pool credential resolution, test isolation and Windows test runners（OPEN）

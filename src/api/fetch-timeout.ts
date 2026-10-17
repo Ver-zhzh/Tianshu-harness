@@ -21,9 +21,11 @@
  */
 
 import { fetchCauseDetail } from './error-classifier.js'
+import { fetch as undiciFetch } from 'undici'
 import { beginCallAudit, auditConfigFingerprint, type CallAuditContext } from './call-audit.js'
 import { observeAuditResponse } from './transport-audit.js'
-import { checkExecutionSend, credentialPrincipal, currentExecutionScope } from './execution-continuity.js'
+import { prepareExecutionSend, credentialPrincipal, currentExecutionScope, assertExecutionAccess } from './execution-continuity.js'
+import { proRegistry } from './pro-registry.js'
 
 const DEFAULT_TIMEOUT_MS = 45_000
 
@@ -37,10 +39,13 @@ export async function fetchWithTimeout(
 ): Promise<Response> {
   const userSignal = init.signal
   const execution = currentExecutionScope()
-  if (execution && auditContext?.requestId) execution.requestId = auditContext.requestId
+  if (execution && auditContext?.requestId) {
+    execution.requestId = auditContext.requestId
+    execution.attemptId = auditContext.attemptId
+  }
   if (execution && typeof init.body === 'string') {
     const body = JSON.parse(init.body) as Record<string, unknown>
-    checkExecutionSend(String(url), body, credentialPrincipal(init.headers))
+    await prepareExecutionSend(String(url), body, credentialPrincipal(init.headers))
   }
   if (execution?.sessionId) {
     const headers = new Headers(init.headers)
@@ -82,7 +87,11 @@ export async function fetchWithTimeout(
     // 重定向只剥 Authorization/Cookie——Anthropic 协议的 x-api-key 会原样转发
     // 到重定向目标（凭证泄漏）。显式传 init.redirect 的调用方不受影响。
     const redirect = init.redirect ?? 'error'
-    const response = await fetch(url, { ...init, redirect, signal: combinedSignal, ...(dispatcher ? { dispatcher } : {}) } as RequestInit)
+    // A dispatcher must use its own undici version; Node 24's bundled handler protocol differs.
+    const fetchFn = dispatcher ? undiciFetch as unknown as typeof fetch : fetch
+    assertExecutionAccess()
+    proRegistry.assertProviderAccess(execution?.provider ?? auditContext?.provider ?? '')
+    const response = await fetchFn(url, { ...init, redirect, signal: combinedSignal, ...(dispatcher ? { dispatcher } : {}) } as RequestInit)
     return audit ? observeAuditResponse(response, context, audit) : response
   } catch (err) {
     audit?.finish({ status: userSignal?.aborted ? 'aborted' : 'failed', errorName: (err as Error).name })

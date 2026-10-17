@@ -119,7 +119,7 @@ import { probeProvider } from '../api/provider-probe.js'
 import { resolveEffortSupported } from '../api/provider.js'
 
 /** 生图真测用的固定提示词——要足够简单，任何生图模型都能画出来。 */
-const IMAGE_GEN_TEST_PROMPT = 'a red circle on a white background'
+const IMAGE_GEN_TEST_PROMPT = 'a yellow rubber duck on a white background'
 
 /**
  * 服务端配置文件中已声明的环境变量密钥名集合

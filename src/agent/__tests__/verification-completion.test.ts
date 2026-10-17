@@ -27,6 +27,7 @@ function fixture() {
   execFileSync('git', ['init', '-q'], { cwd })
   execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.com', 'commit', '--allow-empty', '-qm', 'fixture'], { cwd })
   writeFileSync(join(cwd, '.gitignore'), '._*\n.DS_Store\nnode_modules/\n')
+  writeFileSync(join(cwd, 'package.json'), '{"type":"module"}')
   const write = (file: string, source: string) => { mkdirSync(join(cwd, file, '..'), { recursive: true }); writeFileSync(join(cwd, file), source) }
   write('feature.js', 'export const feature = 1;')
   write('src/alpha.test.ts', "import {test} from 'node:test'; test('alpha',()=>{}); test('delayed',async()=>{await new Promise(r=>setTimeout(r,20))});")
@@ -80,7 +81,7 @@ it('filesystem metadata beside completion receipts does not count as another run
   const capture = prepareCompletionCapture('node --test src/alpha.test.ts', f.cwd, process.platform === 'win32' ? 'cmd' : 'bash')!
   try {
     const result = spawnSync(capture.command, { cwd: f.cwd, shell: true, encoding: 'utf8', env: { ...process.env, ...capture.env }, timeout: 15_000 })
-    assert.equal(result.status, 0, result.stderr || result.error?.message)
+    assert.equal(result.status, 0, result.stderr || result.error?.message || result.stdout)
     writeFileSync(join(receiptDirectory(capture.command), '._another.start'), 'filesystem metadata')
     const coverage = capture.read(result.status!)!
     assert.equal(coverage.workspaceChanged, false)
@@ -93,7 +94,7 @@ it('filesystem metadata beside completion receipts does not count as another run
 it('a transparent rtk proxy may drop all presentation output without losing proof', { skip: process.platform === 'win32' }, () => {
   const f = fixture()
   try {
-    f.write('bin/rtk', "#!/usr/bin/env node\nconst {spawnSync}=require('node:child_process');const a=process.argv.slice(2);if(a[0]==='proxy')a.shift();const r=spawnSync(a[0],a.slice(1),{env:process.env,cwd:process.cwd()});console.log('compressed output');process.exit(r.status??1);")
+    f.write('bin/rtk', "#!/usr/bin/env node\nimport {spawnSync} from 'node:child_process';const a=process.argv.slice(2);if(a[0]==='proxy')a.shift();const r=spawnSync(a[0],a.slice(1),{env:process.env,cwd:process.cwd()});console.log('compressed output');process.exit(r.status??1);")
     execFileSync('chmod', ['+x', join(f.cwd, 'bin/rtk')])
     const { meta, result } = execute(f.cwd, `${shellWord(join(f.cwd, 'bin/rtk'))} proxy node --import ${loader} --test src/alpha.test.ts`)
     assert.match(result.stdout, /compressed/)

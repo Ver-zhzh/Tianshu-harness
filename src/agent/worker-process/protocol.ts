@@ -54,6 +54,7 @@ export interface SerializedWorkerConfig {
 }
 
 export interface WorkerChildInitPayload {
+  proAuthorization?: import('../../api/managed-pro-authorization.js').ManagedProAuthorization
   config: SerializedWorkerConfig
   /** 主会话 persist.buildMemoryBlock() 快照——子进程 promptEngine 的会话记忆块。 */
   memoryBlock?: string
@@ -64,6 +65,7 @@ export interface WorkerChildInitPayload {
 }
 
 export type ParentMessage =
+  | { t: 'pro-deny'; id: string }
   | { t: 'init'; payload: WorkerChildInitPayload }
   | { t: 'steer'; text: string }
   | { t: 'abort'; reason: string }
@@ -102,6 +104,8 @@ export interface SerializedWorkerRun {
 }
 
 export type ChildMessage =
+  | { t: 'pro-denied'; id: string }
+  | { t: 'pro-drained' }
   | ChildActivityMessage
   | ChildNestedMessage
   | ChildMailboxMessage

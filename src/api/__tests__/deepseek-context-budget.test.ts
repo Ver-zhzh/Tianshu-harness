@@ -4,6 +4,7 @@ import { OpenAIClient } from '../openai-client.js'
 import { enforceRequestBodyLimit } from '../request-body-guard.js'
 import { classifyApiError } from '../error-classifier.js'
 import { PromptEngine } from '../../prompt/engine.js'
+import { buildContextBudget, DEEPSEEK_OUTPUT_RESERVE } from '../../context/request-budget.js'
 import type { OaiMessage } from '../oai-types.js'
 
 const config = { baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-flash', apiKey: 'test-placeholder', maxTokens: 384_000, thinking: 'enabled' as const, maxRetries: 0 }
@@ -84,8 +85,7 @@ for (const images of [false, true]) {
   })
 }
 
-test('preflight uses the model-visible request so ignored reasoning does not trigger a cache rewrite', async () => {
-  const { prepareContextRequest } = await import('../../agent/context-budget-preparation.js')
+test('preflight uses the model-visible request so ignored reasoning does not trigger a cache rewrite', async () => {  const { prepareContextRequest } = await import('../../agent/context-budget-preparation.js')
   const client = new OpenAIClient(config)
   const request = { model: config.model, max_tokens: 384_000, messages: [
     { role: 'user' as const, content: 'question' }, { role: 'assistant' as const, content: 'answer', reasoning_content: 'r'.repeat(2_600_000) },
@@ -97,4 +97,16 @@ test('preflight uses the model-visible request so ignored reasoning does not tri
   assert.equal(compacts, 0)
   assert.equal(prepared.contextBudget?.reasoningTokens, 0)
   assert.equal(request.messages[1]?.reasoning_content?.length, 2_600_000, 'preview must not edit stored reasoning')
+})
+
+test('relay 的 wire max_tokens 与预算侧 outputReserve 同源封顶（issue #372）', () => {
+  const model = 'cn:deepseek-v4.1-flash'
+  const relay = new OpenAIClient({ ...config, baseUrl: 'https://relay.example/v1', contextWindow: 524_288, model, maxTokens: 393_216 })
+  const wire = relay.previewContextRequest({ model, stream: true, messages: [{ role: 'user', content: 'hi' }], max_tokens: 393_216 })
+  // RequestContextController.prepare 的回退 policy（非官方 endpoint 拿不到 deepSeekBudgetPolicy）
+  const budget = buildContextBudget(wire, { windowTokens: 524_288, maxOutputTokens: 524_288, transportLimits: 'none' },
+    { requestId: 'relay', revision: 1 })
+  assert.equal(wire.max_tokens, DEEPSEEK_OUTPUT_RESERVE, 'relay 的 wire 输出同样封顶到现实预留')
+  assert.equal(budget.outputReserve, wire.max_tokens, 'input + max_tokens ≤ window 要求两侧同源')
+  assert.ok(budget.inputBudget + wire.max_tokens! + budget.safetyMargin <= 524_288, '预算与 wire 合计不得超过窗口')
 })

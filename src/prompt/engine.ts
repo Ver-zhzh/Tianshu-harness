@@ -34,6 +34,7 @@ import { debugLog } from '../utils/debug.js'
 import { skillRegistry, type SkillRegistry } from '../skills/skill-loader.js'
 import { parseFrozenSnapshotData, type FrozenSnapshotData } from './frozen-snapshot.js'
 import { stableStringify } from '../api/stable-json.js'
+import { assertRewindHistory, proveRewindHistory, ContinuationPrefixError, LocalWorkerPolicyError, type RewindGenerationAuthorization, type ContinuationPrefixProof } from '../api/continuation-prefix.js'
 
 export type { PrefixFingerprint, DriftEvent, ContextLayerReport }
 export type { FrozenSnapshotData } from './frozen-snapshot.js'
@@ -90,9 +91,33 @@ export interface PromptEngineConfig {
 
 export class PromptEngine {
   private executionSnapshot?: import('../api/continuation-prefix.js').ContinuationPrefixProof
+  private publishedUserCount = 0
+  private preparedUserCount = 0
+  private preparedUserInput?: OaiMessage
+  private publishedHistory?: ContinuationPrefixProof['messages']
+  private rewindAuthorization?: RewindGenerationAuthorization
+  private commitExecutionSnapshot?: (snapshot: FrozenSnapshotData) => Promise<void>
+  setExecutionSnapshotCommit(commit: (snapshot: FrozenSnapshotData) => Promise<void>): void { this.commitExecutionSnapshot = commit }
   private toolCatalogPublished = false
   getExecutionSnapshot(): import('../api/continuation-prefix.js').ContinuationPrefixProof | undefined { return this.executionSnapshot }
-  authorizeCacheGeneration(): void { this.executionSnapshot = undefined }
+  getPublishedUserCount(): number { return this.rewindAuthorization ? this.rewindAuthorization.history.filter(message => message.role === 'user').length : this.executionSnapshot ? this.publishedUserCount : 0 }
+  getPreparedUserCount(): number { return this.preparedUserCount }
+  getMergeProtectedUserCount(): number { return this.preparedUserCount || (this.executionSnapshot && this.publishedUserCount === 0 && !this.publishedHistory ? Number.POSITIVE_INFINITY : 0) }
+  getPreparedUserInput(): OaiMessage | undefined { return this.preparedUserInput }
+  assertPublishedHistory(messages: readonly OaiMessage[]): boolean {
+    const published = this.rewindAuthorization?.history ?? (this.executionSnapshot ? this.publishedHistory : undefined)
+    if (!published) return false
+    const current = proveRewindHistory(messages)
+    if (published.some((message, index) => current[index]?.hash !== message.hash)) throw new LocalWorkerPolicyError('已发布的源历史发生变化；禁止通过压缩授权改写')
+    return true
+  }
+  getRewindAuthorization(): RewindGenerationAuthorization | undefined { return this.rewindAuthorization }
+  // Generation authorization preserves the published tool catalog freeze.
+  authorizeCacheGeneration(): void { this.executionSnapshot = undefined; this.rewindAuthorization = undefined; this.preparedUserCount = 0; this.preparedUserInput = undefined }
+  authorizeRewindGeneration(authorization: RewindGenerationAuthorization): void {
+    this.executionSnapshot = undefined
+    this.rewindAuthorization = structuredClone(authorization)
+  }
   getRequestBudgetPolicy(): import('../context/request-budget.js').RequestBudgetPolicy | undefined {
     return this.config.requestBudgetPolicy
   }
@@ -273,6 +298,9 @@ export class PromptEngine {
     const initialFrozenBase = buildStableVolatileBlock(config.volatileCtx)
     if (inherit instanceof PromptEngine) {
       this.executionSnapshot = inherit.executionSnapshot
+      this.publishedUserCount = inherit.publishedUserCount
+      this.publishedHistory = inherit.publishedHistory ? structuredClone(inherit.publishedHistory) : undefined
+      this.rewindAuthorization = inherit.rewindAuthorization
       this.anchors = new FrozenAnchors(inherit.anchors.export())
       this.anchorHistory = [...inherit.anchorHistory]
       this.checkInheritedHistory = true
@@ -286,6 +314,10 @@ export class PromptEngine {
       const data = inherit ? parseFrozenSnapshotData(inherit) : undefined
       if (data) {
         this.executionSnapshot = data.executionSnapshot
+        this.publishedUserCount = data.publishedUserCount ?? 0
+        this.publishedHistory = data.publishedHistory ? structuredClone(data.publishedHistory) : undefined
+        this.rewindAuthorization = data.rewindAuthorization
+        if (this.rewindAuthorization) this.executionSnapshot = undefined
         this.anchors = new FrozenAnchors(data.anchors)
         this.anchorHistory = data.userKeys ?? []
         this.checkInheritedHistory = true
@@ -301,9 +333,15 @@ export class PromptEngine {
         this.collapseTokenStep = data.collapseTokenStep
       }
     }
-    this.toolCatalogPublished = !!this.executionSnapshot
-    const savedMaxTokens = this.executionSnapshot?.options?.max_tokens ?? this.executionSnapshot?.options?.max_completion_tokens
-    if (this.executionSnapshot?.model === config.model && typeof savedMaxTokens === 'number') this.config = { ...this.config, maxTokens: savedMaxTokens }
+    // 2026-10-16（issue #500）：构造期不锁工具表。此处曾以 `!!this.executionSnapshot`
+    // 置 toolCatalogPublished，把 resume 继承快照的会话工具表永久冻结——LSP/MCP 晚到
+    // 注册的合法 updateTools 失效，wire 工具表停在装配瞬间、与 prior 分裂，守卫
+    // fail-closed 拒发（worker continuation prefix diverged at tools）。
+    // 防碎缓存由「首请求上网后」的锁定承担（见 onExecutionSnapshot 提交处）；上网前的
+    // 更新发生在缓存代次建立之前，零缓存成本。回归契约：engine-tool-catalog-resume.test.ts。
+    const restoredOptions = this.executionSnapshot ?? this.rewindAuthorization?.prior
+    const savedMaxTokens = restoredOptions?.options?.max_tokens ?? restoredOptions?.options?.max_completion_tokens
+    if (restoredOptions?.model === config.model && typeof savedMaxTokens === 'number') this.config = { ...this.config, maxTokens: savedMaxTokens }
     this.approvalMode = config.approvalMode
     this.systemPrompt = buildSystemPrompt(config.staticCtx)
     this.frozenBase = initialFrozenBase
@@ -421,7 +459,9 @@ export class PromptEngine {
   exportFrozenSnapshot(): FrozenSnapshotData {
     return {
       v: 2,
-      ...(this.executionSnapshot ? { executionSnapshot: this.executionSnapshot } : {}),
+      ...(this.executionSnapshot ? { executionSnapshot: this.executionSnapshot, publishedUserCount: this.publishedUserCount,
+        ...(this.publishedHistory ? { publishedHistory: structuredClone(this.publishedHistory) } : {}) } : {}),
+      ...(this.rewindAuthorization ? { executionSnapshot: this.rewindAuthorization.prior, rewindAuthorization: structuredClone(this.rewindAuthorization) } : {}),
       anchors: this.anchors.export(),
       userKeys: [...this.anchorHistory],
       frozenBaseHash: this.inheritedActiveBase ? this.inheritedActiveBase.hash : frozenBaseHash(this.volatileBlock),
@@ -448,6 +488,7 @@ export class PromptEngine {
   }
 
   buildOaiRequest(inputMessages: OaiMessage[], toolHistory?: ToolHistoryEntry[], contextWindow?: number, options?: { sidePath?: boolean; onOrphanRepair?: (repairedMessages: OaiMessage[], count: number) => void; writeProbe?: WriteProbe }): OaiChatRequest {
+    if (!options?.sidePath && this.rewindAuthorization) assertRewindHistory(this.rewindAuthorization, inputMessages)
     // Side-path builds (compaction summaries etc.) pass an unrelated message
     // array through the same engine. They must be HERMETIC: any state write
     // here (cachedFreshForUser, frozen snapshots, firstUserKey, volatile swap,
@@ -456,6 +497,22 @@ export class PromptEngine {
     // the prefix-divergence probe, 2026-07-05.
     assertCompleteAttachments(inputMessages)
     const sidePath = options?.sidePath === true
+    const sourceBaseline = this.executionSnapshot
+    const sourceHistory = sourceBaseline ? this.publishedHistory : undefined
+    const publishedUserCount = sidePath ? 0 : inputMessages.filter(message => message.role === 'user').length
+    const publishedHistory = sidePath ? undefined : proveRewindHistory(inputMessages)
+    if (!sidePath) {
+      this.preparedUserCount = publishedUserCount
+      this.preparedUserInput = undefined
+      for (let sourceIndex = inputMessages.length - 1; sourceIndex >= 0; sourceIndex--) {
+        const message = inputMessages[sourceIndex]!
+        if (message.role === 'user' && message.origin !== 'hook' && message.origin !== 'compact'
+          && (message.origin === 'human' || message.origin === 'worker_task' || !isSystemReminder(message.content))) {
+          this.preparedUserInput = message
+          break
+        }
+      }
+    }
     const anchorRevision = this.anchors.revision
     /** Last-user occurrence key from the previous main build — the only boundary
      *  whose anchor is known to describe the CURRENT execution turn. */
@@ -797,11 +854,35 @@ export class PromptEngine {
       // fingerprints final send bytes for these requests (side-path calls
       // through the same client would poison its baseline too).
       prefixProbe: !sidePath || undefined,
+      validateSourceHistory: sidePath || !sourceBaseline || !sourceHistory ? undefined : () => {
+        if (sourceHistory.some((message, index) => publishedHistory?.[index]?.hash !== message.hash)) {
+          throw new ContinuationPrefixError('source', sourceBaseline, { ...sourceBaseline, messages: publishedHistory! })
+        }
+      },
       onExecutionSnapshot: sidePath ? undefined : proof => {
+        if (this.rewindAuthorization) {
+          if (!this.commitExecutionSnapshot) throw new LocalWorkerPolicyError('回退授权缺少耐久提交通道；请求未发送')
+          const snapshot = { ...this.exportFrozenSnapshot(), executionSnapshot: proof, publishedUserCount, publishedHistory, rewindAuthorization: undefined }
+          return this.commitExecutionSnapshot(snapshot).then(() => {
+            this.publishedUserCount = publishedUserCount
+            this.publishedHistory = publishedHistory
+            this.executionSnapshot = proof
+            this.rewindAuthorization = undefined
+            this.toolCatalogPublished = true
+          })
+        }
+        this.publishedUserCount = publishedUserCount
+        this.publishedHistory = publishedHistory
         this.executionSnapshot = proof
+        this.rewindAuthorization = undefined
         this.toolCatalogPublished = true
         try { this.onFrozenChanged?.() } catch { /* persistence cannot break dispatch */ }
       },
+    }
+    if (!sidePath && this.rewindAuthorization) {
+      const authorization = { ...this.rewindAuthorization, history: proveRewindHistory(request.messages) }
+      request.rewindAuthorizationId = authorization.cacheGenerationId
+      request.validateRewindRequest = messages => assertRewindHistory(authorization, messages)
     }
     // Side-path builds (compaction summaries etc.) have unrelated message
     // arrays — recording them would poison the main-turn baseline and report
@@ -1017,6 +1098,7 @@ export class PromptEngine {
   setGoalAnchor(goal: string | null): void {
     this.goalAnchor = goal
   }
+  getGoalAnchor(): string | null { return this.goalAnchor }
 
   /** 已收集锚点数（loop 惰性重建判空用）。 */
   getExcludedPathAnchorCount(): number {

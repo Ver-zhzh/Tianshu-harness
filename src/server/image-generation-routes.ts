@@ -42,8 +42,8 @@ export function buildImageGenerationRoutes(apiToken?: string, knownWorkspaces: (
         const url = new URL(baseUrl)
         if (!['https:', 'http:'].includes(url.protocol) || !model) throw new Error('Enter an endpoint and model')
         const size = typeof draft.size === 'string' && draft.size ? draft.size : undefined
-        selected = { parameters: { provider: String(draft.providerName ?? 'test'), model, prompt: 'a red circle on a white background', size, sizeField: draft.sizeField === 'image_size' ? 'image_size' : 'size', timeoutMs: 180_000 }, connection: { baseUrl, apiKey: typeof draft.apiKey === 'string' && draft.apiKey ? draft.apiKey : undefined, ...imageGenerationNetwork(loadConfig()) } }
-      } else selected = resolveImageGeneration({ ...raw, ...(origin === 'test' ? { prompt: 'a red circle on a white background' } : {}) })
+        selected = { parameters: { provider: String(draft.providerName ?? 'test'), model, prompt: 'a yellow rubber duck on a white background', size, sizeField: draft.sizeField === 'image_size' ? 'image_size' : 'size', timeoutMs: 180_000 }, connection: { baseUrl, apiKey: typeof draft.apiKey === 'string' && draft.apiKey ? draft.apiKey : undefined, ...imageGenerationNetwork(loadConfig()) } }
+      } else selected = resolveImageGeneration({ ...raw, ...(origin === 'test' ? { prompt: 'a yellow rubber duck on a white background' } : {}) })
       const requestId = z.string().min(1).max(200).parse(data.requestId)
       const record = await service.start({ cwd, requestId, origin, ...selected, ...(typeof data.sessionId === 'string' ? { sessionId: data.sessionId } : {}) })
       return { status: 202, body: record }
@@ -58,6 +58,13 @@ export function buildImageGenerationRoutes(apiToken?: string, knownWorkspaces: (
       return record ? { status: 200, body: record } : { status: 404, body: { error: 'Generation not found' } }
     }),
     'POST /image-generations/:id/repair': scoped(async (cwd, _body, params) => ({ status: 200, body: await service.repair(cwd, params.id!) })),
+    'DELETE /image-generations/:id': scoped(async (cwd, _body, params) => {
+      const result = await service.delete(cwd, params.id!)
+      if (!result.deleted && result.reason === 'not-found') return { status: 404, body: { error: 'Generation not found' } }
+      if (!result.deleted && result.reason === 'pending') return { status: 409, body: { error: 'Generation is still in progress' } }
+      if (!result.deleted) return { status: 400, body: { error: result.reason ?? 'Delete failed' } }
+      return { status: 200, body: { deleted: true } }
+    }),
     'GET /image-generations/:id/image': scoped(async (cwd, _body, params, headers, res) => {
       const image = await service.image(cwd, params.id!)
       if (!res) return { status: 500, body: { error: 'Response stream is unavailable' } }

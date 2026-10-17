@@ -18,9 +18,9 @@ export async function completeSkillDraft(system: string, user: string): Promise<
   const owner = selected ?? findModelOwner(provider, model.id)
   const effective = owner?.owner ? { ...provider, ...owner.owner } : provider
   const apiKey = effective.auth?.type === 'oauth' ? '' : resolveApiKey(effective)
-  const auth = createAuthProvider(effective.auth ?? undefined, process.env, apiKey)
+  const auth = createAuthProvider(effective.auth ?? undefined, process.env, apiKey, { ...config.network, proxy: effective.proxy ?? config.network.proxy })
   const client = createProviderClient(effective, resolveCapabilities(provider.name, provider.capabilities, model.capabilities), {
-    apiKey, model: model.id, maxTokens: 8192, auth,
+    apiKey, model: model.id, maxTokens: 8192, auth, network: config.network,
   })
   let output = '', failure: Error | undefined
   await client.stream({ model: model.id, messages: [{ role: 'system', content: system }, { role: 'user', content: user }], max_tokens: 8192 }, {

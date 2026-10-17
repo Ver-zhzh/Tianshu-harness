@@ -1,8 +1,59 @@
 import type { AgentLoop } from './loop.js'
 import { extractTaskContract, mergeFollowUpIntoContract, type TurnMode } from '../context/task-contract.js'
+import type { OaiMessage } from '../api/oai-types.js'
+
+function captureBoundary(self: AgentLoop) {
+  return { input: undefined as OaiMessage | undefined, applied: false,
+    taskContract: self.taskContract ? structuredClone(self.taskContract) : undefined,
+    obligations: self.obligations.captureInputBoundary(), humanConstraint: self.workFacts.captureHumanConstraint(),
+    goalAnchor: self.session.getGoalAnchor(), promptGoalAnchor: self.config.promptEngine.getGoalAnchor(),
+    mutationRevision: self.workFacts.mutationRevision, progressRevision: self.workFacts.progressRevision,
+    obligationVersion: self.obligations.getVersion() }
+}
+const boundaries = new WeakMap<AgentLoop, ReturnType<typeof captureBoundary>>()
+
+export function recordHumanInput(self: AgentLoop, input: string, images?: string[]): void {
+  boundaries.set(self, captureBoundary(self))
+  self.session.addUserMessage(input, images, self.activeInputOrigin)
+}
+
+export function getCompactionTaskContract(self: AgentLoop) {
+  const boundary = boundaries.get(self)
+  const input = self.session.resolveUserInput(boundary?.input)
+  if (boundary && input && !self.session.isUserInputPublished(input)) {
+    return self.taskContract?.id === boundary.taskContract?.id ? boundary.taskContract : undefined
+  }
+  return self.taskContract
+}
+
+export function getCompactionGoalAnchor(self: AgentLoop): string | null {
+  const boundary = boundaries.get(self)
+  const input = self.session.resolveUserInput(boundary?.input)
+  return boundary && input && !self.session.isUserInputPublished(input) ? boundary.promptGoalAnchor : self.config.promptEngine.getGoalAnchor()
+}
+
+export function rollbackActiveUserInput(self: AgentLoop): void {
+  const boundary = boundaries.get(self)
+  const active = self.session.resolveUserInput(self.requestContext.activeUserMessage)
+  const tracked = self.session.resolveUserInput(boundary?.input)
+  const speculative = boundary && active && tracked === active && !self.session.isUserInputPublished(active)
+  if (speculative && (self.workFacts.mutationRevision !== boundary.mutationRevision
+    || self.workFacts.progressRevision !== boundary.progressRevision || self.obligations.getVersion() !== boundary.obligationVersion)) return
+  const removed = self.session.removeUserInput(self.requestContext.activeUserMessage, self.config.promptEngine.getPreparedUserInput())
+  if (!speculative || removed !== active) return
+  self.taskContract = boundary.taskContract
+  self.obligations.restoreInputBoundary(boundary.obligations)
+  self.workFacts.restoreHumanConstraint(boundary.humanConstraint)
+  self.session.restoreGoalAnchor(boundary.goalAnchor)
+  self.config.promptEngine.setGoalAnchor(boundary.promptGoalAnchor)
+  boundaries.delete(self)
+}
 
 /** Task identity is explicit human input; follow-up guidance retains verification ownership. */
 export function applyHumanInputBoundary(self: AgentLoop, turnMode: TurnMode, userInput: string): void {
+    let boundary = boundaries.get(self)
+    if (!boundary || boundary.applied) { boundary = captureBoundary(self); boundaries.set(self, boundary) }
+    boundary.input = self.requestContext.activeUserMessage
     if (turnMode === 'task' && self.activeInputOrigin === 'human') {
       self.taskContract = extractTaskContract(userInput, self.session.getTurnCount())
       // 证据义务任务边界：上一个用户任务的未决义务全部作废（satisfied 历史
@@ -33,4 +84,8 @@ export function applyHumanInputBoundary(self: AgentLoop, turnMode: TurnMode, use
       self.taskContract = undefined
     }
 
+    boundary.applied = true
+    boundary.mutationRevision = self.workFacts.mutationRevision
+    boundary.progressRevision = self.workFacts.progressRevision
+    boundary.obligationVersion = self.obligations.getVersion()
 }

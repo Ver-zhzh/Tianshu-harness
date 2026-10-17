@@ -79,6 +79,8 @@ export const DEFAULT_OFFLINE_MS = DEFAULT_OFFLINE_DAYS * 24 * 60 * 60 * 1000
  */
 export const DEFAULT_CLOCK_SKEW_MS = 10 * 60 * 1000
 
+export const PRO_GRANT_TIERS = ['pro', 'max', 'lifetime'] as const
+
 export interface ProGrantClaims {
   product: string
   deviceId?: string
@@ -105,6 +107,7 @@ export type ProGrantReason =
   | 'bad_signature'
   | 'bad_payload'
   | 'product_mismatch'
+  | 'tier_not_allowed'
   | 'device_mismatch'
   | 'not_yet_valid'
   /** 老 token（无离线预算字段）超出 `max(exp, iat+10天)`。 */
@@ -206,12 +209,15 @@ export function verifyProGrant(
   const claims = sig.claims
 
   if (claims.product !== LICENSE_PRODUCT) return { ok: false, reason: 'product_mismatch' }
-
   if (typeof claims.exp !== 'number' || !Number.isFinite(claims.exp)) {
     return { ok: false, reason: 'bad_payload' }
   }
   if (claims.iat !== undefined && (typeof claims.iat !== 'number' || !Number.isFinite(claims.iat))) {
     return { ok: false, reason: 'bad_payload' }
+  }
+  const legacy = claims.tier == null && (claims.iat ?? 0) === 0 && claims.maxOfflineMs == null
+  if (!(PRO_GRANT_TIERS as readonly unknown[]).includes(claims.tier) && !legacy) {
+    return { ok: false, reason: 'tier_not_allowed' }
   }
 
   const now = opts.now ?? Date.now()

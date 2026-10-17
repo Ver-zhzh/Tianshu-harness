@@ -1,6 +1,6 @@
-import { describe, it } from 'node:test'
+import { afterEach, beforeEach, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AgentLoop } from '../loop.js'
@@ -11,6 +11,8 @@ import { READ_FILE_TOOL } from '../../tools/read-file.js'
 import { maybeExtractAnchors } from '../loop-factory.js'
 import { proRegistry } from '../../api/pro-registry.js'
 import type { ContentBlock } from '../../api/types.js'
+import { __setProGrantPublicKeyForTests } from '../../config/pro-license.js'
+import { makeValidGrant } from '../../config/__tests__/grant-fixtures.js'
 
 /**
  * 锚点写入侧接线集成测试（spec 3c 动作 B · 缺口 2 验证）：
@@ -50,6 +52,30 @@ const thinkingBlocks: ContentBlock[] = [
 ]
 
 describe('锚点写入侧接线（extractor 注册 → 提取 → engine 追加）', () => {
+  let home: string
+  let savedEnv: Map<string, string | undefined>
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'rivet-anchors-license-'))
+    savedEnv = new Map(['RIVET_HOME', 'RIVET_DESKTOP', 'RIVET_PRO_GRANT', 'RIVET_PRO_DEVICE_ID'].map(key => [key, process.env[key]]))
+    const { token, publicKeyB64 } = makeValidGrant({ deviceId: 'anchors-test-device' })
+    process.env.RIVET_HOME = home
+    process.env.RIVET_DESKTOP = '1'
+    process.env.RIVET_PRO_GRANT = token
+    process.env.RIVET_PRO_DEVICE_ID = 'anchors-test-device'
+    writeFileSync(join(home, 'license.json'), JSON.stringify({ token, lastVerifiedAt: Date.now() }))
+    __setProGrantPublicKeyForTests(publicKeyB64)
+  })
+
+  afterEach(() => {
+    __setProGrantPublicKeyForTests(null)
+    for (const [key, value] of savedEnv) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+    rmSync(home, { recursive: true, force: true })
+  })
+
   it('spark provider + extractor 注册：thinking block 触发锚点提取', () => {
     const agent = makeAgent('deepseek-spark')
     const fakeExtractor = (reasoning: string) =>

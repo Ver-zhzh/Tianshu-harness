@@ -6,6 +6,7 @@
  * prefix cache.
  */
 import type { ProjectConstellation, Milestone, MilestoneVerification } from './schema.js'
+import { stripTerminalEscapes } from '../utils/safe-path.js'
 
 const VERIFY_GLYPH: Record<MilestoneVerification, string> = {
   verified: '✓',
@@ -44,7 +45,10 @@ export function formatMilestoneLine(m: Milestone, now = Date.now()): string {
   const type = TYPE_GLYPH[m.type] ?? '●'
   const verify = VERIFY_GLYPH[m.verificationStatus] ?? '·'
   const files = m.filesChanged.length > 0 ? ` (${m.filesChanged.length}f)` : ''
-  return `${type} ${verify} ${m.summary}${files} — ${markLabel(m)}, ${relativeTime(m.timestamp, now)}`
+  const line = `${type} ${verify} ${m.summary}${files} — ${markLabel(m)}, ${relativeTime(m.timestamp, now)}`
+  // Persisted fields reach the overlay without enforceTextContract. The shared
+  // sanitizer handles escapes/C1; this single-row consumer also rejects CR/LF/tab.
+  return stripTerminalEscapes(line).replace(/[\r\n\t]/g, ' ')
 }
 
 /** Render the full constellation view: skeleton + recent milestones. */

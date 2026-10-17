@@ -150,7 +150,9 @@ describe('resolveProLicense — 桌面端硬 gate（RIVET_DESKTOP=1）', () => {
     process.env.RIVET_DESKTOP = '1'
     signer = makeTestSigner()
     __setProGrantPublicKeyForTests(signer.publicKeyB64)
-    tmpLicense = join(mkdtempSync(join(tmpdir(), 'pro-desktop-')), 'pro.license')
+    const home = mkdtempSync(join(tmpdir(), 'pro-desktop-'))
+    process.env.RIVET_HOME = home
+    tmpLicense = join(home, 'license.json')
   })
 
   afterEach(() => {
@@ -162,6 +164,7 @@ describe('resolveProLicense — 桌面端硬 gate（RIVET_DESKTOP=1）', () => {
   /** 注入一份签名有效、时间窗正常的桌面凭证。 */
   function grantEnv(overrides: Record<string, unknown> = {}): void {
     process.env.RIVET_PRO_GRANT = signGrant(buildGrantPayload(overrides), signer.privateKey)
+    writeFileSync(tmpLicense, JSON.stringify({ token: process.env.RIVET_PRO_GRANT, lastVerifiedAt: Date.now() }))
   }
 
   it('验签通过的凭证 → enabled，source=grant，带上 tier', () => {

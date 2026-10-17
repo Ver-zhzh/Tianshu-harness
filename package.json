@@ -1,6 +1,6 @@
 {
   "name": "tianshu-harness",
-  "version": "3.31.0",
+  "version": "3.32.1",
   "description": "Cognitive runtime (CVM) for coding agents — stable, evidence-gated delivery; prefix cache works with all models (95–99% hit rate)",
   "license": "Apache-2.0",
   "type": "module",
@@ -59,7 +59,7 @@
     "test:unit": "node --import tsx scripts/run-node-tests.ts --unit",
     "test:integration": "node --import tsx scripts/run-node-tests.ts --integration",
     "test:fast": "node --import tsx scripts/run-node-tests.ts --exclude-tui",
-    "test:desktop": "node --import tsx desktop/scripts/run-tests.ts 'src/**/__tests__/*.test.ts' 'src/**/__tests__/*.test.tsx' 'scripts/__tests__/*.test.ts'",
+    "test:desktop": "node --import tsx desktop/scripts/run-tests.ts \"src/**/__tests__/*.test.ts\" \"src/**/__tests__/*.test.tsx\" \"scripts/__tests__/*.test.ts\"",
     "test:incremental": "node --import tsx scripts/test-incremental.ts",
     "structure:check": "node --import tsx --test-timeout=120000 --test src/__tests__/architecture-guards.test.ts",
     "contributors:check": "node --import tsx scripts/contributors.ts --check",

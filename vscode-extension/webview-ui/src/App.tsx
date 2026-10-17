@@ -2163,6 +2163,7 @@ function Composer(props: {
           onChange(e.target.value)
         }}
         onKeyDown={(e) => {
+          if (e.nativeEvent.isComposing) return
           if (slashHits.length > 0 && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
             e.preventDefault()
             setSlashHi((i) => {
@@ -2195,7 +2196,7 @@ function Composer(props: {
               return
             }
           }
-          if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+          if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault()
             fire()
           }

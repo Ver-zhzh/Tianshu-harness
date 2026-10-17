@@ -52,18 +52,26 @@ export function tianshuModelInfo(): vscode.LanguageModelChatInformation {
   }
 }
 
+function modelCredentialsReady(provider: ProviderListItem, model: ProviderListItem['models'][number]): boolean {
+  if (provider.authType === 'oauth') return provider.oauthAuthenticated === true
+  if (provider.oauthAuthenticated === true || provider.keyless === true) return true
+  const status = provider.keys?.length
+    ? provider.keys.find(key => key.models.some(owned => owned.id === model.id))?.keyStatus
+    : provider.keyStatus
+  return status?.source === 'inline' || status?.source === 'env'
+}
+
 /**
  * 校验服务商是否有可用凭据（已配置密钥、免密钥或已完成 OAuth 授权）。
  * 未配置有效凭据的服务商模型不注入到聊天模型列表中，避免呈现不可调用的幽灵模型。
  */
 export function isProviderCredentialReady(provider: ProviderListItem): boolean {
+  if (provider.authType === 'oauth') return provider.oauthAuthenticated === true
+  if (provider.oauthAuthenticated === true || provider.keyless === true) return true
   if (provider.keyStatus && (provider.keyStatus.source === 'inline' || provider.keyStatus.source === 'env')) {
     return true
   }
-  if (provider.keyless === true) {
-    return true
-  }
-  if (provider.oauthAuthenticated === true) {
+  if (provider.keys?.some(k => k.keyStatus?.source === 'inline' || k.keyStatus?.source === 'env')) {
     return true
   }
   return false
@@ -72,7 +80,8 @@ export function isProviderCredentialReady(provider: ProviderListItem): boolean {
 /**
  * 把内核 provider 目录投影为 chat 的模型信息列表（chat 模型选择器的真实数据源）。
  *
- * 每个已就绪内核模型（如 deepseek-v4-pro）注册为 chat 可选模型；用户在 picker 的选择
+ * 每个已就绪内核模型（如 deepseek-v4-pro）注册为 chat 可选模型；按凭据就绪状态列出可调用的模型，
+ * keys 池以模型的首个归属 key 为准。用户在 picker 的选择
  * 由 participant 同步到 sidecar 会话（POST /sessions/:id/model 热切换，保留历史）。
  * 窗口尺寸取自内核契约（contextWindow / maxTokens），缺失时保守兜底；空 id 丢弃、
  * 同 id 去重（内核 /config/providers 的 id/alias 为全局解析域）。
@@ -88,6 +97,7 @@ export function mapProviderModels(catalog: ProviderConfigList): vscode.LanguageM
     // 仅列出已就绪/已配置有效凭据的服务商模型
     if (!isProviderCredentialReady(provider)) continue
     for (const model of provider.models) {
+      if (!modelCredentialsReady(provider, model)) continue
       const id = model.id.trim()
       if (id === '' || seen.has(id)) continue
       seen.add(id)

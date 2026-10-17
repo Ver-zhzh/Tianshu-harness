@@ -20,9 +20,8 @@ import { SessionContext } from './context.js'
 import { RequestContextController } from './request-context-controller.js'
 import type { ContextBudgetSnapshot } from '../server/protocol.js'
 import { SessionPersist, getSessionDir, shouldAutoWriteHandoff } from './session-persist.js'
-import { attachSessionPersistListener } from './session-persist-listener.js'
+import { attachSessionPersistListener, commitCompactedHistory } from './session-persist-listener.js'
 import { PrewarmCache } from './prewarm.js'
-import { invalidateSessionReadDedup } from '../tools/read-file.js'
 import { getTodos, getTodoRegressionStats } from '../tools/todo.js'
 import { resolveDecisionsArm } from './decisions-experiment.js'
 import { gateToolDefinitions, isExtendedTool } from './tool-tiers.js'
@@ -140,14 +139,14 @@ import type { SensoriumEntry } from './retrospect.js'
 import { join, dirname } from 'node:path'
 import { writeFileSync, mkdirSync, existsSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { extractRegressionInventory } from './regression-inventory.js'
-import { extractPlanConstraints, planRefFor, renderPlanConstraints } from './plan-constraints.js'
+import { extractPlanConstraints, planRefFor, renderPlanConstraints, formatActivePlanPointer } from './plan-constraints.js'
 import type { ApprovalMode, AgentConfig, AgentCallbacks } from './loop-types.js'
 import type { PermissionAllowRule, PermissionOverlay } from './permissions.js'
 import { createPermissionOverlay } from './permissions.js'
 import { recordToolHistory, RECENT_TOOL_HISTORY_CAP } from "./tool-history-recorder.js";
 import { OutputWindowTracker } from './output-window-tracker.js'
 import { requestThetaCheck } from "./theta-controller.js";
-import { createTurnStreamController, createTurnCompletionController, createToolExecutionController, createPlanTraceCoordinator, createCompactBoundaryCoordinator, createTurnOrchestrator, createTurnStepProducer, createReasoningEffortController, createIntentRetrievalRouteController, createAntiAnchoringController, createModelRoutingShadowController, createPrewarmController, createRuntimeHooksPipeline, buildRuntimeSnapshot, createSidePathUsageRecorder, createReclaimDecisionRecorder, resolveHookDisabledEnv } from "./loop-factory.js";
+import { createTurnStreamController, createTurnCompletionController, createToolExecutionController, createPlanTraceCoordinator, createCompactBoundaryCoordinator, createTurnOrchestrator, createTurnStepProducer, createReasoningEffortController, createIntentRetrievalRouteController, createAntiAnchoringController, createModelRoutingShadowController, createPrewarmController, createRuntimeHooksPipeline, buildRuntimeSnapshot, createSidePathUsageRecorder, createReclaimDecisionRecorder, resolveHookDisabledEnv, waitForAgentRewind, createCompactionInputBoundary, rollbackActiveUserInput } from "./loop-factory.js";
 import type { TurnStepProducer } from './turn-step-producer.js'
 import { ReasoningEffortController } from './reasoning-effort-controller.js'
 import { IntentRetrievalRouteController } from './intent-retrieval-route-controller.js'
@@ -173,22 +172,7 @@ export type { ApprovalMode, AgentConfig, AgentCallbacks }
  */
 export type AgentRunOutcome = 'completed' | 'skipped-already-running'
 
-/**
- * Build the tiny approved-plan pointer block injected into the dynamic appendix.
- * Carries only slug/title/path — NOT the plan body, which stays the single
- * source of truth on disk at `.rivet/plans/<slug>.md`. The agent reads it on
- * demand and tracks steps via the existing todo mechanism.
- */
-export function formatActivePlanPointer(plan: { slug: string; title: string; selectedApproach?: string }): string {
-  const esc = (s: string) =>
-    s.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;')
-  const slug = esc(plan.slug)
-  const title = esc(plan.title)
-  const approach = plan.selectedApproach
-    ? `已选方案: ${esc(plan.selectedApproach)}。只执行此方案，勿执行未选中的备选。 `
-    : ''
-  return `<active-plan slug="${slug}" title="${title}" path=".rivet/plans/${slug}.md">${approach}已批准,正在执行此方案。完整步骤见该文件,需要时用 read_file 查看;开工前先用 todo 列出有序步骤跟踪进度,完成后 plan_close。</active-plan>`
-}
+export { formatActivePlanPointer }
 
 
 
@@ -211,6 +195,7 @@ export class AgentLoop {
     if (!this.config.promptEngine.getRequestBudgetPolicy()) throw new Error('当前模型尚未接入安全手动整理')
     this._running = true
     try {
+      await waitForAgentRewind(this)
       await this.cancelIdleCompaction()
       this.abortController = new AbortController()
       const changed = await this.compactContextBudget(true)
@@ -828,6 +813,7 @@ export class AgentLoop {
       if (config.primaryClient === raw) config.primaryClient = config.client
     }
     this.config = config; this.session = session;
+    session.setPublishedHistoryProbe(userOrdinal => userOrdinal < this.config.promptEngine.getPublishedUserCount(), userOrdinal => userOrdinal < this.config.promptEngine.getMergeProtectedUserCount())
     if (config.sessionId) config.promptEngine.setSkillRegistry(sessionSkillSnapshot(cwd ?? process.cwd(), config.sessionId))
     if (!this.config.permissionsOverlay) {
       this.config.permissionsOverlay = createPermissionOverlay()
@@ -1089,11 +1075,11 @@ export class AgentLoop {
         } catch { /* non-critical: memories are already persisted to disk */ }
       },
       getAbortSignal: () => this.abortController?.signal,
-      getActiveContract: () => this.taskContract,
-      // After any compaction rewrite the historical tool_results that read-ref
-      // points at may be gone — drop this session's read-dedup records so the
+      ...createCompactionInputBoundary(this),
+      // Commit history and its generation authorization together, then drop
+      // read-dedup records whose tool_results may have disappeared, so the
       // next read_file re-serves real content instead of a dangling reference.
-      onHistoryRewritten: () => { invalidateSessionReadDedup(this.config.sessionId) },
+      commitHistory: (expected, candidate) => commitCompactedHistory(this, expected, candidate),
       // Layered archival: persist discarded history as a recallable
       // compact-history artifact. Disk-only write, never touches the prefix.
       archiveHistory: async (input) => {
@@ -2713,6 +2699,7 @@ export class AgentLoop {
     // bail at its next checkpoint; replaceMessages itself is synchronous so the
     // session is always in a consistent state at the await boundary.
     try {
+      await waitForAgentRewind(this)
       await this.cancelIdleCompaction()
 
       // Zen 相位 turn 边界：首消息分诊（单行短消息跳过禅）+ 步数预算计数。
@@ -3355,7 +3342,7 @@ export class AgentLoop {
         debug: debugLog,
         onPhaseChange: callbacks.onPhaseChange,
       })
-      if (!assistantResponded && !userMessageConsumed) this.session.removeLastMessage()
+      if (!assistantResponded && !userMessageConsumed) rollbackActiveUserInput(this)
       callbacks.onAbort(stopReasonAbortTag(stopReason))
       return { action: 'abort' }
     }

@@ -165,4 +165,32 @@ describe('P3 计时锚与分数历史口径 — loop 接线', () => {
     assert.ok(result, 'runConvergenceCheck 必须装配 latestConvergenceResult')
     return result
   }
+
+  it('#502 修复 A 接线级：门槛型升级（L2→L3、score 未骤降）不穿透墙钟', async () => {
+    // 接线链：runConvergenceCheck → emit-gate 分型 → onPhaseChange 副作用。
+    // turn 19 → L2（penalty 0.45 档，score≈0.26）；turn 21 → L3（penalty 0.25 档，
+    // score≈0.15）——升级由 turn 越过 nHigh=20 触发，score 差 ≈0.12 < 0.15 骤降口径
+    // → 门槛型；两次同步调用，墙钟未过 → 第二次必须被拦（修复前 escalated 无条件穿透）。
+    const agent = makeAgent()
+    agent.convergenceEmitMinIntervalMs = 45_000
+    const warns: string[] = []
+    const cb = { onPhaseChange: (p: string) => { warns.push(p) } } as unknown as AgentCallbacks
+    agent.modelObservationTurn = 19
+    agent.workFacts.recordHumanTaskBoundary()
+    confirmStage(agent, 19)
+    agent.recentToolHistory = stallHistory()
+    await agent.runConvergenceCheck(19, 'execute', true, false, cb)
+    const r1 = agent.latestConvergenceResult
+    assert.ok(r1 && r1.level >= 2, '构造校验：第一次达到 kick 级')
+    assert.equal(warns.filter(e => e === 'convergence-warning').length, 1, '首次 L2 应发射一次')
+
+    agent.modelObservationTurn = 21
+    agent.recentToolHistory = stallHistory()
+    await agent.runConvergenceCheck(21, 'execute', true, false, cb)
+    const r2 = agent.latestConvergenceResult
+    assert.ok(r2)
+    assert.equal(r2.level, 3, '构造校验：第二次达到 L3（升级）')
+    assert.ok(r1.score - r2.score <= 0.15, `构造校验：score 未骤降（drop=${(r1.score - r2.score).toFixed(3)}）`)
+    assert.equal(warns.filter(e => e === 'convergence-warning').length, 1, '门槛型升级不得穿透 45s 墙钟（接线级）')
+  })
 })

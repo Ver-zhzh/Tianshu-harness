@@ -3,6 +3,172 @@ import { type SessionPersist } from './session-persist.js'
 import type { OaiMessage } from '../api/oai-types.js'
 import { debugLog } from '../utils/debug.js'
 import { isHumanInput } from './input-origin.js'
+import type { AgentLoop } from './loop.js'
+import { randomUUID } from 'node:crypto'
+import { proveRewindHistory, LocalWorkerPolicyError, type ContinuationPrefixProof, type RewindGenerationAuthorization } from '../api/continuation-prefix.js'
+import { invalidateSessionReadDedup } from '../tools/read-file.js'
+import { matchesCompactionHistory } from '../prompt/compaction-recovery.js'
+import { validateExecutionHistory } from '../api/execution-continuity.js'
+
+const compactionFailures = new WeakMap<SessionContext, { error: unknown; recover: () => Promise<void> }>()
+
+export async function commitCompactedHistory(agent: AgentLoop, expected: OaiMessage[], candidate: OaiMessage[],
+  reason: 'context_limit' | 'explicit_user_compact' = 'context_limit'): Promise<void> {
+  const source = JSON.stringify(expected)
+  const target = structuredClone(candidate)
+  const targetProof = proveRewindHistory(target)
+  const engine = agent.config.promptEngine
+  const client = agent.config.client
+  const persist = agent.persist
+  const prior = client.getMainPrefixProof?.() ?? engine.getRewindAuthorization()?.prior ?? engine.getExecutionSnapshot()
+  const model = engine.getModel()
+  if (!['context_limit', 'explicit_user_compact'].includes(reason) || client.getExecutionPolicy?.().singleAttempt || (prior && prior.model !== model)
+    || (persist && prior && !client.restoreRewindAuthorization)) {
+    throw new LocalWorkerPolicyError('压缩授权的模型或执行策略不匹配；禁止提交')
+  }
+  const checkBinding = () => {
+    if (agent.config.client !== client || agent.config.promptEngine !== engine || agent.persist !== persist
+      || engine.getModel() !== model) throw new LocalWorkerPolicyError('压缩提交期间执行绑定发生变化；禁止发送请求')
+  }
+  const checkHistory = (history: string) => {
+    checkBinding()
+    if (JSON.stringify(agent.session.getMessages()) !== history) throw new LocalWorkerPolicyError('历史在压缩提交期间发生变化；禁止发送请求')
+  }
+  const checkTarget = () => {
+    checkBinding()
+    if (!matchesCompactionHistory(targetProof, agent.session.getMessages())) throw new LocalWorkerPolicyError('历史在压缩提交期间发生变化；禁止发送请求')
+  }
+  await agent.drainPersistWrites()
+  checkHistory(source)
+  const known = engine.assertPublishedHistory(expected)
+  if (prior && (!known || !persist)) {
+    await validateExecutionHistory(client, engine.buildOaiRequest(expected))
+    checkHistory(source)
+  }
+  agent.abortController?.signal.throwIfAborted()
+  const active = agent.session.resolveUserInput(agent.requestContext.activeUserMessage)
+  const activeIndex = active ? candidate.indexOf(active) : -1
+  const rebindActive = () => {
+    const resolved = agent.session.resolveUserInput(active)
+    const cloned = activeIndex >= 0 ? agent.session.getMessages()[activeIndex] : undefined
+    const rebound = resolved ?? (active && cloned && JSON.stringify(cloned) === JSON.stringify(active) ? cloned : undefined)
+    if (active && rebound && active !== rebound) agent.session.linkUserInput(active, rebound)
+    agent.requestContext.activeUserMessage = rebound
+  }
+  const tail = expected.at(-1)
+  const unpublishedTail = tail?.role === 'user' && tail === active && candidate.at(-1) === tail
+    && expected.filter(message => message.role === 'user').length - 1 >= engine.getPublishedUserCount()
+  if (!persist) {
+    agent.session.replaceMessages(target)
+    client.authorizeCacheGeneration?.(reason)
+    engine.authorizeCacheGeneration()
+  } else if (prior) {
+    if (JSON.stringify(persist.loadOai()) !== source) throw new LocalWorkerPolicyError('压缩前的持久化历史不完整；禁止提交')
+    const authorization: RewindGenerationAuthorization = {
+      version: 1, reason, cacheGenerationId: randomUUID(), model: engine.getModel(),
+      history: unpublishedTail ? targetProof.slice(0, -1) : targetProof, prior: structuredClone(prior),
+    }
+    const baseline = engine.exportFrozenSnapshot()
+    const priorHistory = proveRewindHistory(unpublishedTail ? expected.slice(0, -1) : expected)
+    const finish = async () => {
+      await persist.commitFrozenSnapshot({ ...baseline, executionSnapshot: authorization.prior, rewindAuthorization: authorization })
+      checkBinding()
+      if (!matchesCompactionHistory(authorization.history, agent.session.getMessages())
+        || !matchesCompactionHistory(authorization.history, persist.loadOai())) throw new LocalWorkerPolicyError('压缩授权的历史发生变化；禁止发送请求')
+      client.restoreRewindAuthorization!(authorization)
+      engine.authorizeRewindGeneration(authorization)
+      engine.setExecutionSnapshotCommit(snapshot => persist.commitFrozenSnapshot(snapshot))
+      rebindActive()
+    }
+    try {
+      await persist.commitFrozenSnapshot({ ...baseline, executionSnapshot: authorization.prior,
+        pendingCompaction: { version: 1, priorHistory, authorization } })
+      checkHistory(source)
+      agent.abortController?.signal.throwIfAborted()
+      await agent.commitBudgetHistory(expected, target)
+      checkTarget()
+      await agent.drainPersistWrites()
+      checkTarget()
+      if (!matchesCompactionHistory(targetProof, persist.loadOai())) throw new LocalWorkerPolicyError('压缩后的持久化历史不完整；禁止授权')
+      await finish()
+      compactionFailures.delete(agent.session)
+    } catch (error) {
+      const recover = async () => {
+        await agent.drainPersistWrites()
+        checkBinding()
+        const actual = agent.session.getMessages(), disk = persist.loadOai()
+        if (matchesCompactionHistory(priorHistory, actual) && matchesCompactionHistory(priorHistory, disk)) {
+          await persist.commitFrozenSnapshot(baseline, authorization.cacheGenerationId)
+          checkBinding()
+          if (!matchesCompactionHistory(priorHistory, agent.session.getMessages()) || !matchesCompactionHistory(priorHistory, persist.loadOai())) {
+            throw new LocalWorkerPolicyError('压缩取消期间旧历史发生变化；禁止继续发送')
+          }
+        } else if (matchesCompactionHistory(authorization.history, actual) && matchesCompactionHistory(authorization.history, disk)) {
+          await finish()
+          engine.resetAppendixBaseline()
+          invalidateSessionReadDedup(agent.config.sessionId)
+        }
+        else throw new LocalWorkerPolicyError('压缩提交状态无法恢复；禁止继续发送')
+      }
+      try {
+        await recover()
+        compactionFailures.delete(agent.session)
+      } catch (recoveryError) { compactionFailures.set(agent.session, { error: recoveryError, recover }) }
+      throw error
+    }
+  } else {
+    await agent.commitBudgetHistory(expected, target)
+    checkTarget()
+    client.authorizeCacheGeneration?.(reason)
+    engine.authorizeCacheGeneration()
+  }
+  rebindActive()
+  invalidateSessionReadDedup(agent.config.sessionId)
+}
+
+const agentRewindCommits = new WeakMap<AgentLoop['session'], { commit: Promise<void>; prior?: ContinuationPrefixProof }>()
+export function rewindAgentSession(agent: AgentLoop, messages: OaiMessage[], liveAgent: () => AgentLoop = () => agent): void {
+  const expected = JSON.stringify(messages)
+  const prior = agent.config.client.getMainPrefixProof?.() ?? agent.config.promptEngine.getRewindAuthorization()?.prior ?? agentRewindCommits.get(agent.session)?.prior
+  agent.session.rewindToMessages(messages)
+  agent.config.promptEngine.resetAppendixBaseline()
+  const commit = agent.drainPersistWrites().then(async () => {
+    let current = liveAgent()
+    for (;;) {
+      if (JSON.stringify(agent.session.getMessages()) !== expected || JSON.stringify(current.session.getMessages()) !== expected) throw new Error('历史在回退提交期间发生变化')
+      const authorization: RewindGenerationAuthorization | undefined = prior ? {
+        version: 1, reason: 'explicit_user_rewind', cacheGenerationId: randomUUID(),
+        model: current.config.promptEngine.getModel(), history: proveRewindHistory(messages), prior: structuredClone(prior),
+      } : undefined
+      if (authorization && current.persist) await current.persist.commitFrozenSnapshot({
+        ...current.config.promptEngine.exportFrozenSnapshot(), executionSnapshot: authorization.prior, rewindAuthorization: authorization,
+      })
+      if (current !== liveAgent()) { current = liveAgent(); continue }
+      if (JSON.stringify(current.session.getMessages()) !== expected) throw new Error('历史在回退提交期间发生变化')
+      if (authorization) current.config.client.restoreRewindAuthorization?.(authorization)
+      else current.config.client.authorizeCacheGeneration?.('explicit_user_rewind')
+      current.config.promptEngine.authorizeCacheGeneration()
+      if (authorization) current.config.promptEngine.authorizeRewindGeneration(authorization)
+      if (current.persist) current.config.promptEngine.setExecutionSnapshotCommit(snapshot => current.persist!.commitFrozenSnapshot(snapshot))
+      break
+    }
+  })
+  agentRewindCommits.set(agent.session, { commit, prior })
+  void commit.catch(() => {})
+}
+export async function waitForAgentRewind(agent: AgentLoop): Promise<void> {
+  const failure = compactionFailures.get(agent.session)
+  if (failure) {
+    try {
+      await failure.recover()
+      compactionFailures.delete(agent.session)
+    } catch (error) { failure.error = error; throw failure.error }
+  }
+  await agentRewindCommits.get(agent.session)?.commit
+}
+
+type SessionPersistenceListener = { drain: () => Promise<void>; commitCompaction: (expected: OaiMessage[], candidate: OaiMessage[]) => Promise<void> }
+const persistenceListeners = new WeakMap<SessionContext, { persist: SessionPersist; listener: SessionPersistenceListener }>()
 
 /**
  * drain 终值快照（2026-10-02 第四批）：meta.tokenUsage 原只在「消息 append」时
@@ -40,8 +206,10 @@ export function writeFinalUsageSnapshot(session: SessionContext, persist: Sessio
 export function attachSessionPersistListener(deps: {
   session: SessionContext
   persist: SessionPersist
-}): { drain: () => Promise<void>; commitCompaction: (expected: OaiMessage[], candidate: OaiMessage[]) => Promise<void> } {
+}): SessionPersistenceListener {
   const { session, persist } = deps
+  const existing = persistenceListeners.get(session)
+  if (existing?.persist === persist) return existing.listener
   let writeChain: Promise<void> = Promise.resolve()
   let writeFailure: unknown
   let rewriteActive = false
@@ -151,7 +319,7 @@ export function attachSessionPersistListener(deps: {
     writeChain = operation.catch(() => {})
     return operation
   }
-  return { commitCompaction, drain: async () => {
+  const listener = { commitCompaction, drain: async () => {
     // 终值快照（2026-10-02 第四批）：原 drain 只刷已排队的写入，末次 append
     // 之后的记账（turn 末 side-path 等）没有快照点——尾账永失。见
     // writeFinalUsageSnapshot（单调守卫同处）。
@@ -164,4 +332,6 @@ export function attachSessionPersistListener(deps: {
     // never acknowledge history that failed to reach disk.
     if (writeFailure) throw writeFailure
   } }
+  persistenceListeners.set(session, { persist, listener })
+  return listener
 }

@@ -1,4 +1,4 @@
-import { proveWirePrefix, assertContinuationPrefix, wireObservation, type ContinuationPrefixProof, type RequestDiagnostics } from './continuation-prefix.js'
+import { proveWirePrefix, assertContinuationPrefix, wireObservation, isLocalWorkerPolicyError, type ContinuationPrefixProof, type RequestDiagnostics } from './continuation-prefix.js'
 import { currentExecutionScope } from './execution-continuity.js'
 import { beginCallAudit, auditConfigFingerprint, observedAuditUsage } from './call-audit.js'
 import { createHash } from 'node:crypto'
@@ -18,7 +18,7 @@ import { parseRetryAfterMs } from './error-classifier.js'
 import { resolveWireEffort } from './provider.js'
 import { ReasoningRepetitionGuard, REASONING_REPETITION_CORRECTION } from './reasoning-repetition.js'
 import { deepSeekImageLimitError } from '../context/image-input-limits.js'
-import { isOfficialDeepSeek, deepSeekBudgetPolicy, buildContextBudget, assertContextBudget, DEEPSEEK_BODY_LIMIT, DEEPSEEK_OUTPUT_RESERVE } from '../context/request-budget.js'
+import { isOfficialDeepSeek, deepSeekBudgetPolicy, buildContextBudget, assertContextBudget, DEEPSEEK_BODY_LIMIT, capOutputReserve } from '../context/request-budget.js'
 import type { ContextBudgetSnapshot } from '../server/protocol.js'
 import { classifyApiError } from './error-classifier.js'
 import { normalizeBaseUrl } from './endpoint-map.js'
@@ -26,12 +26,14 @@ import { sanitizeMessageContent, countContentChars, FULL_SANITIZE_CHARS } from '
 import { parseOpenAIError } from './error-hints.js'
 import { createBodyGuardNotifyState, enforceRequestBodyLimit, notifyBodyGuard } from './request-body-guard.js'
 import { stableStringify } from './stable-json.js'
-import { RequestInvariantMonitor } from './request-invariant.js'
+import { RequestInvariantMonitor, compareWirePrefixes } from './request-invariant.js'
 import { recoverDsmlToolCallsFromContent } from './dsml-tool-calls.js'
 import { stripThinkTags, filterThinkTagDelta } from './inline-reasoning.js'
 import { wireAbortToReaderCancel, wrapBodyTimeoutError } from './abort-reader.js'
 import { debugLog } from '../utils/debug.js'
 import { repairInvalidJsonEscapes } from './json-escape-repair.js'
+import { ToolCallName, ToolNameVocabulary, ToolNameProtocolError } from './tool-call-name.js'
+import { resolveToolCallIndex, type ToolCallChunk, type ToolCallBuffer, type ToolStreamEvent } from './openai-tool-call-buffer.js'
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { ProxyAgent } from 'undici'
@@ -44,9 +46,8 @@ import type { ProviderRetryConfig } from '../config/retry-schema.js'
  * Returns:
  *  - `{}` when the buffer holds no arguments (a genuine no-arg tool call).
  *  - the parsed object on success.
- *  - a salvaged object when the buffer is two concatenated JSON objects
- *    (`{...}{...}`), which happens when a provider reuses a single
- *    `tool_calls[].index` for distinct calls — we recover the first object.
+ *  - a salvaged object for legacy concatenated JSON (`{...}{...}`). Conflicting
+ *    explicit call IDs are rejected before they can share an argument buffer.
  *  - `null` when the buffer is non-empty but not yet (or not) valid JSON,
  *    signalling the caller to defer until more chunks arrive.
  *
@@ -249,13 +250,6 @@ export interface OpenAIClientConfig {
   proxy?: string
 }
 
-interface ToolCallChunk {
-  index?: number
-  id?: string
-  type?: string
-  function?: { name?: string; arguments?: string }
-}
-
 const FIRST_BYTE_TIMEOUT_MS = 45_000
 export const REASONING_FIRST_BYTE_TIMEOUT_MS = 90_000
 const READ_TIMEOUT_MS = 120_000
@@ -398,8 +392,11 @@ export function decideStreamHardCap(input: {
 }
 
 export class OpenAIClient implements StreamClient {
-  private toolCallBuffer = new Map<number, { id?: string; type?: string; function: { name?: string; arguments: string } }>()
+  private toolCallBuffer = new Map<number, ToolCallBuffer>()
   private toolCallHintFired = new Set<number>()
+  private toolNameVocabulary?: ToolNameVocabulary
+  private completedToolCallIds = new Set<string>()
+  private completedToolCallIndexes = new Set<number>()
   /** Resolved raw-SSE dump path (undefined = unresolved, null = disabled/failed). */
   private rawSsePath: string | null | undefined = undefined
   private pendingStopReason: string | null = null
@@ -548,15 +545,16 @@ export class OpenAIClient implements StreamClient {
 
   previewContextRequest(request: OaiChatRequest): OaiChatRequest {
     const model = request.model || this.config.model
-    return { ...request, model, max_tokens: this.capOutputTokens(request.max_tokens ?? this.config.maxTokens, model),
+    return { ...request, model, max_tokens: this.capOutputTokens(request.max_tokens ?? this.config.maxTokens),
       messages: this.mapWireMessages(request.messages, { toolsPresent: !!request.tools?.length,
         suppressStickyPreserve: this.requestInvariant.hasObserved(request) }) }
   }
 
-  /** 官方 DeepSeek 的单次输出封顶到「现实预留」（DEEPSEEK_OUTPUT_RESERVE）——与预算侧
-   *  outputReserve 同源，保证 `input + max_tokens ≤ window` 不被大输入破坏。其他 provider 原样。 */
-  private capOutputTokens(maxTokens: number, model: string): number {
-    return isOfficialDeepSeek(this.config.baseUrl, model) ? Math.min(maxTokens, DEEPSEEK_OUTPUT_RESERVE) : maxTokens
+  /** 单次输出封顶到「现实预留」——与预算侧 outputReserve 共用 `capOutputReserve`（必须同源，
+   *  否则 `input + max_tokens ≤ window` 被大输入破坏）。此前只对官方 DeepSeek 生效，非官方
+   *  endpoint 原样放行「能力上限」，512K 窗口因此只剩 ~105K 输入、长会话硬断（issue #372）。 */
+  private capOutputTokens(maxTokens: number): number {
+    return capOutputReserve(maxTokens, this.config.contextWindow)
   }
 
   async stream(
@@ -585,7 +583,7 @@ export class OpenAIClient implements StreamClient {
     }
 
     // MiMo API uses max_completion_tokens, standard OpenAI uses max_tokens
-    const wireMaxTokens = this.capOutputTokens(request.max_tokens ?? this.config.maxTokens, String(body.model))
+    const wireMaxTokens = this.capOutputTokens(request.max_tokens ?? this.config.maxTokens)
     if (this.config.useMaxCompletionTokens) {
       body.max_completion_tokens = wireMaxTokens
     } else {
@@ -742,50 +740,14 @@ export class OpenAIClient implements StreamClient {
    *  request's; record the first diverged message. Pure appends record nothing.
    *  tools 数组单独成维——它不进 messages，消息级对比对其隐形。 */
   private recordWireDivergence(messages: Array<Record<string, unknown>>, tools?: unknown[]): void {
-    this.lastWireDivergence = null
     const sigs = messages.map(m => {
       const s = JSON.stringify(m)
       return { sig: wireHash(s), len: s.length, role: String(m.role ?? '?') }
     })
     const toolsSig = tools && tools.length > 0 ? wireHash(stableStringify(tools)) : null
-    const prev = this.prevWireSignatures
-    const prevToolsSig = this.prevWireToolsSig
+    this.lastWireDivergence = compareWirePrefixes(this.prevWireSignatures, sigs, this.prevWireToolsSig, toolsSig)
     this.prevWireSignatures = sigs
     this.prevWireToolsSig = toolsSig
-    if (!prev) return
-
-    // 工具定义变化优先报告——它打的是整个前缀（system+tools 段），不是某条消息。
-    if (prevToolsSig !== toolsSig) {
-      this.lastWireDivergence = {
-        idx: -1,
-        role: 'tools',
-        kind: 'tools_changed',
-        prevCount: prev.length,
-        newCount: sigs.length,
-        approxCharPos: 0,
-      }
-      return
-    }
-
-    const shared = Math.min(prev.length, sigs.length)
-    let divergedIdx = -1
-    for (let i = 0; i < shared; i++) {
-      if (prev[i]!.sig !== sigs[i]!.sig) { divergedIdx = i; break }
-    }
-    if (divergedIdx === -1) {
-      if (sigs.length >= prev.length) return // pure append (or identical)
-      divergedIdx = sigs.length
-    }
-    let approxCharPos = 0
-    for (let i = 0; i < divergedIdx; i++) approxCharPos += sigs[i]?.len ?? prev[i]!.len
-    this.lastWireDivergence = {
-      idx: divergedIdx,
-      role: sigs[divergedIdx]?.role ?? 'removed',
-      kind: divergedIdx >= sigs.length ? 'message_removed' : 'message_changed',
-      prevCount: prev.length,
-      newCount: sigs.length,
-      approxCharPos,
-    }
   }
 
   /** Consume-once accessor for the latest wire-level prefix divergence. */
@@ -858,6 +820,8 @@ export class OpenAIClient implements StreamClient {
       // Reset instance state for each attempt
       this.toolCallBuffer.clear()
       this.toolCallHintFired.clear()
+      this.completedToolCallIds.clear()
+      this.completedToolCallIndexes.clear()
       this.pendingStopReason = null
       this._textAccum = ''
       this.thinkHold = ''
@@ -905,11 +869,13 @@ export class OpenAIClient implements StreamClient {
       // 复读纠正重发（2026-09-24，issue #260）：不清掉那段退化推理就等于把同一个
       // 循环再喂一遍（故 reasoningRef 置空 + 历史里本来就只存正常轮），尾部附一句
       // 纠正让模型换思路。只改本次 attempt 的 wire 副本，不进口历史。
-      if (repeatCorrectionRequested && !repeatCorrectionApplied) {
-        repeatCorrectionApplied = true
-        reasoningRef.content = ''
+      if (repeatCorrectionRequested) {
+        if (!repeatCorrectionApplied) {
+          repeatCorrectionApplied = true
+          reasoningRef.content = ''
+          debugLog('[openai-client] reasoning_repetition 自愈：丢弃退化推理 + 尾部纠正指令，重发一次')
+        }
         wireMessages = [...wireMessages, { role: 'user', content: REASONING_REPETITION_CORRECTION }]
-        debugLog('[openai-client] reasoning_repetition 自愈：丢弃退化推理 + 尾部纠正指令，重发一次')
       }
 
       let effectiveBody = body
@@ -978,6 +944,9 @@ export class OpenAIClient implements StreamClient {
       // 客户端限速（未配置 rateLimit 时零开销）：同 provider 的所有 client 实例共享一只桶。
       await acquireRateLimitSlot(this.config.providerName ?? this.config.baseUrl, this.config.retry?.rateLimit, lifecycle.signal)
       const proof = proveWirePrefix(guard.body, this.config.providerName ?? 'openai', requestId, normalizeBaseUrl(this.config.baseUrl))
+      const previousProof = this.mainPrefixProof
+      const previousSignatures = this.prevWireSignatures
+      const previousToolsSignature = this.prevWireToolsSig
       identity.wire = wireObservation(guard.body, proof, diagnostics, this.mainPrefixProof)
       if (diagnostics?.continuationSource && !currentExecutionScope()?.beforeSend) {
         try {
@@ -1022,7 +991,7 @@ export class OpenAIClient implements StreamClient {
         },
         body: guard.serializedBody ?? JSON.stringify(guard.body),
         signal: lifecycle.signal,
-      }, fetchTimeout, this.proxyDispatcher)
+      }, fetchTimeout, this.proxyDispatcher, { provider: this.config.providerName })
 
       if (!response.ok) {
         const errorBody = await response.text().catch(() => '')
@@ -1072,9 +1041,16 @@ export class OpenAIClient implements StreamClient {
       if (!reader) throw new Error('Response body is not readable')
 
       parserStarted = true
-      await this.parseStreamFromReader(reader, observedCallbacks, signal, reasoningRef, lifecycle, firstByteMs, identity, !!((body.tools as unknown[] | undefined)?.length))
+      await this.parseStreamFromReader(reader, observedCallbacks, signal, reasoningRef, lifecycle, firstByteMs, identity,
+        !!((body.tools as unknown[] | undefined)?.length),
+        (effectiveBody.tools as OaiChatRequest['tools'])?.map(tool => tool.function.name) ?? [])
       audit.finish({ status: 'complete', responseId: identity.responseId, responseModel: identity.responseModel, systemFingerprint: identity.systemFingerprint, finishReason: identity.finishReason })
       } catch (error) {
+        if (isLocalWorkerPolicyError(error)) {
+          this.mainPrefixProof = previousProof
+          this.prevWireSignatures = previousSignatures
+          this.prevWireToolsSig = previousToolsSignature
+        }
         audit.finish({ status: lifecycle.signal.aborted ? 'aborted' : 'failed', responseId: identity.responseId, errorName: (error as Error).name })
         if (!parserStarted) callbacks.onStreamAttemptAborted?.({
           ...identity, provider: this.config.providerName ?? 'openai', receivedChars: 0,
@@ -1175,7 +1151,10 @@ export class OpenAIClient implements StreamClient {
     identity: Omit<NonNullable<Usage['observation']>, 'status' | 'fields'> = { requestId: crypto.randomUUID(), attemptId: crypto.randomUUID() },
     /** 本请求是否声明了 tools——DSML 兜底的开关（默认 true，保持测试直调语义）。 */
     toolsDeclared = true,
+    /** Exact wire declarations; omitted only by legacy direct parser callers. */
+    toolNames?: readonly string[],
   ): Promise<void> {
+    this.toolNameVocabulary = toolNames === undefined ? undefined : new ToolNameVocabulary(toolNames)
     const settlement = new UsageSettlement()
     const settledUsage = (status: 'complete' | 'aborted') => {
       const usage = settlement.finish(identity, status)
@@ -1487,60 +1466,15 @@ export class OpenAIClient implements StreamClient {
       // 响应上 abort 为无操作，故正常结束路径安全。
       lifecycle?.abort()
 
+      this.toolCallBuffer.clear()
+      this.toolCallHintFired.clear()
+      this.completedToolCallIds.clear()
+      this.completedToolCallIndexes.clear()
+      this.toolNameVocabulary = undefined
+
       // Failed attempts are sealed by onStreamAttemptAborted. Never emit more
       // content here: it would leak into the next retry's execution/history.
     }
-  }
-
-  /**
-   * Resolve which toolCallBuffer slot a streaming chunk belongs to.
-   *
-   * Returns the slot index, or null to DROP the chunk. Dropping is the
-   * fail-safe choice when a continuation chunk carries no `index`/`id` and more
-   * than one buffer is open — misgrafting it onto another tool's arguments
-   * corrupts both (the parallel tool_call pollution bug). A dropped trailing
-   * fragment at worst leaves one call's JSON incomplete, which the existing
-   * final-flush + salvageFirstJsonObject path already handles.
-   */
-  private resolveToolCallIndex(tc: ToolCallChunk): number | null {
-    if (tc.index !== undefined) return tc.index
-    // Continuation chunk (typically a trailing-arguments delta after
-    // finish_reason). Providers omit index here; reattach by identity.
-    if (tc.id !== undefined) {
-      for (const [idx, buf] of this.toolCallBuffer) {
-        if (buf.id === tc.id) {
-          this.logToolStreamEvent({
-            phase: 'reattach-by-id', openBuffers: this.toolCallBuffer.size,
-            id: tc.id, name: buf.function.name,
-            argsLen: tc.function?.arguments?.length,
-          })
-          return idx
-        }
-      }
-    }
-    // No identity on the chunk: if exactly one buffer is open, it must be the
-    // target (the common single-call trailing-args case). With multiple open we
-    // cannot know — drop rather than guess and pollute.
-    if (this.toolCallBuffer.size === 1) {
-      const idx = this.toolCallBuffer.keys().next().value!
-      this.logToolStreamEvent({
-        phase: 'reattach-sole', openBuffers: 1,
-        argsLen: tc.function?.arguments?.length,
-      })
-      return idx
-    }
-    // Fallback: preserve historical behavior for the degenerate "no buffer open
-    // yet" case (a first chunk with no index) by seeding slot 0; otherwise drop.
-    if (this.toolCallBuffer.size === 0) return 0
-    // Ambiguous: multiple open buffers, no index/id. Dropping is the fail-safe
-    // choice (one call's JSON may be incomplete) vs. the old `?? 0` which grafted
-    // onto a different tool and corrupted both. Log so this provider pathology
-    // is visible without RIVET_DEBUG.
-    this.logToolStreamEvent({
-      phase: 'drop-ambiguous', openBuffers: this.toolCallBuffer.size,
-      argsLen: tc.function?.arguments?.length,
-    })
-    return null
   }
 
   /** Process a single SSE delta chunk — exposed for testing */
@@ -1618,13 +1552,42 @@ export class OpenAIClient implements StreamClient {
         // JSON. resolveToolCallIndex attaches index-less continuation chunks to the
         // correct slot by id / single-open-buffer, and drops them rather than
         // misgrafting when ambiguous (fail-safe beats fail-loud pollution).
-        const idx = this.resolveToolCallIndex(tc)
+        const idx = resolveToolCallIndex(tc, this.toolCallBuffer, this.completedToolCallIds,
+          this.completedToolCallIndexes, event => this.logToolStreamEvent(event))
         if (idx === null) continue
-        const buf = this.toolCallBuffer.get(idx) ?? { function: { arguments: '' } }
+        let buf = this.toolCallBuffer.get(idx)
+        if (!buf) {
+          buf = { function: { arguments: '' },
+            ...(this.toolNameVocabulary ? { nameState: new ToolCallName(this.toolNameVocabulary) } : {}) }
+          this.toolCallHintFired.delete(idx)
+          this.completedToolCallIndexes.delete(idx)
+          this.toolCallBuffer.set(idx, buf)
+        }
         if (tc.id) buf.id = tc.id
         if (tc.type) buf.type = tc.type
         if (tc.function?.name) {
-          buf.function.name = (buf.function.name ?? '') + tc.function.name
+          if (buf.nameState) {
+            try {
+              const change = buf.nameState.append(tc.function.name)
+              for (const [kind, seen] of Object.entries(change)) {
+                if (!seen) continue
+                buf.nameEvents ??= new Set()
+                if (buf.nameEvents.has(kind)) continue
+                buf.nameEvents.add(kind)
+                this.logToolStreamEvent({ phase: kind === 'repeat' ? 'name-repeat' : 'name-snapshot',
+                  idx, id: buf.id, fragments: buf.nameState.fragments, candidateCount: buf.nameState.candidateCount })
+              }
+              const names = buf.nameState.completeNames
+              buf.function.name = names.length === 1 ? names[0] : undefined
+            } catch (error) {
+              this.logToolStreamEvent({ phase: 'name-rejected', idx, id: buf.id,
+                fragments: buf.nameState.fragments, candidateCount: buf.nameState.candidateCount,
+                reason: error instanceof ToolNameProtocolError ? error.reason : 'unknown' })
+              throw error
+            }
+          } else {
+            buf.function.name = (buf.function.name ?? '') + tc.function.name
+          }
         }
         if (tc.function?.arguments) {
           buf.function.arguments += tc.function.arguments
@@ -1632,11 +1595,12 @@ export class OpenAIClient implements StreamClient {
         this.toolCallBuffer.set(idx, buf)
 
         // Speculative prewarm: emit hint once when tool name + args are parseable
-        if (callbacks.onToolCallHint && buf.function.name && !this.toolCallHintFired.has(idx)) {
+        const hintName = buf.nameState ? buf.nameState.hintName : buf.function.name
+        if (callbacks.onToolCallHint && hintName && !this.toolCallHintFired.has(idx)) {
           try {
             const partial = JSON.parse(buf.function.arguments)
             this.toolCallHintFired.add(idx)
-            callbacks.onToolCallHint(buf.function.name, partial)
+            callbacks.onToolCallHint(hintName, partial)
           } catch { /* args not yet complete JSON — wait for more chunks */ }
         }
       }
@@ -1680,11 +1644,20 @@ export class OpenAIClient implements StreamClient {
    * wholesale, so a deferred entry survives to the final flush.
    */
   private flushToolCalls(
-    callbacks: Partial<Pick<StreamCallbacks, 'onContentBlock' | 'onStopReason'>>,
+    callbacks: Partial<Pick<StreamCallbacks, 'onContentBlock' | 'onStopReason' | 'onToolCallHint'>>,
     opts: { final?: boolean } = {},
   ): void {
     const final = opts.final ?? false
     for (const [idx, buf] of this.toolCallBuffer) {
+      if (buf.nameState) {
+        try { buf.function.name = buf.nameState.resolve(final) }
+        catch (error) {
+          this.logToolStreamEvent({ phase: 'name-rejected', idx, id: buf.id,
+            fragments: buf.nameState.fragments, candidateCount: buf.nameState.candidateCount,
+            reason: error instanceof ToolNameProtocolError ? error.reason : 'unknown' })
+          throw error
+        }
+      }
       if (!buf.id || !buf.function.name) {
         // Header (id/name) not yet seen. Can never complete on the final flush.
         if (final) this.toolCallBuffer.delete(idx)
@@ -1712,11 +1685,19 @@ export class OpenAIClient implements StreamClient {
           argsLen: buf.function.arguments.length,
         })
         callbacks.onContentBlock?.({ type: 'tool_use', id: buf.id, name: buf.function.name, input: {}, argsTruncated: true })
+        this.completedToolCallIds.add(buf.id)
+        this.completedToolCallIndexes.add(idx)
         this.toolCallBuffer.delete(idx)
         continue
       }
+      if (callbacks.onToolCallHint && !this.toolCallHintFired.has(idx)) {
+        this.toolCallHintFired.add(idx)
+        callbacks.onToolCallHint(buf.function.name, parsed)
+      }
       this.maybeTraceToolStream(final ? 'emit-final' : 'emit', idx, buf)
       callbacks.onContentBlock?.({ type: 'tool_use', id: buf.id, name: buf.function.name, input: parsed })
+      this.completedToolCallIds.add(buf.id)
+      this.completedToolCallIndexes.add(idx)
       this.toolCallBuffer.delete(idx)
     }
   }
@@ -1776,13 +1757,7 @@ export class OpenAIClient implements StreamClient {
    * (only fire on ambiguous continuation chunks / final-flush empties), so
    * hitting the cap itself signals a provider streaming pathology worth flagging.
    */
-  private logToolStreamEvent(event: {
-    phase: 'drop-ambiguous' | 'reattach-by-id' | 'reattach-sole' | 'final-flush-empty'
-    openBuffers?: number
-    id?: string
-    name?: string
-    argsLen?: number
-  }): void {
+  private logToolStreamEvent(event: ToolStreamEvent): void {
     if (this.toolStreamLogPath === null) return
     if (this.toolStreamLogLines >= TOOL_STREAM_LOG_MAX_LINES) return
     if (this.toolStreamLogPath === undefined) {

@@ -13,7 +13,7 @@ export const INTERRUPT_MARKER_TEXT =
 export interface InterruptionDeps {
   removeLastMessage: () => void
   addAssistantBlocks: (blocks: ContentBlock[]) => void
-  appendSystemReminder: (content: string, cls?: SrClass) => void
+  appendSystemReminder: (content: string, cls?: SrClass, opts?: { mergeTail?: boolean }) => void
 }
 
 export interface InterruptionParams {
@@ -29,8 +29,9 @@ export interface InterruptionParams {
  * 打断时的历史处理。返回本轮是否已有 assistant 消息（供调用方沿用 assistantResponded）。
  * - 开关关 / watchdog 中止：旧行为——无回复则撤回 user 消息（自动续跑链路依赖此形状）。
  * - 用户打断：保留 user 消息；有 partial 文本则作为 assistant text 落历史（用户已看到的
- *   文字必须持久化，同 turn-orchestrator 的 contract repair 原则）；再追加标记（tail 是
- *   user 时合并为后缀，否则新 SR user 消息）。只追加，不改任何已存在消息。
+ *   文字必须持久化，同 turn-orchestrator 的 contract repair 原则）；再追加标记。标记不得
+ *   改写已发送的 user 消息，因此标记始终独立追加。userMessageConsumed 表示压缩
+ *   消费了原消息，不表示请求已发送；普通流中止时它仍可能为 false。
  * - 只追加 text 块，绝不追加 tool_use：中止时 collectedBlocks 可能含未配对 tool_use，
  *   进历史会让下一请求 400。
  */
@@ -46,7 +47,7 @@ export function recordInterruption(deps: InterruptionDeps, p: InterruptionParams
     deps.addAssistantBlocks([{ type: 'text', text }])
     responded = true
   }
-  deps.appendSystemReminder(INTERRUPT_MARKER_TEXT, 'functional')
+  deps.appendSystemReminder(INTERRUPT_MARKER_TEXT, 'functional', { mergeTail: false })
   return responded
 }
 

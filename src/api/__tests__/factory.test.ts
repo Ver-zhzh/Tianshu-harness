@@ -59,6 +59,28 @@ describe('createProviderClient', () => {
     assert.ok(client)
   })
 
+  it('client 的 contextWindow 走 key 池而非顶层迁移快照——否则 wire 封顶与预算侧脱钩（issue #372 F3）', async t => {
+    // 顶层 models 是迁移快照：key 级增删不回写（见 contractModels 与 modelContextWindow 的注释）。
+    // 直接读顶层会把窗口取成 1M，而预算侧的 agent.config.contextWindow 来自 key 池的 100_000——
+    // 两侧 capOutputReserve 于是算出不同的预留，`input + max_tokens ≤ window` 失去保障。
+    const provider: ProviderConfig = {
+      ...deepseekProvider,
+      name: 'relay',
+      baseUrl: 'https://relay.example/v1',
+      models: [{ id: 'm', contextWindow: 1_000_000, maxTokens: 200_000 }],
+      keys: [{ id: 'k1', models: [{ id: 'm', contextWindow: 100_000, maxTokens: 200_000 }] }],
+    }
+    let sent: any
+    t.mock.method(globalThis, 'fetch', async (_url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+      sent = JSON.parse(String(init?.body))
+      return new Response('data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } })
+    })
+    const client = createProviderClient(provider, resolveCapabilities('relay'), { apiKey: 'k', model: 'm', maxTokens: 200_000 })
+    await client.stream({ model: 'm', stream: true, messages: [{ role: 'user', content: 'hi' }], max_tokens: 200_000 },
+      { onTextDelta: () => {}, onThinkingDelta: () => {}, onContentBlock: () => {}, onStopReason: () => {}, onError: error => { throw error } })
+    assert.equal(sent.max_tokens, 50_000, '窗口取 key 池的 100_000 → 输出封顶到 100_000/2')
+  })
+
   it('grok：x-grok-conv-id + max_completion_tokens + 档位词汇映射（max→xhigh / off→low）', async () => {
     const provider = cloneProviderPreset('grok')
     const capabilities = resolveCapabilities('grok', provider.capabilities, provider.models[0]?.capabilities)

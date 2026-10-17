@@ -59,6 +59,29 @@ export class ImageGenerationStore {
     if (!info.isFile() || info.size > 50 * 1024 * 1024) throw new Error('Image is unavailable or too large')
     return readFile(target)
   }
+
+  /** 删除一条生成记录及其图片文件。返回是否有记录被删（记录不存在则 false）。
+   *  generating/downloading/saving 状态的记录拒绝删（需先 cancel）。 */
+  async delete(cwd: string, id: string): Promise<{ deleted: boolean; reason?: string }> {
+    if (!validId(id)) return { deleted: false, reason: 'invalid-id' }
+    cwd = await realpath(cwd)
+    const record = await this.read(cwd, id)
+    if (!record) return { deleted: false, reason: 'not-found' }
+    if (pending.has(record.state)) return { deleted: false, reason: 'pending' }
+    const directory = imageDirectory(cwd)
+    // 删元数据记录
+    await unlink(join(directory, `${id}.json`)).catch(() => undefined)
+    // 删图片文件（可能不存在——record.path 只在 succeeded 时写入）
+    if (record.path) {
+      const root = await realpath(record.cwd)
+      const target = resolve(record.path)
+      const rel = relative(root, target)
+      if (!isAbsolute(rel) && rel !== '..' && !rel.startsWith('../') && !rel.startsWith('..\\')) {
+        await unlink(target).catch(() => undefined)
+      }
+    }
+    return { deleted: true }
+  }
 }
 
 export async function legacyImages(cwd: string, records: ImageGenerationRecord[]): Promise<ImageGenerationRecord[]> {

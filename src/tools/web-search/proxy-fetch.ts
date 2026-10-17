@@ -1,8 +1,16 @@
 import { ProxyAgent, fetch as undiciFetch } from 'undici'
 import type { ProxyResolverOptions } from '../../tools/net/proxy-resolver.js'
-import { resolveProxyForUrl } from '../../tools/net/proxy-resolver.js'
+import { resolveProxyForUrl, shouldBypassProxy } from '../../tools/net/proxy-resolver.js'
 import { boundedSearchFetch } from './bounded-fetch.js'
 import type { SearchFetch } from './types.js'
+
+/**
+ * cn.bing.com 仅服务中国大陆出口：经任何代理（尤其是海外出口）都会被 301 到
+ * www.bing.com 的验证页（issue #483），为翻墙配置的代理会反过来打死这个国内
+ * 可达后端。该域名无条件直连——不可被 proxy 配置覆盖；用户的 noProxy 配置
+ * 仍可正常追加其他绕过项。
+ */
+const BUILTIN_DIRECT_HOSTS = 'cn.bing.com'
 
 /**
  * Build a proxy-aware fetch for search backends. Reuses the shared
@@ -25,6 +33,7 @@ export function createProxyAwareFetch(
 ): SearchFetch {
   const bounded = boundedSearchFetch(fetchImpl)
   return async (url, init) => {
+    if (shouldBypassProxy(new URL(url).hostname, BUILTIN_DIRECT_HOSTS)) return bounded(url, init)
     const proxyUrl = resolveProxyForUrl(url, proxyOpts)
     if (!proxyUrl) return bounded(url, init)
     // Merge dispatcher without clobbering caller-supplied init (e.g. headers,

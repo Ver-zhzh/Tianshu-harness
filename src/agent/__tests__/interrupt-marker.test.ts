@@ -26,14 +26,15 @@ import { stripInjectedSuffix } from '../../server/rewind-anchors.js'
 import { AgentLoop } from '../loop.js'
 import { ToolRegistry } from '../../tools/registry.js'
 import { PromptEngine } from '../../prompt/engine.js'
+import { OpenAIClient } from '../../api/openai-client.js'
 import type { StreamCallbacks, StreamClient } from '../../api/stream-client.js'
 import type { Tool, ToolResult } from '../../tools/types.js'
 
-/** 把 SessionContext 适配成 InterruptionDeps（与 loop-factory 的 deps 同形）。 */
+/** 把 SessionContext 适配成 InterruptionDeps（与 loop-factory 的 deps 同形，opts 必须透传）。 */
 const ctxDeps = (ctx: SessionContext) => ({
   removeLastMessage: () => ctx.removeLastMessage(),
   addAssistantBlocks: (b: Parameters<SessionContext['addAssistantBlocks']>[0]) => ctx.addAssistantBlocks(b),
-  appendSystemReminder: (t: string, c?: 'user' | 'functional' | 'discipline') => ctx.appendSystemReminder(t, c),
+  appendSystemReminder: (t: string, c?: 'user' | 'functional' | 'discipline', opts?: { mergeTail?: boolean }) => ctx.appendSystemReminder(t, c, opts),
 })
 const base = { assistantResponded: false, userMessageConsumed: false, markerEnabled: true }
 
@@ -48,15 +49,15 @@ test('A1 用户打断 + 有 partial：保留 user、追加 assistant partial、�
   assert.match(String(msgs[2]!.content), /<system-reminder>[\s\S]*\[interrupted\]/)
 })
 
-test('A2 用户打断 + 无 partial：不撤回 user；标记合并为后缀（仍一条消息）；stripInjectedSuffix 剥回原文', () => {
+test('A2 用户打断 + 无 partial：不撤回或改写 user；标记独立追加', () => {
   const ctx = new SessionContext(); ctx.addUserMessage('改 A')
   const responded = recordInterruption(ctxDeps(ctx), { ...base, partialText: '' })
   const msgs = ctx.getMessages()
   assert.equal(responded, false)
-  assert.equal(msgs.length, 1)
-  assert.ok(String(msgs[0]!.content).startsWith('改 A\n<system-reminder>'))
-  assert.equal(stripInjectedSuffix(msgs[0]!.content as string), '改 A', 'rewind 锚点配对依赖这一步')
-  assert.equal(endsWithInterruptMarker(msgs[0]!.content as string), true)
+  assert.equal(msgs.length, 2)
+  assert.equal(msgs[0]!.content, '改 A')
+  assert.equal(stripInjectedSuffix(msgs[0]!.content as string), '改 A')
+  assert.equal(endsWithInterruptMarker(msgs[1]!.content as string), true)
 })
 
 test('A3 watchdog 中止：旧行为——无回复撤回 user，不加标记', () => {
@@ -76,6 +77,27 @@ test('A5 只追加 text，绝不追加 tool_use（partial 里的工具意图不�
   recordInterruption(ctxDeps(ctx), { ...base, partialText: '我来调用工具' })
   const assistant = ctx.getMessages()[1] as { tool_calls?: unknown }
   assert.equal(assistant.tool_calls, undefined)
+})
+
+test('A6 打断不依赖压缩状态：标记独立成条，引擎下一轮前缀逐字节稳定', () => {
+  const ctx = new SessionContext(); ctx.addUserMessage('这是k')
+  const engine = new PromptEngine({
+    model: 'deepseek-v4-flash', maxTokens: 1024,
+    staticCtx: { tools: [] },
+    volatileCtx: { cwd: TEST_CWD, gitStatus: 'Current branch: main\nStatus:\nM src/foo.ts', rivetMd: '# Test Project' },
+  })
+  // 打断前：尾消息带着 appendix 上过 wire（2026-10-16 现场：revit-4213e2/2026101609914b2d8192，
+  // 标记合并改写已发送消息 → 锚点失配 → fallback 丢 appendix → 守卫拒发 → 会话砖死）
+  const sentBytes = JSON.stringify(engine.buildOaiRequest(ctx.getMessages()).messages.find(m => m.role === 'user'))
+  recordInterruption(ctxDeps(ctx), { ...base, partialText: '' })
+  const msgs = ctx.getMessages()
+  assert.equal(msgs.length, 2, '标记必须独立成条（纯追加），不得合并进已发送消息')
+  assert.equal(msgs[0]!.content, '这是k')
+  assert.match(String(msgs[1]!.content), /<system-reminder>[\s\S]*\[interrupted\]/)
+  // 打断后再发一条：历史消息的 wire 渲染字节必须与打断前逐字节一致（前缀零破损）
+  ctx.addUserMessage('这是kimi的问题吗')
+  const rendered = engine.buildOaiRequest(ctx.getMessages()).messages.filter(m => m.role === 'user')
+  assert.equal(JSON.stringify(rendered[0]), sentBytes)
 })
 
 test('B isInterruptMarkerEnabled：config false 优先；env 0/false/off/no 关；缺省开', () => {
@@ -177,6 +199,49 @@ test('C1 流中 abort：历史 = [user 原文, assistant partial, user SR 标记
   assert.deepEqual(msgs.map((m) => m.role), ['user', 'assistant', 'user'])
   assert.equal(msgs[1]!.content, 'partial…')
   assert.equal(String(msgs[2]!.content).includes(INTERRUPT_MARKER_TEXT), true)
+})
+
+test('C4 HTTP 已发送但无文字时打断：原消息不变，下一请求保持原 wire 前缀和代次', { timeout: 20_000 }, async () => {
+  const originalFetch = globalThis.fetch
+  const bodies: Array<{ messages: unknown[] }> = []
+  let signalSent!: () => void
+  const sent = new Promise<void>(resolve => { signalSent = resolve })
+  globalThis.fetch = async (_url, init) => {
+    bodies.push(JSON.parse(String(init?.body)))
+    if (bodies.length === 1) {
+      signalSent()
+      await new Promise<void>((_resolve, reject) => {
+        const abort = () => reject(new DOMException('Aborted', 'AbortError'))
+        if (init?.signal?.aborted) abort()
+        else init?.signal?.addEventListener('abort', abort, { once: true })
+      })
+    }
+    return new Response('data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":1}}\n\ndata: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } })
+  }
+  const agent = makeAgent(new OpenAIClient({
+    providerName: 'fixture', baseUrl: 'https://fixture.invalid/v1', apiKey: 'fixture',
+    model: 'deepseek-v4-pro', maxTokens: 1024, maxRetries: 0,
+  }))
+  try {
+    const running = agent.run('first synthetic request', cbs())
+    await sent
+    const published = structuredClone(agent.session.getMessages())
+    const generation = agent.config.client.getMainPrefixProof!()!.cacheGenerationId
+    agent.abort()
+    await running
+    const after = agent.session.getMessages()
+    assert.deepEqual(after.slice(0, published.length), published, '实际发送状态不能用压缩消费标志代替')
+    assert.equal(after.length, published.length + 1)
+    const errors: Error[] = []
+    await agent.run('second synthetic request', cbs({ onError: error => { errors.push(error) } }))
+    assert.deepEqual(errors, [])
+    assert.equal(bodies.length, 2)
+    assert.deepEqual(bodies[1]!.messages.slice(0, bodies[0]!.messages.length), bodies[0]!.messages)
+    assert.equal(agent.config.client.getMainPrefixProof!()!.cacheGenerationId, generation)
+  } finally {
+    agent.abort()
+    globalThis.fetch = originalFetch
+  }
 })
 
 test('C2 工具阶段 abort（文本已随 tool_use 入历史）：不重复追加 partial，只补标记', async () => {

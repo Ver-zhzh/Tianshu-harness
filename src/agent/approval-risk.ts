@@ -4,7 +4,7 @@ import { evaluateMcpPolicy, type McpCapability } from '../mcp/policy.js'
 import type { ContextClaim } from '../context/claims.js'
 import type { Sensorium } from './sensorium.js'
 import { detectSensitiveGitAdd, AGGREGATE_ADD_MARKER } from '../tools/sensitive-file-detector.js'
-import { GIT_GLOBAL_OPTS_SRC } from '../tools/destructive-patterns.js'
+import { GIT_GLOBAL_OPTS_SRC, GIT_CHECKOUT_CLEAR_RE } from '../tools/destructive-patterns.js'
 
 export type RiskLevel = 'none' | 'low' | 'medium' | 'high'
 
@@ -154,7 +154,7 @@ export const DANGEROUS_BASH_PATTERNS: ReadonlyArray<Readonly<RegExp>> = [
   // git clean 强制旗标位置任意：-fd / -fdx / -xdf / 分开写 -d -f / --force。旧式要求 f 为组合旗标
   // 末字母（-[a-zA-Z]*f\b），最常见的 `git clean -fd`、`git clean -fdx` 全部漏判。
   /\bgit\s+clean\b[^\n;&|]*\s(?:-[a-zA-Z]*f|--force\b)/,
-  /\bgit\s+checkout\s+--(?:\s|$)/,      // discard working-tree changes (panic-chain 事故: checkout -- 不可逆销毁)
+  GIT_CHECKOUT_CLEAR_RE,                // same checkout argument grammar as destructive-gate
   /\bgit\s+restore\b/,                  // discard working-tree / staged changes
   /\bgit\s+stash\b(?!(?:\s+(?:pop|list|show|apply|drop|branch)))/,  // git stash without safe subcommand = destructive clear
   /\bkillall\b/,
@@ -606,7 +606,13 @@ export function assessToolRisk(
     // 凭据/密钥文件 → high，auto-safe 也要走审批。聚合形态（. / -A / --all）静态
     // 无法核验暂存文件 → 哨兵项，medium + 建议改用 git 工具（自带敏感文件筛查）。
     // 检测器不抛——不可解析命令只是漏报，不会崩。
-    const gitAddHits = detectSensitiveGitAdd(cmd)
+    // 双视图并检（与 DANGEROUS/INJECTION 清单同口径）：只测原始视图时，
+    // `git${IFS}add` / `g\it add` / `git "a"dd` 这类归一化可消除的混淆会把
+    // high 降级为 medium——沙箱开启的 auto-safe/manual 档下凭据文件被静默暂存。
+    const gitAddHits = [
+      ...detectSensitiveGitAdd(cmd),
+      ...detectSensitiveGitAdd(normalizeBashCommand(cmd)),
+    ]
     if (gitAddHits.some(h => h !== AGGREGATE_ADD_MARKER)) {
       reasons.push('git add stages credential/key files — prompt hard-gate')
       level = 'high'
