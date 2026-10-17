@@ -680,7 +680,7 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
   {
     name: 'RIVET_JOB_LAUNCHER',
     defaultHint: '',
-    files: ['tools/process-kill.ts', 'tools/__tests__/job-store.test.ts', 'tools/__tests__/process-kill.test.ts'],
+    files: ['tools/__tests__/job-store.test.ts', 'tools/__tests__/process-kill.test.ts', 'tools/__tests__/windows-job-launcher-fixture.ts', 'tools/process-kill.ts'],
     description: '',
   },
   {
