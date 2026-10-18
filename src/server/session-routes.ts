@@ -1,3 +1,4 @@
+import { buildContinuityRecoveryRoutes } from './continuity-recovery-routes.js'
 import { withWorkspaceRoots } from '../tools/workspace-context.js'
 import { NonRepositoryError } from '../agent/repository-capability.js'
 import { validateWorkspaceRoots } from './workspace-roots.js'
@@ -315,6 +316,7 @@ export function buildSessionRoutes(
 
   const routes: Record<string, RouteHandler> = {
     ...buildApprovalRoutes(manager, apiToken),
+    ...buildContinuityRecoveryRoutes(manager, apiToken),
     ...buildGitWorkbenchRoutes(manager, apiToken),
     ...buildGitPrRoutes(manager, apiToken),
     ...buildGitReviewRoutes(manager, apiToken),

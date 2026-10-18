@@ -91,7 +91,7 @@ export function buildTestExecutionPlan(cwd: string, selection: { files?: readonl
     if (native.some(arg => arg === '--test-force-exit' || arg === '--forceExit')) {
       block(targets, 'unsupported_selection', 'forced_exit_unverifiable：强制退出无法证明 reporter 与输出完整结束；请提供保留 loader/setup/config 的有限测试入口。'); continue
     }
-    if (invocation.runner === 'node-test' && (selection.projects?.length || selection.shard === false && native.some(arg => arg.startsWith('--test-shard')))) { block(targets, 'unsupported_selection', 'node_shard_override_unavailable：Node 在预加载前解析分片参数；请提供保留 hooks/loader 的未分片脚本入口。'); continue }
+    if (invocation.runner === 'node-test' && (selection.projects?.length || selection.shard === false && invocation.targets.length > 0 && native.some(arg => arg.startsWith('--test-shard')))) { block(targets, 'unsupported_selection', 'node_shard_override_unavailable：Node 在预加载前解析分片参数；请提供保留 hooks/loader 的未分片脚本入口。'); continue }
     const installed = installedTestRunner(packageRoot, invocation.runner)
     if (installed.reason) { block(targets, installed.packageFile ? 'unsupported_selection' : 'missing_dependency', installed.reason); continue }
     if (invocation.runner === 'vitest' && (!installed.packageFile || !resolveRunnerDependency(packageRoot, installed.packageFile, 'vite'))) { block(targets, 'missing_dependency', '项目的 Vitest 无法解析所需的 Vite；请按该项目的包管理器补齐 peer 依赖后重试。'); continue }
@@ -104,10 +104,10 @@ export function buildTestExecutionPlan(cwd: string, selection: { files?: readonl
       const batch: string[] = []
       while (offset < selected.length && batch.length < 20 && JSON.stringify([...native, ...batch, selected[offset]]).length < 5000) batch.push(selected[offset++]!)
       if (offset < selected.length && !batch.length) { block(targets.slice(offset), 'unsupported_selection', '单个文件路径超过平台安全命令长度。'); break }
-      const overrides = [...(selection.shard === false && invocation.runner !== 'node-test' ? ['--rivet-unsharded'] : []), ...(invocation.runner !== 'node-test' && selection.projects ? selection.projects.length ? selection.projects.map(project => '--rivet-project=' + project) : ['--rivet-all-projects'] : [])]
+      const overrides = [...(selection.shard === false ? invocation.runner === 'node-test' ? native.some(arg => arg.startsWith('--test-shard')) ? ['--test-shard=1/1'] : [] : ['--rivet-unsharded'] : []), ...(invocation.runner !== 'node-test' && selection.projects ? selection.projects.length ? selection.projects.map(project => '--rivet-project=' + project) : ['--rivet-all-projects'] : [])]
       const args = [...prefix.slice(1), ...(overrides.length && manager === 'npm' ? ['--'] : []), ...overrides, ...(batch.length && !fixed ? [...(manager === 'npm' && !overrides.length ? ['--'] : []), ...(invocation.runner === 'jest' ? ['--runTestsByPath'] : []), ...batch] : [])]
       plan.groups.push({ cwd: entryCwd, packageRoot, runner: invocation.runner, command: manager, args,
-        requiresAdapter: overrides.length > 0, projects: invocation.runner !== 'node-test' && selection.projects ? [...selection.projects] : undefined, shard: invocation.runner === 'node-test' ? undefined : selection.shard, originalCommand: readTestPackage(entryCwd)?.scripts?.test ?? '', runnerArgv: [...native, ...(batch.length && !fixed ? [...(invocation.runner === 'jest' ? ['--runTestsByPath'] : []), ...batch] : [])], packageName: readTestPackage(packageRoot)?.name, proof: 'file-completion-v2',
+        requiresAdapter: overrides.some(arg => arg.startsWith('--rivet-')), projects: invocation.runner !== 'node-test' && selection.projects ? [...selection.projects] : undefined, shard: invocation.runner === 'node-test' ? undefined : selection.shard, originalCommand: readTestPackage(entryCwd)?.scripts?.test ?? '', runnerArgv: [...native, ...(batch.length && !fixed ? [...(invocation.runner === 'jest' ? ['--runTestsByPath'] : []), ...batch] : [])], packageName: readTestPackage(packageRoot)?.name, proof: 'file-completion-v2',
         files: batch.map(file => relative(root, resolve(packageRoot, file)).replaceAll('\\', '/')),
         display: [manager, ...args].map(word => /^[\w./:@=-]+$/.test(word) ? word : shellWord(word)).join(' ') })
       if (!selected.length) break

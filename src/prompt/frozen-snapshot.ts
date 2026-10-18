@@ -19,6 +19,7 @@ export interface PendingCompaction {
 export interface FrozenSnapshotData {
   executionSnapshot?: import('../api/continuation-prefix.js').ContinuationPrefixProof
   publishedUserCount?: number
+  renderedHistory?: import('../api/continuation-prefix.js').ContinuationPrefixProof['messages']
   publishedHistory?: import('../api/continuation-prefix.js').ContinuationPrefixProof['messages']
   rewindAuthorization?: import('../api/continuation-prefix.js').RewindGenerationAuthorization
   pendingCompaction?: PendingCompaction
@@ -48,6 +49,7 @@ export function parseFrozenSnapshotData(raw: unknown): FrozenSnapshotData | unde
   if (typeof raw !== 'object' || raw === null) return undefined
   const d = raw as Record<string, unknown>
   if (d.publishedUserCount !== undefined && (!Number.isSafeInteger(d.publishedUserCount) || (d.publishedUserCount as number) < 0)) return undefined
+  if (d.renderedHistory !== undefined && !isHistorySeal(d.renderedHistory)) return undefined
   if (d.publishedHistory !== undefined && (!isHistorySeal(d.publishedHistory)
     || (d.publishedUserCount !== undefined && d.publishedHistory.filter(message => message.role === 'user').length !== d.publishedUserCount))) return undefined
   if (d.rewindAuthorization !== undefined && !isRewindGenerationAuthorization(d.rewindAuthorization)) return undefined

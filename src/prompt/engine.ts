@@ -3,6 +3,7 @@ import { wireOaiMessage } from '../api/oai-types.js'
 import { currentWorkspaceRoots } from '../tools/workspace-context.js'
 import { createHash } from 'node:crypto'
 import { assertCompleteAttachments } from '../api/attachment-integrity.js'
+import { FrozenRenderState } from './frozen-render-state.js'
 import { FrozenAnchors } from './frozen-anchors.js'
 import type { OaiChatRequest, OaiContentPart, OaiMessage } from '../api/oai-types.js'
 import { collapseToolResult } from '../compact/context-collapse.js'
@@ -90,6 +91,7 @@ export interface PromptEngineConfig {
 }
 
 export class PromptEngine {
+  private readonly renderState = new FrozenRenderState()
   private executionSnapshot?: import('../api/continuation-prefix.js').ContinuationPrefixProof
   private publishedUserCount = 0
   private preparedUserCount = 0
@@ -113,10 +115,21 @@ export class PromptEngine {
   }
   getRewindAuthorization(): RewindGenerationAuthorization | undefined { return this.rewindAuthorization }
   // Generation authorization preserves the published tool catalog freeze.
-  authorizeCacheGeneration(): void { this.executionSnapshot = undefined; this.rewindAuthorization = undefined; this.preparedUserCount = 0; this.preparedUserInput = undefined }
+  authorizeCacheGeneration(): void { this.renderState.reset(); this.executionSnapshot = undefined; this.rewindAuthorization = undefined; this.preparedUserCount = 0; this.preparedUserInput = undefined }
   authorizeRewindGeneration(authorization: RewindGenerationAuthorization): void {
+    this.renderState.reset()
     this.executionSnapshot = undefined
     this.rewindAuthorization = structuredClone(authorization)
+  }
+  prepareProjectionRecovery(authorization: RewindGenerationAuthorization): void {
+    this.authorizeRewindGeneration(authorization)
+    this.anchors = new FrozenAnchors()
+    this.anchorHistory = []
+    this.frozenUserMerged.clear()
+    this.frozenPendingMerged.clear()
+    this.inheritedActiveBase = undefined
+    this.invalidateFreshCache()
+    this.resetAppendixBaseline()
   }
   getRequestBudgetPolicy(): import('../context/request-budget.js').RequestBudgetPolicy | undefined {
     return this.config.requestBudgetPolicy
@@ -297,16 +310,17 @@ export class PromptEngine {
     const inherit = config.inheritFrozenFrom
     const initialFrozenBase = buildStableVolatileBlock(config.volatileCtx)
     if (inherit instanceof PromptEngine) {
+      const sealed = inherit.exportFrozenSnapshot()
       this.executionSnapshot = inherit.executionSnapshot
       this.publishedUserCount = inherit.publishedUserCount
       this.publishedHistory = inherit.publishedHistory ? structuredClone(inherit.publishedHistory) : undefined
       this.rewindAuthorization = inherit.rewindAuthorization
-      this.anchors = new FrozenAnchors(inherit.anchors.export())
-      this.anchorHistory = [...inherit.anchorHistory]
+      this.anchors = new FrozenAnchors(sealed.anchors)
+      this.anchorHistory = [...(sealed.userKeys ?? [])]
       this.checkInheritedHistory = true
-      this.inheritedActiveBase = inherit.inheritedActiveBase ?? { hash: frozenBaseHash(inherit.volatileBlock) }
-      this.frozenUserMerged = new Map([...inherit.frozenUserMerged].map(([k, v]) => [k, [...v]]))
-      this.frozenPendingMerged = new Map(inherit.frozenPendingMerged)
+      this.inheritedActiveBase = { hash: sealed.frozenBaseHash }
+      this.frozenUserMerged = new Map(sealed.frozenUserMerged.map(([k, v]) => [k, [...v]]))
+      this.frozenPendingMerged = new Map(sealed.frozenPendingMerged)
       this.firstUserKey = inherit.firstUserKey
       this.collapseWatermark = inherit.collapseWatermark
       this.collapseTokenStep = inherit.collapseTokenStep
@@ -350,6 +364,7 @@ export class PromptEngine {
     this.tracker = (config.habituationThreshold ?? 5) > 0
       ? new FieldHabituationTracker({ promotionThreshold: 0.8, decayRate: 0.3 })
       : null
+    if (this.executionSnapshot) this.renderState.restore({ ...this.captureFrozenSnapshot(), renderedHistory: inherit instanceof PromptEngine ? inherit.exportFrozenSnapshot().renderedHistory : inherit?.renderedHistory })
     this.contextLayerReportData = createContextLayerReport([
       createContextLayer({ id: 'system', label: 'Stable System Prompt', stability: 'stable', channel: 'system', fingerprint: 'included', content: this.systemPrompt }),
       createContextLayer({ id: 'tools', label: 'Tool Definitions', stability: 'stable', channel: 'tools', fingerprint: 'included', content: JSON.stringify(config.staticCtx.tools) }),
@@ -457,6 +472,10 @@ export class PromptEngine {
    * resume 时经 inheritFrozenFrom 喂回，历史 user 消息恢复原始字节。
    */
   exportFrozenSnapshot(): FrozenSnapshotData {
+    return (this.executionSnapshot && !this.rewindAuthorization ? this.renderState.export() : undefined) ?? this.captureFrozenSnapshot()
+  }
+
+  private captureFrozenSnapshot(): FrozenSnapshotData {
     return {
       v: 2,
       ...(this.executionSnapshot ? { executionSnapshot: this.executionSnapshot, publishedUserCount: this.publishedUserCount,
@@ -499,6 +518,12 @@ export class PromptEngine {
     const sidePath = options?.sidePath === true
     const sourceBaseline = this.executionSnapshot
     const sourceHistory = sourceBaseline ? this.publishedHistory : undefined
+    if (!sidePath && sourceHistory) {
+      const current = proveRewindHistory(inputMessages)
+      if (sourceHistory.some((entry, index) => current[index]?.hash !== entry.hash)) {
+        throw new ContinuationPrefixError('source', sourceBaseline!, { ...sourceBaseline!, messages: current })
+      }
+    }
     const publishedUserCount = sidePath ? 0 : inputMessages.filter(message => message.role === 'user').length
     const publishedHistory = sidePath ? undefined : proveRewindHistory(inputMessages)
     if (!sidePath) {
@@ -648,6 +673,14 @@ export class PromptEngine {
       const msg = oaiMessages[i]!
       const anchorKey = msg.role === 'user' && !isSystemReminder(msg.content) ? FrozenAnchors.key(msg, occurrences) : undefined
       if (anchorKey) liveAnchors.add(anchorKey)
+      if (!sidePath && anchorKey && this.renderState.protects(anchorKey, i)) {
+        const content = this.renderState.render(anchorKey, msg, i)
+        const anchor = this.renderState.anchor(anchorKey)
+        if (i === lastUserIdx) this.cachedAppendix = anchor?.suffix ?? ''
+        this.anchors.remember(anchorKey, msg, anchor?.prefix ?? '', anchor?.suffix ?? '', anchor?.legacyText ?? (anchor ? undefined : content as string), true)
+        result.push({ role: 'user', content } as OaiMessage)
+        continue
+      }
       // The active last-user anchor may be rendered directly (instead of
       // rebuilding FRESH) only when it still belongs to the CURRENT execution
       // boundary: its occurrence key must equal the last-user key from the
@@ -690,7 +723,7 @@ export class PromptEngine {
               || this.frozenPendingMerged.has(this.cachedFreshForUser))
           this.lastMessageCount = oaiMessages.length
           this.lastMessageHash = msgHash
-          if (userContent !== this.cachedFreshForUser || isDuplicate) {
+          if (userContent !== this.cachedFreshForUser || isDuplicate || !activeBoundaryMatches || this.rebuildActiveAnchor) {
             // New user message boundary — apply any pending frozen base update.
             // rebuildFrozenBase() defers the volatileBlock swap to this point
             // so that tool-call turns within the same user message keep using
@@ -860,25 +893,22 @@ export class PromptEngine {
         }
       },
       onExecutionSnapshot: sidePath ? undefined : proof => {
-        if (this.rewindAuthorization) {
-          if (!this.commitExecutionSnapshot) throw new LocalWorkerPolicyError('回退授权缺少耐久提交通道；请求未发送')
-          const snapshot = { ...this.exportFrozenSnapshot(), executionSnapshot: proof, publishedUserCount, publishedHistory, rewindAuthorization: undefined }
-          return this.commitExecutionSnapshot(snapshot).then(() => {
-            this.publishedUserCount = publishedUserCount
-            this.publishedHistory = publishedHistory
-            this.executionSnapshot = proof
-            this.rewindAuthorization = undefined
-            this.toolCatalogPublished = true
-          })
+        this.renderState.validate(candidate!)
+        if (this.rewindAuthorization && !this.commitExecutionSnapshot) throw new LocalWorkerPolicyError('回退授权缺少耐久提交通道；请求未发送')
+        const { rewindAuthorization: _authorization, ...rendered } = candidate!.snapshot
+        const snapshot = { ...rendered, executionSnapshot: proof, publishedUserCount, publishedHistory }
+        const finish = () => {
+          this.publishedUserCount = publishedUserCount
+          this.publishedHistory = publishedHistory
+          this.executionSnapshot = proof
+          this.rewindAuthorization = undefined
+          this.toolCatalogPublished = true
+          try { this.onFrozenChanged?.() } catch { /* publication is already committed */ }
         }
-        this.publishedUserCount = publishedUserCount
-        this.publishedHistory = publishedHistory
-        this.executionSnapshot = proof
-        this.rewindAuthorization = undefined
-        this.toolCatalogPublished = true
-        try { this.onFrozenChanged?.() } catch { /* persistence cannot break dispatch */ }
+        return this.renderState.commit(candidate!, snapshot, this.commitExecutionSnapshot, finish)
       },
     }
+    const candidate = sidePath ? undefined : this.renderState.capture(this.captureFrozenSnapshot(), proveRewindHistory(request.messages))
     if (!sidePath && this.rewindAuthorization) {
       const authorization = { ...this.rewindAuthorization, history: proveRewindHistory(request.messages) }
       request.rewindAuthorizationId = authorization.cacheGenerationId
@@ -1029,6 +1059,7 @@ export class PromptEngine {
     return this.cachedAppendix
   }
   updateSessionMemory(block: string): void {
+    if (block === (this.sessionMemoryOverride ?? this.config.volatileCtx.sessionMemoryBlock)) return
     this.sessionMemoryOverride = block
     this.rebuildFrozenBase()
     this.invalidateFreshCache()
@@ -1158,6 +1189,7 @@ export class PromptEngine {
   }
 
   setIntentRetrievalRoute(route: string | null): void {
+    if ((route ?? undefined) === this.intentRetrievalRoute) return
     this.intentRetrievalRoute = route ?? undefined
     this.invalidateFreshCache()
   }
@@ -1504,13 +1536,13 @@ export class PromptEngine {
    * Cache-event counters for cache-log breadcrumbs (P2-6).
    * Cumulative since engine creation — callers diff across turns.
    */
-  getCacheEventStats(): { volatileSwaps: number; frozenClamps: number; frozenFallbackRebuilds: number; collapseWatermark: number; toolsUpdates: number } {
+  getCacheEventStats(): { volatileSwaps: number; frozenClamps: number; frozenFallbackRebuilds: number; collapseWatermark: number; toolsUpdates: number; renderRevision: number } {
     return {
       volatileSwaps: this.volatileSwapCount,
       frozenClamps: this.frozenSnapshotClamps,
       frozenFallbackRebuilds: this.frozenFallbackRebuilds,
       collapseWatermark: this.collapseWatermark,
-      toolsUpdates: this.toolsUpdateCount,
+      toolsUpdates: this.toolsUpdateCount, renderRevision: this.renderState.buildRevision,
     }
   }
 

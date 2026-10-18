@@ -433,7 +433,7 @@ async function verifyCompactionRecovery(context: TestContext, entry: 'automatic'
     if (persistence === 'final-auth-failure') {
       await assert.rejects(compact(), error => isSnapshotDirectoryCollision(error, snapshotPath!))
       assert.deepEqual(client.getMainPrefixProof!(), published)
-      engine.buildOaiRequest(session.getMessages())
+      assert.throws(() => engine.buildOaiRequest(session.getMessages()), /prefix diverged at source/)
       await persist!.drainFrozenSnapshots()
       const frozenPath = join(dirname(persist!.getFilePath()), 'compaction-fixture.frozen.json')
       assert.ok(JSON.parse(readFileSync(frozenPath, 'utf8')).pendingCompaction,

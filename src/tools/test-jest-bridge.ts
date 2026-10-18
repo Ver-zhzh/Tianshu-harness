@@ -3,7 +3,7 @@ import { pathToFileURL } from 'node:url'
 import { join } from 'node:path'
 import { jestProjectIdentitySource } from './test-project-identity.js'
 
-export function createJestBridge(directory: string, binding: { root: string; origin: string; cwd: string; runId: string; config?: string; configLoader: string; sequencer: string; reporters: Array<string | [string, unknown]>; processor?: string }) {
+export function createJestBridge(directory: string, binding: { root: string; origin: string; cwd: string; runId: string; config?: string; projects?: string[]; configLoader: string; sequencer: string; reporters: Array<string | [string, unknown]>; processor?: string }) {
   const report = join(directory, 'jest.json'), inventory = join(directory, 'inventory.json'), selected = join(directory, 'selected.json')
   const reporter = join(directory, 'observer.cjs'), sequencer = join(directory, 'sequencer.mjs'), bridge = join(directory, 'jest.config.cjs')
   const identity = jestProjectIdentitySource(binding.root, join(directory, 'identities.json'))
@@ -40,6 +40,6 @@ require('node:fs').writeFileSync(${JSON.stringify(join(directory, 'processed.jso
   writeFileSync(bridge, `const {readInitialOptions}=require(${JSON.stringify(binding.configLoader)});
 module.exports=async()=>{const {config,configPath}=await readInitialOptions(${JSON.stringify(binding.config)}, {packageRootOrConfig:${JSON.stringify(binding.cwd)}});
 const originalRoot=config.rootDir??(configPath?require('node:path').dirname(configPath):${JSON.stringify(binding.cwd)});
-return {...config,rootDir:originalRoot,...(config.projects?{projects:config.projects.map(p=>typeof p==='object'?{...p,rootDir:p.rootDir??originalRoot}:p)}:{}),testSequencer:${JSON.stringify(sequencer)},testResultsProcessor:${JSON.stringify(processor)},reporters:[...${JSON.stringify(reporters)},${JSON.stringify(reporter)}]};};`, { mode: 0o600 })
+return {...config,rootDir:originalRoot,...(${JSON.stringify(binding.projects)}?{projects:${JSON.stringify(binding.projects)}}:config.projects?{projects:config.projects.map(p=>typeof p==='object'?{...p,rootDir:p.rootDir??originalRoot}:p)}:{}),testSequencer:${JSON.stringify(sequencer)},testResultsProcessor:${JSON.stringify(processor)},reporters:[...${JSON.stringify(reporters)},${JSON.stringify(reporter)}]};};`, { mode: 0o600 })
   return { report, inventory, selected, reporter, sequencer, bridge }
 }

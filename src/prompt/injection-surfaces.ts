@@ -28,7 +28,7 @@
  *
  * - `system-static`：`buildSystemPrompt(staticCtx)`，只含静态锚。
  * - `trailer-frozen`：`buildStableVolatileBlock` 的产物，挂在**每条** user 消息
- *   前面；历史消息用它落下来的快照（`frozenUserMerged`），故块内字段一旦变化
+ *   前面；历史消息用已发布的冻结渲染快照（v2 anchors / v1 merged），故块内字段一旦变化
  *   就是全量重建，只有 session-constant 字段允许在此。
  * - `trailer-fresh`：同一函数带完整 ctx 的产物，每个 user 边界重建一次并缓存
  *   （`cachedFreshForUser`），该边界内的后续 tool 轮复用缓存 → 1 次 user 消息

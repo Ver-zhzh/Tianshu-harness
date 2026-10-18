@@ -1,3 +1,4 @@
+import { registerRepairPrefixCommand } from './repair-prefix.js'
 import type { AgentLoop } from '../agent/loop.js'
 import type { SessionContext } from '../agent/context.js'
 import { catalogMetaFor } from './command-catalog.js'
@@ -4005,6 +4006,7 @@ export function registerTuiSlashCommands(app: TuiApp, ctx: BootstrapContext): vo
   // 与 /clear 同走 register 形式：busy 守卫与清屏需要 app 句柄。实现在
   // new-session.ts（独立模块，本文件是点名巨石，只降不升）。
   registerNewSessionCommand(app, ctx)
+  registerRepairPrefixCommand(app, ctx)
 
   // 经 SIGINT 走 main.ts 的统一 shutdown（app.dispose → ctx.shutdown →
   // 退出摘要 + resume 指引 → process.exit）。直接调 ctx.shutdown() 不会退出

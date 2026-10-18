@@ -1,3 +1,4 @@
+import { isContinuityMaintenance } from './continuity-recovery.js'
 import { withExecutionContinuity } from '../api/execution-continuity.js'
 import { CourseEpisodes } from './course-episodes.js'
 import { WorkProgressFacts, computeRepeatedVerificationSignal } from './work-progress-facts.js'
@@ -175,8 +176,6 @@ export type AgentRunOutcome = 'completed' | 'skipped-already-running'
 
 export { formatActivePlanPointer }
 
-
-
 /** Debounce before an idle compaction pass fires after a turn settles.
  *  60s：典型「读完回答→打下一条」节奏在 20–60s 内，过短的 debounce 会让快速
  *  追问频繁 abort 进行中的 LLM 压缩（浪费已花的压缩 tokens）；真正离开的场景
@@ -192,7 +191,7 @@ export class AgentLoop {
   }
   compactContextBudget(force = false): Promise<boolean> { return this.requestContext.compact(force) }
   async compactContext(): Promise<boolean> {
-    if (this._running) throw new Error('请等待当前任务结束后整理上下文')
+    if (this.isRunning()) throw new Error('请等待当前任务结束后整理上下文')
     if (!this.requestContext.getBudgetPolicy()) throw new Error('无法确定模型上下文窗口，请检查模型的 contextWindow 配置后重试整理')
     this._running = true
     try {
@@ -983,7 +982,6 @@ export class AgentLoop {
       ...(process.env['RIVET_SPEC_OBSERVE'] === '1' ? { speculativeObserve: true } : {}),
     })
 
-
     // Physarum + Immune system — construction only, DB reads deferred to warmupMemories() (S9)
     const meridianDb = this.config.meridianIndexer?.getDb()
     const physarum = new PhysarumEngine(meridianDb)
@@ -1198,7 +1196,6 @@ export class AgentLoop {
   buildRuntimeSnapshot(extra?: Partial<RuntimeHookSnapshot>): RuntimeHookSnapshot {
       return buildRuntimeSnapshot(this, extra);
   }
-
 
   /** Capture an agent's departure mark — sealed into the starmap at session close. */
   captureLeaveMark(mark: import('../tools/types.js').LeaveMarkInput): void {
@@ -2646,11 +2643,12 @@ export class AgentLoop {
   }
 
   isRunning(): boolean {
-    return this._running
+    return this._running || isContinuityMaintenance(this)
   }
 
   activeInputOrigin: import('./input-origin.js').InputOrigin = 'human'
   async run(userInput: string, callbacks: AgentCallbacks, images?: string[], options?: import('./input-origin.js').InputOptions): Promise<AgentRunOutcome> {
+    if (isContinuityMaintenance(this)) throw new Error('会话正在修复前缀，请等待完成')
     if (this._running) return 'skipped-already-running'
     // §4：新 run 丢弃上一轮的改道卡候选——卡片只对当轮投递有效，绝不补弹旧卡。
     this.decisionShifts.discard('run-or-flood')

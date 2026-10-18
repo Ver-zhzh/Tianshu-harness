@@ -153,7 +153,7 @@ test('committed rewind survives restart; sealed edits are rejected, legacy resum
   const sealedClient = makeClient()
   sealedClient.restoreExecutionSnapshot!(alteredSnapshot.executionSnapshot!)
   const sealedEngine = new PromptEngine({ ...configuration, inheritFrozenFrom: alteredSnapshot })
-  await assert.rejects(sealedClient.stream(sealedEngine.buildOaiRequest(restartedPersist.loadOai()), callbacks), /prefix diverged at source/)
+  assert.throws(() => sealedEngine.buildOaiRequest(restartedPersist.loadOai()), /prefix diverged at source/)
   assert.equal(sends, 3)
   assert.deepEqual(sealedClient.getMainPrefixProof!(), alteredSnapshot.executionSnapshot)
   const { publishedHistory: _history, publishedUserCount: _count, ...legacySnapshot } = alteredSnapshot

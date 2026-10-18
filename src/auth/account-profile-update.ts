@@ -31,7 +31,12 @@ export async function updateAccountProfile(accessToken: string, input: AccountPr
         method: 'POST', headers: { ...accountHeaders(), Authorization: `Bearer ${accessToken}` },
         body: JSON.stringify(input), signal: AbortSignal.timeout(timeoutMs),
       })
-      const body = await response.json() as { ok?: boolean; error?: string }
+      let body: { ok?: boolean; error?: string }
+      try { body = await response.json() as typeof body }
+      catch (error) {
+        if (response.status >= 400 && response.status < 500) return { ok: false, error: 'profile_update_failed' }
+        throw error
+      }
       if (response.ok && body.ok === true) return { ok: true }
       if (!lastAttempt && response.status >= 500) {
         await new Promise(resolve => setTimeout(resolve, retryDelay))

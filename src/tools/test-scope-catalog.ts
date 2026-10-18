@@ -20,9 +20,17 @@ export function testOption(args: readonly string[], ...keys: string[]): string |
   for (let i = 0; i < args.length; i++) for (const key of keys) if (args[i] === key || args[i]!.startsWith(key + '=')) return args[i]!.includes('=') ? args[i]!.slice(key.length + 1) : args[i + 1]
   return undefined
 }
+export function testOptionValues(args: readonly string[], key: string): string[] {
+  const values: string[] = []
+  for (let i = 0; i < args.length; i++) {
+    if (args[i]!.startsWith(key + '=')) values.push(args[i]!.slice(key.length + 1))
+    else if (args[i] === key) while (args[i + 1] && !args[i + 1]!.startsWith('-')) values.push(args[++i]!)
+  }
+  return values
+}
 export function removeTestOptions(args: readonly string[], keys: readonly string[]): string[] {
   const result: string[] = []
-  for (let i = 0; i < args.length; i++) { const key = args[i]!.split('=')[0]!; if (keys.includes(key)) { if (!args[i]!.includes('=')) { i++; if (key === '--reporters') while (args[i+1] && !args[i+1]!.startsWith('-')) i++ }; continue } result.push(args[i]!) }
+  for (let i = 0; i < args.length; i++) { const key = args[i]!.split('=')[0]!; if (keys.includes(key)) { if (!args[i]!.includes('=')) { i++; if (key === '--reporters' || key === '--projects') while (args[i+1] && !args[i+1]!.startsWith('-')) i++ }; continue } result.push(args[i]!) }
   return result
 }
 export function scopePreparationTimeout(deadline: number): number { const remaining = deadline - Date.now(); if (remaining <= 0) throw new Error('scope_discovery_budget_exhausted'); return Math.min(5000, remaining) }

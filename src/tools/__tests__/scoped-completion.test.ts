@@ -130,7 +130,11 @@ test('Node reporter ENV/CLI pairs and native shards preserve user output and com
     assert.ok(readFileSync(join(f.cwd, 'user.log'), 'utf8').length)
     assert.ok(readFileSync(join(f.cwd, 'env.log'), 'utf8').length)
     const repair = await RUN_TESTS_TOOL.execute({ cwd: f.cwd, toolUseId: 'node-shard-capability', input: { files: [f.file], shard: false } })
-    assert.match(repair.content, /node_shard_override_unavailable/)
+    assert.equal(repair.verification?.coverage?.complete, true, JSON.stringify(repair.verification))
+    assert.deepEqual(repair.verification?.coverage?.files.map(f => f.path), [f.file])
+    pkg.scripts.test += ' ' + f.file; f.write('package.json', pkg)
+    const fixed = await RUN_TESTS_TOOL.execute({ cwd: f.cwd, toolUseId: 'node-fixed-shard', input: { files: [f.file], shard: false } })
+    assert.match(fixed.content, /node_shard_override_unavailable/)
     pkg.scripts.test = 'node --test --test-reporter=spec ' + f.file; f.write('package.json', pkg)
     if (original === undefined) delete process.env.NODE_OPTIONS; else process.env.NODE_OPTIONS = original
     const implicit = await RUN_TESTS_TOOL.execute({ cwd: f.cwd, toolUseId: 'node-implicit-stdout', input: { files: [f.file] } })
@@ -173,6 +177,21 @@ test('Jest duplicate unnamed declaration slots remain distinct and can be reveri
     const result = await RUN_TESTS_TOOL.execute({ cwd: f.cwd, toolUseId: 'identical-projects', input: { files: [f.file], projects: [] } })
     assert.equal(result.verification?.coverage?.complete, true, JSON.stringify(result.verification))
     assert.equal(new Set(result.verification?.coverage?.files.map(f => f.project)).size, 2)
+    assert.deepEqual(assessImpactedTestCoverage([f.file], [result.verification!], () => true, f.cwd).uncovered, [])
+  } finally { f.dispose() }
+})
+
+test('Jest explicit project config paths and CLI reporter list retain scopes and output', { skip: !available('jest') }, async () => {
+  const f = fixture('jest')
+  try {
+    for (const name of ['one', 'two']) f.write(name + '.config.cjs', "module.exports={displayName:'" + name + "',testMatch:['**/*.test.cjs']};")
+    f.write('observer.cjs', "require('fs').appendFileSync('reporter.log','loaded ');module.exports=class{onRunComplete(){require('fs').appendFileSync('reporter.log','done')}};")
+    const pkg = JSON.parse(readFileSync(join(f.cwd, 'package.json'), 'utf8'))
+    pkg.scripts.test += ' --projects one.config.cjs two.config.cjs --reporters default ./observer.cjs'; f.write('package.json', pkg)
+    const result = await RUN_TESTS_TOOL.execute({ cwd: f.cwd, toolUseId: 'project-paths', input: { files: [f.file] } })
+    assert.equal(result.verification?.coverage?.complete, true, JSON.stringify(result.verification))
+    assert.equal(result.verification?.coverage?.files.length, 2)
+    assert.match(readFileSync(join(f.cwd, 'reporter.log'), 'utf8'), /done/)
     assert.deepEqual(assessImpactedTestCoverage([f.file], [result.verification!], () => true, f.cwd).uncovered, [])
   } finally { f.dispose() }
 })

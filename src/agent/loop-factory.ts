@@ -187,7 +187,8 @@ export function createTurnStreamController(self: AgentLoop): TurnStreamControlle
           provider: info.usage?.observation?.wire?.provider ?? info.provider,
           receivedChars: info.receivedChars,
           elapsedMs: info.elapsedMs,
-          errorName: info.errorName,
+          errorName: info.errorName, continuityFailure: info.continuityFailure,
+          frozenBuildRevision: self.config.promptEngine.getCacheEventStats?.().renderRevision,
           errorMessage: info.errorMessage.slice(0, 300),
         }
         try {

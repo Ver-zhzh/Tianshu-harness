@@ -16,6 +16,7 @@ export interface StreamAttemptAbortedInfo {
   receivedChars: number
   /** Milliseconds from stream start to the abort. */
   elapsedMs: number
+  continuityFailure?: import('./continuation-prefix.js').ContinuityFailureDetails
   errorName: string
   errorMessage: string
 }

@@ -69,6 +69,23 @@ test('4xx 是明确拒绝，不重试', async () => {
   assert.equal(calls.length, 1)
 })
 
+test('非 JSON 的 4xx 同样是明确拒绝，不重试', async () => {
+  const { calls, impl } = stubFetchSequence([new Response('Unauthorized', { status: 401 })])
+  const result = await updateAccountProfile('at', { name: 'x' }, { fetchImpl: impl, retryDelayMs: 0 })
+  assert.deepEqual(result, { ok: false, error: 'profile_update_failed' })
+  assert.equal(calls.length, 1)
+})
+
+test('只有带头像操作放宽单次请求超时', async ctx => {
+  const timeouts: number[] = []
+  const original = AbortSignal.timeout.bind(AbortSignal)
+  ctx.mock.method(AbortSignal, 'timeout', (ms: number) => { timeouts.push(ms); return original(ms) })
+  const { impl } = stubFetchSequence([new Response('{"ok":true}')])
+  await updateAccountProfile('at', { name: 'x' }, { fetchImpl: impl })
+  await updateAccountProfile('at', { name: 'x', avatar: 'data:image/png;base64,AA==' }, { fetchImpl: impl })
+  assert.deepEqual(timeouts, [10_000, 30_000])
+})
+
 test('200 但 body.ok 非真按拒绝处理（不重试），error 透传', async () => {
   const { calls, impl } = stubFetchSequence([new Response(JSON.stringify({ ok: false, error: 'name_taken' }), { status: 200 })])
   const result = await updateAccountProfile('at', { name: 'x' }, { fetchImpl: impl, retryDelayMs: 0 })

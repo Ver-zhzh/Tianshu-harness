@@ -8,7 +8,7 @@ import { join, relative, resolve } from 'node:path'
 import { installedTestRunner, resolveRunnerDependency } from './test-runner-module.js'
 import { classifyVerificationCommand, type VerificationInvocation } from './verification-command.js'
 import { createJestBridge } from './test-jest-bridge.js'
-import { createScopeCatalog, discoveryArguments, invocationEnvironment, nativeDiscovery, readScopeList, removeTestOptions, runnerArguments, scopePreparationTimeout, scopeFile, testOption, type TestScope } from './test-scope-catalog.js'
+import { createScopeCatalog, discoveryArguments, invocationEnvironment, nativeDiscovery, readScopeList, removeTestOptions, runnerArguments, scopePreparationTimeout, scopeFile, testOption, testOptionValues, type TestScope } from './test-scope-catalog.js'
 import { normalizedProjectConfig, testScopeDigest } from './test-project-identity.js'
 import { parseTestSelection } from './test-selection.js'
 import { testRunnerPreload } from './test-runner-preload.js'
@@ -21,7 +21,8 @@ export function prepareFrameworkScopes(directory: string, cwd: string, root: str
   const overrides = invocationEnvironment(invocation), standardOverrides = standard.runner === invocation.runner ? invocationEnvironment(standard) : {}
   if (overrides.NODE_OPTIONS !== undefined) throw new Error('scope_env_override: NODE_OPTIONS 在脚本内部被覆盖；请移到项目的执行环境配置以保留内部采证预加载。')
   const conditionKeys = ['--root','--dir','--environment','--env','--pool','--setupFiles','--setupFilesAfterEnv','--testMatch','--testRegex','--projects']
-  const canonical = (!standard.runner || standard.runner === invocation.runner) && config === standardConfig && testScopeDigest(overrides) === testScopeDigest(standardOverrides) && conditionKeys.every(key => testOption(args, key) === testOption(standard.resolvedArgv ?? standard.argv, key))
+  const canonicalProjects = JSON.stringify(testOptionValues(args, '--projects')) === JSON.stringify(testOptionValues(standard.resolvedArgv ?? standard.argv, '--projects'))
+  const canonical = canonicalProjects && (!standard.runner || standard.runner === invocation.runner) && config === standardConfig && testScopeDigest(overrides) === testScopeDigest(standardOverrides) && conditionKeys.every(key => testOption(args, key) === testOption(standard.resolvedArgv ?? standard.argv, key))
   const environment = Object.entries({ ...getResolvedEnv(cwd), ...overrides }).filter(([key]) => !/^(?:RIVET_HOME$|RIVET_SESSION_DIR$|RIVET_TEST_COMPLETION_RUN$|PWD$|OLDPWD$|SHLVL$|_$|NODE_TEST_CONTEXT$)/.test(key)).sort().map(([key, value]) => [key, value?.split(root).join('<repository>')])
   const origin = JSON.stringify([process.platform, process.versions.node, testScopeDigest(environment), invocation.runner, relative(root, cwd).replaceAll('\\', '/'), config ?? '<default>',
     discoveryArguments(invocation).filter(arg => arg !== '--json').map(arg => arg.split(root).join('<repository>'))])
@@ -37,9 +38,10 @@ export function prepareFrameworkScopes(directory: string, cwd: string, root: str
     const native = nativeConfig(installed.entry, parseTestSelection(args).rest.filter(arg => !invocation.targets.includes(arg)), cwd, deadline, overrides)
     const originalSequencer = native.globalConfig?.testSequencer
     if (!originalSequencer) throw new Error('scope_sequencer_unresolved')
-    jest = createJestBridge(directory, { root, cwd, origin, runId, config, configLoader: loader, sequencer: originalSequencer,
+    const projectPaths = testOptionValues(args, '--projects').map(path => resolve(cwd, path))
+    jest = createJestBridge(directory, { root, cwd, origin, runId, config: config ?? projectPaths[0], projects: projectPaths.length ? projectPaths : undefined, configLoader: loader, sequencer: originalSequencer,
       reporters: native.globalConfig?.reporters ?? ['default'], processor: native.globalConfig?.testResultsProcessor })
-    const actualConfig = nativeConfig(installed.entry, [...removeTestOptions(discoveryArguments(invocation), ['--config', '-c']), '--config', jest.bridge], cwd, deadline, overrides)
+    const actualConfig = nativeConfig(installed.entry, [...removeTestOptions(discoveryArguments(invocation), ['--config', '-c', '--projects']), '--config', jest.bridge], cwd, deadline, overrides)
     if (!Array.isArray(native.configs) || native.configs.length !== actualConfig.configs?.length) throw new Error('scope_changed')
     const identities = native.configs.map((config: any, slot: number) => {
       const digest = testScopeDigest(normalizedProjectConfig(config, root))
@@ -49,7 +51,7 @@ export function prepareFrameworkScopes(directory: string, cwd: string, root: str
     writeFileSync(join(directory, 'identities.json'), JSON.stringify(identities), { mode: 0o600 })
     if (cached) scopes = cached
     else {
-      nativeDiscovery(installed.entry, [...removeTestOptions(discoveryArguments(invocation), ['--config', '-c']), '--config', jest.bridge, '--listTests', '--passWithNoTests'], cwd, deadline, overrides)
+      nativeDiscovery(installed.entry, [...removeTestOptions(discoveryArguments(invocation), ['--config', '-c', '--projects']), '--config', jest.bridge, '--listTests', '--passWithNoTests'], cwd, deadline, overrides)
       scopes = readScopeList(jest.inventory, root)
       rmSync(jest.inventory); rmSync(jest.selected)
     }

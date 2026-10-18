@@ -724,6 +724,8 @@ export function errorCategoryLabel(category: string | undefined): string {
 export function errorRecoveryGuidance(error: unknown): string {
   const c = classifyApiError(error)
   switch (c.category) {
+    case 'request_invariant':
+      return '本地连续性校验受阻，重复发送不会修复；请用 /repair-prefix 检查恢复资格，或保留原会话并用 /logs 导出诊断。执行绑定或源历史异常时禁止重建。'
     case 'rate_limit':
       return '限流/额度不足：稍等片刻再发，或 /model 切轻量档（如 deepseek-v4-flash）；持续 429 先查余额（桌面端 Insights 面板）'
     case 'overloaded':

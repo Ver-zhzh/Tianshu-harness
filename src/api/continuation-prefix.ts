@@ -25,7 +25,7 @@ export interface ContinuationPrefixProof {
 
 export interface RewindGenerationAuthorization {
   version: 1
-  reason: 'explicit_user_rewind' | 'context_limit' | 'explicit_user_compact'
+  reason: 'explicit_user_rewind' | 'context_limit' | 'explicit_user_compact' | 'explicit_projection_recovery'
   cacheGenerationId: string
   model: string
   history: ContinuationPrefixProof['messages']
@@ -35,7 +35,7 @@ export interface RewindGenerationAuthorization {
 export function isRewindGenerationAuthorization(value: unknown): value is RewindGenerationAuthorization {
   if (!value || typeof value !== 'object') return false
   const authorization = value as RewindGenerationAuthorization
-  return authorization.version === 1 && ['explicit_user_rewind', 'context_limit', 'explicit_user_compact'].includes(authorization.reason)
+  return authorization.version === 1 && ['explicit_user_rewind', 'context_limit', 'explicit_user_compact', 'explicit_projection_recovery'].includes(authorization.reason)
     && typeof authorization.cacheGenerationId === 'string' && authorization.cacheGenerationId.length > 0
     && typeof authorization.model === 'string' && authorization.model.length > 0
     && isCompleteExecutionSnapshot(authorization.prior)
@@ -78,6 +78,30 @@ export class ContinuationPrefixError extends LocalWorkerPolicyError {
     super(`worker continuation prefix diverged at ${changed}; request not sent`)
     this.name = 'ContinuationPrefixError'
   }
+}
+
+export interface ContinuityFailureDetails {
+  kind: 'source_history' | 'projection' | 'tools' | 'options' | 'binding' | 'anchor_missing' | 'anchor_mismatch' | 'snapshot_stale' | 'persistence'
+  changed?: string | number
+  beforeChars?: number
+  afterChars?: number
+  deltaChars?: number
+  recovery: 'preview' | 'blocked'
+}
+export function continuityFailureDetails(error: unknown): ContinuityFailureDetails | undefined {
+  if (error instanceof ContinuationPrefixError) {
+    const kind = typeof error.changed === 'number' ? 'projection' : error.changed === 'source' ? 'source_history'
+      : error.changed === 'tools' ? 'tools' : error.changed === 'options' ? 'options' : 'binding'
+    const index = typeof error.changed === 'number' ? error.changed : -1
+    const beforeChars = error.previous.messages[index]?.chars, afterChars = error.next.messages[index]?.chars
+    return { kind, changed: error.changed, beforeChars, afterChars,
+      ...(beforeChars !== undefined && afterChars !== undefined ? { deltaChars: afterChars - beforeChars } : {}),
+      recovery: kind === 'projection' ? 'preview' : 'blocked' }
+  }
+  if (!(error instanceof Error)) return undefined
+  const kind = /已发布锚点缺失/.test(error.message) ? 'anchor_missing' : /已发布锚点与冻结投影/.test(error.message) ? 'anchor_mismatch'
+    : /冻结构建已过期/.test(error.message) ? 'snapshot_stale' : /耐久提交失败/.test(error.message) ? 'persistence' : undefined
+  return kind ? { kind, recovery: kind === 'anchor_missing' || kind === 'anchor_mismatch' ? 'preview' : 'blocked' } : undefined
 }
 
 /** resume 证据门（session-persist）专用：历史请求的模型/凭据/选项证据缺失或不完整。

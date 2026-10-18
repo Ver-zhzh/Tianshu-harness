@@ -17,6 +17,6 @@ export function nodeCompletionOutput(args: readonly string[], options: string, r
   if (/--test-(?:name-pattern|skip-pattern|only|force-exit)(?:[=\s]|$)/.test(options) || parseTestSelection(environment).reason) return undefined
   const injected = ['--test-reporter=' + reporter, '--test-reporter-destination=' + destination]
   if (!reporters.length) injected.push('--test-reporter=spec', '--test-reporter-destination=stdout')
-  else if (!destinations.length) {}
+  else if (!destinations.length) injected.push('--test-reporter-destination=stdout')
   return `${injected.map(arg => JSON.stringify(arg)).join(' ')} ${options}`.trim()
 }

@@ -1,3 +1,4 @@
+import { manageContinuityRecovery } from './session-continuity-recovery.js'
 import { buildWorkerLog, type WorkerLogOptions, type WorkerLog } from './worker-log.js'
 import { SessionTitleCoordinator, titleInput, loadTitleInput, canGenerateTitle, type buildTitleCompletion } from './session-title.js'
 import { legacyReadSkill, legacyWriteSkill, legacyRemoveSkill } from '../skills/skill-management-compat.js'
@@ -38,7 +39,7 @@ import { touchActivity, setActivityPhase, beginRun as beginActivityRun, finishRu
 import { randomUUID } from 'node:crypto'
 import { describeFailure } from '../api/failure-scope.js'
 import { errorRecoveryGuidance } from '../api/error-classifier.js'
-import { isColdStartEvidenceError } from '../api/continuation-prefix.js'
+import { isColdStartEvidenceError, continuityFailureDetails } from '../api/continuation-prefix.js'
 import { debugLog } from '../utils/debug.js'
 import { collectPostBoundaryEditIds, type BlockedRewindFile } from '../agent/file-history.js'
 import { makeOwnershipGuard } from '../agent/checkpoint.js'
@@ -397,6 +398,8 @@ export interface ManagedAgent {
    */
   getCockpitSnapshot?(): import('../tui/cockpit/types.js').CockpitSnapshot | null
   /** Rewind: return the current message list (for listing rewind points). */
+  previewContinuityRecovery?(): Promise<import('../agent/continuity-recovery.js').ContinuityRecoveryPlan>
+  applyContinuityRecovery?(recoveryId: string): Promise<import('../agent/continuity-recovery.js').ContinuityRecoveryPlan>
   getMessages(): OaiMessage[]
   /**
    * Outcome of the boot-time LLM history restore (sidecar restart recovery).
@@ -2786,11 +2789,12 @@ export class RuntimeSessionManager {
    * guidance = errorRecoveryGuidance 的「下一步」指引（此前只有 TUI 消费，
    * 桌面 error 块只有类别标签 + 原文）；AbortError 是用户动作不是故障，不给指引。
    */
-  private failureFields(err: unknown): { scope?: 'local' | 'provider'; kind?: string; guidance?: string } {
+  private failureFields(err: unknown): { scope?: 'local' | 'provider'; kind?: string; guidance?: string; continuity?: ReturnType<typeof continuityFailureDetails> } {
     try {
       // resume 证据门（冷启动证据缺失）：不是故障，是待用户抉择——kind 供桌面渲染
       // 「以当前配置继续」动作，guidance 说清代价（缓存全量重建一次）。
       if (isColdStartEvidenceError(err)) return { kind: 'cold_start_evidence', guidance: '可显式开始新会话；或点「以当前配置继续」放弃连续性证明——缓存将全量重建一次，之后恢复正常。' }
+      if (continuityFailureDetails(err)) return { scope: 'local', kind: 'continuity_projection', continuity: continuityFailureDetails(err), guidance: errorRecoveryGuidance(err) }
       const f = describeFailure(err)
       const guidance = err instanceof Error && err.name === 'AbortError'
         ? undefined
@@ -2802,6 +2806,10 @@ export class RuntimeSessionManager {
     } catch { return {} }
   }
 
+  async continuityRecovery(id: string, recoveryId?: string) {
+    const session = this.sessions.get(id)
+    return session ? manageContinuityRecovery(session, () => this.ensureAgentAsync(session), () => this.sessions.get(id) === session, recoveryId) : undefined
+  }
   /** 阶段 2 — 读取会话恢复检查点（诊断 / 恢复入口用）；无台账时 undefined。 */
   getRecoveryCheckpoint(id: string): Promise<import('./recovery-journal.js').RecoveryCheckpoint | undefined> {
     return this.recoveryJournal?.load(id) ?? Promise.resolve(undefined)

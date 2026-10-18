@@ -105,6 +105,9 @@ async function rejectFork(fixture: Awaited<ReturnType<typeof createFixture>>, tu
   assert.ok(failed)
   assert.equal(failed.status, 'aborted')
   assert.equal(failed.errorName, 'ContinuationPrefixError')
+  assert.equal((failed.continuityFailure as { kind: string }).kind, 'projection')
+  assert.equal((failed.continuityFailure as { changed: number }).changed, 0)
+  assert.equal(typeof failed.frozenBuildRevision, 'number')
   assert.equal(failed.receivedChars, 0)
   assert.equal(fixture.session.getCacheHistory().length, 1, 'failed attempts are not successful main-turn cache samples')
   return failed

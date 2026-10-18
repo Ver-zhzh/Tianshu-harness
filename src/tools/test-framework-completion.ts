@@ -111,8 +111,9 @@ export function prepareFrameworkCompletion(leaf: Leaf, invocation: VerificationI
           if (!scoped.candidatesValid()) { proof.complete = false; proof.scopeError = 'scope_changed' }
           if (!scoped.outputComplete(exitCode)) { proof.complete = false; proof.scopeError = 'output_error' }
           proof.complete &&= !workspaceChanged && (exitCode === 0 || exitCode > 0 && proof.files.some(file => file.outcome === 'failed'))
-          if (proof.complete && !proof.filtered) scoped.cache()
-          return readCompletionCoverage({ ...proof, runId, cwd, repositoryRoot: canonicalTestPath(repositoryRoot ?? root), executionRoot: root, workspaceChanged })
+          const coverage = readCompletionCoverage({ ...proof, runId, cwd, repositoryRoot: canonicalTestPath(repositoryRoot ?? root), executionRoot: root, workspaceChanged })
+          if (coverage?.complete && !coverage.filtered) scoped.cache()
+          return coverage
         } catch { return { version: 3, catalog: scoped.catalog, selectedScopes: [], runId, runner: invocation.runner!, cwd, repositoryRoot: canonicalTestPath(repositoryRoot ?? root), executionRoot: root,
           executionComplete: false, workspaceChanged, scopeError: 'scope_receipt_invalid', complete: false, filtered: false, files: [] } }
       },
@@ -120,7 +121,7 @@ export function prepareFrameworkCompletion(leaf: Leaf, invocation: VerificationI
     }
   } catch (error) {
     if (directory) rmSync(directory, { recursive: true, force: true })
-    const reason = error instanceof Error && /^(?:scope_|project_identity_|missing_dependency)/.test(error.message) ? error.message : 'scope_discovery_failed'
+    const reason = error instanceof Error && /^(?:forced_exit_|scope_|project_identity_|missing_dependency)/.test(error.message) ? error.message : 'scope_discovery_failed'
     return { command: leaf.wrap(leaf.command), env: {}, preparationError: reason, read: () => ({ version: 2, runner: invocation.runner!, runId: randomUUID(), cwd, repositoryRoot: canonicalTestPath(repositoryRoot ?? cwd), complete: false, filtered: false, scopeError: reason, files: [] }), dispose() {} }
   }
 }

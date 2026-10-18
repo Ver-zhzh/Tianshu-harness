@@ -149,7 +149,7 @@ export function prepareCompletionCapture(command: string, cwd: string, shellKind
               success &&= end.success && receipt.success
               if (receipt.totals) for (const key of Object.keys(totals) as Array<keyof typeof totals>) totals[key] += receipt.totals[key]
               const selected = classifyVerificationCommand(['node', ...start.args].map(shellWord).join(' ')).targets
-              for (const target of parseTestSelection(start.args).shard ? [] : selected) {
+              for (const target of (parseTestSelection(start.args).shard?.total ?? 1) > 1 ? [] : selected) {
                 if (/[*?[]/.test(target)) continue
                 const path = resolve(start.cwd, target)
                 if (!receipt.files.some(file => realpathSync(resolve(binding.root, file.path)) === realpathSync(path))) executionComplete = false

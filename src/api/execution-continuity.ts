@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { createHash, randomUUID } from 'node:crypto'
-import { proveWirePrefix, assertCanonicalSourcePrefix, isCompleteExecutionSnapshot, isRewindGenerationAuthorization, ContinuationPrefixError, LocalWorkerPolicyError, type ContinuationPrefixProof, type RewindGenerationAuthorization } from './continuation-prefix.js'
+import { proveWirePrefix, continuityFailureDetails, assertCanonicalSourcePrefix, isCompleteExecutionSnapshot, isRewindGenerationAuthorization, ContinuationPrefixError, LocalWorkerPolicyError, type ContinuationPrefixProof, type RewindGenerationAuthorization } from './continuation-prefix.js'
 import { captureNativeProof, isProvenNativeContinuation, type NativeSourceBoundaries } from './native-continuation.js'
 import type { StreamClient, StreamCallbacks } from './stream-client.js'
 import type { OaiChatRequest } from './oai-types.js'
@@ -225,6 +225,7 @@ export function withExecutionContinuity(client: StreamClient, options: Continuit
           get rejectedSend() { return parent?.singleAttempt ? parent.rejectedSend : rejectedSend },
           set rejectedSend(value) { if (parent?.singleAttempt) parent.rejectedSend = value; else rejectedSend = value },
           provider: options.provider, sessionId: sessionId ?? parent?.sessionId, model: options.model, commits: parent?.commits ?? [] }
+        let rejectedContinuity: ReturnType<typeof continuityFailureDetails>
         let comparison = 'baseline_missing'
         let previousMainRequestId: string | undefined
         let requestPrefix: ContinuationPrefixProof | undefined
@@ -306,6 +307,7 @@ export function withExecutionContinuity(client: StreamClient, options: Continuit
             }
           } catch (error) {
             comparison = 'fork'
+            rejectedContinuity = continuityFailureDetails(error)
             throw error
           }
           if (validation) { validation.guards++; return }
@@ -358,7 +360,7 @@ export function withExecutionContinuity(client: StreamClient, options: Continuit
         }
         const observed: StreamCallbacks = validation ? callbacks : { ...callbacks,
           onError: error => { failure = error; callbacks.onError(error) },
-          onStreamAttemptAborted: info => callbacks.onStreamAttemptAborted?.({ ...info, usage: observe(info.usage ?? {}, 'aborted', info) }),
+          onStreamAttemptAborted: info => callbacks.onStreamAttemptAborted?.({ ...info, continuityFailure: rejectedContinuity, usage: observe(info.usage ?? {}, 'aborted', info) }),
           onStopReason: (reason, usage) => {
             callbacks.onStopReason(reason, observe(usage, 'complete'))
           },

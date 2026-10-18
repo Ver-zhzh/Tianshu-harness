@@ -65,6 +65,7 @@ export function classifyVerificationCommand(command: string, cwd?: string, depth
     const arg = argv[i]!
     if (batchRunner) { targets.push(arg); continue }
     if (FILTER.test(arg)) { filtered = true; if (!arg.includes('=')) i++; continue }
+    if (arg === '--test-force-exit') continue
     if (arg === '--test') { nodeTest = true; continue }
     if (arg === '--test-only') { filtered = true; continue }
     if (VALUE_FLAGS.has(arg)) { i++; continue }

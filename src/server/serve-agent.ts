@@ -1,3 +1,4 @@
+import { previewContinuityRecovery, applyContinuityRecovery, withContinuityAvailable } from '../agent/continuity-recovery.js'
 /**
  * Heavy agent assembly for `rivet serve` — loaded via dynamic import after the
  * HTTP listener is up (or on first session), so /health cold-start does not pay
@@ -815,11 +816,8 @@ export function buildManagedAgent(
   // Expose stores and the live model to session-manager; replace stale rebuild entries.
   sessionStoresById.set(sessionId, { stores, cwd, currentModelRef: () => spec.keyId
     ? `${spec.provider.name}:${spec.keyId}:${spec.model.id}` : `${spec.provider.name}:${spec.model.id}` })
-  // Model affinity: a rehydrated session carries the model its prefix cache
-  // was built on (record.model → preferredModelId). Build directly on it so a
-  // resumed conversation never silently lands on the default model. Falls back
-  // to the default only when the preferred id no longer resolves — resumeRun()
-  // gates that case fail-closed before it ever reaches a run.
+  // Rehydrate on the recorded model; resumeRun gates an unresolved preference
+  // before a request can silently use the default model.
   let spec: ResolvedModelSpec =
     (preferredModelId
       ? reload
@@ -870,6 +868,8 @@ export function buildManagedAgent(
     setActivePlan: (plan) => agent.setActivePlan(plan),
     listArtifacts: () => agent.artifactStore?.list() ?? [],
     readArtifact: (artifactId) => agent.artifactStore?.readRaw(artifactId) ?? Promise.resolve(null),
+    previewContinuityRecovery: () => previewContinuityRecovery(agent),
+    applyContinuityRecovery: recoveryId => applyContinuityRecovery(agent, recoveryId),
     getMessages: () => agent.session.getMessages(),
     getHistoryRestore: () => stores.historyRestore,
     replaceMessages: (msgs) => { agent.session.replaceMessages(msgs); agent.config.promptEngine.resetAppendixBaseline() },
@@ -1019,9 +1019,9 @@ export function buildManagedAgent(
       return settled
     },
     // I1: 桌面端议事会入口，直接评审 artifact 中的 council-plan-json。
-    conveneCouncil: (input) => conveneCouncilOnCoordinator(agent, stores.refs.coordinator, stores.refs, input),
+    conveneCouncil: (input) => withContinuityAvailable(agent, () => conveneCouncilOnCoordinator(agent, stores.refs.coordinator, stores.refs, input)),
     // 用户主动派后台子代理：独立 AbortSignal，跑在隔离子会话，不碰主历史。
-    delegateWorker: (input, opts) => delegateWorkerOnCoordinator(stores.refs.coordinator, input, opts),
+    delegateWorker: (input, opts) => withContinuityAvailable(agent, () => delegateWorkerOnCoordinator(stores.refs.coordinator, input, opts)),
     // P0-2: plan_task 成功后 onToolResult 通过此方法读取 TodoStore 发 todo_state SSE
     getTodos: () => stores.refs.todoStore.read(),
     // Hot-inject MCP tools discovered after this agent was built (mid-session
