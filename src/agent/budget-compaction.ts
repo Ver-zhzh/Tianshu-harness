@@ -1,8 +1,9 @@
-import { parseSummaryEnvelope, SUMMARY_ENVELOPE_INSTRUCTION } from './compact-summary-envelope.js'
-import type { OaiMessage, OaiChatRequest, OaiContentPart } from '../api/oai-types.js'
+import { parseSummaryEnvelope } from './compact-summary-envelope.js'
+import type { OaiMessage, OaiContentPart } from '../api/oai-types.js'
 import { isSystemReminder } from '../prompt/system-reminder.js'
 import type { StreamClient } from '../api/stream-client.js'
-import { estimateBudgetInput } from '../context/request-budget.js'
+import { estimateBudgetInput, type RequestBudgetPolicy } from '../context/request-budget.js'
+import { buildSummaryRequests, summaryRequestFits } from './budget-summary-request.js'
 import { createHash, randomUUID } from 'node:crypto'
 import { stableStringify } from '../api/stable-json.js'
 
@@ -12,6 +13,8 @@ export interface BudgetCompactionDeps {
   signal?: AbortSignal
   targetTokens?: number
   minReclaimTokens?: number
+  summaryPolicy?: RequestBudgetPolicy
+  summaryMaxTokens?: number
   archive: (messages: OaiMessage[]) => Promise<string | { id: string; images: string[] }>
   commit: (messages: OaiMessage[]) => Promise<void>
   protectedUser?: OaiMessage
@@ -38,19 +41,27 @@ export function budgetCompactionSplit(messages: OaiMessage[], recentBudget?: num
 
 function summaryParts(messages: Array<{ message: OaiMessage; index: number }>): OaiContentPart[] {
   const parts: OaiContentPart[] = []
+  const appendText = (text: string, marker: string) => {
+    for (let start = 0; start < text.length;) {
+      let end = Math.min(text.length, start + 24_000)
+      if (/[\uD800-\uDBFF]/.test(text[end - 1]!) && /[\uDC00-\uDFFF]/.test(text[end] ?? '')) end--
+      parts.push({ type: 'text', text: marker + text.slice(start, end) })
+      start = end
+    }
+  }
   for (const { index, message: m } of messages) {
     const marker = `\n[message:${index} role:${m.role}]\n`
     parts.push({ type: 'text', text: marker })
     if (m.role === 'user' && Array.isArray(m.content)) {
       for (const part of m.content) {
         if (part.type === 'image_url') parts.push(part)
-        else for (let start = 0; start < part.text.length; start += 24_000) parts.push({ type: 'text', text: marker + part.text.slice(start, start + 24_000) })
+        else appendText(part.text, marker)
       }
     }
     else {
       const text = (m.content ?? '') + (m.role === 'assistant' && m.tool_calls ? JSON.stringify(m.tool_calls) : '')
       // Bounded text chunks also handle a single enormous tool result.
-      for (let start = 0; start < text.length; start += 24_000) parts.push({ type: 'text', text: marker + text.slice(start, start + 24_000) })
+      appendText(text, marker)
     }
   }
   return parts
@@ -84,31 +95,14 @@ async function compactBudgetHistoryImpl(messages: OaiMessage[], deps: BudgetComp
   const protectedUsers = new Set([...old.filter(m => m.role === 'user' && (!m.origin || m.origin === 'human' || m.origin === 'legacy_unknown') && !isSystemReminder(m.content)), latestUser, deps.protectedUser].filter((m): m is OaiMessage => !!m))
   const protectedUser = old.filter(m => protectedUsers.has(m))
   const parts = summaryParts(old.map((message, index) => ({ message, index })).filter(({ message }) => !protectedUsers.has(message)))
-  const chunks: OaiContentPart[][] = []
-  let chunk: OaiContentPart[] = []
-  let bytes = 0
-  for (const part of parts) {
-    const size = Buffer.byteLength(JSON.stringify(part))
-    const candidate: OaiMessage = { role: 'user', content: [...chunk, part] }
-    if (chunk.length && (estimateBudgetInput([{ role: 'system', content: SUMMARY_ENVELOPE_INSTRUCTION }, candidate]).inputTokens > 32_000 || bytes + size > 40 * 1024 * 1024)) {
-      chunks.push(chunk); chunk = []; bytes = 0
-    }
-    chunk.push(part); bytes += size
-  }
-  if (chunk.length) chunks.push(chunk)
-  // Fail by doing less: a pathological history must not start unbounded side calls.
-  if (!chunks.length || chunks.length > 64) return false
+  const requests = buildSummaryRequests(parts, deps.model, deps.client, deps.summaryPolicy, deps.summaryMaxTokens)
+  if (!requests) return false
   const summaries: string[] = []
   const signal = deps.signal ? AbortSignal.any([deps.signal, AbortSignal.timeout(180_000)]) : AbortSignal.timeout(180_000)
-  for (const content of chunks) {
+  for (const request of requests) {
     signal.throwIfAborted()
-    const request: OaiChatRequest = { model: deps.model, max_tokens: Math.min(4096, Math.floor(16_384 / chunks.length)), stream: true, response_format: { type: 'json_object' }, diagnostics: { purpose: 'compact_summary' },
-      messages: [
-        { role: 'system', content: SUMMARY_ENVELOPE_INSTRUCTION },
-        { role: 'user', content },
-      ],
-    }
-    if (estimateBudgetInput(request.messages).inputTokens > 32_000) return false
+    if (!summaryRequestFits(request, deps.client, deps.summaryPolicy)) return false
+    const content = request.messages[1]!.content as OaiContentPart[]
     let text = '', error: Error | undefined, stop = ''
     await deps.client.stream(request, {
       onTextDelta: delta => { text += delta }, onThinkingDelta: () => {}, onContentBlock: () => {},

@@ -82,7 +82,7 @@ it('filesystem metadata beside completion receipts does not count as another run
   try {
     const result = spawnSync(capture.command, { cwd: f.cwd, shell: true, encoding: 'utf8', env: { ...process.env, ...capture.env }, timeout: 15_000 })
     assert.equal(result.status, 0, result.stderr || result.error?.message || result.stdout)
-    writeFileSync(join(receiptDirectory(capture.command), '._another.start'), 'filesystem metadata')
+    writeFileSync(join(receiptDirectory(capture.command + ' ' + (capture.env.NODE_OPTIONS ?? '')), '._another.start'), 'filesystem metadata')
     const coverage = capture.read(result.status!)!
     assert.equal(coverage.workspaceChanged, false)
     assert.equal(coverage.executionComplete, true)
@@ -133,7 +133,7 @@ it('missing/foreign completion receipts, changed snapshots and timeouts fail clo
     assert.equal(capture.read(-1)?.complete, false, 'timeout')
     f.write('feature.js', 'export const feature = 1;')
     assert.equal(capture.read(0)?.complete, true, 'fresh again before foreign-receipt check')
-    const dir = receiptDirectory(capture.command)
+    const dir = receiptDirectory(capture.command + ' ' + (capture.env.NODE_OPTIONS ?? ''))
     const receiptName = readdirSync(dir).find(n => !n.startsWith('._') && n.endsWith('.json') && n !== 'seal.json')!
     const path = join(dir, receiptName)
     const receipt = JSON.parse(readFileSync(path, 'utf8'))
@@ -210,7 +210,7 @@ it('receipt persists and deduplicates without runId, and commits exactly once on
     assert.equal((await tool.execute(params)).isError, true)
     assert.equal(calls, 1)
     required = ['src/alpha.test.ts']
-    const failed = { ...meta.coverage!, runId: 'failed', complete: false, files: [{ path: 'src/alpha.test.ts', outcome: 'failed' as const, tests: 1, skipped: 0, cancelled: 0 }] }
+    const failed = { ...meta.coverage!, runId: 'failed', complete: false, totals: undefined, files: [{ path: 'src/alpha.test.ts', outcome: 'failed' as const, tests: 1, skipped: 0, cancelled: 0 }] }
     restored.taskLedger.record({ type: 'verification', command: 'node --test src/alpha.test.ts', status: 'failed', meta: { kind: 'test', scope: 'full', exitCode: 1, coverage: failed } })
     assert.equal((await tool.execute(params)).isError, true)
     assert.equal(calls, 1)

@@ -18,7 +18,7 @@ test('a failed small reclaim does not resummarize on every tool round', async ()
   const recordCompactEvent = session.recordCompactEvent.bind(session)
   session.recordCompactEvent = event => { events++; recordCompactEvent(event) }
   const fake = {
-    persist: {}, artifactStore: {}, config: { client: { stream: async () => { throw new Error('execution client must stay separate') } }, budgetSummaryClient: () => ({ stream: async () => { calls++ } }), promptEngine: { getModel: () => 'deepseek-flash' } },
+    persist: {}, artifactStore: {}, config: { client: { stream: async () => { throw new Error('execution client must stay separate') } }, budgetSummaryClient: () => ({ stream: async () => { calls++ } }), promptEngine: { getModel: () => 'deepseek-flash', getRequestBudgetPolicy: () => ({ windowTokens: 1_000_000, maxOutputTokens: 393_216 }) } },
     session, drainPersistWrites: async () => {}, recordSidePathUsage: () => {},
   } as unknown as AgentLoop
   const controller = new RequestContextController(fake)
@@ -67,4 +67,117 @@ test('预算闸门最终拒绝时发出 compact-blocked 相位（含可读原因
   assert.equal(phases.length, 1, '最终拒绝应恰好发一次相位')
   assert.equal(phases[0]!.phase, 'compact-blocked')
   assert.ok(phases[0]!.reason && phases[0]!.reason.length > 0, '必须带可读原因')
+})
+
+
+const SUMMARY = JSON.stringify({ version: 1, summary: 'Archived tool output.', facts: [], requirements: [], pendingApprovals: [] })
+
+function selfHostedAgent(enabled = true, contextWindow = 524_288) {
+  const session = new SessionContext()
+  session.replaceMessages([
+    { role: 'user', content: 'Keep the original requirements.' },
+    { role: 'assistant', content: 'x'.repeat(80_000) },
+    { role: 'user', content: 'u'.repeat(900_000) },
+    { role: 'assistant', content: 'recent answer' },
+    { role: 'user', content: '<system-reminder>recent note</system-reminder>' },
+    { role: 'assistant', content: 'latest answer' },
+  ])
+  const original = session.getMessages().slice(), writes: string[] = []
+  const summaries: import('../../api/oai-types.js').OaiChatRequest[] = []
+  const model = 'self-hosted-model'
+  const fake = {
+    persist: {},
+    artifactStore: { saveDurable: async () => { writes.push('archive'); return 'original-history' } },
+    config: {
+      contextWindow, compact: { enabled },
+      client: { authorizeCacheGeneration: () => {} },
+      budgetSummaryMaxTokens: 128,
+      budgetSummaryClient: () => ({ stream: async (request: import('../../api/oai-types.js').OaiChatRequest, cb: import('../../api/stream-client.js').StreamCallbacks) => {
+        summaries.push(request)
+        cb.onTextDelta(SUMMARY)
+        cb.onStopReason('stop', { input_tokens: 1, output_tokens: 1 } as never)
+      } }),
+      promptEngine: {
+        getRequestBudgetPolicy: () => undefined,
+        getModel: () => model,
+        getRewindAuthorization: () => undefined, getExecutionSnapshot: () => undefined,
+        assertPublishedHistory: () => false, getPublishedUserCount: () => 0,
+        buildOaiRequest: (messages: OaiMessage[]) => ({ model, max_tokens: 256_000, messages }),
+        authorizeCacheGeneration: () => {}, resetAppendixBaseline: () => {},
+      },
+    },
+    session, drainPersistWrites: async () => {}, recordSidePathUsage: () => {},
+    commitBudgetHistory: async (expected: OaiMessage[], candidate: OaiMessage[]) => {
+      assert.deepEqual(session.getMessages(), expected)
+      assert.equal(writes.at(-1), 'archive', 'archive must be durable before changing history')
+      writes.push('commit'); session.replaceMessages(candidate)
+    },
+  } as unknown as AgentLoop
+  const controller = new RequestContextController(fake)
+  Object.defineProperty(fake, 'requestContext', { value: controller })
+  controller.activeUserMessage = original[2]
+  const build = () => ({ model, max_tokens: 256_000, messages: session.getMessages() })
+  return { controller, original, writes, build, summaries, agent: fake, messages: () => session.getMessages() }
+}
+
+test('self-hosted manual refresh uses the same generic budget as request preparation', () => {
+  const { controller } = selfHostedAgent()
+  controller.refreshSnapshot()
+  assert.equal(controller.snapshot?.windowTokens, 524_288)
+  assert.equal(controller.snapshot?.outputReserve, 256_000)
+  assert.equal(controller.snapshot?.inputBudget, 242_073)
+})
+
+for (const enabled of [true, false]) {
+  test(`self-hosted hard-budget recovery accepts a useful reclaim below 32K (discretionary enabled=${enabled})`, async () => {
+    const { controller, original, writes, build, messages } = selfHostedAgent(enabled)
+    const before = buildContextBudget(build(), { windowTokens: 524_288, maxOutputTokens: 524_288, transportLimits: 'none' }, { requestId: 'before', revision: 0 })
+    assert.equal(before.state, 'blocked')
+    assert.ok(before.inputTokens - before.inputBudget < 32_768)
+    const request = await controller.prepare(build, {} as never)
+    assert.equal(request.contextBudget?.state, 'warning', 'the protected active user may remain near the limit')
+    assert.ok(request.contextBudget!.inputTokens <= request.contextBudget!.inputBudget, 'the rebuilt request must fit')
+    assert.equal(request.max_tokens, 256_000, 'recovery must not silently lower the configured output limit')
+    assert.deepEqual(writes, ['archive', 'commit'])
+    for (const user of [original[0], original[2]]) {
+      assert.ok(messages().some(message => JSON.stringify(message) === JSON.stringify(user)), 'human requirements survive verbatim')
+    }
+    assert.ok(messages().includes(controller.activeUserMessage!), 'the active boundary is rebound after the transactional rewrite')
+    assert.ok(before.inputTokens - request.contextBudget!.inputTokens < 32_768)
+  })
+}
+
+test('explicit self-hosted compaction works below the hard limit even if discretionary compaction is off', async () => {
+  const { controller, original, writes, messages } = selfHostedAgent(false, 1_048_576)
+  assert.equal(await controller.compact(true), true)
+  assert.deepEqual(writes, ['archive', 'commit'])
+  assert.ok(messages().some(message => JSON.stringify(message) === JSON.stringify(original[2])))
+  assert.ok(messages().includes(controller.activeUserMessage!))
+})
+
+
+test('small-window controller propagates summary window and configured output limit to the sender', async () => {
+  const { controller, agent, summaries } = selfHostedAgent(false, 8192)
+  agent.session.replaceMessages([
+    { role: 'assistant', content: 'x'.repeat(23_999) + '🛰️' + '历史'.repeat(6000) },
+    { role: 'assistant', content: 'another old result' },
+    { role: 'user', content: 'preserve request' },
+    { role: 'assistant', content: 'recent' },
+    { role: 'user', content: 'active' },
+    { role: 'assistant', content: 'latest' },
+  ])
+  controller.activeUserMessage = undefined
+  assert.equal(await controller.compact(true), true)
+  assert.ok(summaries.length > 1, 'a single large result must be split for the real window')
+  for (const request of summaries) {
+    for (const message of request.messages) {
+      if (Array.isArray(message.content)) for (const part of message.content) {
+        if (part.type === 'text') assert.doesNotMatch(part.text, /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/, 'source slicing also preserves Unicode')
+      }
+    }
+    assert.equal(request.max_tokens, 128, 'summary must respect the configured output cap at dispatch')
+    const budget = buildContextBudget(request, { windowTokens: 8192, maxOutputTokens: 8192, transportLimits: 'none' }, { requestId: 'test', revision: 0 })
+    assert.notEqual(budget.state, 'blocked')
+    assert.ok(budget.inputTokens + request.max_tokens! + budget.safetyMargin <= 8192)
+  }
 })

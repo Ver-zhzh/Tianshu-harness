@@ -12,7 +12,7 @@ export function hasIsolatedComparison(result: VerificationMetadata, verification
     return !a.stale && a.status === 'passed' && a.exitCode === 0 && a.kind === 'test' && a.verificationPhase === 'isolated'
       && a.comparisonId === result.comparisonId && a.snapshotRef === result.snapshotRef && a.scope === result.scope
       && a.command === result.command && !!c?.complete && !c.filtered && !c.workspaceChanged
-      && c.repositoryRoot === b.repositoryRoot && c.files.length === b.files.length
-      && b.files.every(f => c.files.some(p => p.path === f.path && p.outcome === 'passed' && p.tests > p.skipped && p.cancelled === 0))
+      && c.runner === b.runner && c.repositoryRoot === b.repositoryRoot && c.files.length === b.files.length
+      && b.files.every(f => c.files.some(p => p.path === f.path && p.project === f.project && p.outcome === 'passed' && p.tests > p.skipped && p.cancelled === 0))
   })
 }

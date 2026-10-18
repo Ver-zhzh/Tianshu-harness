@@ -50,7 +50,8 @@ it('multi-batch totals survive compressed output, output clipping and repeated f
       assert.equal(facts.passed, 54)
       assert.equal(facts.failed, 1)
       assert.equal(facts.coverage?.files.length, 55)
-      assert.equal(facts.coverage?.complete, false)
+      assert.equal(facts.coverage?.version, 2)
+      assert.equal(facts.coverage?.complete, true, 'a failed batch may still have complete per-file evidence')
       assert.equal(facts.coverage?.executionComplete, true)
     } finally { capture.dispose() }
   } finally { f.dispose() }
@@ -75,7 +76,13 @@ it('the original RTK shell wrapper retains structured proof even when stdout is 
       assert.equal(facts.passed, 1, JSON.stringify(facts))
       assert.equal(facts.coverage?.complete, true)
       writeFileSync(join(f.cwd, 'package.json'), JSON.stringify({ scripts: { test: 'node --test example.test.mjs' } }))
-      assert.equal(prepareCompletionCapture('npm test', f.cwd), undefined, 'fixed targets must not silently suppress reporter options')
+      const fixed = prepareCompletionCapture('npm test', f.cwd)!
+      try {
+        assert.ok(fixed, 'fixed targets use the environment reporter channel before Node parses files')
+        const result = spawnSync(fixed.command, { cwd: f.cwd, shell: true, encoding: 'utf8', env: { ...process.env, ...fixed.env }, timeout: 15_000 })
+        assert.equal(result.status, 0, result.stderr)
+        assert.equal(fixed.read(0)?.complete, true)
+      } finally { fixed.dispose() }
     } finally { capture.dispose() }
   } finally { f.dispose() }
 })

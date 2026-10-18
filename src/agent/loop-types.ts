@@ -30,6 +30,7 @@ export interface AgentConfig {
   inputOrigin?: import('./input-origin.js').InputOrigin
   client: StreamClient
   budgetSummaryClient?: () => StreamClient
+  budgetSummaryMaxTokens?: number
   promptEngine: PromptEngine
   toolRegistry: ToolRegistry
   maxTurns: number

@@ -371,7 +371,7 @@ export const PROVIDER_PRESETS: Record<ProviderPresetKey, ProviderPreset> = {
     key: 'mimo',
     label: 'MiMo',
     description: '小米 MiMo Token Plan：含 V2.6 全模态（图像输入）；V2.5 系 2026-10-21 下线',
-    defaultModelId: 'mimo-v2.5-pro',
+    defaultModelId: 'mimo-v2.6-pro',
     keyUrl: 'https://mimo.mi.com/',
     provider: {
       name: 'mimo',
@@ -436,7 +436,7 @@ export const PROVIDER_PRESETS: Record<ProviderPresetKey, ProviderPreset> = {
     key: 'mimo-api',
     label: 'MiMo API (新)',
     description: '小米 MiMo 按量 API：含 V2.6 全模态（图像输入）；V2.5 系 2026-10-21 下线',
-    defaultModelId: 'mimo-v2.5-pro-ultraspeed',
+    defaultModelId: 'mimo-v2.6-pro',
     keyUrl: 'https://mimo.mi.com/',
     provider: {
       name: 'mimo-api',

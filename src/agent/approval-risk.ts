@@ -4,7 +4,7 @@ import { evaluateMcpPolicy, type McpCapability } from '../mcp/policy.js'
 import type { ContextClaim } from '../context/claims.js'
 import type { Sensorium } from './sensorium.js'
 import { detectSensitiveGitAdd, AGGREGATE_ADD_MARKER } from '../tools/sensitive-file-detector.js'
-import { GIT_GLOBAL_OPTS_SRC, GIT_CHECKOUT_CLEAR_RE } from '../tools/destructive-patterns.js'
+import { GIT_GLOBAL_OPTS_SRC, GIT_CHECKOUT_CLEAR_RE, GIT_CLEAN_CLEAR_RE } from '../tools/destructive-patterns.js'
 
 export type RiskLevel = 'none' | 'low' | 'medium' | 'high'
 
@@ -151,9 +151,7 @@ export const DANGEROUS_BASH_PATTERNS: ReadonlyArray<Readonly<RegExp>> = [
   // SQL 清表（SECURITY.md 声明 TRUNCATE 受门禁——与既有 DROP TABLE 同档）
   /\btruncate\s+table\b/i,
   /\bgit\s+reset\s+--hard\b/,
-  // git clean 强制旗标位置任意：-fd / -fdx / -xdf / 分开写 -d -f / --force。旧式要求 f 为组合旗标
-  // 末字母（-[a-zA-Z]*f\b），最常见的 `git clean -fd`、`git clean -fdx` 全部漏判。
-  /\bgit\s+clean\b[^\n;&|]*\s(?:-[a-zA-Z]*f|--force\b)/,
+  GIT_CLEAN_CLEAR_RE,                   // PR #494: same option/value boundaries as destructive-gate
   GIT_CHECKOUT_CLEAR_RE,                // same checkout argument grammar as destructive-gate
   /\bgit\s+restore\b/,                  // discard working-tree / staged changes
   /\bgit\s+stash\b(?!(?:\s+(?:pop|list|show|apply|drop|branch)))/,  // git stash without safe subcommand = destructive clear

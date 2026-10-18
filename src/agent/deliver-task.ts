@@ -1,7 +1,7 @@
 import type { DeliveryImpact } from './delivery-impact.js'
-import { getEffectiveVerifications } from './verification-attribution.js'
+import { assessImpactedTestCoverage, getEffectiveVerifications } from './verification-attribution.js'
 import { captureCommitVersion } from './commit-version.js'
-import { formatDeliveryVerificationPlan } from './delivery-verification-plan.js'
+import { buildDeliveryVerificationPlan, renderDeliveryVerificationPlan } from './delivery-verification-plan.js'
 /**
  * deliver_task — 语义化交付工具 (B1-8)
  *
@@ -518,7 +518,8 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
         return shown
       }
       const externalSplit = filterExternalNoise(report.externalFiles, params.cwd)
-
+      const pendingTests = assessImpactedTestCoverage(impactedTests, getEffectiveVerifications(ctx.taskLedger.getVerifications(), ctx.getCurrentSnapshotRef?.()).effective, path => existsSync(join(params.cwd, path)), params.cwd).uncovered
+      const verificationPlan = buildDeliveryVerificationPlan(params.cwd, impactedTests, pendingTests, impact?.advisoryTests.length ?? 0, ctx.taskLedger.getVerifications(), ctx.getCurrentSnapshotRef?.())
       const lines: string[] = [
         `Delivery Gate: ${report.state}`,
         `Task: ${report.taskId}`,
@@ -664,8 +665,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
       }
 
       lines.push('', `Attribution: ${report.attributionSummary}`)
-      if (report.attributionClass === 'module_unverified' && report.state === 'YELLOW') lines.push(...formatDeliveryVerificationPlan(params.cwd, impactedTests, report.uncoveredImpactedTests ?? [], impact?.advisoryTests.length ?? 0))
-
+      if (report.attributionClass === 'module_unverified' && report.state === 'YELLOW') lines.push(...renderDeliveryVerificationPlan(verificationPlan, params.cwd))
       // Failure attribution summary: distinguish "my fault" vs "not my fault" failures.
       // Helps the agent understand: which failures should I fix, which are external?
       {
@@ -879,7 +879,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
             '以上交付报告与门禁状态仅供参考——变更未提交。',
             '审查完成后由用户手动执行 git commit。',
           )
-          return { content: lines.join('\n') }
+          return { verificationPlan, content: lines.join('\n') }
         }
         if (!ctx.ownership.isBaselineComplete()) {
           // 恢复路径：基线只在会话启动时采集一次——会话开始后目录才变成 git 仓库
@@ -891,7 +891,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
           } else {
             lines.push('', '❌ Cannot commit: 归属基线未完整建立，无法安全执行 scoped commit。')
             lines.push('文件改动已保存在工作区中。git 仓库可用后重试 deliver_task 会现场重采基线（如刚执行 git init，直接重试即可）；force 不豁免。')
-            return { content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
+            return { verificationPlan, content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
           }
         }
         // Keep the atomic commit reminder at the commit boundary.
@@ -916,7 +916,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
           lines.push('', 'Recovery:')
           lines.push(`  → 用 read_file / grep 逐一核验：${firewallRefs.join('、')}，然后重跑 deliver_task`)
           lines.push('  → 或从提交信息/清单中移除该引用，或为该行添加 [待核] 标注（诚实降级为线索）。')
-          return { content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
+          return { verificationPlan, content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
         }
 
         // Mechanical-change classification (computed once, reused for gate bypass
@@ -936,7 +936,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
             lines.push('', 'Recovery:')
             lines.push('  → 提供额外的独立证据满足冗余义务（DP 副本验证、独立工具复现、')
             lines.push('    第二条 file:line 证据链），或显式 supersede 该义务后重试。')
-            return { content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
+            return { verificationPlan, content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
           } else if (
             report.attributionClass === 'unverified'
             && mechanicalClass?.skipVerification
@@ -966,20 +966,20 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
               lines.push('  → Fix the blocking issue above, then re-run deliver_task.')
               lines.push('    If tests keep timing out, run them in smaller batches by directory.')
             }
-            return { content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
+            return { verificationPlan, content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
           }
         }
         const effectiveEvidence = getEffectiveVerifications(ctx.taskLedger.getVerifications(), ctx.getCurrentSnapshotRef?.()).effective
         if (report.ownedFileCount > 0 && !mechanicalClass?.skipVerification
           && !effectiveEvidence.some(verification => verification.status === 'passed' && verification.scope !== 'unknown')) {
           lines.push('', '❌ Cannot commit: no applicable successful verification. Unknown or blocked checks do not prove validation; force=true does not waive this obligation.')
-          return { content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
+          return { verificationPlan, content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
         }
         // W1 回归防线: module_unverified 在 assess 层是 YELLOW（可带条件交付），
         // commit=true 必须有覆盖证明；force 不豁免缺失验证。
         if (report.state === 'YELLOW' && report.attributionClass === 'module_unverified') {
           lines.push('', '❌ Cannot commit: impacted tests were never covered by a passed verification. force=true does not waive missing verification.')
-          return { content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
+          return { verificationPlan, content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
         }
         if (report.state === 'YELLOW') {
           const stanceHint = detectSymptomPatch(params.cwd)
@@ -987,7 +987,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
         }
         if (!message) {
           lines.push('', '❌ Commit requires a "message" parameter.')
-          return { content: lines.join('\n'), isError: true, errorKind: 'format_error' }
+          return { verificationPlan, content: lines.join('\n'), isError: true, errorKind: 'format_error' }
         }
 
         // 宣称-证据对账（复现即证明）：commit message / checklist 里宣称测试绿，
@@ -1001,7 +1001,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
           })
           if (audit.status === 'block') {
             lines.push('', ...audit.lines)
-            return { content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
+            return { verificationPlan, content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
           }
           if (audit.status === 'warn') {
             lines.push('', ...audit.lines)
@@ -1018,7 +1018,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
           const notAdoptable = adoptFiles.filter(f => !adoptableSet.has(f))
           if (notAdoptable.length > 0) {
             lines.push('', `❌ Adopt: file(s) not in external or co-owned files: ${notAdoptable.join(', ')}. Only external and co-owned files can be adopted.`)
-            return { content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
+            return { verificationPlan, content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
           }
           const adopted = ctx.ownership.adoptFiles(adoptFiles)
           if (adopted.length > 0) {
@@ -1055,7 +1055,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
               lines.push(`  Detail: ${postAdoptionReport.currentBlockingFailure}`)
             }
             lines.push('  → Run verification for the adopted files, then re-run deliver_task.')
-            return { content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
+            return { verificationPlan, content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
           }
         }
 
@@ -1070,12 +1070,12 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
           const notOwned = requestedFiles.filter(f => !ownedSet.has(f))
           if (notOwned.length > 0) {
             lines.push('', `❌ File(s) not in owned files: ${notOwned.join(', ')}. Cannot commit non-owned files.`)
-            return { content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
+            return { verificationPlan, content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
           }
           filesToCommit = requestedFiles
         } else if (requestedFiles && Array.isArray(requestedFiles) && requestedFiles.length === 0) {
           lines.push('', '❌ No files specified for commit. Provide non-empty files array or omit to commit all owned files.')
-          return { content: lines.join('\n'), isError: true, errorKind: 'format_error' }
+          return { verificationPlan, content: lines.join('\n'), isError: true, errorKind: 'format_error' }
         }
 
         const commitVersion = captureCommitVersion(params.cwd, filesToCommit)
@@ -1085,7 +1085,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
         if (blockingClaimConflicts.length > 0 && !forceGate) {
           lines.push('', '❌ Cannot commit: cross-session claim conflicts are present.')
           lines.push('   → Resolve the other session claim or use force=true only after independently verifying the override is safe.')
-          return { content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
+          return { verificationPlan, content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
         }
         if (blockingClaimConflicts.length > 0 && forceGate) {
           lines.push('', '⚠️ Cross-session claim conflicts overridden with force=true. Verify the other session has finished or approved the takeover.')
@@ -1155,7 +1155,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
         if (cohesion.needsWarning && !cohesionOverride) {
           lines.push('', ...cohesion.warningLines.map(l => `  ${l}`))
           mark('cohesion:denied')
-          return { content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
+          return { verificationPlan, content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
         }
         if (cohesion.needsWarning && cohesionOverride) {
           lines.push('', '  ⚠️ Cohesion gate overridden with force=true. Verify this is truly one logical unit.')
@@ -1180,7 +1180,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
             } else {
               lines.push('', `  ⚠️  Git index is locked (another session mid-commit, lock age ${Math.round(lockAge / 1000)}s).`)
               lines.push('     Wait a few seconds and retry deliver_task. Do NOT fall back to raw git commit — that bypasses ownership scoping.')
-              return { content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
+              return { verificationPlan, content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
             }
           } catch {
             // Permission denied or race — let the commit attempt surface the real error.
@@ -1198,7 +1198,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
         const commitResult = executor(params.cwd, filesToCommit, message)
         if (!commitResult.ok) {
           lines.push('', `❌ Scoped commit failed: ${commitResult.output}`)
-          return { content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
+          return { verificationPlan, content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
         }
         lines.push('', `✅ Scoped commit created with message: "${message}"`)
         lines.push(`   Files: ${filesToCommit.join(', ') || '(none)'}`)
@@ -1627,7 +1627,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
         }
       })
 
-      return { content: lines.join('\n') }
+      return { verificationPlan, content: lines.join('\n') }
     },
 
     requiresApproval(params: ToolCallParams): boolean {

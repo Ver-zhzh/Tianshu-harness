@@ -451,8 +451,8 @@ export const CHANNEL_SURFACES: readonly InjectionSurface[] = [
   },
   {
     id: 'tool-result.delivery-verification-plan', channel: 'tool-result', cost: 'append-tail', volatility: 'per-turn',
-    producer: 'formatDeliveryVerificationPlan()',
-    anchor: { file: 'src/agent/deliver-task.ts', symbol: 'lines.push(...formatDeliveryVerificationPlan' },
+    producer: 'renderDeliveryVerificationPlan()',
+    anchor: { file: 'src/agent/deliver-task.ts', symbol: 'lines.push(...renderDeliveryVerificationPlan' },
     note: '提交因 required 覆盖缺口受阻时，返回累计进度与按项目分批的独立命令；未适配 runner 保留义务，不以名单截断或 advisory 豁免验证。',
   },
   {

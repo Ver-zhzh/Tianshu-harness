@@ -81,6 +81,13 @@ export function classifyVerificationIntent(command: string, cwd: string, depth =
   let index = exeOf(argv[0] ?? '') === 'rtk' ? (argv[1] === 'proxy' ? 2 : 1) : 0
   if (['npx', 'bunx'].includes(exeOf(argv[index] ?? ''))) { index++; if (argv[index] === '--') index++ }
   const runnerArgv = argv.slice(index)
+  const known = classifyVerificationCommand(effective, effectiveCwd)
+  if (known.runner && !known.reason) return { ...BASE, ...common, purpose: 'test',
+    lifetime: known.persistent ? 'persistent' : 'finite', waitingEligible: !known.persistent,
+    allowsCompletionEvidence: !known.persistent && !known.filtered,
+    scope: { kind: 'test', scope: known.filtered ? 'unknown' : known.targets.length ? 'targeted' : 'full', ...(known.targets.length ? { targetFiles: known.targets } : {}) },
+    entry: known.batchRunner ? known.argv.find(arg => /scripts[\\/]run-(?:node-)?tests\.ts$/.test(arg)) ?? entry : entry,
+    source: known.batchRunner ? 'batch-runner' : known.nodeTest ? 'node-test' : 'runner-kind' }
   if (['npm', 'pnpm', 'yarn', 'bun'].includes(exeOf(runnerArgv[0] ?? ''))) {
     if (exeOf(runnerArgv[0] ?? '') === 'bun' && runnerArgv[1] === 'test') {
       const persistent = persistentReason(runnerArgv)

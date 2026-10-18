@@ -366,9 +366,10 @@ export type VerificationBlockedReason =
   | 'invocation_failure'    // runner crashed / EPERM / could not start
 
 export interface TestCompletionCoverage {
-  version: 1
+  /** v2 complete means execution/proof integrity; status and exitCode express suite success. */
+  version: 1 | 2 | 3
   runId: string
-  runner: 'node-test'
+  runner: 'node-test' | 'vitest' | 'jest'
   cwd: string
   repositoryRoot: string
   complete: boolean
@@ -376,8 +377,12 @@ export interface TestCompletionCoverage {
   executionRoot?: string
   executionComplete?: boolean
   workspaceChanged?: boolean
+  catalog?: import('./test-scope-catalog.js').TestScopeCatalog
+  selectedScopes?: import('./test-scope-catalog.js').TestScope[]
+  selection?: { projects: string[]; shard?: { index: number; total: number } }
+  scopeError?: string
   totals?: { tests: number; passed: number; failed: number; skipped: number; cancelled: number; todo: number }
-  files: Array<{ path: string; outcome: 'passed' | 'failed' | 'incomplete'; tests: number; skipped: number; cancelled: number }>
+  files: Array<{ path: string; project?: string; outcome: 'passed' | 'failed' | 'incomplete'; tests: number; skipped: number; cancelled: number }>
 }
 
 export interface VerificationMetadata {
@@ -426,6 +431,7 @@ export interface VerificationMetadata {
 export type ToolErrorClass = 'environment' | 'exec-failure' | 'timeout'
 
 export interface ToolResult {
+  verificationPlan?: import('./test-execution-plan.js').DeliveryVerificationPlan
   generatedImageId?: string
   /** Runtime presentation contract, never sent as model-generated metadata. */
   presentation?: { kind: 'worker_packet'; bounded: true }

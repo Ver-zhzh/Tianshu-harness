@@ -1,4 +1,9 @@
-import { createHash, randomUUID } from 'node:crypto'
+import { nodeCompletionOutput } from './test-node-output.js'
+import { parseTestSelection } from './test-selection.js'
+import { validScopeCoverage } from './test-scope-validation.js'
+import { workspaceIdentity } from './test-completion-identity.js'
+import { prepareFrameworkCompletion } from './test-framework-completion.js'
+import { randomUUID } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { realpathSync, mkdtempSync, readFileSync, writeFileSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -8,22 +13,12 @@ import type { TestCompletionCoverage } from './types.js'
 import { classifyVerificationCommand, shellWord, verificationArgv } from './verification-command.js'
 import { unwrapVerification } from './verification-invocation.js'
 import { isFilesystemMetadata } from '../utils/file-metadata.js'
+import { getResolvedEnv } from './resolved-env.js'
 
 const ENV = 'RIVET_TEST_COMPLETION_RUN'
 interface Binding { runId: string; dir: string; root: string }
 interface Receipt { runId: string; batchId: string; cwd: string; complete: boolean; success: boolean; totals?: TestCompletionCoverage['totals']; files: TestCompletionCoverage['files'] }
 
-/** Bind the invocation to the workspace before execution; concurrent edits lose evidence. */
-function workspaceIdentity(cwd: string): string | undefined {
-  try {
-    const hash = createHash('sha256')
-    hash.update(execFileSync('git', ['rev-parse', 'HEAD'], { cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }))
-    hash.update(execFileSync('git', ['diff', '--no-ext-diff', 'HEAD'], { cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 32 * 1024 * 1024 }))
-    const untracked = execFileSync('git', ['ls-files', '--others', '--exclude-standard', '-z'], { cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 8 * 1024 * 1024 }).toString().split('\0')
-    for (const file of untracked.sort()) if (/\.(?:[cm]?[jt]sx?|py|go|rs)$/.test(file)) { hash.update(file); hash.update(readFileSync(resolve(cwd, file))) }
-    return hash.digest('hex')
-  } catch { return undefined }
-}
 
 function reporter(binding: Binding, batchId: string, cwd: string): string {
   const filename = join(binding.dir, batchId + '.mjs')
@@ -32,6 +27,8 @@ function reporter(binding: Binding, batchId: string, cwd: string): string {
 import {relative,resolve} from 'node:path';
 const binding=${JSON.stringify({ ...binding, batchId, cwd })};
 export default async function*(events){
+ try{writeFileSync(binding.dir+'/'+binding.batchId+'.owner',String(process.pid),{flag:'wx'})}catch{for await(const event of events)yield '';return}
+ process.on('uncaughtExceptionMonitor',()=>writeFileSync(binding.dir+'/'+binding.batchId+'.output-error','output_error'));
  const files=[]; let complete=false,success=false,totals;
  for await(const event of events){
   if(event.type==='test:summary'){
@@ -81,20 +78,22 @@ export function sealCompletionRun(expectedBatches: number, completedBatches: num
 }
 
 export interface CompletionCapture {
+  preparationError?: string
   command: string
   env: NodeJS.ProcessEnv
   read(exitCode: number): TestCompletionCoverage | undefined
   dispose(): void
 }
 
-export function prepareCompletionCapture(command: string, cwd: string, shellKind: 'bash' | 'sh' | 'powershell' | 'cmd' = 'bash', repositoryRoot?: string): CompletionCapture | undefined {
+export function prepareCompletionCapture(command: string, cwd: string, shellKind: 'bash' | 'sh' | 'powershell' | 'cmd' = 'bash', repositoryRoot?: string, deadline?: number): CompletionCapture | undefined {
   const unwrapped = unwrapVerification(command, cwd, shellKind === 'bash' || shellKind === 'sh')
   if (!unwrapped) return undefined
   cwd = unwrapped.cwd
   const invocation = classifyVerificationCommand(unwrapped.command, cwd)
+  if (invocation.runner === 'vitest' || invocation.runner === 'jest') return prepareFrameworkCompletion(unwrapped, invocation, shellKind, repositoryRoot, deadline)
   if ((!invocation.nodeTest && !invocation.batchRunner) || invocation.filtered) return undefined
-  if (invocation.fixedPackageTargets) return undefined // npm appends flags after fixed files; Node silently ignores those reporter flags.
-  if (invocation.argv.some(a => a.startsWith('--test-reporter') || a === '--test-force-exit')) return undefined
+  if (/--test-(?:name-pattern|skip-pattern|only|force-exit)/.test(getResolvedEnv(cwd).NODE_OPTIONS ?? '')) return undefined
+  if ((invocation.resolvedArgv ?? invocation.argv).includes('--test-force-exit')) return undefined
   try {
     const root = execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8' }).trim()
     if (repositoryRoot) repositoryRoot = realpathSync(repositoryRoot)
@@ -107,14 +106,13 @@ export function prepareCompletionCapture(command: string, cwd: string, shellKind
     if (invocation.nodeTest) {
       const index = invocation.runnerIndex
       const args = invocation.resolvedArgv ? invocation.resolvedArgv.slice(1) : invocation.argv.slice(index + 1)
-      const batch = completionBatch(args, cwd, env)
-      const prefix = invocation.argv.slice(0, index + 1)
-      const packageEnd = invocation.argv.indexOf('--') >= 0 ? invocation.argv.indexOf('--') : index + (invocation.argv[index + 1] === 'run' ? 3 : 2)
-      actualCommand = invocation.resolvedArgv
-        ? [...invocation.argv.slice(0, packageEnd), '--', ...batch.args.slice(0, 4), ...invocation.argv.slice(packageEnd + (invocation.argv[packageEnd] === '--' ? 1 : 0))].map(shellWord).join(' ')
-        : [...prefix, ...batch.args].map(shellWord).join(' ')
+      const stripOutputs: string[] = []
+      for (let i = 0; i < args.length; i++) { if (/^--test-reporter(?:-destination)?(?:=|$)/.test(args[i]!)) { if (!args[i]!.includes('=')) i++; continue }; stripOutputs.push(args[i]!) }
+      const batch = completionBatch(stripOutputs, cwd, env)
+      const options = nodeCompletionOutput(args, getResolvedEnv(cwd).NODE_OPTIONS ?? '', batch.args[2]!.slice('--test-reporter='.length), batch.args[3]!.slice('--test-reporter-destination='.length))
+      if (!options) { rmSync(binding.dir, { recursive: true, force: true }); return undefined }
       directFinish = batch.finish
-      Object.assign(env, batch.env)
+      Object.assign(env, batch.env, { NODE_OPTIONS: options })
       delete env[ENV]
     }
     if (shellKind === 'powershell' && directFinish) actualCommand = '& ' + actualCommand
@@ -147,11 +145,12 @@ export function prepareCompletionCapture(command: string, cwd: string, shellKind
                 && start.batchId === receipt.batchId && end.batchId === start.batchId && start.cwd === receipt.cwd && end.cwd === start.cwd
               if (!bound) { executionComplete = false; continue }
               executionComplete &&= receipt.complete && !!receipt.totals
+              if (readdirSync(binding.dir).includes(batchId + '.output-error')) executionComplete = false
               success &&= end.success && receipt.success
               if (receipt.totals) for (const key of Object.keys(totals) as Array<keyof typeof totals>) totals[key] += receipt.totals[key]
               const selected = classifyVerificationCommand(['node', ...start.args].map(shellWord).join(' ')).targets
-              for (const target of selected) {
-                if (/[*?\[]/.test(target)) continue
+              for (const target of parseTestSelection(start.args).shard ? [] : selected) {
+                if (/[*?[]/.test(target)) continue
                 const path = resolve(start.cwd, target)
                 if (!receipt.files.some(file => realpathSync(resolve(binding.root, file.path)) === realpathSync(path))) executionComplete = false
               }
@@ -161,9 +160,9 @@ export function prepareCompletionCapture(command: string, cwd: string, shellKind
               }
             } catch { executionComplete = false }
           }
-          return { version: 1, runId: binding.runId, runner: 'node-test', cwd: resolve(cwd), repositoryRoot: repositoryRoot ?? binding.root, executionRoot: binding.root, executionComplete, workspaceChanged, totals, complete: executionComplete && success && !workspaceChanged && exitCode === 0, filtered: false, files }
+          return { version: 2, runId: binding.runId, runner: 'node-test', cwd: resolve(cwd), repositoryRoot: repositoryRoot ?? binding.root, executionRoot: binding.root, executionComplete, workspaceChanged, totals, complete: executionComplete && !workspaceChanged && (exitCode === 0 ? success : exitCode > 0 && files.some(file => file.outcome === 'failed')), filtered: false, files }
         } catch {
-          return { version: 1, runId: binding.runId, runner: 'node-test', cwd: resolve(cwd), repositoryRoot: repositoryRoot ?? binding.root, executionRoot: binding.root, executionComplete: false, workspaceChanged: before !== workspaceIdentity(root), complete: false, filtered: false, files: [] }
+          return { version: 2, runId: binding.runId, runner: 'node-test', cwd: resolve(cwd), repositoryRoot: repositoryRoot ?? binding.root, executionRoot: binding.root, executionComplete: false, workspaceChanged: before !== workspaceIdentity(root), complete: false, filtered: false, files: [] }
         }
       },
       dispose() { rmSync(binding.dir, { recursive: true, force: true }) },
@@ -175,12 +174,17 @@ export function prepareCompletionCapture(command: string, cwd: string, shellKind
 export function readCompletionCoverage(value: unknown): TestCompletionCoverage | undefined {
   if (!value || typeof value !== 'object') return undefined
   const c = value as TestCompletionCoverage
-  if (c.version !== 1 || c.runner !== 'node-test' || typeof c.runId !== 'string' || !c.runId || typeof c.cwd !== 'string' || typeof c.repositoryRoot !== 'string'
+  if (![1, 2, 3].includes(c.version) || !['node-test', 'vitest', 'jest'].includes(c.runner) || c.version === 1 && c.runner !== 'node-test' || typeof c.runId !== 'string' || !c.runId || typeof c.cwd !== 'string' || typeof c.repositoryRoot !== 'string'
     || typeof c.complete !== 'boolean' || typeof c.filtered !== 'boolean' || !Array.isArray(c.files)) return undefined
   if (!c.files.every(f => f && typeof f.path === 'string' && !!f.path && !/[\x00]|^[A-Za-z]:/.test(f.path) && !f.path.startsWith('/') && !f.path.split(/[\\/]/).includes('..')
+    && (f.project === undefined || typeof f.project === 'string' && f.project.length <= 1024 && !/[\x00\r\n]/.test(f.project))
     && ['passed', 'failed', 'incomplete'].includes(f.outcome) && [f.tests, f.skipped, f.cancelled].every(n => Number.isInteger(n) && n >= 0) && f.skipped + f.cancelled <= f.tests)) return undefined
   if (c.executionComplete !== undefined && typeof c.executionComplete !== 'boolean' || c.workspaceChanged !== undefined && typeof c.workspaceChanged !== 'boolean'
     || c.executionRoot !== undefined && typeof c.executionRoot !== 'string'
     || c.totals && !['tests', 'passed', 'failed', 'skipped', 'cancelled', 'todo'].every(key => Number.isInteger(c.totals![key as keyof typeof c.totals]) && c.totals![key as keyof typeof c.totals] >= 0)) return undefined
+  if (c.version >= 2 && c.complete && (c.executionComplete !== true || c.workspaceChanged !== false || !c.totals || !c.files.length && c.version !== 3)) return undefined
+  if (new Set(c.files.map(file => JSON.stringify([file.path, file.project ?? '']))).size !== c.files.length) return undefined
+  if (c.totals && (c.totals.passed + c.totals.failed + c.totals.skipped + c.totals.cancelled !== c.totals.tests || c.totals.todo > c.totals.skipped)) return undefined
+  if (c.version === 3 && !validScopeCoverage(c)) return undefined
   return c
 }

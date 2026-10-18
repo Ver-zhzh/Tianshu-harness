@@ -1,6 +1,6 @@
 import { snapshotSessionBinding } from '../model/model-binding.js'
 import { createReportClientFactory } from '../api/report-client.js'
-import { deepSeekBudgetPolicy } from '../context/request-budget.js'
+import { resolveRequestBudgetPolicy } from '../context/request-budget.js'
 import { createProviderClient, resolveApiKey } from '../api/factory.js'
 import { resolveCapabilities } from '../api/provider.js'
 import { createAuthProvider } from '../auth/registry.js'
@@ -207,7 +207,7 @@ export function createMainAgentConfigInput(params: MainAgentConfigInputParams): 
 
 export function createAgentConfig(input: AgentConfigInput): Pick<
   AgentConfig,
-  'client' | 'promptEngine' | 'contextWindow' | 'compact' | 'cwd' | 'blockPolicy' | 'providerProfile' | 'providerName' | 'compactionProfile' | 'primaryClient' | 'compactClient' | 'sessionId' | 'approvalMode' | 'autoReasoning' | 'reasoningFloor' | 'turnLevelThinking' | 'songlineEnabled' | 'constellationEnabled' | 'companionPresenceEnabled' | 'dreamEnabled' | 'runtimeLean' | 'securityGuidance' | 'interruptMarker' | 'hearthObserveEnabled' | 'crossSessionEnabled' | 'antiAnchoring' | 'intentRetrievalRouter' | 'llmSpeculation' | 'autoDelegateEnabled' | 'domainKeywordRouting' | 'defaultDomain' | 'goalJudge' | 'allProviders' | 'permissions' | 'toolGating' | 'prefixCacheStrategy' | 'supportsVision' | 'visionClient' | 'visionModelPrompt' | 'visionModelMaxTokens' | 'visionBridge' | 'onStatusLine' | 'wireContext' | 'meridianIndexer' | 'agentReconnect' | 'retryBudgetHolder' | 'budgetSummaryClient'
+  'client' | 'promptEngine' | 'contextWindow' | 'compact' | 'cwd' | 'blockPolicy' | 'providerProfile' | 'providerName' | 'compactionProfile' | 'primaryClient' | 'compactClient' | 'sessionId' | 'approvalMode' | 'autoReasoning' | 'reasoningFloor' | 'turnLevelThinking' | 'songlineEnabled' | 'constellationEnabled' | 'companionPresenceEnabled' | 'dreamEnabled' | 'runtimeLean' | 'securityGuidance' | 'interruptMarker' | 'hearthObserveEnabled' | 'crossSessionEnabled' | 'antiAnchoring' | 'intentRetrievalRouter' | 'llmSpeculation' | 'autoDelegateEnabled' | 'domainKeywordRouting' | 'defaultDomain' | 'goalJudge' | 'allProviders' | 'permissions' | 'toolGating' | 'prefixCacheStrategy' | 'supportsVision' | 'visionClient' | 'visionModelPrompt' | 'visionModelMaxTokens' | 'visionBridge' | 'onStatusLine' | 'wireContext' | 'meridianIndexer' | 'agentReconnect' | 'retryBudgetHolder' | 'budgetSummaryClient' | 'budgetSummaryMaxTokens'
 > {
   const { model, apiKey, cwd, provider } = input
   const capabilities = resolveCapabilities(provider.name, provider.capabilities, model.capabilities)
@@ -272,7 +272,7 @@ export function createAgentConfig(input: AgentConfigInput): Pick<
     : applyDescriptionMode(input.toolDefinitions, blockPolicy.toolDescriptions)
 
   const promptEngine = new PromptEngine({
-    requestBudgetPolicy: primaryClient.previewContextRequest ? deepSeekBudgetPolicy(provider.baseUrl, model.id, model.contextWindow) : undefined,
+    requestBudgetPolicy: resolveRequestBudgetPolicy(provider.baseUrl, model.id, model.contextWindow, !!primaryClient.previewContextRequest),
     model: model.id,
     maxTokens: model.maxTokens,
     staticCtx: { tools: gatedTools, modelFamily: detectModelFamily(model.id) },
@@ -321,6 +321,7 @@ export function createAgentConfig(input: AgentConfigInput): Pick<
     }),
     primaryClient: primaryClient,
     budgetSummaryClient: createReportClientFactory(provider, capabilities, { apiKey, model: model.id, auth: input.auth, sessionId: input.sessionId, network: input.network }),
+    budgetSummaryMaxTokens: model.maxTokens,
     compactClient,
     sessionId: input.sessionId,
     approvalMode: input.approvalMode,

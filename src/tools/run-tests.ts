@@ -1,11 +1,10 @@
 import { prepareCompletionCapture } from './test-completion.js'
-import { verificationArgv, shellWord } from './verification-command.js'
+import { classifyVerificationCommand, verificationArgv, shellWord } from './verification-command.js'
 import { applyBatchCounts, formatTestCounts } from './test-output-counts.js'
 import { DisplayOutputBuffer } from './display-output-buffer.js'
-import { readFile, stat, glob } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { join, delimiter, win32 as winPath, posix as posixPath } from 'node:path'
-import type { Tool, ToolCallParams, ToolResult, VerificationMetadata, VerificationBlockedReason, VerificationSnapshotPlan } from './types.js'
+import type { Tool, ToolCallParams, ToolResult, VerificationMetadata, VerificationBlockedReason } from './types.js'
 import { track } from './process-tracker.js'
 import { WinStreamDecoder } from '../platform.js'
 import { spawnHidden } from './spawn-hidden.js'
@@ -13,15 +12,15 @@ import { killProcessTree } from './process-kill.js'
 import { persistRawOutput, buildUiOutput } from './output-store.js'
 import { getResolvedEnv } from './resolved-env.js'
 import { createRequire } from 'node:module'
-import { randomUUID } from 'node:crypto'
 import { pathToFileURL } from 'node:url'
 import { completionFacts } from './verification-facts.js'
-import { toPosixPath } from '../path-format.js'
 import { loadDeclaredVerify } from '../config/verify-config.js'
-import { detectProjectFingerprint } from '../repo/project-fingerprint.js'
+import { buildLegacyTestCommand, type TestCommand } from './legacy-test-command.js'
 import { OutputStreamBudget } from './output-stream-budget.js'
-import { snapshotOmissionNote, snapshotTestResult } from './run-tests-snapshot-result.js'
+import { runTestPhases } from './run-test-phases.js'
+import { runPlannedTests } from './run-planned-tests.js'
 import { verificationTimeout, runTestsTimeoutMs, verificationBudgetStop } from './verification-budget.js'
+import { resolveNpmCliCommand } from '../platform/resolve-node-cli.js'
 
 /** context-collapse 靠此正则解析 formatOutput 摘要行；改文案必须与消费方同步（常量共享，禁止两边各自手抄）。 */
 export const RUN_TESTS_PASSED_RE = /(\d+)\s+通过/
@@ -35,6 +34,8 @@ export interface RunnableTestCommand {
   display: string
   runner: string
   scope: 'full' | 'targeted'
+  relativeCwd?: string
+  targetFiles?: string[]
   recommendedCommand?: string
   /** True for declared/fingerprint commands that are full shell strings
    *  (e.g. "cargo test", "go test ./...") rather than argv arrays. */
@@ -50,19 +51,6 @@ function withNodeTsxLoader(cwd: string, command: RunnableTestCommand): RunnableT
   return { ...command, command: process.execPath, args, display: `node --import tsx ${displayArgs.join(' ')}` }
 }
 
-interface BlockedTestCommand {
-  type: 'blocked'
-  display: string
-  runner: string
-  scope: 'full' | 'targeted'
-  message: string
-  recommendedCommand?: string
-  blockedReason: VerificationBlockedReason
-  userGuidance: string
-}
-
-type TestCommand = RunnableTestCommand | BlockedTestCommand
-
 /** A spawn descriptor normalized for the host OS (see {@link resolveTestSpawn}). */
 export interface ResolvedTestSpawn {
   command: string
@@ -75,6 +63,8 @@ export interface ResolvedTestSpawn {
 export interface TestSpawnDeps {
   isWindows: boolean
   exists: (p: string) => boolean
+  execPath?: string
+  path?: string
 }
 
 /** Resolve project-local tsx on POSIX; Windows .cmd runners retain shell quoting. */
@@ -91,17 +81,29 @@ export function resolveTestSpawn(
     return { command: process.execPath, args: [cli, ...args], shell: false }
   }
 
+  const host = deps.execPath ?? process.execPath
+  const npm = resolveNpmCliCommand(command, [...args], { platform: 'win32', execPath: host, existsSync: deps.exists })
+  if (npm.command !== command) return { ...npm, shell: false }
+  const manager = command.replace(/\.cmd$/i, '')
+  const bins = manager === 'pnpm' ? ['pnpm/bin/pnpm.cjs'] : manager === 'yarn' ? ['yarn/bin/yarn.js', '@yarnpkg/cli-dist/bin/yarn.js'] : manager === 'tsx' ? ['tsx/dist/cli.mjs'] : []
+  const directories = [cwd, ...((deps.path ?? process.env.PATH ?? '').split(';'))]
+  for (const directory of directories) for (const bin of bins) {
+    const cli = winPath.join(directory, 'node_modules', bin)
+    if (deps.exists(cli)) return { command: host, args: [cli, ...args], shell: false }
+  }
+
   // shell:true 让 Node 把 argv 拼成单条 cmd.exe 命令行——引号必须覆盖一切
   // 非安全字符（空白、& | < > ^ ( ) 等元字符），否则仓库可控的文件名
   // （如 a&calc.cmd）可注入 cmd。% 与内部 " 在双引号内仍危险（变量展开/
-  // 断引），消毒替换为 _——fail-closed 方向；已整体带引号且内部干净的
+  // 断引），必须明确拒绝，不能替换文件名；已整体带引号且内部干净的
   // token 原样通过（不双重加引）。
   const CMD_SAFE = /^[A-Za-z0-9@_+=:,./\\-]+$/
   const quote = (raw: string): string => {
-    if (raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"') && !/[%"]/.test(raw.slice(1, -1))) {
+    if (raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"') && !/[%"!]/.test(raw.slice(1, -1))) {
       return raw
     }
-    const s = raw.replace(/[%"]/g, '_')
+    if (/[%"!\n\r]/.test(raw)) throw new Error('该参数无法安全通过 cmd.exe；请使用真实 CLI 入口，不能改写文件名。')
+    const s = raw
     return CMD_SAFE.test(s) ? s : `"${s}"`
   }
 
@@ -114,11 +116,11 @@ export function resolveTestSpawn(
       // Mirrors lsp/client.ts::runTscSubprocess + theta-check.ts::resolveTscCommand.
       return { command: `"${localShim}"`, args: args.map(quote), shell: true }
     }
-    // Fallback: npx tsx — npx.cmd resolves tsx from node_modules under a shell.
-    return { command: 'npx', args: ['tsx', ...args].map(quote), shell: true }
+    // No download fallback: a missing installed CLI is a normal invocation error.
+    return { command: host, args: [winPath.join(cwd, 'node_modules', 'tsx', 'dist', 'cli.mjs'), ...args], shell: false }
   }
 
-  if (command === 'npm' || command === 'npx') {
+  if (['npm', 'npx', 'pnpm', 'yarn'].includes(manager)) {
     // Bare command name; cmd.exe resolves npm.cmd/npx.cmd from PATH under shell.
     return { command, args: args.map(quote), shell: true }
   }
@@ -127,286 +129,6 @@ export function resolveTestSpawn(
   return { command, args: [...args], shell: false }
 }
 
-async function pathExists(path: string): Promise<boolean> {
-  try {
-    await stat(path)
-    return true
-  } catch {
-    return false
-  }
-}
-
-async function hasPythonProjectMarker(cwd: string): Promise<boolean> {
-  const markers = ['pyproject.toml', 'pytest.ini', 'tox.ini', 'setup.cfg']
-  const markerChecks = await Promise.all(markers.map(marker => pathExists(join(cwd, marker))))
-  if (markerChecks.some(Boolean)) return true
-
-  // tests/ 目录本身不是 Python 证据——dotnet 的 tests/ 里只有 *.csproj，旧判据凭
-  // isDirectory() 就判 Python → pytest 直 spawn → ENOENT（verifier 无 bash 可旁路）。
-  // 收紧为「tests/ 须真含 .py」；glob 出错保守 false：漏判落点是 blocked 引导，误判落点是静默 ENOENT。
-  try {
-    if (!(await stat(join(cwd, 'tests'))).isDirectory()) return false
-    for await (const _ of glob('tests/**/*.py', { cwd })) return true
-  } catch {
-    return false
-  }
-  return false
-}
-
-async function pythonHasTests(cwd: string): Promise<boolean> {
-  try {
-    const s = await stat(join(cwd, 'tests'))
-    if (!s.isDirectory()) return false
-  } catch {
-    return false
-  }
-  try {
-    for await (const _ of glob('tests/test_*.py', { cwd })) return true
-    for await (const _ of glob('tests/**/*_test.py', { cwd })) return true
-    for await (const _ of glob('tests/**/test_*.py', { cwd })) return true
-  } catch {
-    return true
-  }
-  return false
-}
-
-async function detectTestCommand(cwd: string): Promise<{ base: string; runner: string; recommendedCommand?: string; hasTests?: boolean }> {
-  // A2: project-declared verify.test (from .rivet-config.json) wins over all
-  // auto-detection — this is what unblocks Rust/Go/Java projects that the
-  // marker-based probes below don't recognize.
-  const declared = loadDeclaredVerify(cwd).test?.trim()
-  if (declared) {
-    return { base: declared, runner: 'declared', recommendedCommand: declared, hasTests: true }
-  }
-
-  const pkgPath = join(cwd, 'package.json')
-  if (!(await pathExists(pkgPath))) {
-    if (await hasPythonProjectMarker(cwd)) {
-      return {
-        base: 'pytest',
-        runner: 'pytest',
-        recommendedCommand: 'pytest',
-        hasTests: await pythonHasTests(cwd),
-      }
-    }
-    // A0 fingerprint fallback: Rust/Go/Java have canonical test commands even
-    // without a declaration (cargo test / go test always exist).
-    const fp = detectProjectFingerprint(cwd)
-    if (fp.testCommand && fp.language !== 'typescript' && fp.language !== 'python') {
-      return { base: fp.testCommand, runner: 'declared', recommendedCommand: fp.testCommand, hasTests: fp.hasTestInfra }
-    }
-    return { base: '', runner: 'unknown' }
-  }
-
-  const pkg = JSON.parse(await readFile(pkgPath, 'utf-8')) as { scripts?: { test?: string } }
-  const testScript = pkg.scripts?.test ?? ''
-
-  if (testScript.includes('vitest')) return { base: 'npx vitest run', runner: 'vitest' }
-  if (testScript.includes('jest')) return { base: 'npx jest', runner: 'jest' }
-  if (testScript.includes('node --test') || testScript.includes('tsx --test') || testScript.includes('node:test') || testScript.includes('run-node-tests')) {
-    return { base: testScript, runner: 'node-test' }
-  }
-
-  return { base: 'npm test', runner: 'npm' }
-}
-
-function isTestFileFilter(filter: string): boolean {
-  return /\.(test|spec)\.(ts|tsx|js|jsx|mjs|cjs)$/.test(filter)
-}
-
-
-/**
- * Reduce a filter to the stem used for globbing.
- *
- * The glob below wraps the filter in `*<stem>*.test.<ext>`, so a filter that
- * already carries `.test` / `.spec` can never match — `edit.test` expands to
- * `*edit.test*.test.ts`. That silently broke the most natural spellings,
- * including this tool's own documented `filter="loop.test.ts"` example
- * (2026-07-27 sessions: three blocked runs, one of which then reported
- * "exit 1, 0 passed" because the unresolved filter was handed to the runner
- * verbatim as a path).
- *
- * Directory components are dropped too: resolution only runs after the literal
- * path failed to stat, so a filter like `src/wrong-dir/edit.test.ts` should
- * still find the file by name rather than dead-end.
- */
-function filterStem(filter: string): string {
-  const basename = filter.split(/[/\\]/).pop() ?? filter
-  return basename.replace(/\.(test|spec)(\.(ts|tsx|js|jsx|mjs|cjs))?$/, '')
-}
-
-function buildUnresolvedFilter(runner: string, safeFilter: string): BlockedTestCommand {
-  return {
-    type: 'blocked',
-    display: '(auto-detect tests)',
-    runner,
-    scope: 'targeted',
-    message: [
-      `无法把 filter "${safeFilter}" 解析为测试文件。`,
-      'filter 用于定位测试文件，不是测试名——它按 src/**/*<filter>*.test.* 匹配。',
-      `已尝试的词干："${filterStem(safeFilter)}"。`,
-      '改用文件名（如 loop.test.ts）、相对路径（src/agent/__tests__/loop.test.ts）',
-      '或去掉 filter 跑全量；要按测试名筛选请用 bash 执行项目自身的测试命令。',
-    ].join('\n'),
-    recommendedCommand: 'npm test',
-    blockedReason: 'filter_unresolved',
-    userGuidance: `无法将 "${safeFilter}" 解析为测试文件。请使用文件名或相对路径（如 src/__tests__/xxx.test.ts），或运行无过滤的 run_tests() 跑全量测试。`,
-  }
-}
-
-/**
- * Resolve a non-file-path filter string to an actual test file path.
- * Uses Node.js glob (available in Node 22+) for cross-platform file matching.
- * Returns null if no match is found.
- */
-async function resolveFilterToTestFile(cwd: string, filter: string): Promise<string | null> {
-  const stem = filterStem(filter)
-  if (stem.length === 0) return null
-  try {
-    const files: string[] = []
-    for await (const f of glob(`src/**/*${stem}*.test.{ts,tsx,js,jsx,mjs,cjs}`, { cwd })) {
-      // 归一到 POSIX：glob 在 win32 上产出反斜杠，而本函数的返回值流进
-      // `display` / `args` / `targetFiles` 三条对外通道——仓库约定是 POSIX
-      // （见 path-format.ts 的 toPosixPath）。顺带修掉 `exact` 匹配：原先拿
-      // `f.includes('/' + stem + …)` 去比反斜杠路径，win32 上恒不命中，
-      // 只因 `files[0]` 兜底才看不出错。
-      files.push(toPosixPath(f))
-    }
-    if (files.length === 0) return null
-    const exact = files.find(f => f.includes('/' + stem + '.test.') || f.includes('/' + stem))
-    return exact ?? files[0] ?? null
-  } catch {
-    return null
-  }
-}
-
-async function buildTestCommand(cwd: string, filter?: string): Promise<TestCommand> {
-  const { base, runner, recommendedCommand, hasTests } = await detectTestCommand(cwd)
-  const scope = filter ? 'targeted' as const : 'full' as const
-
-  // Declared / fingerprint commands run as full shell strings. Targeted runs
-  // append the sanitized filter as a trailing token — the convention most
-  // runners accept (cargo test <name>, pytest <path>, npm test -- <path>).
-  if (runner === 'declared') {
-    const safeFilter = filter?.replace(/[`$\\;"'|&<>]/g, '').trim()
-    const full = safeFilter ? `${base} ${safeFilter}` : base
-    return {
-      type: 'run',
-      command: full,
-      args: [],
-      display: full,
-      runner,
-      scope,
-      shell: true,
-      recommendedCommand: recommendedCommand ?? base,
-    }
-  }
-
-  if (runner === 'unknown') {
-    return {
-      type: 'blocked',
-      display: '(auto-detect tests)',
-      runner,
-      scope,
-      message: [
-        '无法自动推断测试命令。',
-        '未找到 package.json 或受支持的测试运行器标记。',
-        '请用 bash 运行项目专用的验证命令（例如 Python 脚本、pytest 调用或输出检查）。',
-      ].join('\n'),
-      recommendedCommand: undefined,
-      blockedReason: 'no_test_framework',
-      userGuidance: '项目缺少可自动检测的测试命令。运行 /init 从项目指纹生成 verify 声明，或在 .rivet-config.json 手动声明 {"verify": {"test": "<命令>"}}——声明后 run_tests 直接使用它。也可以绕过自动检测，直接用 bash 运行验证命令。',
-    }
-  }
-
-  if (runner === 'pytest') {
-    if (!filter && hasTests === false) {
-      return {
-        type: 'blocked',
-        display: '(auto-detect tests)',
-        runner,
-        scope: 'full',
-        message: [
-          '无法为该 Python 项目自动推断测试命令，因为 tests/ 下未找到测试。',
-          '存在 Python 测试时，推荐使用 pytest。',
-          '若这是非测试的输出/绘图任务，请用 bash 运行具体的 Python 脚本或检查生成输出。',
-        ].join('\n'),
-        recommendedCommand: recommendedCommand ?? 'pytest',
-        blockedReason: 'no_tests_found',
-        userGuidance: 'Python 项目检测到，但 tests/ 目录下没有 test_*.py 或 *_test.py 文件。如果项目不需要自动化测试，用 bash 直接运行脚本验证；如果需要测试，在 tests/ 下创建 pytest 用例。',
-      }
-    }
-    const safeFilter = filter?.replace(/[`$\\;"'|]/g, '')
-    const args = safeFilter ? [safeFilter] : []
-    const display = safeFilter ? `pytest ${safeFilter}` : 'pytest'
-    return { type: 'run', command: 'pytest', args, display, runner, scope, recommendedCommand: recommendedCommand ?? 'pytest' }
-  }
-
-  if (!filter) {
-    return { type: 'run', command: 'npm', args: ['test'], display: 'npm test', runner, scope: 'full' }
-  }
-
-  const safeFilter = filter.replace(/[`$\\;"'|]/g, '')
-  if (runner === 'node-test' && isTestFileFilter(safeFilter)) {
-    // Resolve relative test file names to actual paths.
-    // run_tests(filter="compaction-controller.test.ts") sends the bare filename
-    // to tsx, which fails because the file is in src/agent/__tests__/.
-    // glob for the file first; if the filter IS a valid path, use it directly.
-    let resolvedFilter: string | null = null
-    try {
-      const s = await stat(join(cwd, safeFilter))
-      resolvedFilter = s.isFile() ? safeFilter : await resolveFilterToTestFile(cwd, safeFilter)
-    } catch {
-      // File doesn't exist at the direct path — try glob resolution
-      resolvedFilter = await resolveFilterToTestFile(cwd, safeFilter)
-    }
-    // Fail loud rather than handing an unlocated path to the runner: that
-    // yields "exit 1 / 0 passed, 0 failed", which reads as a test failure
-    // instead of a bad filter and sends the model debugging the wrong thing.
-    if (resolvedFilter === null) {
-      return buildUnresolvedFilter(runner, safeFilter)
-    }
-    if (base.includes('tsx') || base.includes('run-node-tests')) {
-      return withNodeTsxLoader(cwd, { type: 'run', command: 'tsx', args: ['--test', resolvedFilter], display: `tsx --test ${resolvedFilter}`, runner, scope: 'targeted' })
-    }
-    return { type: 'run', command: 'node', args: ['--test', resolvedFilter], display: `node --test ${resolvedFilter}`, runner, scope: 'targeted' }
-  }
-
-  // Resolve non-file-path filter to actual test file via find
-  if (runner === 'node-test' && safeFilter.length > 0) {
-    const resolved = await resolveFilterToTestFile(cwd, safeFilter)
-    if (resolved && (base.includes('tsx') || base.includes('run-node-tests'))) {
-      return withNodeTsxLoader(cwd, { type: 'run', command: 'tsx', args: ['--test', resolved], display: `tsx --test ${resolved}`, runner, scope: 'targeted' })
-    }
-    if (resolved) {
-      return { type: 'run', command: 'node', args: ['--test', resolved], display: `node --test ${resolved}`, runner, scope: 'targeted' }
-    }
-    return buildUnresolvedFilter(runner, safeFilter)
-  }
-
-  if (runner === 'vitest') {
-    return { type: 'run', command: 'npx', args: ['vitest', 'run', safeFilter], display: `npx vitest run ${safeFilter}`, runner, scope: 'targeted' }
-  }
-
-  if (runner === 'jest') {
-    return { type: 'run', command: 'npx', args: ['jest', '--testPathPattern', safeFilter], display: `npx jest --testPathPattern ${safeFilter}`, runner, scope: 'targeted' }
-  }
-
-  return {
-    type: 'blocked',
-    display: '(auto-detect tests)',
-    runner,
-    scope: 'targeted',
-    message: [
-      '无法为该项目推断安全的定向测试命令。',
-      '已配置的 npm test 运行器未被识别为 node:test、vitest 或 jest，因此 run_tests(filter=...) 不会合成 npm test 参数。',
-      '请用 bash 运行精确的定向验证命令，或不带 filter 运行 run_tests() 以执行完整 npm test 脚本。',
-    ].join('\n'),
-    recommendedCommand: 'npm test',
-    blockedReason: 'unknown_runner',
-    userGuidance: `npm test 脚本使用了不被自动识别的测试运行器。请用 bash 直接运行精确的测试命令，或不带 filter 运行 run_tests() 执行完整 npm test。`,
-  }
-}
 
 interface ParsedResult {
   exitCode: number
@@ -579,6 +301,7 @@ function buildBlockedVerification(
 }
 
 function extractTargetFilesFromCommand(testCommand: RunnableTestCommand, filter?: string): string[] {
+  if (testCommand.targetFiles) return testCommand.targetFiles
   const testFilePattern = /([^\s"']+\.(?:test|spec)\.(?:ts|tsx|js|jsx|mjs|cjs)|[^\s"']+\.py)/g
   const allMatches = [
     ...testCommand.args.join(' ').matchAll(testFilePattern),
@@ -619,16 +342,18 @@ export const RUN_TESTS_TOOL: Tool = {
 
 ### 用法
 - 修改代码后用 run_tests 验证改动
-- filter 用于**定位测试文件**，不是筛选测试名——按 src/**/*<filter>*.test.* 匹配
-- 自动检测 Node.js 测试脚本和 Python pytest 项目
-- 无法推断出安全的 runner 时，返回受阻的验证结果，并指引改用 bash
+- files 接受精确仓库相对路径，可跨包；与 filter 互斥
+- filter 按文件名／词干定位 .test/.spec；重名返回候选，不选择第一项
+- JS/TS 保留项目入口、hooks、配置和 loader；支持 Node、Vitest、Jest 的逐文件采证
+- 无法推断出安全的 runner 时返回具体受阻原因，不自动安装依赖
 - 报告：exit code、失败的测试、错误详情、耗时
 
 ### filter 怎么写
 文件名和相对路径都可以，带不带 .test/.spec 后缀都能解析：
 好：run_tests() —— 运行全部测试
 好：run_tests(filter="loop.test.ts") —— 按文件名定位
-好：run_tests(filter="loop") —— 词干也可以，命中多个时取最贴近的
+好：run_tests(filter="loop") —— 词干也可以，重名时改用精确路径
+好：run_tests(files=["packages/web/src/a.spec.ts"]) —— workspace 文件
 好：run_tests(filter="src/agent/__tests__/loop.test.ts") —— 相对路径最精确
 好：run_tests(filter="tests/test_example.py") —— 一个 Python pytest 文件
 坏：run_tests(filter="handles empty input") —— 这是测试名，定位不到文件会受阻
@@ -639,6 +364,9 @@ export const RUN_TESTS_TOOL: Tool = {
     input_schema: {
       type: 'object',
       properties: {
+        files: { type: 'array', items: { type: 'string' }, minItems: 1, description: '精确的仓库相对测试路径；可以跨包，与 filter 互斥。' },
+        projects: { type: 'array', items: { type: 'string' }, description: '明确选择配置项目，空数组表示恢复标准配置的全部项目；不会缩小交付所需的项目范围。' },
+        shard: { type: 'boolean', enum: [false], description: '显式取消原 Jest/Vitest 分片，用于剩余文件定向补测。' },
         filter: { type: 'string', description: '测试文件名、词干或相对路径（不是测试名）。留空跑全量。' },
         timeout: { type: 'integer', description: '整次验证的总预算（毫秒，默认：120000），隔离、集成与归因重试共用。' },
       },
@@ -650,7 +378,11 @@ export const RUN_TESTS_TOOL: Tool = {
     const timeout = verificationTimeout(params.input.timeout)
     const startTime = Date.now()
     const remaining = () => Math.max(0, timeout - (Date.now() - startTime))
-    const testCommand = await buildTestCommand(params.cwd, filter)
+    if (params.input.projects !== undefined || params.input.shard !== undefined || params.input.files !== undefined || existsSync(join(params.cwd, 'package.json')) && !loadDeclaredVerify(params.cwd).test
+      && (filter || classifyVerificationCommand('npm test', params.cwd).runner)) {
+      return runPlannedTests(params, remaining)
+    }
+    const testCommand = await buildLegacyTestCommand(params.cwd, filter)
 
     if (testCommand.type === 'blocked') {
       const rawPath = await persistRawOutput(params.toolUseId, testCommand.message)
@@ -664,57 +396,7 @@ export const RUN_TESTS_TOOL: Tool = {
       }
     }
 
-    const plan = params.verificationSnapshot
-    if (!plan) {
-      // Default in-place verification — unchanged single-phase path.
-      const inPlace = await runTestCommandIn(params.cwd, testCommand, params, filter, remaining())
-
-      // C3 compares live failure with the owned snapshot; the gate checks proof.
-      if (inPlace.isError && !params.abortSignal?.aborted && remaining() > 0 && inPlace.verification?.failureKind !== 'timeout' && params.prepareRetrySnapshot) {
-        let retryPlan: VerificationSnapshotPlan | null = null
-        try { retryPlan = await params.prepareRetrySnapshot() } catch { /* degrade: keep in-place result */ }
-        if (retryPlan) {
-          const isolated = await runTestCommandIn(retryPlan.path, testCommand, params, filter, remaining(), defaultRunTestDeps, retryPlan.repositoryRoot)
-          tagVerification(isolated, 'isolated', retryPlan.snapshotRef)
-          if (!isolated.isError) {
-            const comparisonId = randomUUID()
-            tagVerification(inPlace, 'integration', retryPlan.snapshotRef)
-            for (const phase of [isolated, inPlace]) if (phase.verification) phase.verification.comparisonId = comparisonId
-            const note = `\n\n[C3 归因重试] 测试在实时工作区 FAILED，但在归属变更的隔离快照中 PASSED。两个环境结果不一致；保留失败记录并检查失败位置或隔离对照，不能仅据此认定由其他会话引入。`
-            const result: ToolResult = {
-              ...isolated,
-              content: `[实时工作区] FAILED\n${typeof inPlace.content === 'string' ? inPlace.content.slice(0, 1500) : ''}\n\n[隔离快照] PASSED\n${isolated.content}${snapshotOmissionNote(retryPlan)}${note}`,
-              isError: false,
-            }
-            if (inPlace.verification) result.extraVerifications = [inPlace.verification]
-            return result
-          }
-          // Keep live failure; an incomplete retry cannot establish isolation failure.
-          inPlace.content += `${snapshotOmissionNote(retryPlan)}\n\n[C3 归因重试] ${isolated.verification?.status === 'blocked' ? `未完成 — ${isolated.content}` : '在隔离快照中也 FAILED——两个环境均失败；尚不能区分归属缺陷与共同基线问题。'}`
-          if (isolated.verification) inPlace.extraVerifications = [isolated.verification]
-        }
-      }
-      return inPlace
-    }
-
-    // Record both executions; only matched complete proofs can waive integration failure.
-    const comparisonId = randomUUID()
-    const phaseA = await runTestCommandIn(plan.path, testCommand, params, filter, remaining(), defaultRunTestDeps, plan.repositoryRoot)
-    tagVerification(phaseA, 'isolated', plan.snapshotRef)
-
-    // 阶段 A（隔离）失败即已定论：门禁只在「隔离通过」时才认集成差异
-    // （isolatedPassed）。此时再跑一遍实时工作区只会多付一整轮测试时间
-    // （2026-10-06 全量实测每次多约 64s）并把失败信息翻倍。
-    if (phaseA.isError) {
-      return snapshotTestResult(phaseA, plan)
-    }
-
-    const phaseB = await runTestCommandIn(params.cwd, testCommand, params, filter, remaining())
-    tagVerification(phaseB, 'integration', plan.snapshotRef)
-    for (const phase of [phaseA, phaseB]) if (phase.verification) phase.verification.comparisonId = comparisonId
-    if (phaseB.verification) phaseB.verification.isolatedPassed = !phaseA.isError && phaseA.verification?.status === 'passed'
-
-    return snapshotTestResult(phaseA, plan, phaseB)
+    return runTestPhases(params, testCommand, filter, remaining)
   },
 
   timeoutMs: runTestsTimeoutMs,
@@ -725,11 +407,6 @@ export const RUN_TESTS_TOOL: Tool = {
 
   isConcurrencySafe: () => false,
   isEnabled: () => true,
-}
-
-function tagVerification(result: ToolResult, phase: 'isolated' | 'integration', snapshotRef: string): void {
-  if (!result.verification) return
-  result.verification = { ...result.verification, verificationPhase: phase, snapshotRef }
 }
 
 interface TestStreamDecoder {
@@ -775,18 +452,30 @@ export function runTestCommandIn(
   deps: RunTestCommandDeps = defaultRunTestDeps,
   repositoryRoot?: string,
 ): Promise<ToolResult> {
+  cwd = join(cwd, testCommand.relativeCwd ?? '.')
   const startTime = Date.now()
   if (params.abortSignal?.aborted || timeout <= 0) return Promise.resolve(verificationBudgetStop(testCommand, startTime, params.abortSignal?.aborted ? 'cancelled' : 'timeout'))
   // Normalize for the host OS: on Windows npm/npx/tsx are `.cmd` shims that need
   // a shell (else modern Node throws EINVAL); node/pytest spawn directly.
   // Declared commands (verify.test / fingerprint) are full shell strings.
-  const completion = prepareCompletionCapture(testCommand.shell ? testCommand.command : [testCommand.command, ...testCommand.args].map(shellWord).join(' '), cwd, 'bash', repositoryRoot)
+  const completion = prepareCompletionCapture(testCommand.shell ? testCommand.command : [testCommand.command, ...testCommand.args].map(shellWord).join(' '), cwd, 'bash', repositoryRoot, startTime + timeout)
+  timeout = Math.max(0, timeout - (Date.now() - startTime))
+  if (timeout <= 0 || params.abortSignal?.aborted) { completion?.dispose(); return Promise.resolve(verificationBudgetStop(testCommand, startTime, params.abortSignal?.aborted ? 'cancelled' : 'timeout')) }
+  if (completion?.preparationError) { completion.dispose(); return Promise.resolve({ content: completion.preparationError, isError: true, verification: { ...buildBlockedVerification(testCommand, startTime, 'unknown_runner', completion.preparationError), coverage: completion.read(-1), targetFiles: testCommand.targetFiles } }) }
   const capturedArgv = completion ? verificationArgv(completion.command) : undefined
   const executionCommand = capturedArgv?.[0] ?? testCommand.command
   const executionArgs = capturedArgv?.slice(1) ?? testCommand.args
-  const spawnSpec: ResolvedTestSpawn = testCommand.shell
-    ? { command: completion?.command ?? testCommand.command, args: testCommand.args, shell: true }
-    : resolveTestSpawn(executionCommand, executionArgs, cwd)
+  let spawnSpec: ResolvedTestSpawn
+  try {
+    spawnSpec = testCommand.shell
+      ? { command: completion?.command ?? testCommand.command, args: testCommand.args, shell: true }
+      : resolveTestSpawn(executionCommand, executionArgs, cwd)
+  } catch (error) {
+    completion?.dispose()
+    const content = error instanceof Error ? error.message : String(error)
+    return Promise.resolve({ content, isError: true, verification: { command: testCommand.display, kind: 'test', scope: testCommand.scope,
+      status: 'blocked', blockedReason: 'invocation_failure', userGuidance: content, timestamp: startTime, countsReliable: false } })
+  }
   return new Promise<ToolResult>((resolve) => {
       // Single-settlement guard: timeout, abort, close and error can all race
       // (e.g. the killed child's `close` fires after the timeout already
@@ -952,7 +641,7 @@ export function runTestCommandIn(
         const invocationGuidance = '测试运行器启动失败或崩溃。请检查测试命令是否正确，必要时用 bash 手动运行以诊断环境问题。'
         const verification: VerificationMetadata = {
           ...(coverage ? { coverage } : {}),
-          ...(!coverage?.complete ? { userGuidance: '缺少完整逐文件完成证明；未知运行器或未完成执行不能补齐交付覆盖。' } : {}),
+          ...(!coverage?.complete ? { userGuidance: (coverage?.scopeError ? coverage.scopeError + '：' : '') + '缺少完整逐文件完成证明；未知运行器或未完成执行不能补齐交付覆盖。' } : {}),
           command: testCommand.display,
           kind: 'test',
           status: exitCode === 0 ? 'passed' : invocationFailed ? 'blocked' : 'failed',
@@ -979,7 +668,7 @@ export function runTestCommandIn(
         // When filter is a test file pattern, extract the file path so that
         // later runs with different filter strings targeting the same file
         // can be matched via meta.targetFiles instead of command string.
-        if (testCommand.scope === 'targeted' && filter) {
+        if (testCommand.scope === 'targeted' && (filter || testCommand.targetFiles?.length)) {
           const files = extractTargetFilesFromCommand(testCommand, filter)
           if (files.length > 0) {
             verification.targetFiles = files

@@ -46,6 +46,18 @@ function collectAdvisories(): { submitted: AdvisoryEntry[]; hook: ReturnType<typ
 }
 
 describe('git-clear-after-fail-hook', () => {
+  it('PR #494: clean flags share argument boundaries with the execution gate', () => {
+    for (const [command, count] of [
+      ['git clean -d -f', 1], ['git clean --force', 1], ['git clean "-f"', 1],
+      ['git clean -- -foo', 0], ['git clean -e -foo', 0], ['git clean -n', 0],
+    ] as const) {
+      const { submitted, hook } = collectAdvisories()
+      hook.run(makeCtx(1), makeTestFail())
+      hook.run(makeCtx(1), makeBashOk(command))
+      assert.equal(submitted.length, count, command)
+    }
+  })
+
   it('fires constitutional advisory on test fail → git stash without diagnosis', () => {
     const { submitted, hook } = collectAdvisories()
     hook.run(makeCtx(1), makeTestFail())

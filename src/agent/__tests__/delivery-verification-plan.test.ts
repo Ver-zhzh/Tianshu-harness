@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from 'node
 import { execFileSync } from 'node:child_process'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { formatDeliveryVerificationPlan } from '../delivery-verification-plan.js'
+import { formatDeliveryVerificationPlan, buildDeliveryVerificationPlan } from '../delivery-verification-plan.js'
 import { createDeliverTaskTool } from '../deliver-task.js'
 import { createTaskLedger } from '../task-ledger.js'
 import { createOwnershipLedger } from '../ownership-ledger.js'
@@ -38,7 +38,8 @@ it('actual delivery returns executable batches; all batches cover obligations an
     assert.equal(first.isError, true)
     assert.equal(commits, 0)
     assert.match(first.content, /required 24，已覆盖 0，剩余 24/)
-    const commands = first.content.split('\n').filter(line => line.startsWith('  node --test ')).map(line => line.trim())
+    const commands = first.verificationPlan!.batches.map(batch => batch.display)
+    assert.equal(first.verificationPlan!.pending.length, 24)
     assert.equal(commands.length, 2)
     for (let i = 0; i < commands.length; i++) {
       const result = await BASH_TOOL.execute({ cwd, toolUseId: `batch-${i}`, input: { command: commands[i]! } })
@@ -63,8 +64,8 @@ it('nested packages get their own cwd; unsupported runners keep every pending ob
     const text = formatDeliveryVerificationPlan(cwd, required, required, 9999).join('\n')
     assert.match(text, /advisory 9999 不阻断/)
     assert.match(text, /未生成可采证批命令.*义务保留：a.test.js/)
-    if (process.platform !== 'win32') assert.ok(text.includes(`cd -- '${join(cwd, 'nested')}' && node --test 'b.test.mjs'`))
-    else assert.match(text, /义务保留：nested\/b.test.mjs/)
+    assert.match(text, /run_tests\(files=\["nested\/b.test.mjs"\]\)/)
+    assert.equal(buildDeliveryVerificationPlan(cwd, required, required, 0).batches[0]!.cwd, join(cwd, 'nested'))
     assert.ok(!text.includes("node --test 'a.test.js'"))
   } finally { rmSync(cwd, { recursive: true, force: true }) }
 })
@@ -78,8 +79,8 @@ it('batch suggestions preserve preload flags and never silently replace fixed or
     for (const script of ['node --import tsx --require setup.cjs scripts/run-node-tests.ts', 'node --import tsx --require setup.cjs --test', 'rtk node --import tsx --require setup.cjs scripts/run-node-tests.ts', 'rtk node --import tsx --require setup.cjs --test']) {
       writeFileSync(join(cwd, 'package.json'), JSON.stringify({ scripts: { test: script } }))
       const output = formatDeliveryVerificationPlan(cwd, [file], [file], 0).join('\n')
-      const runner = script.startsWith('rtk ') ? 'rtk node' : 'node'
-      assert.ok(output.includes(`  ${runner} --import tsx --require setup.cjs --test 'feature.test.ts'`))
+      assert.match(output, /run_tests\(files=\["feature.test.ts"\]\)/)
+      assert.equal(buildDeliveryVerificationPlan(cwd, [file], [file], 0).batches[0]!.display, 'npm run test -- feature.test.ts')
       assert.doesNotMatch(output, /rtk rtk/)
     }
     for (const script of ['node --test fixed.test.js', 'node --test --test-name-pattern selected', 'tsx scripts/run-node-tests.ts fixed.test.js']) {
@@ -87,7 +88,7 @@ it('batch suggestions preserve preload flags and never silently replace fixed or
       assert.match(formatDeliveryVerificationPlan(cwd, [file], [file], 0).join('\n'), /未生成可采证批命令.*义务保留：feature.test.ts/)
     }
     writeFileSync(join(cwd, 'package.json'), JSON.stringify({ scripts: { test: 'tsx scripts/run-node-tests.ts' } }))
-    assert.match(formatDeliveryVerificationPlan(cwd, [file], [file], 0).join('\n'), /^  node --import tsx --test 'feature.test.ts'/m)
-    assert.match(formatDeliveryVerificationPlan(cwd, ['../outside.test.ts'], ['../outside.test.ts'], 0).join('\n'), /路径不在当前项目内，义务保留/)
+    assert.match(formatDeliveryVerificationPlan(cwd, [file], [file], 0).join('\n'), /npm run test -- feature.test.ts/)
+    assert.match(formatDeliveryVerificationPlan(cwd, ['../outside.test.ts'], ['../outside.test.ts'], 0).join('\n'), /当前仓库内.*义务保留/)
   } finally { rmSync(cwd, { recursive: true, force: true }) }
 })

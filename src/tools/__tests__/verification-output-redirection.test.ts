@@ -45,7 +45,7 @@ it('literal append redirection retains failed background evidence and records ex
     assert.equal(records[0]?.exitCode, 1)
     assert.equal(records[0]?.status, 'failed')
     assert.equal(records[0]?.coverage?.executionComplete, true)
-    assert.equal(records[0]?.coverage?.complete, false)
+    assert.equal(records[0]?.coverage?.complete, true)
     assert.equal(records[0]?.failed, 1)
     await jobs.await(result.backgroundJobId!, { timeoutMs: 1 })
     assert.equal(records.length, 1)

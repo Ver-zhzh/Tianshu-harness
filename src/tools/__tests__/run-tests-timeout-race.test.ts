@@ -34,58 +34,62 @@ class ManualTimers {
 }
 
 test('run_tests timeout claims settlement before synchronous child close and finalizes once', async () => {
-  const child = new FakeChild()
-  const timers = new ManualTimers()
-  let persistCalls = 0
-  let decoderEnds = 0
-  const command: RunnableTestCommand = {
-    type: 'run',
-    command: 'fake-tests',
-    args: [],
-    display: 'fake-tests',
-    runner: 'declared',
-    scope: 'full',
-  }
-  const deps: RunTestCommandDeps = {
-    spawn: () => child,
-    kill: () => {
-      // Reproduce the race deterministically: process close fires inside the
-      // timeout cleanup, before output persistence resolves.
-      child.emit('close', 0, null)
-    },
-    persist: async () => {
-      persistCalls++
-      await Promise.resolve()
-      return '/tmp/raw-output'
-    },
-    setTimeout: (callback, ms) => timers.setTimeout(callback, ms),
-    clearTimeout: (handle) => timers.clearTimeout(handle),
-    createDecoder: () => ({
-      write: (data: Buffer) => data.toString('utf8'),
-      end: () => {
-        decoderEnds++
-        return ''
+  const originalClock = Date.now
+  Date.now = () => 100
+  try {
+    const child = new FakeChild()
+    const timers = new ManualTimers()
+    let persistCalls = 0
+    let decoderEnds = 0
+    const command: RunnableTestCommand = {
+      type: 'run',
+      command: 'fake-tests',
+      args: [],
+      display: 'fake-tests',
+      runner: 'declared',
+      scope: 'full',
+    }
+    const deps: RunTestCommandDeps = {
+      spawn: () => child,
+      kill: () => {
+        // Reproduce the race deterministically: process close fires inside the
+        // timeout cleanup, before output persistence resolves.
+        child.emit('close', 0, null)
       },
-    }),
-  }
+      persist: async () => {
+        persistCalls++
+        await Promise.resolve()
+        return '/tmp/raw-output'
+      },
+      setTimeout: (callback, ms) => timers.setTimeout(callback, ms),
+      clearTimeout: (handle) => timers.clearTimeout(handle),
+      createDecoder: () => ({
+        write: (data: Buffer) => data.toString('utf8'),
+        end: () => {
+          decoderEnds++
+          return ''
+        },
+      }),
+    }
 
-  const pending = runTestCommandIn(
-    '/tmp',
-    command,
-    { input: {}, toolUseId: 'timeout-race', cwd: '/tmp' },
-    undefined,
-    50,
-    deps,
-  )
-  child.stdout.write('partial output')
-  await timers.fire(50)
-  const result = await pending
+    const pending = runTestCommandIn(
+      '/tmp',
+      command,
+      { input: {}, toolUseId: 'timeout-race', cwd: '/tmp' },
+      undefined,
+      50,
+      deps,
+    )
+    child.stdout.write('partial output')
+    await timers.fire(50)
+    const result = await pending
 
-  assert.equal(result.isError, true)
-  assert.match(result.content, /50ms 后超时/)
-  assert.equal(result.verification?.blockedReason, 'timeout')
-  assert.equal(persistCalls, 1, 'raw output must be persisted exactly once')
-  assert.equal(decoderEnds, 2, 'stdout and stderr decoders finalize exactly once each')
+    assert.equal(result.isError, true)
+    assert.match(result.content, /50ms 后超时/)
+    assert.equal(result.verification?.blockedReason, 'timeout')
+    assert.equal(persistCalls, 1, 'raw output must be persisted exactly once')
+    assert.equal(decoderEnds, 2, 'stdout and stderr decoders finalize exactly once each')
+  } finally { Date.now = originalClock }
 })
 
 test('EPERM fallback receives only remaining budget and cannot spawn after exhaustion', async () => {

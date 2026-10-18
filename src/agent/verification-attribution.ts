@@ -1,3 +1,4 @@
+import { currentScopeCatalogs, scopeGeneration } from './verification-scope-current.js'
 import { realpathSync } from 'node:fs'
 import { resolve, relative, isAbsolute } from 'node:path'
 import { readCompletionCoverage } from '../tools/test-completion.js'
@@ -232,7 +233,7 @@ function verificationKey(event: TaskLedgerEvent): string {
   // different filter syntax (e.g. "volatile-snapshot.test" vs
   // "src/prompt/__tests__/volatile-snapshot.test.ts").
   const coverage = readCompletionCoverage(event.meta?.coverage)
-  if (coverage) return `completion::${coverage.runner}::${coverage.cwd}::${scope}::${coverage.filtered}::${coverage.files.map(f => f.path).sort().join('|')}::${identity}`
+  if (coverage) return `completion::${coverage.runner}::${coverage.catalog?.digest ?? 'legacy'}::${coverage.cwd}::${scope}::${coverage.filtered}::${coverage.files.map(f => JSON.stringify([f.path, f.project ?? ''])).sort().join('|')}::${identity}`
   const metaTargetFiles = getMetaTargetFiles(event.meta)
   const cmdTargetFiles = extractTestFiles(command)
   const resolvedTargetFiles = extractTestFiles(resolvedCommand)
@@ -387,9 +388,12 @@ export function assessImpactedTestCoverage(
   if (impactedTests.length === 0) return { uncovered: [], uncoverable: [] }
 
   const coveredFiles = new Set<string>()
+  const projectResults = new Map<string, Map<string, boolean>>()
   const failedFiles = new Set<string>()
+  const catalogs = currentScopeCatalogs(verifications)
   for (const v of verifications) {
     const c = readCompletionCoverage(v.coverage)
+    if (c?.version === 3 && c.catalog?.canonical && catalogs.get(c.catalog.origin) !== scopeGeneration(c.catalog)) continue
     // coverage 缺失的失败记录不能静默消失：下面的 `if (!c) continue` 会把它整条跳过，
     // 其点名的文件随后落进 uncovered——而 uncovered 的语义是「从未跑过」，那一档
     // 没有归因、直接硬拦。实测现场：run_tests 的隔离快照里失败（快照只含本会话的
@@ -410,7 +414,11 @@ export function assessImpactedTestCoverage(
     const pathForScope = (path: string) => repositoryRoot && c
       ? normalizePathForMatch(relative(canonicalRoot(repositoryRoot), resolve(canonicalRoot(c.repositoryRoot), path)))
       : normalizePathForMatch(path)
-    if (!v.stale && v.status === 'failed' && v.kind === 'test' && c && !hasIsolatedComparison(v, verifications)) for (const f of c.files) if (f.outcome === 'failed') failedFiles.add(pathForScope(f.path))
+    if (!v.stale && v.kind === 'test' && c?.scopeError) for (const file of new Set([...(v.targetFiles ?? []), ...c.files.map(f => f.path), ...(c.catalog?.scopes.map(s => s.path) ?? [])])) projectResults.set(pathForScope(file), new Map([['scope_invalid', false]]))
+    if (!v.stale && v.status === 'failed' && v.kind === 'test' && c && !hasIsolatedComparison(v, verifications)) for (const f of c.files) if (f.outcome === 'failed') {
+      const path = pathForScope(f.path), projects = projectResults.get(path) ?? new Map<string, boolean>()
+      failedFiles.add(path); if (!(c.runner === 'jest' && c.version < 3) && !(c.version === 3 && !c.catalog?.canonical)) { projects.set(f.project ?? '', false); projectResults.set(path, projects) }
+    }
     // 覆盖判定逐文件（证据粒度 = 责任粒度）：同批其他文件的失败不得作废本文件
     // 已拿到的通过证据。`status` / `exitCode` 是**整批**判据，用它筛掉整批会丢掉
     // 批内逐文件证据——现场：一次全量运行里 7862 个文件通过，因同批混入 1 个既有
@@ -420,10 +428,22 @@ export function assessImpactedTestCoverage(
     // 成不成功」正交，不能一起放开（同构先例：编译器不因一文件报错丢掉其他文件的
     // 诊断；CI 矩阵里 job 红不过作废别的 job 结果）。
     if (v.stale || v.kind !== 'test' || !c?.complete || c.filtered) continue
+    if (hasIsolatedComparison(v, verifications)) continue
+    // Legacy Jest ordinal IDs cannot establish a stable project obligation.
+    if (c.runner === 'jest' && c.version < 3) continue
+    if (c.version === 3) for (const scope of c.catalog!.scopes) {
+      const path = pathForScope(scope.path), projects = projectResults.get(path) ?? new Map<string, boolean>()
+      if (!projects.has(scope.project)) projects.set(scope.project, false)
+      projectResults.set(path, projects)
+    }
     for (const f of c.files) {
-      if (f.outcome === 'passed' && f.tests > f.skipped && f.cancelled === 0) coveredFiles.add(pathForScope(f.path))
+      const path = pathForScope(f.path), projects = projectResults.get(path) ?? new Map<string, boolean>()
+      projects.delete('scope_invalid')
+      projects.set(f.project ?? '', f.outcome === 'passed' && f.tests > f.skipped && f.cancelled === 0)
+      projectResults.set(path, projects)
     }
   }
+  for (const [path, projects] of projectResults) if ([...projects.values()].every(Boolean)) { coveredFiles.add(path); failedFiles.delete(path) }
 
   const uncovered: string[] = []
   const uncoverable: string[] = []

@@ -165,7 +165,7 @@ describe('mixed', () => {
     assert.ok(result.content.includes('通过'), 'should include passed count')
     assert.ok(result.verification)
     assert.equal(result.verification!.scope, 'targeted')
-    assert.equal(result.verification!.command, 'node --import tsx --test src/example.test.ts')
+    assert.equal(result.verification!.command, 'npm run test')
   })
 
   // 2026-07-27 实测：filter='edit.test' 被判「无法解析为 Node 测试文件」，
@@ -177,7 +177,7 @@ describe('mixed', () => {
       const result = await RUN_TESTS_TOOL.execute(makeParams({ filter }, passingDir))
 
       assert.equal(result.isError, false, `filter 应解析到 src/example.test.ts，实得：${result.content}`)
-      assert.equal(result.verification!.command, 'node --import tsx --test src/example.test.ts')
+      assert.equal(result.verification!.command, 'npm run test')
       assert.equal(result.verification!.scope, 'targeted')
     })
   }
@@ -199,18 +199,24 @@ describe('mixed', () => {
 
     assert.equal(result.isError, false)
     assert.equal(result.verification!.command.startsWith('npx '), false)
-    assert.equal(result.verification!.command, 'node --import tsx --test src/example.test.ts')
+    assert.equal(result.verification!.command, 'npm run test')
   })
 
   it('treats scripts/run-node-tests.ts projects as node-test for targeted filters', async () => {
     const dir = setupProject('tsx scripts/run-node-tests.ts', `import { it } from 'node:test'
 import assert from 'node:assert/strict'
 it('works', () => assert.equal(2 + 2, 4))`)
+    mkdirSync(join(dir, 'scripts'), { recursive: true })
+    writeFileSync(join(dir, 'scripts/run-node-tests.ts'), `import {spawnSync} from 'node:child_process';
+console.log('original batch script');
+const result = spawnSync(process.execPath, ['--import','tsx','--test',...process.argv.slice(2)], {stdio:'inherit'});
+process.exit(result.status ?? 1);`)
     try {
       const result = await RUN_TESTS_TOOL.execute(makeParams({ filter: 'src/example.test.ts' }, dir))
 
       assert.equal(result.isError, false)
-      assert.equal(result.verification!.command, 'node --import tsx --test src/example.test.ts')
+      assert.equal(result.verification!.command, 'npm run test -- src/example.test.ts')
+      assert.match(result.displayOutput ?? result.content, /original batch script/)
       assert.equal(result.verification!.scope, 'targeted')
     } finally {
       await rm(dir, { recursive: true, force: true, maxRetries: 15, retryDelay: 50 })

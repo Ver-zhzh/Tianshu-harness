@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from 'node:fs'
+import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync, symlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createRequire } from 'node:module'
@@ -67,7 +67,15 @@ test('targeted TypeScript uses the project loader and complete proof for spaced 
     mkdirSync(projectTsx, { recursive: true })
     writeFileSync(join(projectTsx, 'package.json'), JSON.stringify({ type: 'module', exports: { '.': './loader.mjs', './cli': './cli.mjs' } }))
     writeFileSync(join(projectTsx, 'loader.mjs'), `import ${JSON.stringify(pathToFileURL(require.resolve('tsx')).href)}; process.env.TIANSHU_QA_PROJECT_LOADER = 'yes';`)
-    writeFileSync(join(projectTsx, 'cli.mjs'), `import ${JSON.stringify(pathToFileURL(require.resolve('tsx/cli')).href)};`)
+    writeFileSync(join(projectTsx, 'cli.mjs'), `#!/usr/bin/env node\nprocess.env.TIANSHU_QA_PROJECT_LOADER='yes';await import(${JSON.stringify(pathToFileURL(require.resolve('tsx/cli')).href)});`)
+    mkdirSync(join(cwd, 'node_modules/.bin'))
+    if (process.platform === 'win32') writeFileSync(join(cwd, 'node_modules/.bin/tsx.cmd'), `@echo off\r\n"${process.execPath}" "${join(projectTsx, 'cli.mjs')}" %*\r\n`)
+    else { symlinkSync(join(projectTsx, 'cli.mjs'), join(cwd, 'node_modules/.bin/tsx')); chmodSync(join(projectTsx, 'cli.mjs'), 0o755) }
+    mkdirSync(join(cwd, 'scripts'))
+    writeFileSync(join(cwd, 'scripts/run-node-tests.ts'), `import {spawnSync} from 'node:child_process';
+import {completionBatch,sealCompletionRun} from ${JSON.stringify(pathToFileURL(join(import.meta.dirname, '../test-completion.ts')).href)};
+const b=completionBatch(['--import','tsx','--test',...process.argv.slice(2)],process.cwd(),process.env);
+const r=spawnSync(process.execPath,b.args,{env:b.env,stdio:'inherit'});b.finish(r.status===0);sealCompletionRun(1,1);process.exit(r.status??1);`)
     writeFileSync(join(cwd, '.gitignore'), 'node_modules\n.rivet\n')
     writeFileSync(join(cwd, 'src/空 格.test.ts'), "import {test} from 'node:test'; import assert from 'node:assert/strict'; const value: number = 42; test('typed',()=>{assert.equal(value,42);assert.equal(process.env.TIANSHU_QA_PROJECT_LOADER,'yes');});")
     writeFileSync(join(cwd, 'src/direct.test.ts'), "import {test} from 'node:test'; import assert from 'node:assert/strict'; const value: number = 42; test('direct typed',()=>assert.equal(value,42));")
@@ -77,9 +85,9 @@ test('targeted TypeScript uses the project loader and complete proof for spaced 
     for (const script of ['tsx --test', 'node --import tsx --test', 'tsx scripts/run-node-tests.ts']) {
       writeFileSync(join(cwd, 'package.json'), JSON.stringify({ type: 'module', scripts: { test: script } }))
       const result = await RUN_TESTS_TOOL.execute({ input: { filter: 'src/空 格.test.ts' }, cwd, toolUseId: 'typed' })
-      assert.equal(result.isError, false, result.content)
+      assert.equal(result.isError, false, script + '\n' + result.content)
       assert.equal(result.verification?.scope, 'targeted')
-      assert.match(result.verification!.command, /^node --import tsx --test /)
+      assert.equal(result.verification!.command, "npm run test -- 'src/空 格.test.ts'")
       assert.equal(result.verification?.coverage?.complete, true, result.content)
       assert.equal(result.verification?.coverage?.repositoryRoot, realpathSync(cwd))
       assert.equal(result.verification?.coverage?.executionRoot, realpathSync(cwd))

@@ -308,7 +308,11 @@ export function buildAccountRoutes(deps: AccountRoutesDeps): Record<string, Rout
       if (started !== generation || !credential || accountModule.jwtSubject(credential)!==input.expectedUserId) return { status: 409, body: { error: 'account_changed' } }
       const result = await api.updateAccountProfile?.(credential, {name:input.name,...(input.avatar !== undefined ? {avatar:input.avatar} : {})}, { fetchImpl })
       if (started !== generation || store.load()?.accessToken !== credential) return { status: 409, body: { error: 'account_changed' } }
-      if (!result?.ok) return { status: 502, body: { error: result?.error || 'profile_update_unavailable' } }
+      if (!result?.ok) {
+        // 失败原因此前只存在响应体里、前端又吞成兜底文案，排查无迹——留一条日志。
+        serverLogger.warn('[account-profile] 资料写入远端失败', { error: result?.error ?? 'no_result' })
+        return { status: 502, body: { error: result?.error || 'profile_update_unavailable' } }
+      }
       lastRefresh = undefined
       await refreshAccount(store, credential, true)
       if (started !== generation || store.load()?.accessToken !== credential) return { status: 409, body: { error: 'account_changed' } }

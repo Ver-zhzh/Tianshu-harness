@@ -4,7 +4,7 @@ import { setImmediate as yieldToLoop } from 'node:timers/promises'
 import { canonicalStoragePath } from '../platform/test-session-isolation.js'
 
 export interface StorageEntry { root: string; path: string; relative: string; bytes: number; allocatedBytes: number; mtimeMs: number; dev: number; ino: number; symlink: boolean }
-export interface ScanError { path: string; error: string }
+export interface ScanError { path: string; error: string; code?: string }
 export function distinctStorageRoots(roots: string[]): string[] {
   const sorted = [...new Set(roots.map(canonicalStoragePath))].sort((a, b) => a.length - b.length)
   return sorted.filter((root, i) => !sorted.slice(0, i).some(parent => {

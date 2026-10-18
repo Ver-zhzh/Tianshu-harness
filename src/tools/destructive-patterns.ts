@@ -54,6 +54,15 @@ const CHECKOUT_CLEAR_SRC = String.raw`checkout[ \t]+(?:${CHECKOUT_ARG}[ \t]+)*(?
 /** Shared checkout argument boundaries for approval, pre-execution and advisory. */
 export const GIT_CHECKOUT_CLEAR_RE = new RegExp(CMD_START + 'git' + GIT_GLOBAL_OPTS_SRC + String.raw`\s+${CHECKOUT_CLEAR_SRC}`)
 
+// PR #494: force may follow other flags. Consume exclude values and stop at
+// the path separator so filenames such as -- -foo never become force flags.
+const CLEAN_VALUE_OPT = quotedOption(String.raw`(?:--exclude|-[qdxXinfi]*e)`)
+const CLEAN_PATH_SEPARATOR = quotedOption('--')
+const CLEAN_ARG = String.raw`(?:${CLEAN_VALUE_OPT}[ \t]+${SHELL_WORD}|(?!${CLEAN_VALUE_OPT}${ARG_END}|${CLEAN_PATH_SEPARATOR}${ARG_END})${SHELL_WORD})`
+const CLEAN_FORCE_OPT = quotedOption(String.raw`(?:--f(?:o(?:r(?:c(?:e)?)?)?)?|-[qdxXinfi]*f[qdxXinfi]*(?:e[^\s"';&|()]*)?)`)
+const CLEAN_CLEAR_SRC = String.raw`clean[ \t]+(?:${CLEAN_ARG}[ \t]+)*${CLEAN_FORCE_OPT}${ARG_END}`
+export const GIT_CLEAN_CLEAR_RE = new RegExp(CMD_START + 'git' + GIT_GLOBAL_OPTS_SRC + String.raw`\s+${CLEAN_CLEAR_SRC}`)
+
 /**
  * git 清场命令正则——匹配不可逆的 git 清理操作。
  * 来源:AGENTS.md 高危命令纪律 + `<security>` 覆盖范围段
@@ -64,7 +73,7 @@ export const GIT_CHECKOUT_CLEAR_RE = new RegExp(CMD_START + 'git' + GIT_GLOBAL_O
  *   `git checkout -- .` / `git checkout -q -f .` / `git checkout HEAD --force`
  *   `git checkout .` / `git checkout ./src/x.ts` / `git checkout src/`（裸路径＝pathspec 检出）
  *   `git restore .`
- *   `git clean -fd`
+ *   `git clean -fd` / `git clean -d -f` / `git clean --force`
  * 以上任意形态前置全局参数(`git -C <dir> reset --hard` / `git --no-pager stash`)同样命中。
  *
  * 排除(只读/恢复类):
@@ -75,5 +84,5 @@ export const GIT_CLEAR_RE = new RegExp(
   CMD_START +
     String.raw`git` +
     GIT_GLOBAL_OPTS_SRC +
-    String.raw`\s+(?:stash(?!\s+(?:pop|list|show|apply|drop|branch))|reset\s+(?:--hard|--mixed)|${CHECKOUT_CLEAR_SRC}|restore\s+\S|clean\s+-[a-z]*f)`,
+    String.raw`\s+(?:stash(?!\s+(?:pop|list|show|apply|drop|branch))|reset\s+(?:--hard|--mixed)|${CHECKOUT_CLEAR_SRC}|restore\s+\S|${CLEAN_CLEAR_SRC})`,
 )

@@ -2,6 +2,35 @@ import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
 import { createDestructiveGateState } from '../destructive-gate.js'
 import { GIT_CLEAR_RE } from '../destructive-patterns.js'
+import { matchesDangerousBash } from '../../agent/approval-risk.js'
+
+test('PR #494: clean force forms agree across the execution gate and approval', () => {
+  const blocked = [
+    'git clean -fd', 'git clean -fdx', 'git clean -xdf', 'git clean -d -f',
+    'git clean -f -d', 'git clean --force', 'git clean -d --force', 'git clean --force -d',
+    'git clean -q -d -f', 'cd x;git clean -d -f', 'git -C repo clean --force',
+    'git clean "-f"', "git clean '-df'", 'git clean --fo', 'git clean -e ignored --force',
+    'git clean -e "-f" --force', 'git clean -qfe ignored',
+  ]
+  const safe = [
+    'git clean -dn', 'git clean -d', 'git clean -n', 'git clean --dry-run',
+    'git clean -e "*.log" -d', 'git clean -- -foo', 'git clean "--" "-f"',
+    'git clean -e -foo', 'git clean --exclude "-f"', 'git clean -qe -f',
+    'git clean -efoo', 'git clean --exclude=-f', 'git clean -d; echo -f',
+    'git clean -d\necho --force', 'git clean -d && echo -f', 'git clean -d | echo -f',
+  ]
+  for (const [commands, expected] of [[blocked, true], [safe, false]] as const) {
+    for (const command of commands) {
+      const gate = createDestructiveGateState()
+      gate.noteVerification('failed')
+      assert.equal(GIT_CLEAR_RE.test(command), expected, `pattern: ${command}`)
+      assert.equal(gate.evaluate('bash', { command }).block, expected, `gate: ${command}`)
+      assert.equal(matchesDangerousBash(command), expected, `approval: ${command}`)
+      if (expected) assert.equal(gate.evaluate('bash', { command }).block, false, 'exact retry keeps existing semantics')
+    }
+  }
+  assert.equal(GIT_CLEAR_RE.test('git checkout -q --force .'), true, 'keep local checkout fix')
+})
 
 describe('destructive-gate 决策矩阵', () => {
   test('无验证失败时不拦截 git 清场命令', () => {

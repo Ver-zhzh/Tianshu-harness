@@ -43,11 +43,28 @@ describe('resolveTestSpawn — Windows .cmd runner handling', () => {
     assert.deepEqual(r.args, ['--test', 'a.test.ts'])
   })
 
-  it('Windows tsx falls back to `npx tsx` when the local shim is absent', () => {
+  it('Windows tsx missing installation never falls back to a download', () => {
     const r = resolveTestSpawn('tsx', ['--test', 'a.test.ts'], CWD, win(() => false))
-    assert.equal(r.shell, true)
-    assert.equal(r.command, 'npx')
-    assert.deepEqual(r.args, ['tsx', '--test', 'a.test.ts'])
+    assert.equal(r.shell, false)
+    assert.equal(r.command, process.execPath)
+    assert.deepEqual(r.args, ['C:\\proj\\node_modules\\tsx\\dist\\cli.mjs', '--test', 'a.test.ts'])
+  })
+
+  it('pnpm/yarn shim arguments are quoted without rewriting filenames', () => {
+    for (const manager of ['pnpm', 'yarn']) {
+      assert.deepEqual(resolveTestSpawn(manager, ['run', 'test', '中文 & space.test.ts'], CWD, win()).args, ['run', 'test', '"中文 & space.test.ts"'])
+      assert.throws(() => resolveTestSpawn(manager, ['percent%name.test.ts'], CWD, win()), /不能改写文件名/)
+    }
+  })
+
+  it('installed real CLI receives percent and Unicode paths unchanged', () => {
+    for (const [manager, bin] of [['pnpm', 'pnpm\\bin\\pnpm.cjs'], ['yarn', 'yarn\\bin\\yarn.js'], ['npm', 'npm\\bin\\npm-cli.js']]) {
+      const cli = 'C:\\node\\node_modules\\' + bin
+      const args = ['run', 'test', '中文 space%20.test.ts']
+      const r = resolveTestSpawn(manager!, args, CWD, { isWindows: true, execPath: 'C:\\node\\node.exe', path: 'C:\\node', exists: path => path === cli })
+      assert.equal(r.shell, false)
+      assert.deepEqual(r.args, [cli, ...args])
+    }
   })
 
   it('Windows node/pytest are real executables — spawned directly', () => {
