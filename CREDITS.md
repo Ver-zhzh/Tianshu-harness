@@ -479,3 +479,9 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 署名：pujitha24 <10557236+pujitha24@users.noreply.github.com>
 
 - #513 fix(skills): exclude __pycache__ and .pyc from skill packages（OPEN）
+
+## @q0o8o0p
+
+署名：q0o8o0p <322862300+q0o8o0p@users.noreply.github.com>
+
+- #509 feat(prompt): 新增用户级全局常驻指令位点（agent.userInstructions）（OPEN）
