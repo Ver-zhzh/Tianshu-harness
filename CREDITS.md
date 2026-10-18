@@ -473,3 +473,9 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 - #505 fix(auth): 桌面端登录 purpose 与账号服务端契约不一致（client-login → account-login）（OPEN）
 - #503 fix(platform): harden multi-key pool credential resolution, test isolation and Windows test runners（OPEN）
 - #511 fix(context): 打通自建 API 压缩恢复，解除上下文超限死锁（OPEN）
+
+## @pujitha24
+
+署名：pujitha24 <10557236+pujitha24@users.noreply.github.com>
+
+- #513 fix(skills): exclude __pycache__ and .pyc from skill packages（OPEN）
