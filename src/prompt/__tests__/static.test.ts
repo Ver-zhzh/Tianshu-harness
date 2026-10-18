@@ -168,6 +168,13 @@ describe('buildSystemPrompt', () => {
     assert.ok(prompt.includes('</security>'))
   })
 
+  it('hard-stops reverse-engineering cracks and business-ethics violations', () => {
+    const prompt = buildSystemPrompt({ tools: [] })
+    assert.ok(prompt.includes('逆向破解'), 'should name the prohibited domain')
+    assert.ok(prompt.includes('绕过'), 'should cover bypassing protection/authorization')
+    assert.ok(prompt.includes('终止本次会话'), 'should define the termination action')
+  })
+
   it('does NOT include tool summary section', () => {
     const tools = [{ name: 'bash', description: 'Run commands', input_schema: { type: 'object' as const, properties: {} } }]
     const prompt = buildSystemPrompt({ tools })

@@ -53,6 +53,7 @@ import { registeredWorkspaces } from './workspace-guard.js'
 import { buildProjectDocsRoutes } from './project-docs-routes.js'
 import { buildTrustRoutes } from './trust-api.js'
 import { buildCacheRoutes } from './cache-routes.js'
+import { buildStorageAuditRoutes } from './storage-audit-routes.js'
 import { buildTokenLedgerRoutes } from './token-ledger-routes.js'
 import { TokenLedgerService } from '../token-ledger/service.js'
 import { buildSpeechRoutes, createSpeechEngineFromEnv, type SpeechEngine } from './speech-routes.js'
@@ -1066,6 +1067,7 @@ export async function runServe(opts: RunServeOptions = {}): Promise<RunningServe
 
   // Cache usage route: 跨会话 cache-log 聚合 — 桌面端读不到 ~/.rivet 下的日志文件。
   Object.assign(routes, buildCacheRoutes({ apiToken, defaultCwd: () => process.cwd() }))
+  Object.assign(routes, buildStorageAuditRoutes({ apiToken }))
 
   // Token 台账路由：本地消耗查询 + 手动触发论坛同步。sidecar 是长驻进程，
   // 桌面用户的会话不经过 CLI bootstrap——autoSync+endpoint 齐全时在进程内

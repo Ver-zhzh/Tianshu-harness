@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "version": "3.33.0",
+  "date": "2026-10-17",
+  "fullNotesUrl": "https://github.com/huiliyi37/Tianshu-harness/releases/tag/v3.33.0",
+  "locales": {
+    "zh": {
+      "title": "安全收编与会话续跑修复",
+      "highlights": [
+        "收编外部安全审计 P0/P1：Bash 黑名单门禁与进程自我保护的 shell 包装穿透已全量封堵，多 key 池凭据不再被宿主环境变量劫持；另收编社区安全 PR 批次（#485/#488–#498）。",
+        "打断后续跑不再死锁：打断标记不改写已发送消息；旧快照缺失的会话可经「以当前配置继续」原地续跑；修复 Codex 带图轮次 400。",
+        "驾驶舱暗舱重构：异常才点亮的告警灯板 + 上下文水位/缓存命中率/交付/成本主仪表 + 轨迹时间轴；修复界面塌缩与计划文档裸 JSON。"
+      ],
+      "notice": "建议所有用户尽快升级。曾被「禁止静默冷启动」拦住的旧会话：升级后在报错卡片点「以当前配置继续」即可原地续跑。"
+    },
+    "en": {
+      "title": "Security intake and session-continuation fixes",
+      "highlights": [
+        "External security audit P0/P1 merged: shell-wrapping bypasses of the bash denylist gate and process self-preservation are fully blocked, and pooled credentials can no longer be hijacked by host env vars; plus a community security PR batch (#485/#488–#498).",
+        "Continuing after an interrupt no longer deadlocks, interrupt markers never rewrite sent bytes, sessions with missing snapshots can resume in place via \"Continue with current config\", and Codex image-turn 400s are fixed.",
+        "Cockpit redesigned on the dark-cockpit principle: an annunciator that lights only on anomalies, primary gauges for context load, cache hit rate, delivery and cost, and a trace timeline; plus fixes for the collapsed surfaces and leaked plan JSON."
+      ],
+      "notice": "All users should upgrade promptly. Sessions previously blocked by the evidence gate can resume in place from the error card after updating."
+    }
+  }
+}

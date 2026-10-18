@@ -171,6 +171,10 @@ export async function requestDeviceCode(opts: RequestDeviceCodeOpts = {}): Promi
         tuiVersion: opts.tuiVersion ?? null,
         deviceName: opts.deviceName ?? null,
         deviceFingerprint: opts.deviceFingerprint ?? null,
+        // 客户端登录必须自证「持久设备绑定」用途：服务端 tui-auth-create 也接受
+        // account-login，但 2026-10-17 实测响应回显的 purpose 仍是 client-login——
+        // 换用旧名不改变服务端语义，只会让客户端不再声明真实意图（设计见
+        // docs/plans/2026-10-15-identity-device.md 第 2 条）。
         purpose: 'client-login',
       }),
       signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),

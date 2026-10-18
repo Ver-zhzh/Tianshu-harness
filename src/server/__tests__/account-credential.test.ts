@@ -117,6 +117,80 @@ describe('account queries are key-aware (issue #392)', () => {
     assert.equal(body.keyId, 'default', '池回退命中时也要回显 keyId——客户端才能知道缺省视图是谁的账户')
   })
 
+  it('host rogue DEEPSEEK_API_KEY must not hijack the pool default (PR #503 P1)', async () => {
+    // 宿主环境残留的标准 env var 不得越过用户在 config.json 显式配置的池主 key。
+    // （守卫回归测试：把 account-credential.ts 的池形态守卫回滚，本用例必须红。）
+    process.env.DEEPSEEK_API_KEY = 'sk-rogue'
+    try {
+      writePooledConfig(home)
+      const res = await routes['GET /config/balance']!({}, {}, AUTH, undefined)
+      assert.equal(res.status, 200)
+      assert.equal(captured[0]?.auth, 'Bearer sk-main', '宿主环境残留的未关联 key 不得越过池主 key')
+      const body = res.body as { keyId?: string }
+      assert.equal(body.keyId, 'default', '命中池回退时 keyId 回显不得丢失')
+    } finally {
+      delete process.env.DEEPSEEK_API_KEY
+    }
+  })
+
+  it('pool + explicit apiKeyEnv pointing at an unset var falls back to the pool, not host env (PR #503 P1 edge)', async () => {
+    // apiKeyEnv 显式配置但指名的变量未设时，顶层「显式凭据」应视为落空——
+    // 池主 key 优先于 <NAME>_API_KEY 宿主兜底。
+    delete process.env.RIVET_TEST_UNSET_KEY
+    process.env.DEEPSEEK_API_KEY = 'sk-rogue'
+    try {
+      writeFileSync(join(home, 'config.json'), JSON.stringify({
+        provider: {
+          default: 'deepseek',
+          providers: {
+            deepseek: {
+              name: 'deepseek', baseUrl: 'https://api.deepseek.com/v1',
+              apiKeyEnv: 'RIVET_TEST_UNSET_KEY',
+              models: [{ id: 'deepseek-chat' }],
+              keys: [
+                { id: 'default', keyRef: 'deepseek:default', models: [] },
+                { id: 'k2', keyRef: 'deepseek:k2', label: '备用', models: [] },
+              ],
+            },
+          },
+        },
+      }, null, 2) + '\n')
+      const res = await routes['GET /config/balance']!({}, {}, AUTH, undefined)
+      assert.equal(res.status, 200)
+      assert.equal(captured[0]?.auth, 'Bearer sk-main', 'apiKeyEnv 显式但未命中时，池主 key 优先于 <NAME>_API_KEY 宿主兜底')
+    } finally {
+      delete process.env.DEEPSEEK_API_KEY
+    }
+  })
+
+  it('pool default key with empty slots must not wear pool identity over a rogue env (PR #503 P1 edge)', async () => {
+    // 池主 key 三槽全空（如 secret 被删）且宿主残留 rogue env：解析可落顶层
+    // （历史 env 兜底行为），但绝不能回显 keyId='default' 披着池 key 名义。
+    // 用自定义 provider（无预设 apiKeyEnv 继承、不共享 deepseek secrets），
+    // 排除同文件其他用例的状态泄漏。
+    process.env.GHOSTPOOL_API_KEY = 'sk-rogue'
+    try {
+      writeFileSync(join(home, 'config.json'), JSON.stringify({
+        provider: {
+          default: 'ghostpool',
+          providers: {
+            ghostpool: {
+              name: 'ghostpool', baseUrl: 'https://api.deepseek.com/v1',
+              models: [{ id: 'deepseek-chat' }],
+              keys: [{ id: 'default', models: [] }],
+            },
+          },
+        },
+      }, null, 2) + '\n')
+      const res = await routes['GET /config/balance']!({}, {}, AUTH, undefined)
+      assert.equal(res.status, 200)
+      const body = res.body as { keyId?: string }
+      assert.notEqual(body.keyId, 'default', '池主 key 自身凭据落空时，不得回显池 keyId 为 env 兜底 key 背书')
+    } finally {
+      delete process.env.GHOSTPOOL_API_KEY
+    }
+  })
+
   it('unknown keyId fails closed with 400 instead of silently querying another account', async () => {
     writePooledConfig(home)
     const res = await routes['GET /config/balance']!({}, { keyId: 'ghost' }, AUTH, undefined)

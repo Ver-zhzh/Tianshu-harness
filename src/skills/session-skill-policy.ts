@@ -2,6 +2,8 @@ import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { getSessionDir } from '../agent/session-persist.js'
 import { writeFileAtomicSync } from '../fs-atomic.js'
+import { sessionsDir } from '../config/paths.js'
+import { registerStorageRuntime } from '../storage/maintenance-gate.js'
 import { assertValidSessionId } from '../validation.js'
 import type { SkillMode } from './skill-metadata.js'
 import type { SkillRegistry } from './skill-loader.js'
@@ -16,6 +18,7 @@ export function sessionSkillModes(cwd: string, sessionId: string): Record<string
 export function queueSessionSkillMode(cwd: string, sessionId: string, registry: SkillRegistry, name: string, mode: SkillMode) {
   if (!registry.get(name)) throw new Error('Skill is not in this session snapshot')
   if (!['auto', 'manual', 'off'].includes(mode)) throw new Error('Invalid mode')
+  registerStorageRuntime(sessionsDir())
   writeFileAtomicSync(path(cwd, sessionId), JSON.stringify({ ...sessionSkillModes(cwd, sessionId), [name]: mode }))
   return { name, mode, effective: 'next-user-message' }
 }

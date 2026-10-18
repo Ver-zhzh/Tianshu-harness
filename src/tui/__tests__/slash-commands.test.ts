@@ -103,6 +103,34 @@ function makeSessionSkillProbe(cwd = '/cwd') {
   return { agent, registry, listCalls: () => listCalls }
 }
 
+describe('/skill resource readiness (#512)', () => {
+  it('materializes before acknowledging and marking the skill invoked', async () => {
+    const probe = makeSessionSkillProbe()
+    probe.registry.register({ name: 'storage-probe', description: 'probe', body: 'body', triggers: [] })
+    const order: string[] = []
+    probe.registry.setResourceLoader('storage-probe', () => { order.push('materialized') })
+    probe.agent.markSkillInvoked = () => { order.push('invoked') }
+    const handled = await handleSlashCommand(makeCtx({ agent: probe.agent, parts: ['/skill', 'storage-probe'],
+      pushStatic: entry => { if (String(entry.content).includes('Loaded skill:')) order.push('acknowledged') } }))
+    assert.equal(handled, false)
+    assert.deepEqual(order, ['materialized', 'acknowledged', 'invoked'])
+  })
+
+  it('does not acknowledge or invoke a skill when resources fail to materialize', async () => {
+    const probe = makeSessionSkillProbe()
+    probe.registry.register({ name: 'storage-probe', description: 'probe', body: 'body', triggers: [] })
+    probe.registry.setResourceLoader('storage-probe', () => { throw new Error('storage unavailable') })
+    let invoked = false, output = ''
+    probe.agent.markSkillInvoked = () => { invoked = true }
+    const handled = await handleSlashCommand(makeCtx({ agent: probe.agent, parts: ['/skill', 'storage-probe'],
+      pushStatic: entry => { output += String(entry.content) } }))
+    assert.equal(handled, true)
+    assert.equal(invoked, false)
+    assert.match(output, /storage unavailable/)
+    assert.doesNotMatch(output, /Loaded skill:/)
+  })
+})
+
 describe('/context 占用明细', () => {
   it('无参数输出含 cache 命中率与 cost 头（占用明细）', async () => {
     let captured = ''

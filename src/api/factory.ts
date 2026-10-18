@@ -81,24 +81,29 @@ export function resolveApiKey(provider: ProviderConfig): string {
   )
 }
 
-/** 三槽解析的非抛出形态（provider 级与 key 级共用）：keyRef→apiKey→apiKeyEnv→
- *  `<NAME>_API_KEY` 全部落空返回 undefined，由调用方决定 keyless 豁免还是抛错。
- *  导出供「尽力而为」的消费方使用（provider-cli 的探测路径）——它们要的就是
- *  这个语义，此前各写一份平行实现，正是漂移的来源。 */
-export function tryResolveCredentialKey(cred: CredentialSlots): string | undefined {
-  const { name, keyRef, apiKey, apiKeyEnv } = cred
+/** 显式三槽解析（无 env 兜底）：keyRef→apiKey→显式 apiKeyEnv，三者全部落空
+ *  返回 undefined。专用于「用户显式配置的凭据」与「宿主环境残留」必须区分的
+ *  消费方（账户查询的池形态守卫）——字段非空 ≠ 显式配置：apiKeyEnv 可以是
+ *  loadConfig 深合并注入的预设便利回退，secret 可能已被删除。 */
+export function tryResolveExplicitCredentialKey(cred: CredentialSlots): string | undefined {
+  const { keyRef, apiKey, apiKeyEnv } = cred
   if (keyRef) {
     const secret = readSecret(keyRef)
     if (secret) return secret
   }
   if (apiKey) return apiKey
-  if (apiKeyEnv) {
-    const env = process.env[apiKeyEnv]
-    if (env) return env
-  }
-  const env = process.env[`${name.toUpperCase()}_API_KEY`]
-  if (env) return env
+  if (apiKeyEnv) return process.env[apiKeyEnv] || undefined
   return undefined
+}
+
+/** 三槽解析的非抛出形态（provider 级与 key 级共用）：keyRef→apiKey→apiKeyEnv→
+ *  `<NAME>_API_KEY` 全部落空返回 undefined，由调用方决定 keyless 豁免还是抛错。
+ *  导出供「尽力而为」的消费方使用（provider-cli 的探测路径）——它们要的就是
+ *  这个语义，此前各写一份平行实现，正是漂移的来源。 */
+export function tryResolveCredentialKey(cred: CredentialSlots): string | undefined {
+  const env = tryResolveExplicitCredentialKey(cred)
+    ?? process.env[`${cred.name.toUpperCase()}_API_KEY`]
+  return env || undefined
 }
 
 /** key 级三槽解析（keys[].apiKey/apiKeyEnv/keyRef + provider 名做 env 回退名）。

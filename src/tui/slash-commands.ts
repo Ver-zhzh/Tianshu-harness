@@ -1,7 +1,8 @@
 import type { AgentLoop } from '../agent/loop.js'
 import type { SessionContext } from '../agent/context.js'
 import { catalogMetaFor } from './command-catalog.js'
-import { resolveAppPromptInput } from './prompt-input-resolver.js'
+import { isProjectSlotSkill, resolveAppPromptInput } from './prompt-input-resolver.js'
+import { projectSurfaceAllowed } from '../config/project-trust.js'
 import { SessionPersist, getSessionDir } from '../agent/session-persist.js'
 import { forkSession, listBranches, countMessageLines } from '../agent/session-fork.js'
 import { type StarDomainId } from '../agent/star-domain.js'
@@ -3488,7 +3489,8 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
       // registry，语义等价（PromptEngine.getSkillRegistry 的兜底就是它）。
       const sourceTag = (source?: string): string =>
         source === 'global-claude' ? '🌐' : '📁'
-      const allSkills = (ctx.agent.config?.promptEngine?.getSkillRegistry?.() ?? skillRegistry).list()
+      const activeRegistry = ctx.agent.config?.promptEngine?.getSkillRegistry?.() ?? skillRegistry
+      const allSkills = activeRegistry.list()
 
       // ── Auto-distilled draft review (human-in-loop) ──
       if (sub === 'review' || sub === 'drafts') {
@@ -3609,6 +3611,17 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
         return true
       }
 
+      if (skill.mode === 'off' || isProjectSlotSkill(skill, ctx.agent.cwd) && !projectSurfaceAllowed(ctx.agent.cwd, 'skills')) {
+        pushStatic(createLogEntry({ type: 'system', content: `Skill「${skill.name}」已停用或项目未授信，未加载。` }))
+        setIsStreaming(false)
+        return true
+      }
+      try { activeRegistry.ensureResources(skill.name) }
+      catch (error) {
+        pushStatic(createLogEntry({ type: 'system', content: `技能资源加载失败：${error instanceof Error ? error.message : String(error)}` }))
+        setIsStreaming(false)
+        return true
+      }
       const sizeKb = (skill.body.length / 1024).toFixed(1)
       const taskHint = parts.slice(2).join(' ').trim()
       pushStatic(createLogEntry({ type: 'system', content: `✅ Loaded skill: ${skill.name} (${sizeKb}KB from ${skill.source ?? 'rivet'})\nThe full skill instructions are now in the conversation.${taskHint ? `\nUser task: ${taskHint}` : ''}` }))

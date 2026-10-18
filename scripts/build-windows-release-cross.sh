@@ -30,6 +30,16 @@
 #   release/windows-repair/（WebView2 预窗口修复工具）
 #   release/latest.json（仅更新 windows-x86_64 条目，保留 macOS 条目）
 set -euo pipefail
+
+# 并发构建互斥（2026-10-17 事故：mac/windows 两腿并发共享 desktop/src-tauri/resources/
+# 与 dist/，Windows 安装包收进了 darwin-arm64 运行时）。mkdir 原子、跨平台，无需 flock。
+LOCK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.rivet/build.lock.d"  # 绝对路径：脚本中途 cd 后 trap 仍指对位置
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  echo "✗ 另一个平台构建正在进行（$LOCK_DIR 存在）——构建共享 resources/，并发必交叉污染" >&2
+  exit 1
+fi
+trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
+
 cd "$(dirname "$0")/.."
 
 # 版本号以 package.json 为准（同 build-windows-release.sh / build-macos-release.sh 范式）。

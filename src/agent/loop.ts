@@ -130,6 +130,7 @@ import { StigmergyStore } from '../context/stigmergy.js'
 import { dispatchUserImages } from './user-image-dispatch.js'
 import { drainSidePathUsage } from './side-path-usage-recorder.js'
 import { ImageRegistry } from './image-registry.js'
+import { StripImagesAtIntervals, resolveStripImagesConfig } from './strip-images-at-intervals.js'
 import { createStanceTally } from './stance-tally.js'
 import { createVirtuePendingLedger, computeVirtueCredit } from './virtue-signals.js'
 import { createFailureJournal, type FailureJournal } from './failure-journal.js'
@@ -801,6 +802,11 @@ export class AgentLoop {
   /** 视觉副驾短期记忆：本会话用户/工具携带的图片按短 id 寄存，供 ask_image 反复追问。
    *  纯内存、不进 prompt 历史、不落盘（见 image-registry.ts 的边界约束）。 */
   readonly imageRegistry = new ImageRegistry()
+  /** CUBP High #1：请求侧 interval 图片修剪器（wire-only）。跨轮保活是周期
+   *  语义的载体（offset 只在 force-prune 后非零）；switchModel 重建 AgentLoop
+   *  会重置周期——可接受：模型切换本身已使缓存 key 失效，周期重置无额外代价。
+   *  构造器内初始化（成员初始化器先于构造体执行，读不到 this.config）。 */
+  readonly imagePruner: StripImagesAtIntervals
 
   constructor(
     config: AgentConfig,
@@ -813,8 +819,9 @@ export class AgentLoop {
       if (config.primaryClient === raw) config.primaryClient = config.client
     }
     this.config = config; this.session = session;
+    this.imagePruner = new StripImagesAtIntervals(config.imagePruning ?? resolveStripImagesConfig())
     session.setPublishedHistoryProbe(userOrdinal => userOrdinal < this.config.promptEngine.getPublishedUserCount(), userOrdinal => userOrdinal < this.config.promptEngine.getMergeProtectedUserCount())
-    if (config.sessionId) config.promptEngine.setSkillRegistry(sessionSkillSnapshot(cwd ?? process.cwd(), config.sessionId))
+    if (config.sessionId) config.promptEngine.setSkillRegistry(sessionSkillSnapshot(cwd ?? process.cwd(), config.sessionId, undefined, { purpose: 'execute' }))
     if (!this.config.permissionsOverlay) {
       this.config.permissionsOverlay = createPermissionOverlay()
     }

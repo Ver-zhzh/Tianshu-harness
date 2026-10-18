@@ -93,6 +93,16 @@ export function parseSkillMarkdown(content: string, fileName: string): SkillDefi
 
 export class SkillRegistry {
   private skills = new Map<string, SkillDefinition>()
+  private resourceLoaders = new Map<string, () => void>()
+
+  setResourceLoader(name: string, load: () => void): void {
+    this.resourceLoaders.set(name, load)
+  }
+
+  /** Workspace registries already use source files; session registries materialize pinned bytes. */
+  ensureResources(name: string): void {
+    this.resourceLoaders.get(name)?.()
+  }
 
   register(skill: SkillDefinition): void {
     this.skills.set(skill.name, skill)
@@ -304,6 +314,7 @@ export class SkillRegistry {
 
     const blocks: string[] = []
     for (const skill of skills) {
+      this.ensureResources(skill.name)
       let block = `<skill name="${skill.name}">\n${skill.body}\n</skill>`
       if (skill.skillDir) {
         const files = skill.files ?? listSkillFiles(skill.skillDir)

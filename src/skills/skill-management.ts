@@ -8,7 +8,7 @@ import { writeFileAtomicSync } from '../fs-atomic.js'
 import { isSafeFileName } from '../utils/safe-path.js'
 import { SkillRegistry, registerBuiltinSkills, parseSkillMarkdown, BUILTIN_SKILLS, type SkillSource, type SkillDefinition } from './skill-loader.js'
 import { type SkillMode } from './skill-metadata.js'
-import { readPackage, scanPackages, validateResourcePath, type SkillPackage } from './skill-package.js'
+import { readPackage, scanPackages, skillPackagePath, validateResourcePath, type SkillPackage } from './skill-package.js'
 import { parseSkillYaml } from './skill-metadata.js'
 import { stringify } from 'yaml'
 import { parseManifest } from '../plugins/manifest.js'
@@ -43,15 +43,24 @@ export class SkillManagement {
   private save(context: SkillContext, value: Record<string, RecordEntry>) {
     writeFileAtomicSync(join(this.root(context), '_management.json'), JSON.stringify(value, null, 2))
   }
-  list(cwd?: string): { skills: ManagedSkill[]; errors: string[] } {
+  list(cwd?: string, onPackage?: (path: string, pkg: SkillPackage) => void): { skills: ManagedSkill[]; errors: string[] } {
     const skills: ManagedSkill[] = [], errors: string[] = []
+    // One catalog operation must use the same bytes for its definition, version and snapshot.
+    const packages = new Map<string, SkillPackage>()
+    const packageAt = (path: string): SkillPackage => {
+      const key = resolve(skillPackagePath(path))
+      let pkg = packages.get(key)
+      if (!pkg) { pkg = readPackage(path); packages.set(key, pkg) }
+      return pkg
+    }
     const append = (definitions: SkillDefinition[], scope: ManagedScope, context: SkillContext) => {
       const records = this.records(context)
       for (const def of definitions) {
         const skillId = createHash('sha256').update(`${scope}:${def.bodyPath ?? `${def.source}:${def.name}`}`).digest('hex').slice(0, 24)
         let pkg: SkillPackage | undefined
-        try { if (def.bodyPath) pkg = readPackage(def.skillDir ?? def.bodyPath) }
+        try { if (def.bodyPath) pkg = packageAt(def.skillDir ?? def.bodyPath) }
         catch (e) { errors.push(`${def.name}: ${String(e)}`); continue }
+        if (pkg && def.bodyPath) onPackage?.(def.bodyPath, pkg)
         const metadata = pkg?.definition.metadata ?? def.metadata
         const record = records[skillId]
         skills.push({ skillId, name: def.name, description: metadata?.shortDescription ?? def.description,
@@ -72,7 +81,7 @@ export class SkillManagement {
           const manifest = parseManifest(JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).tianshu)
           if (!manifest.ok || enabled[manifest.manifest.name] === false) continue
           for (const path of manifest.manifest.skills ?? []) {
-            const directory = insidePackage(root, path), pkg = readPackage(directory)
+            const directory = insidePackage(root, path), pkg = packageAt(directory)
             if (!builtins.get(pkg.definition.name)) builtins.register({ ...pkg.definition, source: 'plugin', bodyPath: join(directory, 'SKILL.md'), skillDir: directory })
           }
         } catch (error) { errors.push(`Plugin ${entry.name}: ${String(error)}`) }
@@ -92,7 +101,7 @@ export class SkillManagement {
         const path = join(dir, entry.name), directory = entry.isDirectory()
         if (!(entry.isFile() && entry.name.endsWith('.md')) && !(directory && existsSync(join(path, 'SKILL.md')))) continue
         try {
-          const pkg = readPackage(path)
+          const pkg = packageAt(path)
           definitions.push({ ...pkg.definition, source, bodyPath: directory ? join(path, 'SKILL.md') : path, skillDir: directory ? path : undefined })
         } catch (error) { errors.push(`${path}: ${String(error)}`) }
       }

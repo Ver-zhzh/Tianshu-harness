@@ -14,6 +14,16 @@
 #   bash scripts/build-linux-container.sh arm64    # 原生（快）
 #   bash scripts/build-linux-container.sh amd64    # Rosetta x86 模拟（慢）
 set -euo pipefail
+
+# 并发构建互斥（2026-10-17 事故：mac/windows 两腿并发共享 desktop/src-tauri/resources/
+# 与 dist/，Windows 安装包收进了 darwin-arm64 运行时）。mkdir 原子、跨平台，无需 flock。
+LOCK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.rivet/build.lock.d"  # 绝对路径：脚本中途 cd 后 trap 仍指对位置
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  echo "✗ 另一个平台构建正在进行（$LOCK_DIR 存在）——构建共享 resources/，并发必交叉污染" >&2
+  exit 1
+fi
+# 锁释放并入下方 cleanup trap（同信号只留一个 EXIT trap，104 行处 cleanup 会顶掉单独注册的）。
+
 cd "$(dirname "$0")/.."
 
 ARCH="${1:?用法: build-linux-container.sh <amd64|arm64>}"
@@ -90,7 +100,7 @@ if [ -n "${CONTAINER_PROXY:-}" ]; then
 fi
 # 使用刚校验过的不可变 ID，避免 tag 在检查后被另一次构建切换架构。
 CID="$(docker run "${RUN_ARGS[@]}" "$IMAGE_ID" sleep infinity)"
-cleanup() { docker rm -f "$CID" >/dev/null 2>&1 || true; }
+cleanup() { docker rm -f "$CID" >/dev/null 2>&1 || true; rmdir "$LOCK_DIR" 2>/dev/null || true; }
 trap cleanup EXIT
 
 echo "=== 拷贝源码 → 容器卷（排除 .git/target/node_modules/release/out）==="

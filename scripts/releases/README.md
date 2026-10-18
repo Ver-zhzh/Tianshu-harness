@@ -25,7 +25,7 @@ From the product repository root, after building, signing and uploading the exis
 node scripts/releases/generate-catalog.mjs
 node scripts/releases/publish-atomgit.mjs                 # local validation and dry run
 node scripts/releases/publish-atomgit.mjs --publish       # immutable upload + anonymous full readback
-node scripts/releases/publish-atomgit.mjs --publish --acceptance release/atomgit-acceptance.json
+node scripts/releases/publish-atomgit.mjs --publish
 node scripts/releases/publish-routing.mjs                # review metadata publication
 node scripts/releases/publish-routing.mjs --publish --website ../tianshu-website
 ```
@@ -36,16 +36,15 @@ node scripts/releases/publish-routing.mjs --publish --website ../tianshu-website
 bash scripts/releases/publish-release-catalog.sh             # dry run (read-only pre-checks)
 bash scripts/releases/publish-release-catalog.sh --publish   # publish
 #   --with-atomgit              also run the AtomGit stage (requires the tag already mirrored)
-#   --atomgit-acceptance FILE   real multi-network acceptance, to enable the source
 ```
 
 If `github.com` is unreachable from your network, Node's built-in fetch times out even when `git`/`gh` still work through `git config http.proxy` — Node ignores env proxies unless told otherwise. Prefix with `HTTPS_PROXY=<proxy> NODE_USE_ENV_PROXY=1` in that case.
 
-AtomGit requires the version tag to be mirrored beforehand. The publisher consumes `ATOMGIT_ACCESS_TOKEN` or the system Git credential helper without displaying either. It uses the official upload-address API and PUT headers, then checks the stable anonymous download entry, full SHA-256, size, HEAD and Range. No signed temporary URL is persisted. Missing credentials, login requirements, conflicting existing attachments or failed package checks stop publication. Provider quota and multi-network acceptance still need real measurements; this script does not certify unlimited bandwidth.
+AtomGit requires the version tag to be mirrored beforehand. The publisher consumes `ATOMGIT_ACCESS_TOKEN` or the system Git credential helper without displaying either. It uses the official upload-address API and PUT headers, then checks the stable anonymous download entry, full SHA-256, size, HEAD and Range. No signed temporary URL is persisted. Missing credentials, login requirements, conflicting existing attachments or failed package checks stop publication. Provider quota and multi-network behavior are not certified by this script.
 
-Anonymous byte verification alone leaves the source disabled. `--acceptance` must identify `schemaVersion: 1`, the exact `version`, `platform` and `sha256`, plus true `tauriRedirectVerified`, `stableEntryVerified`, `disconnectRetryVerified`, a nonempty `limitsObserved` record and at least two distinct `networks` observations (`name`, `checkedAt`, `passed: true`). Populate these only from actual tests. Without that record, the public package/signature/checksum may be uploaded, but updater metadata is deferred. After qualification, retrying preserves proof timestamps and revision instead of rewriting immutable metadata.
+Source qualification is fully automated (2026-10-17): anonymous full download with byte-identical SHA-256 + size plus Range addressability qualify the source; there is no manual acceptance file. The earlier two-network人工记录门 was deleted as over-engineering — manual notes add no truth over the automated evidence. If Range verification fails the source stays disabled; nothing is written remotely in that case.
 
-For several platforms, run `--platform <platform> --publish --assets-only --acceptance <platform-evidence>` for each intended update platform. Complete the catalog's AtomGit qualification for every update platform before publishing either immutable metadata file. An incomplete platform set fails before any metadata upload; it cannot lock in a Windows-only manifest while macOS assets are still pending. HEAD is informational and may fail; Range acceptance must match the requested interval, total package size and bytes, not merely return HTTP 206.
+For several platforms, run `--platform <platform> --publish --assets-only` for each intended update platform. Complete the catalog's AtomGit qualification for every update platform before publishing either immutable metadata file. An incomplete platform set fails before any metadata upload; it cannot lock in a Windows-only manifest while macOS assets are still pending. HEAD is informational and may fail; Range acceptance must match the requested interval, total package size and bytes, not merely return HTTP 206.
 
 After asset qualification, finalize or resume metadata publication without reuploading/revalidating the large package:
 

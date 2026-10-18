@@ -35,6 +35,7 @@ import { appendFile, mkdir, writeFile, rename } from 'node:fs/promises'
 import { setImmediate as yieldToLoop } from 'node:timers/promises'
 import { extname, join } from 'node:path'
 import { contextFileKind, CONTEXT_DOCUMENT_MIME } from './file-context-policy.js'
+import { registerSessionStorageRuntime } from '../storage/maintenance-gate.js'
 import { cpuPool } from '../workers/cpu-pool.js'
 import { parseEventsJsonlRaw } from '../workers/cpu-tasks.js'
 import { readEventsTailRaw } from '../workers/events-tail.js'
@@ -53,7 +54,7 @@ export class FileSessionPersistence implements SessionPersistenceAdapter {
   constructor(
     private readonly baseDir: string,
     private readonly opts: { maxEventsDiskBytes?: number; maxTransientWriteRetries?: number } = {},
-  ) {}
+  ) { registerSessionStorageRuntime(baseDir) }
 
   /** Accepted rows start the async single writer; only flushThrough confirms writes and fsync. */
   private eventBuffers = new Map<string, BufferedLine[]>()

@@ -69,6 +69,7 @@ skill 是可复用的工作流 playbook。available-skills 区块列出了每个
 
     if ((skill.mode ?? skill.metadata?.defaultMode) === 'off') return { content: `Skill「${skill.name}」已停用。请先启用。`, isError: true }
     if ((skill.mode ?? skill.metadata?.defaultMode) === 'manual') return { content: `Skill「${skill.name}」仅手动使用。请用户通过 /skill ${skill.name} 调用。`, isError: true }
+    registry.ensureResources(skill.name)
     params.onSkillInvoked?.(skill.name)
 
     const body = `<skill name="${skill.name}">\n${skill.body}\n</skill>`

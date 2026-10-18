@@ -22,7 +22,6 @@
 # 选项：
 #   --publish              执行对外发布（upload-to-oss + [atomgit] + publish-routing --publish + 线上验证）
 #   --with-atomgit         把 AtomGit 上传阶段并进来（需 AtomGit 已镜像 v<ver> tag + 写凭据）
-#   --atomgit-acceptance F 真实测量验收记录（按其 platform 字段匹配对应平台才启用该源；其余平台仍 disabled）
 #   --skip-oss             跳过 upload-update-to-oss.sh（OSS 二进制/legacy manifest 已单独传过）
 #   --no-commit            generate-catalog 后不自动提交 release-catalog.json
 #   --website DIR          覆盖 website checkout 路径（默认 ../tianshu-website）
@@ -38,15 +37,13 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-PUBLISH=0; SKIP_OSS=0; NO_COMMIT=0; WITH_ATOMGIT=0; ATOMGIT_ACCEPTANCE=""; WEBSITE="../tianshu-website"
+PUBLISH=0; SKIP_OSS=0; NO_COMMIT=0; WITH_ATOMGIT=0; WEBSITE="../tianshu-website"
 while [ $# -gt 0 ]; do
   case "$1" in
     --publish)              PUBLISH=1; shift ;;
     --skip-oss)             SKIP_OSS=1; shift ;;
     --no-commit)            NO_COMMIT=1; shift ;;
     --with-atomgit)         WITH_ATOMGIT=1; shift ;;
-    --atomgit-acceptance)   ATOMGIT_ACCEPTANCE="${2:-}"; shift 2 ;;
-    --atomgit-acceptance=*) ATOMGIT_ACCEPTANCE="${1#*=}"; shift ;;
     --website)              WEBSITE="${2:-}"; shift 2 ;;
     --website=*)            WEBSITE="${1#*=}"; shift ;;
     *) echo "未知参数：$1" >&2; exit 2 ;;
@@ -138,25 +135,14 @@ if [ "$WITH_ATOMGIT" = 1 ]; then
   step "AtomGit 上传 + 匿名回读校验（逐平台）"
   # publish-atomgit 一次只处理一个 platform/purpose；README 要求逐平台覆盖，最后一次不带
   # --assets-only。只跑 updater 用得到的 purpose=update（install 是网站手动下载用的）。
-  # 验收文件按其 platform 字段匹配才使用（validateAcceptance 会校验 platform === artifact.platform）。
-  ACC_PLATFORM=""
-  if [ -n "$ATOMGIT_ACCEPTANCE" ] && [ -f "$ATOMGIT_ACCEPTANCE" ]; then
-    ACC_PLATFORM="$(node -pe "JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')).platform" "$ATOMGIT_ACCEPTANCE" 2>/dev/null || true)"
-  fi
   # 全部平台都用 --assets-only：publish-atomgit 的 metadata 步会以 uploadImmutable 上传
   # `latest.json`，而它的内容随「已上传平台的 atomgit 条目」增多而变——一旦先跑过单平台，
   # 旧字节已在 AtomGit 上，重跑必撞 "Package SHA-256 or size mismatch"（2026-10-08 实测）。
   # 分流只依赖 release-catalog（Rust routed_update_check 读它），不依赖这个 legacy manifest。
   PLATFORMS="$(node -e "console.log(Object.keys(require('./latest.json').platforms).join(' '))")"
   for p in $PLATFORMS; do
-    ARGS=(--publish --platform "$p" --purpose update --assets-only)
-    if [ -n "$ACC_PLATFORM" ] && [ "$p" = "$ACC_PLATFORM" ]; then
-      ARGS+=(--acceptance "$ATOMGIT_ACCEPTANCE")
-      echo "    → ${p}（含验收）"
-    else
-      echo "    → ${p}（仅匿名校验）"
-    fi
-    node scripts/releases/publish-atomgit.mjs "${ARGS[@]}"
+    echo "    → ${p}"
+    node scripts/releases/publish-atomgit.mjs --publish --platform "$p" --purpose update --assets-only
   done
   if [ -z "$ACC_PLATFORM" ]; then
     echo "    ⚠ 没有匹配的 --atomgit-acceptance：AtomGit 源仍为 disabled（需真实多网络测量后才启用）。"

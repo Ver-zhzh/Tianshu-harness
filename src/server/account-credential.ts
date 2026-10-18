@@ -11,13 +11,15 @@
  *   不悄悄回落到别的 key——查错账户比报错更糟）。'default' 是合法池 id（存量
  *   迁移的首个 key）；仅当 provider 无池时它指顶层三槽（对齐 pro
  *   provider-usage 服务的无池 keyId 约定）。
- * - 省略 keyId → 顶层三槽优先（未迁移形态的历史行为）；顶层落空且 keys 池非空
- *   （A′ 迁移形态）→ 回退 defaultKeyOf(provider)——多 key 用户至少能查到主 key。
+ * - 省略 keyId → keys 池非空且顶层无 keyRef/apiKey（A′ 迁移形态）→ 池主 key
+ *   （defaultKeyOf，显式三槽解析）优先于顶层与 env 兜底——宿主残留的
+ *   `<NAME>_API_KEY` 不得劫持用户显式配置的池凭据（PR #503 P1）；池主 key 落空
+ *   再走顶层三槽（含 env 兜底，未迁移形态的历史行为）与池回退保底。
  * - provider 省略 → 默认 provider；显式给的 provider 不存在 → 400。
  */
 import type { Config, ProviderConfig } from '../config/schema.js'
 import { defaultKeyOf, DEFAULT_KEY_ID } from '../config/provider-keys.js'
-import { tryResolveCredentialKey } from '../api/factory.js'
+import { tryResolveCredentialKey, tryResolveExplicitCredentialKey } from '../api/factory.js'
 
 export interface AccountCredential {
   /** undefined 仅出现在「隐式默认 provider 不存在」——路由据此返回 null 数据。 */
@@ -42,6 +44,10 @@ export function resolveAccountCredential(
   }
   const resolve = (slots: { keyRef?: string; apiKey?: string; apiKeyEnv?: string }) =>
     tryResolveCredentialKey({ name, ...slots })
+  // 显式凭据解析（无 <NAME>_API_KEY 兜底）：池形态守卫专用——「字段非空」≠
+  // 「用户显式配置」，预设注入的 apiKeyEnv 与宿主残留 env 都不算池凭据。
+  const resolveExplicit = (slots: { keyRef?: string; apiKey?: string; apiKeyEnv?: string }) =>
+    tryResolveExplicitCredentialKey({ name, ...slots })
   if (keyId !== undefined) {
     // 池非空时按 id 查找——'default' 也是合法池 id（存量迁移的首个 key 就叫
     // 'default'，见 provider-keys.ts DEFAULT_KEY_ID）。池为空时 'default' 指顶层
@@ -55,11 +61,19 @@ export function resolveAccountCredential(
       ? { provider, apiKey: resolve(provider) }
       : { error: `provider "${name}" has no key pool (keyId "${keyId}")` }
   }
-  // A′ 迁移形态（keys 池非空且顶层槽位未显式配置）：回退 defaultKeyOf(provider)
-  // 必须先于顶层空槽的 `<NAME>_API_KEY` 环境回退，避免宿主环境遗留的未关联 key 劫持用户显式配置的池主 key。
-  if (provider.keys?.length && !provider.keyRef && !provider.apiKey && !provider.apiKeyEnv) {
+  // A′ 池形态回退：keys 池非空且顶层无 keyRef/apiKey 时，池主 key 优先于 env 兜底。
+  // 故意不看 provider.apiKeyEnv——loadConfig 深合并会把预设自带的 apiKeyEnv
+  // （如 deepseek 预设的 DEEPSEEK_API_KEY）注入顶层，字段非空 ≠ 用户显式配置；
+  // 若把它算作显式凭据，宿主残留的 <NAME>_API_KEY 会越过用户配置的池主 key
+  // 静默查错账户（PR #503 P1）。池形态下请求端本就只读 keys[0] 三槽（见
+  // provider-keys.ts 脱钩注释），此处对齐。池主 key 解析落空则继续走顶层（含
+  // env 兜底）——配置不完整时保底。
+  if (provider.keys?.length && !provider.keyRef && !provider.apiKey) {
     const fallback = defaultKeyOf(provider)
-    if (fallback) return { provider, apiKey: resolve(fallback), keyId: fallback.id, ...(fallback.label ? { label: fallback.label } : {}) }
+    if (fallback) {
+      const apiKey = resolveExplicit(fallback)
+      if (apiKey) return { provider, apiKey, keyId: fallback.id, ...(fallback.label ? { label: fallback.label } : {}) }
+    }
   }
   const topLevel = resolve(provider)
   if (topLevel) return { provider, apiKey: topLevel }

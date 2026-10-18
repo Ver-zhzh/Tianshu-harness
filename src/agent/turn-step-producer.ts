@@ -852,18 +852,33 @@ export class TurnStepProducer {
     _tb = Date.now()
     await this.self.config.promptEngine.refreshGitContextIfNeeded(this.self.cwd)
     debugLog(`[turn-boundary] turn=${turn} refreshGitContext: ${Date.now() - _tb}ms`)
-    const request = await this.self.prepareBudgetedRequest(() => this.self.config.promptEngine.buildOaiRequest(
-      this.self.session.getMessages(),
-      this.self.recentToolHistory,
-      this.self.config.contextWindow,
-      {
-        onOrphanRepair: (repaired, count) => {
-          debugLog(`[orphan-repair] buildOaiRequest repaired ${count} orphan(s) — writing back to session`)
-          this.self.session.replaceMessages(repaired)
+    const request = await this.self.prepareBudgetedRequest(() => {
+      const built = this.self.config.promptEngine.buildOaiRequest(
+        this.self.session.getMessages(),
+        this.self.recentToolHistory,
+        this.self.config.contextWindow,
+        {
+          onOrphanRepair: (repaired, count) => {
+            debugLog(`[orphan-repair] buildOaiRequest repaired ${count} orphan(s) — writing back to session`)
+            this.self.session.replaceMessages(repaired)
+          },
+          writeProbe: createWriteEvidenceProbe(this.self.cwd),
         },
-        writeProbe: createWriteEvidenceProbe(this.self.cwd),
-      },
-    ), callbacks)
+      )
+      // CUBP High #1：请求侧 interval 图片修剪。必须在 build 回调**内**——预算
+      // 闸门按修剪后的 wire 测量，未修剪的大图会让 inputTokens 虚高、触发无谓
+      // 压缩。wire-only（copy-on-write 新 messages 数组）：transcript 恒 pristine，
+      // engine 的 recordPrefixDivergence 探针记录的也是 pristine 序列，与本变换
+      // 不冲突（client 侧 wire 探针对最终上线字节，各记各的账）。
+      // 刻意不发 onImageStripped：那是 413 拒图的持久化语义，会误触
+      // persistStrippedImages 把 wire-only 修剪写进历史（见模块注释）。
+      const pruned = this.self.imagePruner.apply(built.messages)
+      if (pruned.messages !== built.messages) {
+        debugLog('strip-images', `interval prune: pruned ${pruned.prunedCount} image part(s)${pruned.forcePruned ? ' (force-pruned, cycle reset)' : ''}`)
+        return { ...built, messages: pruned.messages }
+      }
+      return built
+    }, callbacks)
 
     if (this.self.abortController?.signal.aborted) return { action: 'abort' }
     const confirmed = this.self.decisionShifts.confirm(deliveredSnapshot, request, callbacks)

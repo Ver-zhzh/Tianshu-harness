@@ -3,6 +3,7 @@ import { SkillImports, type ImportSource } from '../skills/skill-import.js'
 import { SkillDrafts } from '../skills/skill-drafts.js'
 import { completeSkillDraft } from '../skills/skill-draft-model.js'
 import type { SkillMode } from '../skills/skill-metadata.js'
+import { exportSessionSkillSnapshot, migrateSessionSkillSnapshot } from '../skills/skill-snapshot-maintenance.js'
 
 export async function runSkillsCLI(args: string[], options: { cwd?: string; management?: SkillManagement } = {}): Promise<{ output: string; exitCode: number }> {
   const service = options.management ?? new SkillManagement(), imports = new SkillImports(service)
@@ -23,7 +24,13 @@ export async function runSkillsCLI(args: string[], options: { cwd?: string; mana
   }
   try {
     let result: unknown
-    if (command === 'list') { const catalog = service.list(cwd); result = { ...catalog, skills: catalog.skills.filter(s => !scope || s.scope === scope) } }
+    if (command === 'snapshot-migrate') result = migrateSessionSkillSnapshot(cwd, args[1]!, args.includes('--apply'))
+    else if (command === 'snapshot-export') {
+      const output = value('--output')
+      if (!output) throw new Error('Usage: rivet skills snapshot-export <sessionId> --output <new-file> [--project /absolute/path]')
+      result = exportSessionSkillSnapshot(cwd, args[1]!, output)
+    }
+    else if (command === 'list') { const catalog = service.list(cwd); result = { ...catalog, skills: catalog.skills.filter(s => !scope || s.scope === scope) } }
     else if (command === 'doctor') {
       const catalog = service.list(cwd)
       result = { ...catalog, diagnostics: catalog.skills.flatMap(s => [
@@ -71,7 +78,7 @@ export async function runSkillsCLI(args: string[], options: { cwd?: string; mana
         result = imports.install(preview.previewId, { scope: skill.scope, cwd }, [{ candidateId: candidate.candidateId, name: skill.name, conflict: 'overwrite', expectedVersion: skill.version }])
       }
     }
-    else throw new Error('Commands: list, inspect, add, mode, update (preview), remove, doctor')
+    else throw new Error('Commands: list, inspect, add, mode, update (preview), remove, doctor, snapshot-migrate (dry-run; --apply), snapshot-export')
     return { output: args.includes('--json') ? JSON.stringify(result, null, 2) : format(result), exitCode: 0 }
   } catch (error) { return { output: JSON.stringify({ error: error instanceof Error ? error.message : String(error) }), exitCode: 1 } }
 }

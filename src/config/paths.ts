@@ -20,6 +20,7 @@ import { existsSync, realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
+import { isolateTestSessionHome } from '../platform/test-session-isolation.js'
 
 /** Platform default data root, ignoring RIVET_HOME. */
 export function defaultRivetHome(): string {
@@ -56,7 +57,7 @@ export function userConfigPath(): string {
   // If the user pointed RIVET_HOME at a new location but there is no config
   // there yet, warn that the old default config still exists. Without this
   // the UI would silently look empty (no providers, no API keys).
-  if (process.env.RIVET_HOME && !existsSync(candidate)) {
+  if (!process.env.NODE_TEST_CONTEXT && process.env.RIVET_HOME && !existsSync(candidate)) {
     const legacyPath = join(defaultRivetHome(), 'config.json')
     if (existsSync(legacyPath)) {
       process.stderr.write(
@@ -232,3 +233,5 @@ export function workflowsDir(base?: string): string {
 export function planTemplatesDir(base?: string): string {
   return join(base ?? rivetHome(), 'plan-templates')
 }
+
+isolateTestSessionHome(defaultRivetHome())

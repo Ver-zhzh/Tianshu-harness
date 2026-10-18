@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { chooseCatalog, selectSources, validateCatalog, assertCatalogUpdate } from './catalog.mjs'
 import { generateCatalog } from './generate-catalog.mjs'
-import { atomgitClient, uploadImmutable, verifyDownload, validateAcceptance } from './publish-atomgit.mjs'
+import { atomgitClient, uploadImmutable, verifyDownload } from './publish-atomgit.mjs'
 const bytes = Buffer.from('signed installer fixture'), digest = createHash('sha256').update(bytes).digest('hex')
 const entry = (source, verified = true) => ({ url: source === 'github' ? 'https://github.com/huiliyi37/Tianshu-harness/releases/download/v3.28.0/Tianshu_3.28.0_x64-setup.exe' : source === 'oss' ? 'https://tianshu-update.oss-cn-hangzhou.aliyuncs.com/tianshu/v3.28.0/Tianshu_3.28.0_x64-setup.exe' : 'https://api.atomgit.com/api/v5/repos/huiliyi37/Tianshu-harness/releases/v3.28.0/attach_files/Tianshu_3.28.0_x64-setup.exe/download', verified, verifiedAt:'2026-10-07T00:00:00Z', sha256:digest, size:bytes.length, anonymous:true })
 const fixture = () => ({ schemaVersion:1, revision:1, version:'3.28.0', publishedAt:'2026-10-07T00:00:00Z', artifacts:[{ platform:'windows-x86_64', purpose:'update', fileName:'Tianshu_3.28.0_x64-setup.exe', size:bytes.length, sha256:digest, signature:'signed', sources:{ atomgit:entry('atomgit'), github:entry('github'), oss:entry('oss') } }] })
@@ -61,11 +61,4 @@ test('existing different attachment cannot be overwritten on retry', async () =>
 test('API preserves upload filename query and does not expose token in errors', async () => {
   const api=atomgitClient('private-fixture',async url=>{assert.equal(url.searchParams.get('file_name'),'a.exe');assert.equal(url.searchParams.get('access_token'),'private-fixture');return new Response(null,{status:429})})
   await assert.rejects(api('/releases/v3.28.0/upload_url?file_name=a.exe'),e=>e.status===429&&!e.message.includes('private-fixture'))
-})
-test('anonymous readback alone cannot qualify a default AtomGit route', () => {
-  const c=fixture(),a=c.artifacts[0]
-  assert.throws(()=>validateAcceptance({schemaVersion:1,version:c.version,platform:a.platform,sha256:a.sha256},c,a),/incomplete/)
-  const acceptance={schemaVersion:1,version:c.version,platform:a.platform,sha256:a.sha256,tauriRedirectVerified:true,stableEntryVerified:true,disconnectRetryVerified:true,limitsObserved:'Upload size accepted; provider quota not publicly specified',networks:[{name:'network A',passed:true,checkedAt:c.publishedAt},{name:'network B',passed:true,checkedAt:c.publishedAt}]}
-  assert.equal(validateAcceptance(acceptance,c,a),true)
-  acceptance.networks[1].name='network A';assert.throws(()=>validateAcceptance(acceptance,c,a),/distinct/)
 })

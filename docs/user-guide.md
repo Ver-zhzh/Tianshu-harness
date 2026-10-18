@@ -345,6 +345,41 @@ triggers: [deploy, 部署, release]
 
 可按名称导入 Claude Code 的技能。`writing-plans` / `executing-plans` 已内置为原生流程（规划期按系统提示的 `<plan-mode>` 纪律、执行期按 `<plan-executing>` 纪律执行），不再需要技能文件。`agent-harness-testing` / `research-spec` 撤出默认分发，归档在 [`docs/skills/optional/`](skills/optional/)——需要时手动拷入 `.rivet/skills/` 即可启用。
 
+技能正文与资源在会话创建时固定版本；安装更新只影响新会话。新会话的 `.skills.json` 使用 v2 轻量引用，相同资源版本共享保存在会话根目录 `_skill-store/v1/`，首次调用技能时才展开到会话私有目录。`__pycache__/` 与 `.pyc` 不进入新技能包；真实脚本、参考资料和附件保留。私有目录优先使用写时复制，不支持时独立复制，因此 Windows 上已使用技能仍会占用私有副本空间。
+
+旧 v1 快照仍能恢复，不会自动改写或删除。需压缩旧快照 JSON 时，先停止该会话，再显式迁移：
+
+```bash
+tianshu skills snapshot-migrate <sessionId> --project /absolute/project --json          # 仅预览，不写文件
+tianshu skills snapshot-migrate <sessionId> --project /absolute/project --apply --json  # 写入 v2，保留旧资源字节
+tianshu skills snapshot-export <sessionId> --project /absolute/project --output /backup/session.skills.json
+```
+
+单会话迁移只收缩 JSON，不删除展开目录、脚本输出或共享版本；归档与永久删除单个会话也不会删除其他会话引用的共享版本。迁移旧 v1 时保留历史缓存，不会根据今天的安装源替换旧内容。执行迁移前须退出所有相关 CLI、桌面端和 worker；检测到运行时占用或未知锁归属时拒绝执行。
+
+**备份兼容性**：v2 快照需要新版运行时。完整备份应包含会话根目录的 `_skill-store/`（`RIVET_SESSION_DIR` 覆盖时也在该目录内），不能只复制单个 v2 `.skills.json`。`snapshot-export` 可输出独立的 v1 格式技能快照，放回目标会话的 `<sessionId>.skills.json` 即可恢复技能；聊天、技能模式覆盖及其他会话文件仍需另行备份。桌面“导出会话”与分享快照导出的是聊天内容，不是包含技能依赖的完整运行时备份。
+
+### 会话存储审计与资源回收
+
+默认保留全部主会话与 worker 历史，启动不再按会话数量、目录 mtime 或 7 天窗口自动删除磁盘数据。技能列表与管理界面只读取目录信息，只有实际恢复执行或调用技能才准备私有资源。
+
+```bash
+tianshu storage audit --json
+tianshu storage compact --dry-run --output /backup/session-compact-plan.json
+# 退出所有相关运行时，审查上一步清单后：
+tianshu storage compact --apply /backup/session-compact-plan.json
+```
+
+`audit` 同时统计内核会话根、共享技能库和桌面事件存储；重叠根不重复遍历。报告给出逻辑字节、文件分配块合计、技能快照版本、主会话/worker 分类、疑似孤立快照与扫描错误。分配块合计不是 CoW/硬链接去重后的独占物理占用；没有聊天或 meta 的快照也不会被自动判为垃圾。
+
+`compact` 默认仅预览；不传 `--output` 时不写任何文件。清单须保存到会话数据根之外的新文件中，预计净回收量会扣除新增共享包及其索引。apply 验证根目录身份和文件指纹，先发布并校验固定版本，再原子提交 manifest 与恢复记录，最后只删除字节和权限执行标志均与固定版本一致的受管副本。修改过的资源、脚本输出、未知文件、符号链接、聊天、cache-log、冻结前缀和备份全部保留。
+
+v2 manifest 仍逐会话保存技能正文与描述；本轮 compact 不改变该格式。技能正文很大的安装可能在资源去重后仍占明显空间，应以预览给出的净收益为准。
+
+维护进度按会话保存在清单旁的 `<plan>.progress/` 中；中断后用相同清单续跑，不重复累计完成项。文件变化时跳过并提示重新预览；权限或共享版本完整性错误会停止回收。不要删除进度目录后继续使用旧清单。若仍运行不支持维护门的旧版本，必须先手动退出；新版运行时通过跨进程租约与维护互斥。共享版本暂不自动 GC，报告的未引用项也不会被删除。
+
+桌面/插件可通过 `POST /storage/audits` 创建后台审计任务，以 `GET /storage/audits/:auditId?page=0` 每页读取最多 100 个项目/错误项，或通过 `DELETE /storage/audits/:auditId` 取消。接口需要现有 API 鉴权，同一进程最多同时运行一个审计任务；原 `/storage` 和归档删除接口保持原语义。
+
 ### 跨会话记忆
 
 天枢的项目记忆统一落在 **`.rivet/knowledge/memory.jsonl`**（JSONL，原子写入 + 文件锁），`memory-index.sqlite` 只是可重建的检索投影。

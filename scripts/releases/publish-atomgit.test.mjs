@@ -103,10 +103,11 @@ function metadataFixture() {
 test('已验收包重试时 HEAD 状态和时间变化不能改动不可变目录', () => {
   const previous={...metadataFixture().artifacts[0].sources.atomgit,headStatus:404}
   const next={...previous,headStatus:null,verifiedAt:'2026-10-10T00:00:00Z'}
-  assert.deepEqual(qualifyProof(previous,next,false),previous)
+  assert.deepEqual(qualifyProof(previous,next),previous)
+  // 资格只看自动化证据（匿名下载字节一致 + Range 可寻址），不再有两个人工记录门：
   const unqualified={...previous,verified:false,qualificationVerified:false}
-  assert.equal(qualifyProof(unqualified,next,false).verified,false)
-  assert.equal(qualifyProof(unqualified,next,true).verified,true)
+  assert.equal(qualifyProof(unqualified,next).verified,true,'自动化证据齐全即合格')
+  assert.equal(qualifyProof(unqualified,{...next,rangeSupported:false}).verified,false,'Range 不可寻址则不合格')
 })
 test('metadata-only 默认 dry run 展示全部平台且不要求本地安装包、不写文件', () => {
   const dir=mkdtempSync(join(tmpdir(),'atomgit-dry-run-'))

@@ -90,7 +90,7 @@ const PROJECT_SLOT_SKILL_SOURCES: ReadonlySet<SkillSource> = new Set(['rivet', '
  * 全局技能（home 目录）与内置技能（无 backing 文件）永不落在 cwd 这两个子目录下，
  * 误判只可能往「不展开」侧倒，不误伤全局技能。
  */
-function isProjectSlotSkill(skill: SkillDefinition, cwd: string): boolean {
+export function isProjectSlotSkill(skill: SkillDefinition, cwd: string): boolean {
   if (skill.source && PROJECT_SLOT_SKILL_SOURCES.has(skill.source)) return true
   for (const p of [skill.bodyPath, skill.skillDir]) {
     if (!p) continue
@@ -117,6 +117,7 @@ function buildSkillPrompt(name: string, userTask: string, cwd?: string, sessionR
   // session-manager.createSession）均传 cwd。
   if (cwd && isProjectSlotSkill(skill, cwd) && !projectSurfaceAllowed(cwd, 'skills')) return null
   if (skill.mode === 'off') return `Skill「${skill.name}」已停用，请先启用。`
+  registry.ensureResources(skill.name)
   let prompt = `[Skill loaded: ${skill.name}]\n<skill name="${skill.name}">\n${skill.body}\n</skill>`
   if (skill.skillDir) {
     const files = skill.files ?? listSkillFiles(skill.skillDir)

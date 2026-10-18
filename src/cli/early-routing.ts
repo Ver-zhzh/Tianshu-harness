@@ -18,6 +18,7 @@
  */
 
 export interface EarlyCliHandlers {
+  storage: (args: string[]) => Promise<{ output: string; exitCode: number }>
   skills: (args: string[]) => Promise<{ output: string; exitCode: number }>
   config: (args: string[]) => Promise<void> | void
   provider: (args: string[]) => Promise<void> | void
@@ -45,6 +46,7 @@ export interface EarlyCliRouteOptions {
 /** 真实处理器：每个分支的 import 都发生在函数体内，保持 launcher 静态图轻量。 */
 export function createEarlyCliHandlers(cwd: string = process.cwd()): EarlyCliHandlers {
   return {
+    storage: async args => (await import('./storage-cli.js')).runStorageCLI(args),
     skills: async (args) => {
       const { runSkillsCLI } = await import('./skills-cli.js')
       return runSkillsCLI(args, { cwd })
@@ -130,6 +132,12 @@ export async function routeEarlyCli(
     ...options.io,
   }
 
+  if (args[0] === 'storage') {
+    const { output, exitCode } = await handlers.storage(args.slice(1))
+    ;(exitCode === 0 ? io.stdout : io.stderr)(output + '\n')
+    if (exitCode !== 0) io.exit(exitCode)
+    return true
+  }
   if (args[0] === 'skills') {
     const { output, exitCode } = await handlers.skills(args.slice(1))
     ;(exitCode === 0 ? io.stdout : io.stderr)(output + '\n')

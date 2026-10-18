@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "version": "3.33.1",
+  "date": "2026-10-17",
+  "fullNotesUrl": "https://github.com/huiliyi37/Tianshu-harness/releases/tag/v3.33.1",
+  "locales": {
+    "zh": {
+      "title": "Windows 安装包运行时架构修正",
+      "highlights": [
+        "修复 v3.33.0 Windows 包装入 macOS 运行时（并发构建竞争）导致的启动失败；产品代码与 v3.33.0 一致。",
+        "构建脚本加并发互斥锁，杜绝同类竞争。"
+      ],
+      "notice": "Windows 用户请直接安装 v3.33.1（v3.33.0 的 Windows 包不可用）。"
+    },
+    "en": {
+      "title": "Windows installer runtime-architecture fix",
+      "highlights": [
+        "Fixes v3.33.0 Windows packages shipping macOS runtimes due to a concurrent-build race; product code is identical to v3.33.0.",
+        "Build scripts now take a mutual-exclusion lock to prevent the race."
+      ],
+      "notice": "Windows users: install v3.33.1 directly (the v3.33.0 Windows package does not start)."
+    }
+  }
+}

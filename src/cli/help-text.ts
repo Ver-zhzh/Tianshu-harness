@@ -18,6 +18,9 @@ Usage:
   rivet serve [--port N] [--host ADDR] [--attach] [--json]   runtime API server
     --tls-cert <pem> --tls-key <pem>   required when serve binds outside loopback
   rivet sessions | rivet logs        list sessions / log locations and exit
+  rivet storage audit --json         inspect session and skill storage without changing data
+  rivet storage compact --dry-run --output <plan>   preview resource deduplication
+  rivet storage compact --apply <plan>             apply reviewed plan with all runtimes stopped
 
 Options:
   --model <name>           use a specific model (e.g. deepseek-v4-pro)

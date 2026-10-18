@@ -3,6 +3,7 @@ import { SessionTitleCoordinator, titleInput, loadTitleInput, canGenerateTitle, 
 import { legacyReadSkill, legacyWriteSkill, legacyRemoveSkill } from '../skills/skill-management-compat.js'
 import { queueSessionSkillMode } from '../skills/session-skill-policy.js'
 import { sessionSkillSnapshot } from '../skills/session-skill-snapshot.js'
+import { isSessionStorageSafetyError } from '../platform/test-session-isolation.js'
 import { disposeSessionFilePreviews } from './file-open-routes.js'
 import { disposeSessionBrowserContexts } from './browser-contexts.js'
 import { hasLiveDelegation } from './session-delegation-state.js'
@@ -42,7 +43,8 @@ import { debugLog } from '../utils/debug.js'
 import { collectPostBoundaryEditIds, type BlockedRewindFile } from '../agent/file-history.js'
 import { makeOwnershipGuard } from '../agent/checkpoint.js'
 import { loadConfig } from '../config/manager.js'
-import { rivetHome } from '../config/paths.js'
+import { rivetHome, sessionsDir } from '../config/paths.js'
+import { registerStorageRuntime } from '../storage/maintenance-gate.js'
 import type { DelegationActivity, Tool } from '../tools/types.js'
 import type { ApprovalResult } from '../agent/approval-edit.js'
 import type { HookEvent, HookResult } from '../hooks/user-hooks-runner.js'
@@ -2623,6 +2625,7 @@ export class RuntimeSessionManager {
   }
 
   createSession(input: CreateSessionInput = {}): SessionRecord {
+    registerStorageRuntime(sessionsDir())
     // P1-1 fork：调用方可以显式指定子会话 id（worktree 分支名由 id 派生，
     // 必须与最终会话 id 一致才能对上）。已存在的 id 一律让位给新生成——重复
     // 注册会静默覆盖在跑的会话，是本路径唯一不可接受的失败形状。
@@ -2743,7 +2746,7 @@ export class RuntimeSessionManager {
     this.touchLoaded(session)
     this.persistRecord(session)
     // Legacy seeding happens once; the independent snapshot pins new-session defaults.
-    try { session.skillLoadErrors = loadProjectSkills(cwd).errors; sessionSkillSnapshot(cwd, id) } catch { /* non-fatal: 技能加载失败不阻断会话 */ }
+    try { session.skillLoadErrors = loadProjectSkills(cwd).errors; sessionSkillSnapshot(cwd, id, undefined, { purpose: 'execute' }) } catch (error) { if (isSessionStorageSafetyError(error)) throw error /* skill parse failures remain non-fatal */ }
     // R1 — announce the session to the shared registry so its file claims are
     // attributed and reaped on crash. Best-effort: registry may be disabled.
     try { this.getRegistry?.()?.register(id, cwd, 'standalone') } catch { /* non-fatal */ }
@@ -3727,7 +3730,7 @@ export class RuntimeSessionManager {
   listSkills(id: string): SkillStatus[] | undefined {
     const session = this.sessions.get(id)
     if (!session) return undefined
-    return (session.agent?.getSkillSnapshot?.() ?? sessionSkillSnapshot(session.record.cwd, id).list()).map((s) => ({
+    return (session.agent?.getSkillSnapshot?.() ?? sessionSkillSnapshot(session.record.cwd, id, undefined, { purpose: 'catalog' }).list()).map((s) => ({
       name: s.name,
       version: s.version, mode: s.mode, skillId: s.skillId,
       description: s.description,
@@ -3761,7 +3764,7 @@ export class RuntimeSessionManager {
   setSkillEnabled(id: string, name: string, enabled: boolean): boolean {
     const session = this.sessions.get(id)
     if (!session) return false
-    const registry = sessionSkillSnapshot(session.record.cwd, id)
+    const registry = sessionSkillSnapshot(session.record.cwd, id, undefined, { purpose: 'catalog' })
     if (!registry.get(name)) return false
     queueSessionSkillMode(session.record.cwd, id, registry, name, enabled ? 'auto' : 'off')
     if (enabled) session.disabledSkills.delete(name)

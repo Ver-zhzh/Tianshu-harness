@@ -308,3 +308,30 @@ it('W2-2 对照：真实凭据形态仍 fail-closed——上面的绿不是判�
     )
   }
 })
+
+/**
+ * 现场（2026-10-17）：验证跑完之后才 adopt 一个外部文件（构建产物，内容未变），
+ * 该文件加入指纹路径集合 → 指纹变化 → 此前所有验证被判 stale，交付门从 GREEN
+ * 掉回 RED；而那次验证（全量测试）实际覆盖了该文件。
+ *
+ * 语义：adopt 是归属变更，不是内容变更。文件字节在 adopt 前后完全相同，
+ * 指纹衡量的是「可交付内容的字节状态」，不该因它改变。真正的内容变更走
+ * file_write 事件——那条路径仍会让旧验证失效（见上面的反向对照）。
+ */
+it('adopt 只改归属不改内容——不得作废既有验证', () => {
+  const { cwd, baseline } = fixture()
+  const state = createPersistentTaskState(cwd, 'adopt-after-verify', baseline)
+  writeFileSync(join(cwd, 'owned.ts'), 'modified')
+  state.taskLedger.record({ type: 'file_write', path: 'owned.ts' })
+  state.taskLedger.record({ type: 'verification', command: 'npm run test:desktop', status: 'passed', meta: { scope: 'full' } })
+  assert.equal(getEffectiveVerifications(state.taskLedger.getEvents()).effective.length, 1, '前置：验证初始有效')
+
+  writeFileSync(join(cwd, 'adopted.ts'), 'produced by a bash command, never written via file_write')
+  state.ownership.adoptFiles(['adopted.ts'])
+
+  assert.equal(
+    getEffectiveVerifications(state.taskLedger.getEvents()).effective.length, 1,
+    'adopt 不改变文件内容，既有验证必须保持有效（否则验证后再认领 = 自己作废自己的证据）',
+  )
+  assert.equal(state.ownership.isOwned('adopted.ts'), true, '归属仍要记上——要修的是指纹，不是归属')
+})

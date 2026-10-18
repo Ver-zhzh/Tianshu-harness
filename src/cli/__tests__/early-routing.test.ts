@@ -48,6 +48,13 @@ function makeFixture(overrides: Partial<EarlyCliHandlers> = {}): {
 }
 
 describe('routeEarlyCli', () => {
+  test('storage routes before --list and forwards the maintenance plan without loading an agent', async () => {
+    const calls: string[][] = []
+    const fixture = makeFixture({ storage: async args => { calls.push(args); return { output: 'STORAGE', exitCode: 0 } } })
+    assert.equal(await routeEarlyCli(['storage', 'compact', '--apply', '/reviewed/plan.json', '--list'], { handlers: fixture.handlers, io: fixture.io }), true)
+    assert.deepEqual(calls, [['compact', '--apply', '/reviewed/plan.json', '--list']])
+    assert.deepEqual(fixture.calls.stdout, ['STORAGE\n'])
+  })
   test('config/provider/serve 命中并经 args.slice(1) 转发', async () => {
     const { handlers, io, calls } = makeFixture()
     assert.equal(await routeEarlyCli(['config', 'show'], { handlers, io }), true)

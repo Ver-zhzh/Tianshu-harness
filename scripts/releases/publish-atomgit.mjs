@@ -9,16 +9,9 @@ import { writeCatalog } from './check-workspace-metadata.mjs'
 
 const BASE = 'https://api.atomgit.com/api/v5/repos/huiliyi37/Tianshu-harness'
 export const downloadURL = (tag, name) => `${BASE}/releases/${encodeURIComponent(tag)}/attach_files/${encodeURIComponent(name)}/download`
-export function validateAcceptance(value, catalog, artifact) {
-  if (value?.schemaVersion !== 1 || value.version !== catalog.version || value.platform !== artifact.platform || value.sha256 !== artifact.sha256 || value.tauriRedirectVerified !== true || value.stableEntryVerified !== true || value.disconnectRetryVerified !== true || typeof value.limitsObserved !== 'string' || !value.limitsObserved.trim() || !Array.isArray(value.networks) || value.networks.length < 2) throw new Error('AtomGit manual acceptance is incomplete')
-  const names = new Set()
-  for (const network of value.networks) {
-    if (network.passed !== true || typeof network.name !== 'string' || !network.name.trim() || !Number.isFinite(Date.parse(network.checkedAt))) throw new Error('Invalid domestic network acceptance record')
-    names.add(network.name.trim())
-  }
-  if (names.size < 2) throw new Error('At least two distinct network observations are required')
-  return true
-}
+/** AtomGit 来源资格 = 自动化证据（匿名全量下载 sha256+size 一致、Range 可寻址）。
+ *  此前的「两条国内网络人工观测记录」门（2026-10-17 删）：人工记录不产生任何
+ *  额外真实性，且每次发版都要重做——纯过度工程。 */
 
 /** 给脚本自造的失败打阶段标记：顶层 catch 只对它打印 message（文案只含阶段名与 HTTP 状态码，不含预签名 URL）。 */
 const staged = (message, pubStage) => Object.assign(new Error(message), { pubStage })
@@ -78,9 +71,10 @@ export function atomgitManifest(catalog) {
   })) throw staged('All update platforms must have qualified AtomGit assets before publishing immutable metadata; finish --assets-only first', 'metadata-readiness')
   return { version: catalog.version, notes: catalog.notes ?? '', pub_date: catalog.publishedAt, platforms: Object.fromEntries(updates.map(a => [a.platform, { url: a.sources.atomgit.url, signature: a.signature }])) }
 }
-export function qualifyProof(previous, proof, acceptance) {
-  const qualified = acceptance || previous?.qualificationVerified === true
-  // Diagnostic HEAD differences must not rewrite an already qualified immutable catalog.
+export function qualifyProof(previous, proof) {
+  // 资格 = 自动化证据：匿名全量下载字节一致 + Range 可寻址。诊断性 HEAD 差异
+  // 不得改写已合格的不可变目录。
+  const qualified = proof.verified === true && proof.anonymous === true && proof.rangeSupported === true
   if (previous?.verified && previous.qualificationVerified && previous.rangeSupported && previous.anonymous && previous.url === proof.url && previous.sha256 === proof.sha256 && previous.size === proof.size) return previous
   return { ...proof, verified: qualified, qualificationVerified: qualified, ...(previous?.anonymous && previous.sha256 === proof.sha256 && previous.size === proof.size ? {verifiedAt:previous.verifiedAt} : {}) }
 }
@@ -157,7 +151,6 @@ async function main() {
   if (statSync(file).size !== target.size || await sha256(file) !== target.sha256) throw new Error('Local artifact differs from catalog')
   // install 用途（macOS DMG）不参与 updater 签名，catalog 里没有 signature 字段：只在有签名时校验。
   if (target.signature && readFileSync(file + '.sig', 'utf8').trim() !== target.signature.trim()) throw new Error('Local signature differs from catalog')
-  const acceptance = arg('--acceptance') ? validateAcceptance(JSON.parse(readFileSync(arg('--acceptance'),'utf8')),catalog,target) : false
   if (!process.argv.includes('--publish')) {
     console.log(`Dry run: v${catalog.version}, ${target.fileName}, ${target.size} bytes; use --publish to upload and verify`)
     return
@@ -174,7 +167,7 @@ async function main() {
   let proof = await uploadImmutable(api, tag, file, target)
   if (!proof.rangeSupported) throw staged('Full download verified, but range acceptance failed; source remains disabled', 'acceptance')
   const previous = target.sources.atomgit
-  proof = qualifyProof(previous, proof, acceptance)
+  proof = qualifyProof(previous, proof)
   const qualified = proof.verified
   if (JSON.stringify(previous) !== JSON.stringify(proof)) catalog.revision += 1
   for (const a of catalog.artifacts.filter(a => a.platform === target.platform && a.fileName === target.fileName)) a.sources.atomgit = proof
@@ -185,7 +178,7 @@ async function main() {
   const checksumPath = join(assets,`${target.fileName}.sha256`)
   writeFileSync(checksumPath,`${target.sha256}  ${target.fileName}\n`); await extra(checksumPath)
   if (process.argv.includes('--assets-only')) { console.log(`Verified ${target.platform} assets; metadata publication deferred until all intended platforms are ready`); return }
-  if (!qualified) { console.log('Anonymous bytes/HEAD/Range passed. AtomGit remains disabled pending recorded Tauri redirects, stable entry, disconnect retry, distinct domestic networks and limits observations (--acceptance).'); return }
+  if (!qualified) { console.log('Anonymous bytes/HEAD/Range 自动验证未全过——AtomGit 源不启用（只看自动化证据）。'); return }
   await publishMetadata(api, tag, assets, catalog, fetch, readFileSync(catalogPath))
   writeCatalog(catalogPath, catalog)
   console.log(`Verified anonymous AtomGit download: ${target.fileName}, ${proof.size} bytes. Catalog saved; publish it to GitHub/OSS before enabling routing.`)

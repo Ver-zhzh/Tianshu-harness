@@ -289,6 +289,12 @@ export interface AgentConfig {
    *  switchModel 重建 agent 时随 ModelSpec 更新。门控工具边界视觉通道：
    *  computer_use 截图仅在 true 时以尾部追加 user 消息回灌模型，false 时静默丢弃。 */
   supportsVision?: boolean
+  /** CUBP High #1（StripImagesAtIntervals）：请求侧 interval 图片修剪配置。
+   *  wire-only——只改发往模型的请求副本，绝不写 transcript/持久化（与 413
+   *  拒图的 persisted-image-strip 是两条语义不同的路径）。缺省 undefined →
+   *  resolveStripImagesConfig()（env，默认 interval / min 3 / interval 40，
+   *  ≤42 张图零行为差）。 */
+  imagePruning?: import('./strip-images-at-intervals.js').StripImagesAtIntervalsConfig
   /** Optional dedicated multimodal client. When supportsVision is false and the user
    *  sends images, this client generates text descriptions that are prepended to
    *  the primary prompt. */

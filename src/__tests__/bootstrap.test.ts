@@ -32,7 +32,7 @@ describe('cleanupStaleWorkerSessionDirs', () => {
     rmSync(testCwd, { recursive: true, force: true })
   })
 
-  it('removes stale worker dirs but keeps fresh ones and non-worker dirs', () => {
+  it('retains old worker directories as durable session assets', () => {
     // Stale worker dir — backdate mtime to 2 hours ago
     const staleDir = join(sessionsDir, 'worker-old')
     mkdirSync(staleDir, { recursive: true })
@@ -51,8 +51,8 @@ describe('cleanupStaleWorkerSessionDirs', () => {
 
     const cleaned = cleanupStaleWorkerSessionDirs(testCwd, 3_600_000)
 
-    assert.equal(cleaned, 1)
-    assert.ok(!existsSync(staleDir), 'stale worker dir should be removed')
+    assert.equal(cleaned, 0)
+    assert.ok(existsSync(staleDir), 'old worker dir must survive automatic cleanup')
     assert.ok(existsSync(freshDir), 'fresh worker dir should survive')
     assert.ok(existsSync(mainDir), 'non-worker dir must never be touched')
   })
@@ -70,7 +70,7 @@ describe('cleanupStaleWorkerSessionDirs', () => {
     }
   })
 
-  it('清理超龄 worker 文件（jsonl/meta），新鲜 worker 文件与主会话文件不动', () => {
+  it('保留全部 worker 聊天与元数据，无论时间阈值', () => {
     // evict 额度池已排除 worker——不清文件的话 worker jsonl 无限累积
     //（实测 46/65 个坑），这里接管其生命周期：7 天（fileThresholdMs）。
     const eightDaysAgo = Date.now() / 1000 - 8 * 24 * 3600
@@ -92,9 +92,9 @@ describe('cleanupStaleWorkerSessionDirs', () => {
 
     const cleaned = cleanupStaleWorkerSessionDirs(testCwd)
 
-    assert.equal(cleaned, 2, 'stale jsonl + meta 各计一次')
-    assert.ok(!existsSync(staleJsonl), '超龄 worker jsonl 应被清理')
-    assert.ok(!existsSync(staleMeta), '超龄 worker meta 应被清理')
+    assert.equal(cleaned, 0, 'history is never automatically expired')
+    assert.ok(existsSync(staleJsonl), '超龄 worker jsonl 保留')
+    assert.ok(existsSync(staleMeta), '超龄 worker meta 保留')
     assert.ok(existsSync(freshJsonl), '窗口内 worker 文件应幸存')
     assert.ok(existsSync(mainJsonl), '主会话文件绝不能被 worker 清理碰到')
   })
@@ -111,9 +111,9 @@ describe('cleanupStaleWorkerSessionDirs', () => {
 
     const cleaned = cleanupStaleWorkerSessionDirs(testCwd)
 
-    assert.ok(!existsSync(dir), '2h 目录超过 1h 阈值 → 清理')
+    assert.ok(existsSync(dir), '目录 mtime 不能证明会话数据可删')
     assert.ok(existsSync(file), '2h 文件在 7 天窗口内 → 保留（排查资产）')
-    assert.equal(cleaned, 1)
+    assert.equal(cleaned, 0)
   })
 })
 

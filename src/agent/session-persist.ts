@@ -6,6 +6,7 @@ import { existsSync, mkdirSync, readFileSync, unlinkSync, rmSync, readdirSync, s
 import { writeFileAtomicSync, writeFileAtomicAsync, writeFileAtomicDurableAsync } from '../fs-atomic.js'
 import { isAbsolute, join, relative, resolve } from 'path'
 import { sessionsDir } from '../config/paths.js'
+import { registerStorageRuntime } from '../storage/maintenance-gate.js'
 import type { Message } from '../api/types.js'
 import { normalizeOaiMessage, normalizeOaiMessages } from '../api/oai-types.js'
 import type { OaiMessage, OaiToolCall } from '../api/oai-types.js'
@@ -154,6 +155,7 @@ export class SessionPersist {
 
   constructor(sessionId: string, cwd: string, opts?: { recoveryStructuredTools?: boolean }) {
     assertValidSessionId(sessionId)
+    registerStorageRuntime(sessionsDir())
     this.recoveryStructuredTools = opts?.recoveryStructuredTools
     this.cwd = cwd
     ensureDir(getSessionDir(cwd))
@@ -1030,11 +1032,7 @@ function formatRelativeTime(ts: number): string {
   return `${Math.floor(mon / 12)}年前`
 }
 
-const MAX_SESSIONS = 50
-
-export function evictOldSessions(keepSessionId: string, cwd: string): string[] {
-  return evictOldSessionsInternal(getSessionDir(cwd), keepSessionId, MAX_SESSIONS)
-}
+export { evictOldSessions } from '../storage/history-retention.js'
 
 export function evictOldSessionsInternal(dir: string, keepSessionId: string, limit: number): string[] {
   ensureDir(dir)
@@ -1043,11 +1041,11 @@ export function evictOldSessionsInternal(dir: string, keepSessionId: string, lim
     sessions = readdirSync(dir)
       .filter((f: string) => f.endsWith('.jsonl'))
       .map((f: string) => f.replace('.jsonl', ''))
-      // 只有主会话占 MAX_SESSIONS 额度（与 listMainSessions 同语义）。曾经全量计数：
+      // 显式驱逐工具只按主会话计数（与 listMainSessions 同语义）。曾经全量计数：
       // - worker-*.jsonl 每次派发新文件（nonce 不复用），team/galaxy 重度使用即洪水
       //   （实测 46/65 个坑被 worker 占掉），把更老的主会话挤出额度——桌面端会话的
       //   模型上下文被静默驱逐，重开后 UI 有历史、模型失忆、上下文 0%。
-      //   worker 文件生命周期归 cleanupStaleWorkerSessionDirs（独立阈值）。
+      //   当前启动路径不自动删除主会话或 worker 历史。
       // - 带点的 id（<id>.claims 等）是主会话附属文件，不是会话；被误计还会被
       //   当作"最老会话"驱逐，损坏在用主会话的 claims。
       .filter((id: string) => !id.startsWith('worker-') && !id.includes('.'))

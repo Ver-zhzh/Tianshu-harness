@@ -30,7 +30,7 @@ export function buildSkillManagementRoutes(apiToken?: string, management = new S
     'GET /skill-library/:skillId': wrap((_data, params) => ({ skill: management.inspect(params.skillId!, params.cwd), content: management.content(params.skillId!, params.cwd) })),
     'PUT /skill-session/:sessionId/mode': wrap((data, params) => {
       const directory = string(data, 'cwd')
-      return queueSessionSkillMode(directory, params.sessionId!, sessionSkillSnapshot(directory, params.sessionId!, management), string(data, 'name'), string(data, 'mode') as SkillMode)
+      return queueSessionSkillMode(directory, params.sessionId!, sessionSkillSnapshot(directory, params.sessionId!, management, { purpose: 'catalog' }), string(data, 'name'), string(data, 'mode') as SkillMode)
     }),
     'PUT /skill-library/:skillId/mode': wrap((data, params) => management.setMode(params.skillId!, string(data, 'mode') as SkillMode, cwd(data))),
     'PUT /skill-library/:skillId': wrap((data, params) => management.edit(params.skillId!, string(data, 'content'), string(data, 'expectedVersion'), cwd(data))),

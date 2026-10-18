@@ -178,5 +178,8 @@ src/**/__tests__/.undo-test-backup/
 # 运行时索引（本地生成，非源码——对齐 main 2026-09-02 历史清理条目）
 .rivet/knowledge/memory-index.sqlite
 
+# 平台构建互斥锁目录
+.rivet/build.lock.d/
+
 # 公开仓：禁止 knowledge 回灌（私有仓策略不同；仅保留 .rivet/SELF）
 .rivet/knowledge/

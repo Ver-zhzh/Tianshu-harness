@@ -36,7 +36,7 @@ import { resolveZenConfig } from './agent/zen-mode.js'
 import { resolveMaxTurns } from './agent/turn-budget-policy.js'
 import { createAgentConfig, createMainAgentConfigInput } from './agent/create-agent-config.js'
 import { SessionContext } from './agent/context.js'
-import { SessionPersist, evictOldSessions, getSessionDir } from './agent/session-persist.js'
+import { SessionPersist, getSessionDir } from './agent/session-persist.js'
 import { waitForAgentRewind } from './agent/session-persist-listener.js'
 import { runGateCompletion } from './agent/gate-completion.js'
 import { memoryBackfillEnabled, runMemoryBackfill } from './memory/backfill.js'
@@ -496,48 +496,21 @@ export function getOrCreateSessionId(): string {
 }
 
 /**
- * Clean up stale worker session directories under ~/.rivet/sessions/<slug>/.
- * Worker sessions (worker-*) create per-session dirs here (pheromones.json,
- * sensorium.jsonl). Removes worker dirs older than STALE_THRESHOLD_MS to
- * avoid deleting dirs that might still be in use by a concurrent worker.
+ * Legacy thresholds remain exported for compatibility, but no longer expire history.
+ * Worker directories contain pinned skills, usage evidence and recovery assets;
+ * their directory mtime cannot establish that the contents are disposable.
  */
 export const WORKER_DIR_STALE_THRESHOLD_MS = 3_600_000 // 1 hour
-/** worker 文件（jsonl/meta 等）保留窗口：排查资产（查 worker 模型/对话），
- *  价值随时间快速衰减；7 天后清退。目录阈值(1h)不适用——目录是遥测/信息素
- *  临时物，文件是事后排查凭据。 */
+/** @deprecated Former worker-file threshold; retained only as an API constant. */
 export const WORKER_FILE_STALE_THRESHOLD_MS = 7 * 24 * 3_600_000 // 7 days
 
+/** @deprecated History is never automatically expired. Use explicit reviewed storage maintenance. */
 export function cleanupStaleWorkerSessionDirs(
-  cwd: string,
-  thresholdMs = WORKER_DIR_STALE_THRESHOLD_MS,
-  fileThresholdMs = WORKER_FILE_STALE_THRESHOLD_MS,
+  _cwd: string,
+  _thresholdMs = WORKER_DIR_STALE_THRESHOLD_MS,
+  _fileThresholdMs = WORKER_FILE_STALE_THRESHOLD_MS,
 ): number {
-  const sessionsDir = getSessionDir(cwd)
-  if (!existsSync(sessionsDir)) return 0
-  let cleaned = 0
-  try {
-    const entries = readdirSync(sessionsDir)
-    for (const entry of entries) {
-      if (!entry.startsWith('worker-')) continue
-      const fullPath = join(sessionsDir, entry)
-      try {
-        const st = statSync(fullPath)
-        const age = Date.now() - st.mtimeMs
-        if (st.isDirectory()) {
-          if (age > thresholdMs) {
-            rmSync(fullPath, { recursive: true, force: true })
-            cleaned++
-          }
-        } else if (age > fileThresholdMs) {
-          // worker-<id>.jsonl 及附属（.meta.json/.claims.jsonl…）。evict 额度池
-          // 已排除 worker（否则洪水挤掉主会话），生命周期由此处接管——否则无限累积。
-          unlinkSync(fullPath)
-          cleaned++
-        }
-      } catch { /* best-effort — skip unreadable entries */ }
-    }
-  } catch { /* best-effort */ }
-  return cleaned
+  return 0
 }
 
 // ── Tool Registry (with all tools registered) ──────────────────
@@ -2160,12 +2133,7 @@ export async function bootstrapInteractiveSession(opts: BootstrapOptions = {}): 
     }
   }
 
-  // Evict old sessions
-  evictOldSessions(sessionId, cwd)
-
-  // Clean up stale worker session directories under ~/.rivet/sessions/<slug>/.
-  // Worker sessions create worker-xxx/ (pheromones, sensorium).
-  cleanupStaleWorkerSessionDirs(cwd)
+  // History is durable: only explicit user maintenance may delete main/worker sessions.
 
   // Clean up orphaned files
   const rivetDir = join(cwd, '.rivet')

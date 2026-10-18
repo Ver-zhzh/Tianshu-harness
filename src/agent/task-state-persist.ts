@@ -105,20 +105,22 @@ function fingerprint(root: string, files: string[], isolated = false): string | 
   return hash.digest('hex')
 }
 
-/** 指纹输入集唯一口径：实际发生过的写（file_write 事件）+ 认领集。
- *  记录侧（workspaceFingerprint）与校验侧（validateEvents / 恢复校验）必须
- *  共用本函数——两侧口径分叉会让所有验证恒被标 stale（8784b64b8 审查 P1：
- *  ownership 含 ledger 事件之外的路径时，如 plan draft 残留、autoOwnFromBaseline
- *  自动认领，两个集合永不相等，交付门禁恒 RED）。
+/** 指纹输入集唯一口径：**实际发生过的内容写入**（file_write 事件）。
  *
- *  瞬态计划草稿除外：它不是代码证据。草稿的写入与释放（loop.ts
- *  releasePlanModeArtifacts 的 removeEventsByPath）都不得改变指纹——否则在
- *  plan mode 里写草稿会连带作废此前跑过的测试，且退出后 stale 标记仍留在
- *  那些验证事件上（8784b64b8 审查 P1 W1-2）。 */
-function fingerprintPaths(events: ReadonlyArray<TaskLedgerEvent>, adopted: ReadonlySet<string> | readonly string[], root: string): string[] {
-  const adoptedList = Array.isArray(adopted) ? adopted : [...adopted]
-  // 越界路径（不可交付）不参与指纹——与 plan 草稿同为「不得影响指纹」的排除项。
-  return [...events.filter(e => e.type === 'file_write' && e.path && !isTransientPlanDraftPath(e.path, root)).map(e => e.path!), ...adoptedList]
+ *  不含认领集（adopt / autoOwnFromBaseline）：认领是归属变更，不是内容变更——
+ *  文件字节在认领前后完全相同。把认领混进指纹，会让「先验证、后认领」这个
+ *  正常顺序把此前所有验证判废（2026-10-17 现场：跑完全量测试后 adopt 一个由
+ *  bash 产出的构建产物，交付门从 GREEN 掉回 RED，而那次测试实际覆盖了该文件）。
+ *
+ *  内容变更仍被追踪：认领过的文件一旦被本会话改写，那条 file_write 事件就会
+ *  把它重新计入指纹，旧验证照常失效——放宽的只是「不涉及写入的归属簿记」。
+ *
+ *  越界路径与瞬态计划草稿同样排除：它们不是可交付的代码证据（前者见 W2-1，
+ *  后者见 8784b64b8 审查 P1 W1-2）。 */
+function fingerprintPaths(events: ReadonlyArray<TaskLedgerEvent>, _adopted: ReadonlySet<string> | readonly string[], root: string): string[] {
+  return events
+    .filter(e => e.type === 'file_write' && e.path && !isTransientPlanDraftPath(e.path, root))
+    .map(e => e.path!)
     .filter(p => classifyFingerprintPath(root, p) !== 'out-of-project')
 }
 
