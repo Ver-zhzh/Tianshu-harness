@@ -97,64 +97,6 @@ test('mapProviderModels：空目录 → 空列表；缺省字段保守兜底、�
   assert.equal(sparse[0]?.detail, 'Kimi')
 })
 
-test('mapProviderModels：仅列出已就绪凭据的服务商，过滤未配 key 的服务商', () => {
-  const catalog: ProviderConfigList = {
-    providers: [
-      {
-        name: 'unconfigured-preset',
-        label: '未配 Key 的服务商',
-        isDefault: false,
-        keyStatus: { source: 'none', ref: '' },
-        isPreset: true,
-        models: [{ id: 'ghost-model' }],
-      },
-      {
-        name: 'configured-inline',
-        label: '已配 Inline Key',
-        isDefault: false,
-        keyStatus: { source: 'inline', ref: 'sk-123' },
-        isPreset: false,
-        models: [{ id: 'inline-model' }],
-      },
-      {
-        name: 'configured-env',
-        label: '已配 Env Key',
-        isDefault: false,
-        keyStatus: { source: 'env', ref: 'MY_ENV_KEY' },
-        isPreset: false,
-        models: [{ id: 'env-model' }],
-      },
-      {
-        name: 'ollama-local',
-        label: '本地免密 Ollama',
-        isDefault: false,
-        keyStatus: { source: 'none', ref: '' },
-        keyless: true,
-        isPreset: true,
-        models: [{ id: 'ollama-model' }],
-      },
-      {
-        name: 'codex-oauth',
-        label: 'OAuth 登录服务商',
-        isDefault: false,
-        keyStatus: { source: 'none', ref: '' },
-        oauthAuthenticated: true,
-        isPreset: true,
-        models: [{ id: 'oauth-model' }],
-      },
-    ],
-    unconfigured: [],
-  }
-  const mapped = mapProviderModels(catalog)
-  assert.equal(mapped.length, 4)
-  const ids = mapped.map(m => m.id)
-  assert.ok(!ids.includes('ghost-model'), '未配置 Key 的服务商模型被过滤')
-  assert.ok(ids.includes('inline-model'), 'inline key 模型保留')
-  assert.ok(ids.includes('env-model'), 'env key 模型保留')
-  assert.ok(ids.includes('ollama-model'), 'keyless 模型保留')
-  assert.ok(ids.includes('oauth-model'), 'oauth 模型保留')
-})
-
 test('model picker hides unconfigured providers and retains inline, env, OAuth and keyless models', () => {
   const provider = (name: string, extra: object = {}) => ({
     name, label: name, isDefault: false, isPreset: true,

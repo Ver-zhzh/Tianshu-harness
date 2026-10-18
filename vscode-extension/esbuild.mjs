@@ -39,31 +39,9 @@ const webviewCfg = {
   define: { 'process.env.NODE_ENV': '"production"' },
 }
 
-/** @type {import('esbuild').BuildOptions} */
-const builderCfg = {
-  entryPoints: ['builder-ui/src/main.tsx'],
-  bundle: true,
-  outfile: 'dist/builder.js',
-  platform: 'browser',
-  format: 'iife',
-  target: 'es2022',
-  sourcemap: true,
-  minify: true,
-  logLevel: 'info',
-  define: { 'process.env.NODE_ENV': '"production"' },
-}
-
 if (watch) {
-  const ctxs = await Promise.all([
-    esbuild.context(extensionCfg),
-    esbuild.context(webviewCfg),
-    esbuild.context(builderCfg),
-  ])
+  const ctxs = await Promise.all([esbuild.context(extensionCfg), esbuild.context(webviewCfg)])
   await Promise.all(ctxs.map((c) => c.watch()))
 } else {
-  await Promise.all([
-    esbuild.build(extensionCfg),
-    esbuild.build(webviewCfg),
-    esbuild.build(builderCfg),
-  ])
+  await Promise.all([esbuild.build(extensionCfg), esbuild.build(webviewCfg)])
 }

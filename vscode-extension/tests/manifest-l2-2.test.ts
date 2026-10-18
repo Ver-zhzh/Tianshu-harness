@@ -84,17 +84,9 @@ test('命令面板前缀统一：全量 category=天枢，title 无手工前缀'
   }
 })
 
-test('既有菜单面不回退：editor/context 项、view/title 变更项、scm/title 既有 git 项保持', () => {
-  assert.ok((menus['editor/context'] ?? []).length >= 2)
-  const viewTitle = menus['view/title'] ?? []
-  assert.ok(
-    viewTitle.some((m) => m.command === 'tianshu.refreshChanges' && m.when === 'view == tianshu.changes'),
-    'refreshChanges 应保持',
-  )
-  assert.ok(
-    viewTitle.some((m) => m.command === 'tianshu.rollback' && m.when === 'view == tianshu.changes'),
-    'rollback 应保持',
-  )
+test('既有菜单面不回退：editor/context 两项、view/title 两项、scm/title 既有 git 项保持', () => {
+  assert.equal((menus['editor/context'] ?? []).length, 2)
+  assert.equal((menus['view/title'] ?? []).length, 2)
   // L2-5 起 scm/title 增 tianshu 两项（见 manifest-l2-5.test.ts）；此处核既有 git 项不回退
   const scmTitle = menus['scm/title'] ?? []
   assert.ok(

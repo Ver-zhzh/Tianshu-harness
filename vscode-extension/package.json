@@ -39,7 +39,6 @@
   ],
   "main": "./dist/extension.js",
   "activationEvents": [
-    "onView:tianshu.cockpitView",
     "onChatParticipant:tianshu.default",
     "onLanguageModelChatProvider:tianshu"
   ],
@@ -50,13 +49,6 @@
   ],
   "contributes": {
     "viewsContainers": {
-      "activitybar": [
-        {
-          "id": "tianshu-sidebar",
-          "title": "天枢",
-          "icon": "media/icon.svg"
-        }
-      ],
       "secondarySidebar": [
         {
           "id": "tianshu",
@@ -72,13 +64,6 @@
           "name": "天枢变更"
         }
       ],
-      "tianshu-sidebar": [
-        {
-          "type": "webview",
-          "id": "tianshu.cockpitView",
-          "name": "天枢座舱"
-        }
-      ],
       "secondarySidebar": [
         {
           "id": "tianshu.launcher",
@@ -88,32 +73,13 @@
     },
     "commands": [
       {
-        "command": "tianshu.refreshCockpit",
-        "title": "刷新座舱",
-        "icon": "$(refresh)",
-        "category": "天枢"
-      },
-      {
-        "command": "tianshu.focusCockpit",
-        "title": "聚焦座舱",
-        "icon": "$(layout-sidebar-left)",
-        "category": "天枢"
-      },
-      {
         "command": "tianshu.newSession",
         "title": "新建会话",
-        "icon": "$(plus)",
         "category": "天枢"
       },
       {
         "command": "tianshu.openInEditor",
         "title": "在编辑器中打开座舱",
-        "category": "天枢"
-      },
-      {
-        "command": "tianshu.openVisualBuilder",
-        "title": "打开前端可视化建造与实时预览",
-        "icon": "$(browser)",
         "category": "天枢"
       },
       {
@@ -205,11 +171,6 @@
     "menus": {
       "editor/context": [
         {
-          "command": "tianshu.openVisualBuilder",
-          "group": "tianshu@0",
-          "when": "resourceExtname =~ /\\.(html|htm|tsx|jsx|vue|svelte|css)$/"
-        },
-        {
           "command": "tianshu.sendSelection",
           "group": "tianshu@1"
         },
@@ -220,20 +181,8 @@
       ],
       "editor/title": [
         {
-          "command": "tianshu.openVisualBuilder",
-          "group": "navigation@1",
-          "when": "resourceExtname =~ /\\.(html|htm|tsx|jsx|vue|svelte|css)$/"
-        },
-        {
           "submenu": "tianshu.actions",
           "group": "navigation@9"
-        }
-      ],
-      "explorer/context": [
-        {
-          "command": "tianshu.openVisualBuilder",
-          "group": "tianshu@1",
-          "when": "resourceExtname =~ /\\.(html|htm|tsx|jsx|vue|svelte|css)$/"
         }
       ],
       "editor/title/context": [
@@ -253,21 +202,6 @@
         }
       ],
       "view/title": [
-        {
-          "command": "tianshu.refreshCockpit",
-          "when": "view == tianshu.cockpitView",
-          "group": "navigation@1"
-        },
-        {
-          "command": "tianshu.newSession",
-          "when": "view == tianshu.cockpitView",
-          "group": "navigation@2"
-        },
-        {
-          "command": "tianshu.openInEditor",
-          "when": "view == tianshu.cockpitView",
-          "group": "navigation@3"
-        },
         {
           "command": "tianshu.refreshChanges",
           "when": "view == tianshu.changes",
