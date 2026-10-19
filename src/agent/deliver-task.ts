@@ -1,7 +1,10 @@
 import type { DeliveryImpact } from './delivery-impact.js'
 import { assessImpactedTestCoverage, getEffectiveVerifications } from './verification-attribution.js'
-import { captureCommitVersion } from './commit-version.js'
-import { buildDeliveryVerificationPlan, renderDeliveryVerificationPlan } from './delivery-verification-plan.js'
+import { captureCommitVersionAsync } from './commit-version-async.js'
+import { recordRuntimeDiagnostic } from '../utils/runtime-diagnostics.js'
+import { gitCommand } from '../tools/git-command.js'
+import { buildDeliveryVerificationPlanAsync, renderDeliveryVerificationPlan } from './delivery-verification-plan.js'
+import { scanDeliveryFilesAsync, type scanDeliveryFiles } from './delivery-readonly.js'
 /**
  * deliver_task — 语义化交付工具 (B1-8)
  *
@@ -23,8 +26,7 @@ import { buildDeliveryVerificationPlan, renderDeliveryVerificationPlan } from '.
  * @task B1-8
  */
 
-import { existsSync, readFileSync, statSync, unlinkSync } from 'node:fs'
-import { spawnGitSync } from '../tools/spawn-git.js'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import { parseVerifyCommand, spawnVerifyArgv } from './verify-command.js'
 import { join, isAbsolute } from 'node:path'
 import type { Tool, ToolCallParams, ToolResult, DelegationActivity } from '../tools/types.js'
@@ -35,14 +37,15 @@ import { debugLog } from '../utils/debug.js'
 
 /**
  * 阶段时间戳标记（commit 卡死诊断插桩，主控可靠性闭环 2026-08-06）。
- * 返回 (stage) => void：记录「execute 开始以来的相对毫秒」到 debug 通道
- * （RIVET_DEBUG=1 才输出，生产零开销）。下次 deliver_task commit=true 卡死时，
+ * 返回 (stage) => void：有界记录阶段与相对耗时，并保留 debug 输出。
+ * 下次 deliver_task commit=true 卡死时，
  * 日志里最后一个 stage 就是卡点：在 execute 内（缺 execute:return）或
  * execute 已返回但工具未完成（全标记齐全 = harness 结果回传层卡死）。
  */
-export function createStageMarker(prefix: string): (stage: string) => void {
+export function createStageMarker(prefix: string, correlationId?: string, sessionId?: string): (stage: string) => void {
   const t0 = Date.now()
   return (stage: string): void => {
+    recordRuntimeDiagnostic({ kind: 'delivery_stage', phase: stage, correlationId, sessionId, elapsedMs: Date.now() - t0 })
     debugLog(`[${prefix}] ${stage} +${Date.now() - t0}ms`)
   }
 }
@@ -85,7 +88,7 @@ function runGateAsync(command: string, cwd: string): Promise<{ ok: boolean; deta
 }
 import { filterExternalNoise, type DeliveryGateV2 } from './delivery-gate-v2.js'
 import { summarizeOwnershipHealth } from './ownership-health.js'
-import { classifyChange, createGitDiffProvider, isMechanicalFastPathEnabled } from './change-classification.js'
+import { classifyChange, createGitDiffProviderAsync, isMechanicalFastPathEnabled } from './change-classification.js'
 import { commitScopedFiles, type ScopedCommitResult } from './scoped-git-commit.js'
 import { buildReviewPrincipleChecklist } from './review-principle-checklist.js'
 import { checkCommitCohesion } from './commit-cohesion.js'
@@ -99,9 +102,9 @@ import { readUnacknowledged, acknowledgeAll, type RecoveryEntry } from './recove
 import { analyzeImpact } from '../repo/meridian-impact.js'
 import { evaluateTestPresence, testPresenceGateEnabled } from './test-presence.js'
 import { auditDeliveryClaims, claimAuditEnabled } from './claim-audit.js'
-import { scanFilesForProbes, formatProbeHits, type ProbeHit } from './probe-detector.js'
+import { formatProbeHits, type ProbeHit } from './probe-detector.js'
 import { checkStructureGate } from './structure-gate.js'
-import { findApprovedPlanInventory, verifyRegressionInventory, formatInventoryReport, type InventorySearcher } from './regression-inventory.js'
+import { findApprovedPlanInventory, verifyRegressionInventoryAsync, formatInventoryReport, type InventorySearcher } from './regression-inventory.js'
 import { verifyObligations, formatObligationReport, type GateRunner, type PlanWithObligations } from './council/council-obligations.js'
 import { declaredVerificationCommands, reconcileVerificationCommands, formatVerificationReconcileReport } from './verification-reconcile.js'
 import { getStoredPlan } from './plan-store.js'
@@ -131,7 +134,7 @@ export interface B1Context {
   /** Test hook / alternate runtime source for project memory markdown. */
   getProjectMemoryContent?: (cwd: string) => string | undefined
   /** Test hook / alternate runtime executor for scoped commits. */
-  commitOwnedFiles?: (cwd: string, files: string[], message: string) => ScopedCommitResult
+  commitOwnedFiles?: (cwd: string, files: string[], message: string) => ScopedCommitResult | Promise<ScopedCommitResult>
   /** Review router entry point. Defaults to routeReviewWorkflow when reviewDeps is provided. */
   routeReviewWorkflow?: typeof routeReviewWorkflow
   /** Dependencies used by the review router to spawn verifier/patcher/squadron workers. */
@@ -303,8 +306,8 @@ function collectLargeFiles(cwd: string, filePaths: readonly string[]): Array<{ p
   return large.length > 0 ? large : undefined
 }
 
-function gitNameList(cwd: string, args: string[]): string[] | null {
-  const result = spawnGitSync(['-c', 'core.quotePath=false', ...args], { cwd, encoding: 'utf-8', timeout: 5000 })
+async function gitNameList(cwd: string, args: string[]): Promise<string[] | null> {
+  const result = await gitCommand(cwd, ['-c', 'core.quotePath=false', ...args], { timeoutMs: 5000 })
   if (result.status !== 0) return null
   return parseNulFileList(result.stdout)
 }
@@ -314,8 +317,8 @@ function gitNameList(cwd: string, args: string[]): string[] | null {
  * operators (`??` `||` default values). These are the shape of the trained-mode
  * reflex — patch the last hop, not the root. Returns a stance hint, or null.
  */
-export function detectSymptomPatch(cwd: string): string | null {
-  const res = spawnGitSync(['-c', 'core.quotePath=false', 'diff', '--numstat', 'HEAD'], { cwd, encoding: 'utf-8', timeout: 5000 })
+export async function detectSymptomPatch(cwd: string): Promise<string | null> {
+  const res = await gitCommand(cwd, ['-c', 'core.quotePath=false', 'diff', '--numstat', 'HEAD'], { timeoutMs: 5000 })
   if (res.status !== 0) return null
   const rows = res.stdout.split(/\r?\n/).filter(Boolean)
     .map(l => l.split('\t'))
@@ -324,7 +327,7 @@ export function detectSymptomPatch(cwd: string): string | null {
   const row = rows[0]!
   const added = Number(row[0]) || 0
   if (added > 2) return null
-  const patch = spawnGitSync(['-c', 'core.quotePath=false', 'diff', 'HEAD', '--', row[2]!], { cwd, encoding: 'utf-8', timeout: 5000 })
+  const patch = await gitCommand(cwd, ['-c', 'core.quotePath=false', 'diff', 'HEAD', '--', row[2]!], { timeoutMs: 5000 })
   if (patch.status !== 0) return null
   const addedLines = patch.stdout.split(/\r?\n/).filter(l => l.startsWith('+') && !l.startsWith('+++'))
   const fallbackOnly = addedLines.length > 0 && addedLines.every(l => /\?\?|\|\||=\s*['"`]?\w*['"`]?\s*$|fallback|default/.test(l))
@@ -332,10 +335,10 @@ export function detectSymptomPatch(cwd: string): string | null {
   return '⚖️  这是症状处的 fallback 补丁(单行、改默认值)。是源头修复还是就近打补丁？数据流追到源头了吗？(清醒锚点，不阻塞)'
 }
 
-export function collectCurrentDirtyFiles(cwd: string): string[] | undefined {
-  const unstaged = gitNameList(cwd, ['diff', '--name-only', '-z'])
-  const staged = gitNameList(cwd, ['diff', '--cached', '--name-only', '-z'])
-  const untracked = gitNameList(cwd, ['ls-files', '--others', '--exclude-standard', '-z'])
+export async function collectCurrentDirtyFiles(cwd: string): Promise<string[] | undefined> {
+  const unstaged = await gitNameList(cwd, ['diff', '--name-only', '-z'])
+  const staged = await gitNameList(cwd, ['diff', '--cached', '--name-only', '-z'])
+  const untracked = await gitNameList(cwd, ['ls-files', '--others', '--exclude-standard', '-z'])
   if (!unstaged || !staged || !untracked) return undefined
 
   const files = new Set<string>()
@@ -484,12 +487,12 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
     },
 
     async execute(params: ToolCallParams): Promise<ToolResult> {
-      const mark = createStageMarker('deliver-task')
+      const mark = createStageMarker('deliver-task', params.toolUseId, params.sessionId)
       mark('execute:start')
       const ctx = getB1Context(params)
       const reviewDepth = params.reviewDepth ?? ctx.reviewDepth ?? 0
       ctx.ownership.autoOwnFromLedger()
-      const currentDirtyFiles = ctx.getCurrentDirtyFiles?.(params.cwd) ?? collectCurrentDirtyFiles(params.cwd)
+      const currentDirtyFiles = ctx.getCurrentDirtyFiles?.(params.cwd) ?? await collectCurrentDirtyFiles(params.cwd)
       if (currentDirtyFiles) ctx.ownership.autoOwnFromBaseline(currentDirtyFiles)
       // W1 回归防线: feed Meridian blast radius into the gate. existsSync filters
       // deleted/renamed tests (static-analysis false positives) into "uncoverable".
@@ -519,7 +522,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
       }
       const externalSplit = filterExternalNoise(report.externalFiles, params.cwd)
       const pendingTests = assessImpactedTestCoverage(impactedTests, getEffectiveVerifications(ctx.taskLedger.getVerifications(), ctx.getCurrentSnapshotRef?.()).effective, path => existsSync(join(params.cwd, path)), params.cwd).uncovered
-      const verificationPlan = buildDeliveryVerificationPlan(params.cwd, impactedTests, pendingTests, impact?.advisoryTests.length ?? 0, ctx.taskLedger.getVerifications(), ctx.getCurrentSnapshotRef?.())
+      const verificationPlan = await buildDeliveryVerificationPlanAsync(params.abortSignal, params.cwd, impactedTests, pendingTests, impact?.advisoryTests.length ?? 0, ctx.taskLedger.getVerifications(), ctx.getCurrentSnapshotRef?.())
       const lines: string[] = [
         `Delivery Gate: ${report.state}`,
         `Task: ${report.taskId}`,
@@ -739,7 +742,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
         const refactorish = isRefactorObjective(contract?.objective ?? '')
           || isRefactorObjective(typeof params.input.message === 'string' ? params.input.message : '')
         if (inventory && inventory.length > 0) {
-          const results = verifyRegressionInventory(params.cwd, inventory, ctx.inventorySearcher)
+          const results = await verifyRegressionInventoryAsync(params.cwd, inventory, ctx.inventorySearcher)
           lines.push(...formatInventoryReport(results))
         } else if (refactorish) {
           lines.push('', '⚠️ 重构类交付缺少回归清单（task contract regressionInventory / 计划「回归清单」章节均为空）。')
@@ -925,7 +928,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
         if (isMechanicalFastPathEnabled(ctx.reviewConfig)) {
           mechanicalClass = classifyChange(
             report.ownedFiles,
-            createGitDiffProvider(params.cwd, report.ownedFiles, currentDirtyFiles ?? undefined),
+            await createGitDiffProviderAsync(params.cwd, report.ownedFiles, currentDirtyFiles ?? undefined, params.abortSignal),
           )
         }
 
@@ -982,7 +985,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
           return { verificationPlan, content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
         }
         if (report.state === 'YELLOW') {
-          const stanceHint = detectSymptomPatch(params.cwd)
+          const stanceHint = await detectSymptomPatch(params.cwd)
           if (stanceHint) lines.push('', stanceHint)
         }
         if (!message) {
@@ -1078,7 +1081,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
           return { verificationPlan, content: lines.join('\n'), isError: true, errorKind: 'format_error' }
         }
 
-        const commitVersion = captureCommitVersion(params.cwd, filesToCommit)
+        const commitVersion = await captureCommitVersionAsync(params.cwd, filesToCommit, { signal: params.abortSignal })
         lines.push('', `Commit scope (${postAdoptionReport.state}): ${filesToCommit.join(', ') || '(none)'}`)
         const commitConflictFiles = new Set(filesToCommit)
         const blockingClaimConflicts = claimConflicts.filter(conflict => commitConflictFiles.has(conflict.file))
@@ -1093,12 +1096,18 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
 
         // ── PRE-COMMIT GATES (blocking) ──────────────────────────────────
         // Static checks that don't need worker API calls — run before commit.
+        let fileChecks: Partial<ReturnType<typeof scanDeliveryFiles>> = {}
+        try { fileChecks = await scanDeliveryFilesAsync(params.cwd, filesToCommit, params.abortSignal) }
+        catch {
+          params.abortSignal?.throwIfAborted()
+          lines.push('', '⚠ 静态提示检查进程不可用或超时；未在服务线程重算，请独立审查布线、探针和结构。')
+        }
 
         // D-fix: cheap static wrote-but-never-read check. Mechanically catches
         // the modelOverride class of dead wiring (field/symbol added, zero
         // read-side consumers) at the moment of delivery. YELLOW, non-blocking.
         try {
-          const deadSymbols = (ctx.detectWroteButNeverRead ?? detectWroteButNeverRead)(params.cwd, filesToCommit)
+          const deadSymbols = ctx.detectWroteButNeverRead ? ctx.detectWroteButNeverRead(params.cwd, filesToCommit) : fileChecks.dead ?? []
           lines.push(...formatWroteButNeverRead(deadSymbols))
         } catch {
           // best-effort: never let the nudge break delivery
@@ -1108,7 +1117,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
         // = fixture 伪造了真实系统不产出的形状。YELLOW，非阻断。仅抓子型A（生产零写入）；
         // 子型B（写入点存在但运行时永空）是 review 门的职责。
         try {
-          const falseGreen = (ctx.detectReadButNeverProduced ?? detectReadButNeverProduced)(params.cwd, filesToCommit)
+          const falseGreen = ctx.detectReadButNeverProduced ? ctx.detectReadButNeverProduced(params.cwd, filesToCommit) : fileChecks.falseGreen ?? []
           lines.push(...formatReadButNeverProduced(falseGreen))
         } catch {
           // best-effort: never let the nudge break delivery
@@ -1119,12 +1128,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
         // may have intentionally added logging. fs re-scan is authoritative:
         // probes already cleaned by a later edit won't be in the file.
         try {
-          const scanner = ctx.scanProbes ?? ((files, cwd) => {
-            return scanFilesForProbes(files, cwd, (p) => {
-              try { return readFileSync(p, 'utf-8') } catch { return null }
-            })
-          })
-          const probeHits = scanner(filesToCommit, params.cwd)
+          const probeHits = ctx.scanProbes ? ctx.scanProbes(filesToCommit, params.cwd) : fileChecks.probes ?? []
           if (probeHits.length > 0) {
             lines.push(...formatProbeHits(probeHits))
           }
@@ -1137,8 +1141,8 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
         // YELLOW, non-blocking — the hard stop is architecture-guards in
         // npm test; this surfaces the ratchet before CI does.
         try {
-          const structure = (ctx.checkStructure ?? checkStructureGate)(filesToCommit, params.cwd)
-          if (structure.needsWarning) {
+          const structure = ctx.checkStructure ? ctx.checkStructure(filesToCommit, params.cwd) : fileChecks.structure
+          if (structure?.needsWarning) {
             lines.push('', ...structure.warningLines.map(l => `  ${l}`))
           }
         } catch {
@@ -1165,37 +1169,23 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
         // Review is post-commit (advisory) — the commit must land first so
         // the main loop never stalls on a slow/timeout review worker.
 
-        // Pre-flight: detect another git process holding the index lock.
-        // A stale lock (crashed / zombie git) is cleaned up automatically;
-        // a live lock (another session mid-commit) fails fast with an
-        // actionable message instead of hanging until the tool times out.
+        // A lock's age cannot prove that its owner has exited.
         const lockPath = join(params.cwd, '.git', 'index.lock')
         if (existsSync(lockPath)) {
-          try {
-            const lockAge = Date.now() - statSync(lockPath).mtimeMs
-            if (lockAge > 30_000) {
-              // Stale lock (> 30s): clean up and proceed.
-              unlinkSync(lockPath)
-              lines.push('', '  ♻️  Cleared a stale git lock file before committing.')
-            } else {
-              lines.push('', `  ⚠️  Git index is locked (another session mid-commit, lock age ${Math.round(lockAge / 1000)}s).`)
-              lines.push('     Wait a few seconds and retry deliver_task. Do NOT fall back to raw git commit — that bypasses ownership scoping.')
-              return { verificationPlan, content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
-            }
-          } catch {
-            // Permission denied or race — let the commit attempt surface the real error.
-          }
+          lines.push('', '  ⚠️  Git index is locked; its owner has not been verified.')
+          lines.push('     Wait for the owning Git process to finish and retry; the lock was preserved.')
+          return { verificationPlan, content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
         }
 
         // Capture HEAD before the commit so the result carries verifiable
         // evidence that a new commit actually landed (vs. agent guessing from
         // a possibly-stale git status snapshot).
-        const headBefore = spawnGitSync(['rev-parse', '--short', 'HEAD'], { cwd: params.cwd, encoding: 'utf-8', timeout: 5000 })
+        const headBefore = await gitCommand(params.cwd, ['rev-parse', '--short', 'HEAD'], { signal: params.abortSignal, timeoutMs: 5000 })
         mark('commit:before')
         const headBeforeHash = headBefore.status === 0 ? headBefore.stdout.trim() : null
 
-        const executor = ctx.commitOwnedFiles ?? ((cwd, files, msg) => commitScopedFiles({ cwd, files, message: msg, expectedVersion: commitVersion ?? undefined }))
-        const commitResult = executor(params.cwd, filesToCommit, message)
+        const executor = ctx.commitOwnedFiles ?? ((cwd, files, msg) => commitScopedFiles({ cwd, files, message: msg, expectedVersion: commitVersion ?? undefined, signal: params.abortSignal }))
+        const commitResult = await executor(params.cwd, filesToCommit, message)
         if (!commitResult.ok) {
           lines.push('', `❌ Scoped commit failed: ${commitResult.output}`)
           return { verificationPlan, content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
@@ -1204,7 +1194,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
         lines.push(`   Files: ${filesToCommit.join(', ') || '(none)'}`)
         if (commitResult.output) lines.push(`   ${commitResult.output}`)
         // Post-commit truth readback: verify HEAD actually moved + surface hash.
-        const headAfter = spawnGitSync(['rev-parse', '--short', 'HEAD'], { cwd: params.cwd, encoding: 'utf-8', timeout: 5000 })
+        const headAfter = await gitCommand(params.cwd, ['rev-parse', '--short', 'HEAD'], { signal: params.abortSignal, timeoutMs: 5000 })
         mark('commit:after')
         const headAfterHash = headAfter.status === 0 ? headAfter.stdout.trim() : null
         if (headBeforeHash && headAfterHash) {
@@ -1214,7 +1204,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
             lines.push(`   ⚠️ WARNING: HEAD did not move (still ${headAfterHash}). The commit may not have landed — verify with git log before retrying.`)
           }
         }
-        const readback = spawnGitSync(['-c', 'core.quotePath=false', 'show', '--stat', '--format=%h%d', 'HEAD'], { cwd: params.cwd, encoding: 'utf-8', timeout: 10_000 })
+        const readback = await gitCommand(params.cwd, ['-c', 'core.quotePath=false', 'show', '--stat', '--format=%h%d', 'HEAD'], { signal: params.abortSignal })
         if (readback.status === 0 && readback.stdout.trim()) {
           lines.push('', '--- actual changes (git show --stat) ---')
           lines.push(readback.stdout.trim())

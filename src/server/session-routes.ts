@@ -42,6 +42,7 @@ import { buildDocumentRoutes, documentVersion } from './file-document.js'
 import { buildGitWorkbenchRoutes, serveFileRoute } from './git-workbench-routes.js'
 import { buildGitPrRoutes } from './git-pr-routes.js'
 import { buildApprovalRoutes, sendApprovalSnapshot } from './approval-routes.js'
+import { boundedEventPage } from './event-page.js'
 import { buildGitReviewRoutes } from './git-review-jobs.js'
 import { normalizeRolloverConfig } from '../agent/goal-tracker.js'
 import { decodeRouteParam, type RouteHandler } from './index.js'
@@ -1264,6 +1265,7 @@ export function buildSessionRoutes(
       // off the main thread instead of stalling every other request on it.
       const result = await manager.getEventsAsync(params!.id!, since)
       if (!result) return { status: 404, body: { error: 'Session not found' } }
+      if (params?.limit !== undefined) return { status: 200, body: boundedEventPage(result.events, since, params.limit) }
       // 回放投影：已闭合 delta run 压成单事件（见 replay-compaction.ts）；
       // 末段若仍在流式输出则保留原样，客户端经 open 标志尾部追加。
       if (isReplayCompactionEnabled()) {

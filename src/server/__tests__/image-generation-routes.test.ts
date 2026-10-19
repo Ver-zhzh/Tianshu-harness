@@ -40,7 +40,7 @@ test('authenticated async routes preserve one paid request, actual size, bytes, 
   t.after(() => { app.closeAllConnections(); app.close() })
   const address = app.address() as { port: number }, up = upstream.address() as { port: number }
   const call = (path: string, body?: unknown, auth = true) => fetch(`http://127.0.0.1:${address.port}${path}`, { method: body ? 'POST' : 'GET', headers: { ...(auth ? { Authorization: 'Bearer local-test' } : {}), 'content-type': 'application/json' }, ...(body ? { body: JSON.stringify(body) } : {}) })
-  const request = { cwd, requestId: randomUUID(), origin: 'test', draft: { baseUrl: `http://127.0.0.1:${up.port}/v1`, modelId: 'flux', sizeField: 'image_size', size: '1536x1024' } }
+  const request = { cwd, requestId: randomUUID(), origin: 'test', draft: { allowPrivateNetwork: true, baseUrl: `http://127.0.0.1:${up.port}/v1`, modelId: 'flux', sizeField: 'image_size', size: '1536x1024' } }
   assert.equal((await call('/image-generations', request, false)).status, 401)
   assert.equal((await call('/image-generations', { ...request, cwd: tmpdir() })).status, 403)
   assert.equal((await call('/image-generations', { ...request, draft: { ...request.draft, size: '0x1' } })).status, 400)
@@ -94,12 +94,12 @@ test('workbench, draft trial and legacy trial consume network settings at the ac
   const workbench = await router('POST', '/image-generations', { cwd, requestId: randomUUID(), parameters: { prompt: 'garden' } }, auth)
   assert.equal(workbench.status, 202, JSON.stringify(workbench.body))
   assert.equal((await service.wait(cwd, (workbench.body as ImageGenerationRecord).id))?.state, 'succeeded')
-  const trial = await router('POST', '/image-generations', { cwd, requestId: randomUUID(), origin: 'test', draft: { baseUrl: 'http://trial.example/v1', modelId: 'image', apiKey: 'trial-key' } }, auth)
+  const trial = await router('POST', '/image-generations', { cwd, requestId: randomUUID(), origin: 'test', draft: { allowPrivateNetwork: true, baseUrl: 'http://trial.example/v1', modelId: 'image', apiKey: 'trial-key' } }, auth)
   assert.equal(trial.status, 202)
   assert.equal((await service.wait(cwd, (trial.body as ImageGenerationRecord).id))?.state, 'succeeded')
   assert.deepEqual(requests.map(req => [req.route, req.method]), [['provider', 'POST'], ['provider', 'GET'], ['global', 'POST'], ['global', 'GET']])
   assert.ok(requests.filter(req => req.method === 'GET').every(req => !req.auth), 'Provider keys must not reach the image CDN')
-  const legacy = await createRouter(buildConfigRoutes('fixture'))('POST', '/config/image-gen-model/test', { baseUrl: 'http://trial.example/v1', modelId: 'image', apiKey: 'trial-key' }, auth)
+  const legacy = await createRouter(buildConfigRoutes('fixture'))('POST', '/config/image-gen-model/test', { proxyDns: 'trusted-proxy', baseUrl: 'http://trial.example/v1', modelId: 'image', apiKey: 'trial-key' }, auth)
   assert.equal(legacy.status, 200)
   assert.deepEqual(requests.slice(-2).map(req => [req.route, req.method]), [['global', 'POST'], ['global', 'GET']])
 })
@@ -115,7 +115,7 @@ test('saving without a trial and saving after a trial never call generation; mod
   t.after(() => { upstream.closeAllConnections(); upstream.close() })
   const address = upstream.address() as { port: number }, baseUrl = `http://127.0.0.1:${address.port}/v1`
   const configRouter = createRouter(buildConfigRoutes('test-config'))
-  const saved = await configRouter('POST', '/config/image-gen-model/onboard', { providerName: 'image-test', baseUrl, modelId: 'model', skipTest: false, apiKey: 'mock-key' }, { authorization: 'Bearer test-config' })
+  const saved = await configRouter('POST', '/config/image-gen-model/onboard', { providerName: 'image-test', baseUrl, allowPrivateNetwork: true, modelId: 'model', skipTest: false, apiKey: 'mock-key' }, { authorization: 'Bearer test-config' })
   assert.equal(saved.status, 200); assert.equal(calls, 0, 'Saving is not a billable operation, including older callers')
   const cfg = loadConfig(); cfg.provider.providers['image-test']!.models[0]!.imageGen = { sizeField: 'image_size', sizes: ['1536x1024'], defaultSize: '1536x1024' }; saveConfig(cfg)
   const service = new ImageGenerationService(), router = createRouter(buildImageGenerationRoutes('test-config', () => [root], service))
@@ -156,7 +156,7 @@ test('test drafts reject apiKeyEnv: no env var is resolved from a request body',
   const auth = { authorization: ['Bearer', 'draft-env'].join(' ') }
   const res = await router('POST', '/image-generations', {
     cwd, requestId: randomUUID(), origin: 'test',
-    draft: { baseUrl: `http://127.0.0.1:${port}/v1`, modelId: 'm', apiKeyEnv: 'AUDIT_EXFIL_CANARY' },
+    draft: { allowPrivateNetwork: true, baseUrl: `http://127.0.0.1:${port}/v1`, modelId: 'm', apiKeyEnv: 'AUDIT_EXFIL_CANARY' },
   }, auth)
   assert.equal(res.status, 400)
   assert.match(String((res.body as { error?: string }).error ?? ''), /apiKeyEnv/)
@@ -200,8 +200,12 @@ test('image-gen test endpoint only resolves apiKeyEnv names declared in the save
   assert.equal(evil.status, 400)
   assert.match(String((evil.body as { error?: string }).error ?? ''), /not declared/)
   assert.equal(hits, 0, 'undeclared env name must not trigger a request')
+  const wrongOrigin = await router('POST', '/config/image-gen-model/test', { baseUrl, allowPrivateNetwork: true, modelId: 'm', apiKeyEnv: 'DECLARED_TEST_KEY' }, auth)
+  assert.equal(wrongOrigin.status, 400)
+  assert.equal(hits, 0, 'declared credential cannot be sent to another origin')
+  const cfg = loadConfig(); cfg.provider.providers.p!.baseUrl = baseUrl; saveConfig(cfg)
   // 已声明的变量名：解析并作为 Bearer 发送。
-  const ok = await router('POST', '/config/image-gen-model/test', { baseUrl, modelId: 'm', apiKeyEnv: 'DECLARED_TEST_KEY' }, auth)
+  const ok = await router('POST', '/config/image-gen-model/test', { baseUrl, allowPrivateNetwork: true, modelId: 'm', apiKeyEnv: 'DECLARED_TEST_KEY' }, auth)
   assert.equal(ok.status, 200, JSON.stringify(ok.body))
   assert.equal(hits, 1)
   assert.equal(seenAuth, ['Bearer', 'declared-secret'].join(' '))

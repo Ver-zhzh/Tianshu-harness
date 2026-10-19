@@ -1,3 +1,5 @@
+import { bindConnectEndpointPolicy } from '../connect-apply.js'
+import { configuredEndpointNetwork } from '../../config/endpoint-network-policy.js'
 import { workerDispatchKey } from '../../tools/worker-identity.js'
 /**
  * T9 TuiApp — 主事件循环（替代 app.tsx 的 React 组件）。
@@ -2936,7 +2938,7 @@ export class TuiApp {
       this.setConnectInput('', true)
       this.connectError = undefined
       this.overlay.rerender()
-      void probeProvider({ baseUrl: result.baseUrl, apiKey: result.apiKey, protocol: result.protocol, probeModel: result.probeModel, providerName: result.providerName })
+      void Promise.resolve().then(() => probeProvider({ ...configuredEndpointNetwork(flow?.endpointAccess(result.baseUrl) ?? {}, result.baseUrl, result.providerName), baseUrl: result.baseUrl, apiKey: result.apiKey, protocol: result.protocol, probeModel: result.probeModel, providerName: result.providerName }))
         .then(report => {
           if (this.connectFlow === flow && flow) this.advanceConnect(flow.applyProbe(report))
         })
@@ -2971,6 +2973,8 @@ export class TuiApp {
     // commit — exec (commitStatic / model switch) MUST run before
     // deactivateOverlay so the overlay-exit repaint is the last write; running
     // it after leaves a ghost frame (see overlay-deactivate-regression).
+    const commitUrl = this.connectFlow?.endpointBaseUrl()
+    bindConnectEndpointPolicy(result.commit, commitUrl, commitUrl ? this.connectFlow?.endpointAccess(commitUrl) ?? {} : {})
     const exec = this.overlayController.getConnectExec()
     this.connectFlow = undefined
     // exec 失败（如 registerProvider 撞名）时草稿必须保留，否则恢复场景下

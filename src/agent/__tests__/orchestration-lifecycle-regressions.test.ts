@@ -1,3 +1,5 @@
+import { DISABLED_USER_INSTRUCTIONS } from '../../prompt/user-instructions.js'
+import { PromptEngine } from '../../prompt/engine.js'
 import { test, after } from 'node:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -29,7 +31,7 @@ async function oopSteer() {
   let drains = 0
   const config: any = {
     order: { id: 'fake-oop', objective: 'Fictional task', profile: 'code_scout', allowedTools: [], budget: { maxTurns: 3 } },
-    client: {}, promptEngine: {}, toolRegistry: new ToolRegistry(), cwd: fixtureDir, maxTurns: 3, contextWindow: 64000,
+    client: {}, promptEngine: new PromptEngine({ model: 'fictional-model', maxTokens: 1024, staticCtx: { tools: [] }, volatileCtx: { cwd: fixtureDir } }), toolRegistry: new ToolRegistry(), cwd: fixtureDir, maxTurns: 3, contextWindow: 64000,
     compact: { enabled: false, model: 'fake' }, activeClaims: [],
     runtimeDecision: { providerName: 'fictional', model: 'fictional-model', maxTokens: 1024, contextWindow: 64000, thinkingBudget: 0, isWrite: false },
     onSteerDrain: () => { drains++; const text = pending; pending = null; return text },
@@ -126,7 +128,7 @@ async function routingMetadata() {
   const coordinator = new DelegationCoordinator({
     baseToolRegistry: new ToolRegistry(), maxWorkers: 1, cwd: fixtureDir, routing,
     modelCards: [{ model: 'fake-card-A', toolUseReliability: .8, jsonStability: .9, editSuccessRate: .7, testRepairRate: .6, contextWindow: 64000, cacheEconomics: 'strong', recommendedTasks: ['code_search'] }],
-    runtimeFactory: (order, card, registry) => buildWorkerRuntime({ config: { provider: { providers }, agent: { review: { profiles: {} } }, workers: routing } as any, cwd: fixtureDir, provider: mainProvider, apiKey: 'fictional-key', auth: undefined, currentModelId: 'fake-card-A', listActiveClaims: () => [], sessionMemoryBlock: () => undefined, domainKnowledgeStore: undefined, writeProfiles: [] }, order, card, registry),
+    runtimeFactory: (order, card, registry) => buildWorkerRuntime({ getUserInstructions: () => DISABLED_USER_INSTRUCTIONS, config: { provider: { providers }, agent: { review: { profiles: {} } }, workers: routing } as any, cwd: fixtureDir, provider: mainProvider, apiKey: 'fictional-key', auth: undefined, currentModelId: 'fake-card-A', listActiveClaims: () => [], sessionMemoryBlock: () => undefined, domainKnowledgeStore: undefined, writeProfiles: [] }, order, card, registry),
     runWorker: async config => { actualModel = config.runtimeDecision?.model; return { result: result(config.order.id), session: { getMessages: () => [] }, transcript, usage } as any },
   })
   const run = await coordinator.delegate({ parentTurnId: 'fake-routing', objective: 'Inspect fictional routed worker model identity and report its findings', kind: 'code_search', profile: 'code_scout', scope: {} })

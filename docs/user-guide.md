@@ -852,6 +852,45 @@ tianshu logs open desktop            # 打开 sidecar 日志目录（GUI 起不�
 
 `RIVET_SESSION_DIR` / `RIVET_DESKTOP_DIR` 可分别搬走会话树与桌面树；生效中的覆盖会出现在 `tianshu logs` 输出顶部。
 
+## 用户级常驻指令
+
+用户全局配置可显式指定一份跨项目生效的简短规则，适合语言偏好、机器环境事实和长期行为约束。默认关闭；项目配置、profile 和 session overlay 都不能启用、替换或关闭它。
+
+在当前数据根下创建 `instructions/user.md`，再编辑用户全局配置：
+
+```json
+{
+  "agent": {
+    "userInstructions": {
+      "enabled": true,
+      "path": "/Users/you/.rivet/instructions/user.md"
+    }
+  }
+}
+```
+
+示例绝对路径需替换为本机实际路径。数据根沿用 `RIVET_HOME`，用户配置路径沿用 `RIVET_CONFIG_PATH`；Windows 默认数据根为 `%LOCALAPPDATA%\.rivet`。文件只能位于实际数据根的 `instructions/` 内，不自动发现，不允许该目录重定向到其他目录或文件链接逃逸。
+
+文件必须是非空、不含 NUL 的普通 UTF-8 文本，最大 16 KiB。BOM 和换行会归一化。完整渲染块（含 XML 转义、固定说明及新增分隔符）最多 1,024 字符；这不是精确 token 上限。超限会拒绝本次运行，绝不截断、摘要或挤占项目指令预算。长篇参考资料请继续使用 skill 或知识库。
+
+规则在新建或恢复会话时加载一次，活会话中的 `/cd`、切模型、worker 派发沿用同一版本。主控、进程内 worker、子进程及嵌套 worker 共享快照，子进程不重新读取文件。修改或删除磁盘文件不会热更新正在运行的会话。
+
+恢复时若版本变化，自动续跑和 worker 派发会暂停；发送一条新输入后，新版本随该请求发布生效。系统提醒不会解除等待。设为 `enabled: false` 或移除配置，会在恢复后的新输入边界发布停用标记，撤销此前同名用户规则。
+
+停用不会删除历史请求中的旧正文。需要使正文彻底离开发送历史时，请新建会话。规则正文会发送给所用模型并保存在既有冻结快照中，请勿放入密码或其他凭据。
+
+此功能不增加模型调用、不改变 system prompt，也不授予权限或关闭审批／沙箱／deny。需要强制保护的操作和路径仍应配置运行时权限。`/prefix-budget` 独立列出已发布规则和待应用规则；工具轮复用同一边界字节，多条用户消息仍会重复携带规则，缓存命中不等于零上下文成本。
+
+| 错误类别 | 处理方式 |
+|---|---|
+| `user_instructions_config_invalid` | 在用户全局配置指定有效绝对路径 |
+| `user_instructions_source_invalid` | 检查文件位置、普通文件类型、UTF-8 编码、大小和正文 |
+| `user_instructions_over_budget` | 缩短正文，使完整渲染结果不超过 1,024 字符 |
+| `user_instructions_boundary_required` | 发送新输入应用规则，或新建会话 |
+| `user_instructions_payload_invalid` | worker 或已存规则快照缺失、损坏，执行已停止；核验版本、安装和会话快照，必要时新建会话 |
+
+这些错误属于本地配置或状态问题，不进行 provider 重试或自动重连。启用后来源校验失败，只阻止受影响的运行，不自动忽略规则继续执行。
+
 ## FAQ
 
 **缓存命中率怎么看？** 状态栏实时显示。`/debug cache` 看详细统计和 miss 原因分析。

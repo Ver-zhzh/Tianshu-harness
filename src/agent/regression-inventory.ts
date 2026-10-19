@@ -115,3 +115,15 @@ export function formatInventoryReport(results: readonly InventoryCheckResult[]):
   }
   return lines
 }
+
+export async function verifyRegressionInventoryAsync(cwd: string, items: readonly string[], searcher?: InventorySearcher): Promise<InventoryCheckResult[]> {
+  if (searcher) return verifyRegressionInventory(cwd, items, searcher)
+  const { gitCommand } = await import('../tools/git-command.js')
+  const results: InventoryCheckResult[] = []
+  for (const item of items) {
+    const needle = needleForItem(item)
+    const result = needle ? await gitCommand(cwd, ['grep', '-l', '-F', '--', needle]) : undefined
+    results.push({ item, needle, status: result?.status === 0 ? 'present' : result?.status === 1 ? 'missing' : 'unknown' })
+  }
+  return results
+}

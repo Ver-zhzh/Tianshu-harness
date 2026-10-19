@@ -406,6 +406,10 @@ node dist/cli/entry.js
 
 <img src="docs/brand/assets/wechat-group-qr.png" width="280" alt="天枢 harness 交流群5群微信群二维码">
 
+- **QQ 交流群** → 「TUI」，群号 `1017892942`，扫码加入：
+
+<img src="docs/brand/assets/qq-group-qr.png" width="280" alt="TUI QQ 群二维码（群号 1017892942）">
+
 ## 🌐 官网开发
 
 天枢生态官网 [jiangsx496/Tianshu-Official-Website](https://jiangsx496.github.io/Tianshu-Official-Website/) 由 [@jiangsx496](https://github.com/jiangsx496) 原创开发，覆盖数据库、前端与初版后端。

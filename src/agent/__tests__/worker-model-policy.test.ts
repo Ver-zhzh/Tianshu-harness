@@ -1,3 +1,4 @@
+import { DISABLED_USER_INSTRUCTIONS, createUserInstructionsSnapshot } from '../../prompt/user-instructions.js'
 import { DelegationCoordinator } from '../coordinator.js'
 import { test, after, before } from 'node:test'
 import assert from 'node:assert/strict'
@@ -21,7 +22,7 @@ import { mock } from 'node:test'
 const dir = mkdtempSync(join(tmpdir(), 'worker-model-policy-'))
 const previousSessionDir = process.env.RIVET_SESSION_DIR
 const previousConfigPath = process.env.RIVET_CONFIG_PATH
-const calls: { model: string; authorization: string | undefined; path: string | undefined }[] = []
+const calls: { model: string; authorization: string | undefined; path: string | undefined; hasNestedRules: boolean }[] = []
 let baseUrl = ''
 let currentOrder: WorkOrder
 let nestedMode = false
@@ -30,7 +31,7 @@ const server = createServer(async (req, res) => {
   let body = ''
   for await (const chunk of req) body += chunk
   const input = JSON.parse(body)
-  calls.push({ model: input.model, authorization: req.headers.authorization, path: req.url })
+  calls.push({ model: input.model, authorization: req.headers.authorization, path: req.url, hasNestedRules: JSON.stringify(input.messages).includes('PINNED_NESTED_RULE') })
   const prompt = input.messages.map((message: { content?: unknown }) => typeof message.content === 'string' ? message.content : '').join('\n')
   const workOrderId = prompt.match(/\u5de5\u5355 ID[^:\uff1a\n]*[:\uff1a]([^\s\n]+)/)?.[1] ?? currentOrder?.id ?? 'test'
   if (nestedMode && input.model === 'other-flash' && !delegated) {
@@ -66,7 +67,7 @@ function deps(configure?: (cfg: Config) => void): WorkerRuntimeDeps {
   const main = provider()
   const cfg = configSchema.parse({ provider: { default: main.name, providers: { [main.name]: main, missing: provider('missing', { apiKey: undefined, apiKeyEnv: 'TIANSHU_FIXTURE_ABSENT' }) } }, workers: { routing: {}, profiles: {} } })
   configure?.(cfg)
-  return { config: cfg, cwd: dir, provider: main, apiKey: 'fixture-main', auth: undefined, currentModelId: 'exact-main', listActiveClaims: () => [], sessionMemoryBlock: () => undefined, domainKnowledgeStore: undefined, writeProfiles: ['patcher'] }
+  return { getUserInstructions: () => DISABLED_USER_INSTRUCTIONS, config: cfg, cwd: dir, provider: main, apiKey: 'fixture-main', auth: undefined, currentModelId: 'exact-main', listActiveClaims: () => [], sessionMemoryBlock: () => undefined, domainKnowledgeStore: undefined, writeProfiles: ['patcher'] }
 }
 function order(profile = 'code_scout', target?: ModelTarget): WorkOrder {
   return createReadOnlyWorkOrder({ parentTurnId: `turn-${Math.random()}`, kind: 'doc_research', objective: 'Verify model selection', profile, scope: {}, modelOverride: target })
@@ -216,6 +217,8 @@ test('coordinator dispatch reports actual model and bypasses tier recommendation
 })
 test('real nested delegation from isolated fixed worker still follows root user session', async () => {
   const d = deps(); d.config.provider.default = 'missing'
+  const instructions = createUserInstructionsSnapshot('PINNED_NESTED_RULE: preserve archives.')
+  d.getUserInstructions = () => instructions
   writeFileSync(process.env.RIVET_CONFIG_PATH!, JSON.stringify(d.config))
   const parentRegistry = new ToolRegistry()
   parentRegistry.register({ definition: { name: 'delegate_task', description: 'Nested binding fixture', input_schema: { type: 'object', properties: {} } }, requiresApproval: () => false, isConcurrencySafe: () => true, isEnabled: () => true, execute: async () => ({ content: '' }) })
@@ -231,6 +234,7 @@ test('real nested delegation from isolated fixed worker still follows root user 
     assert.equal(requests[0]?.model, 'other-flash')
     assert.ok(requests.some(request => request.model === 'exact-main'), 'real nested client must call root model')
     assert.ok(requests.filter(request => request.model === 'exact-main').every(request => request.authorization === 'Bearer fixture-main'))
+    assert.ok(requests.every(request => request.hasNestedRules), 'parent and real nested HTTP requests must share the user rules')
   } finally { nestedMode = false }
 })
 

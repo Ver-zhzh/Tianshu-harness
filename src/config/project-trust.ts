@@ -277,6 +277,7 @@ const UNTRUSTED_TOP_LEVEL_KEYS = new Set([
 /** 未授信时剥离的嵌套键（点路径相对项目层配置根）。 */
 const UNTRUSTED_NESTED_KEYS: ReadonlyArray<readonly [string, string]> = [
   ['agent', 'approval'],
+  ['agent', 'userInstructions'],
   ['agent', 'unsandboxed'],
   // schema 的真实位置：allow/deny 规则、bash 预授权白名单、additionalRead/WriteDirs
   // 常驻目录授权（bootstrap/serve-agent 启动即生效、零审批）都在 agent.permissions 下。
@@ -313,8 +314,10 @@ export function stripUntrustedProjectKeys(raw: Record<string, unknown>): Record<
  * 工作目录文件对它零路径；天枢等价 = 这三个键不进 project config 层。
  *
  * 合法来源保留：内置默认 / 用户全局 config / profile / CLI flag / 运行时切换。
+ * agent.userInstructions 另有用户层捕获与恢复，仅用户全局配置决定其来源。
  */
 const PROJECT_FORBIDDEN_SAFETY_NESTED_KEYS: ReadonlyArray<readonly [string, string]> = [
+  ['agent', 'userInstructions'],
   ['agent', 'approval'],
   ['agent', 'unsandboxed'],
   ['agent', 'permissions'],

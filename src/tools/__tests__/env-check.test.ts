@@ -51,19 +51,23 @@ describe('env-check', () => {
   })
 
   describe('buildNotFoundHint', () => {
-    it('returns python install hint on macOS', () => {
+    it('checks existing Python entry points before any installation on macOS', () => {
       const hint = buildNotFoundHint('python3', 'darwin')
-      assert.ok(hint.includes('brew install python'))
+      assert.match(hint, /python3.*python/)
+      assert.match(hint, /版本/)
+      assert.doesNotMatch(hint, /brew install|环境缺失/)
     })
 
-    it('returns git install hint on linux', () => {
+    it('checks Git discovery and PATH instead of prescribing an install', () => {
       const hint = buildNotFoundHint('git', 'linux')
-      assert.ok(hint.includes('apt install git'))
+      assert.match(hint, /PATH/)
+      assert.doesNotMatch(hint, /apt install/)
     })
 
-    it('returns uv install hint on windows', () => {
+    it('checks existing uv entry points instead of downloading it', () => {
       const hint = buildNotFoundHint('uv', 'win32')
-      assert.ok(hint.includes('astral.sh'))
+      assert.match(hint, /项目|入口/)
+      assert.doesNotMatch(hint, /astral\.sh|Invoke-RestMethod/)
     })
 
     it('returns empty for unrelated command', () => {

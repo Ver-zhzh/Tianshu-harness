@@ -3,7 +3,8 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { persistConnectCommit, resolveConnectRuntimeSelection } from '../connect-apply.js'
+import { bindConnectEndpointPolicy, persistConnectCommit, resolveConnectRuntimeSelection } from '../connect-apply.js'
+import { PROVIDER_PRESETS } from '../../config/provider-presets.js'
 import { registerProvider, loadConfig } from '../../config/manager.js'
 import { addProviderKey } from '../../config/provider-key-store.js'
 import { contractModels } from '../../config/contract-models.js'
@@ -72,4 +73,20 @@ describe('connect commits across custom gateways and active providers', () => {
     const commit: ConnectCommit = { mode: 'preset', setup: { providerName: 'relay-a', makeDefault: false } }
     assert.deepEqual(resolveConnectRuntimeSelection(commit, loadConfig(), { provider: 'relay-a', model: 'active' }), { provider: 'relay-a', model: 'active' })
   })
+})
+
+it('connect consent reaches preset persistence even when its default URL was not overridden', () => {
+  const commit = { mode: 'preset' as const, setup: { providerName: 'ollama', preset: 'ollama' as const } }
+  const dir = mkdtempSync(join(tmpdir(), 'connect-policy-')), previous = process.env.RIVET_CONFIG_PATH
+  process.env.RIVET_CONFIG_PATH = join(dir, 'config.json')
+  try {
+    bindConnectEndpointPolicy(commit, PROVIDER_PRESETS.ollama.provider.baseUrl, { allowPrivateNetwork: true })
+    persistConnectCommit(commit)
+    assert.equal(loadConfig().provider.providers.ollama!.endpointNetworkPolicy?.allowPrivateNetwork, true)
+  } finally {
+    if (previous === undefined) delete process.env.RIVET_CONFIG_PATH; else process.env.RIVET_CONFIG_PATH = previous
+    rmSync(dir, { recursive: true, force: true })
+  }
+  const app = readFileSync(new URL('../engine/app.ts', import.meta.url), 'utf8')
+  assert.match(app, /bindConnectEndpointPolicy\(result.commit, commitUrl, commitUrl \? this.connectFlow\?\.endpointAccess\(commitUrl\)/)
 })

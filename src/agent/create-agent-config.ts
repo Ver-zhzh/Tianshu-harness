@@ -8,6 +8,7 @@ import { PromptEngine } from '../prompt/engine.js'
 import type { FrozenSnapshotData } from '../prompt/frozen-snapshot.js'
 import { detectModelFamily } from '../prompt/static.js'
 import { createVolatileSnapshotFresh } from '../prompt/volatile-snapshot.js'
+import { parseUserInstructionsSnapshot } from '../prompt/user-instructions.js'
 import { resolvePromptBlocks, invalidatePromptBlocks } from '../prompt/block-policy.js'
 import { FallbackStreamClient } from '../api/fallback-client.js'
 import type { AgentConfig } from './loop-types.js'
@@ -41,6 +42,7 @@ export interface ModelSpec {
 }
 
 export interface AgentConfigInput {
+  userInstructions: import('../prompt/user-instructions.js').UserInstructionsSnapshot
   network?: Config['network']
   apiKey: string
   model: ModelSpec
@@ -117,6 +119,7 @@ export interface AgentConfigInput {
 }
 
 export interface MainAgentConfigInputParams {
+  userInstructions: import('../prompt/user-instructions.js').UserInstructionsSnapshot
   apiKey: string
   model: ModelSpec
   cwd: string
@@ -145,6 +148,7 @@ export interface MainAgentConfigInputParams {
 
 export function createMainAgentConfigInput(params: MainAgentConfigInputParams): AgentConfigInput {
   return {
+    userInstructions: params.userInstructions,
     apiKey: params.apiKey,
     model: params.model,
     cwd: params.cwd,
@@ -278,6 +282,7 @@ export function createAgentConfig(input: AgentConfigInput): Pick<
     staticCtx: { tools: gatedTools, modelFamily: detectModelFamily(model.id) },
     approvalMode: input.approvalMode,
     volatileCtx: createVolatileSnapshotFresh({
+      userInstructions: parseUserInstructionsSnapshot(input.userInstructions),
       cwd,
       sessionMemoryBlock: input.sessionMemoryBlock,
       // 会话启动期解析一次并冻结——中途改配置不生效（改前缀 = 全量重建）。

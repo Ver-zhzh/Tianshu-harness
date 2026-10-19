@@ -1,4 +1,5 @@
-import { prepareCompletionCapture } from './test-completion.js'
+import { prepareCompletionCaptureAsync } from './test-completion-async.js'
+import { completionPreparationBlocked } from './completion-preparation-result.js'
 import { inferBashVerificationScope } from '../agent/bash-verification.js'
 import { prepareBackgroundVerification } from './background-verification.js'
 import { execFileSync } from 'child_process'
@@ -483,7 +484,8 @@ async function executeBashOnce(params: ToolCallParams): Promise<BashExecResult> 
     }
   }
   if (wantBackground && params.jobs) {
-    const verificationRun = prepareBackgroundVerification(rewrittenWithMirrors, params)
+    const verificationRun = await prepareBackgroundVerification(rewrittenWithMirrors, params)
+    if (verificationRun.preparationError) { verificationRun.dispose(); return completionPreparationBlocked(rawCommand, verificationRun.preparationError) }
     const mirrorEnv = buildMirrorEnv(mirrorConfig)
     const earlyFailEnv = gitCloneEarlyFailEnv(rawCommand, mirrorConfig)
     const env = { ...sanitizeEnv(getResolvedEnv(params.cwd)), ...mirrorEnv, ...earlyFailEnv, ...verificationRun.env }
@@ -505,8 +507,9 @@ async function executeBashOnce(params: ToolCallParams): Promise<BashExecResult> 
     const sandboxNote = sandbox.sandboxed && sandbox.note ? `\n${sandbox.note}` : ''
     const content =
       `[job:${snap.id}] ${auto ? '已自动转入后台' : '已在后台启动'}: ${rawCommand}\n` +
-      `不阻塞当前轮次。用 job(action="await", id="${snap.id}", pattern="Ready|listening|compiled") 等待就绪/退出，` +
-      `job(action="logs", id="${snap.id}") 看输出，job(action="kill", id="${snap.id}") 终止。${sandboxNote}${verificationRun.note}`
+      `不阻塞当前轮次。用 job(action="await", id="${snap.id}") 等待退出，` +
+      `job(action="logs", id="${snap.id}") 看输出，job(action="kill", id="${snap.id}") 请求终止。` +
+      `仅服务就绪探测才按实际日志设置 pattern；启动或输出命中不代表执行完成或测试通过，测试须核对退出状态与结果。${sandboxNote}${verificationRun.note}`
     const shortCmd = rawCommand.length > 80 ? rawCommand.slice(0, 80) + '…' : rawCommand
     return Promise.resolve({
       content,
@@ -517,7 +520,9 @@ async function executeBashOnce(params: ToolCallParams): Promise<BashExecResult> 
     })
   }
 
-  const completion = prepareCompletionCapture(rewrittenWithMirrors, params.cwd ?? process.cwd(), getShellCommand().kind)
+  const completion = await prepareCompletionCaptureAsync(rewrittenWithMirrors, params.cwd ?? process.cwd(), getShellCommand().kind, undefined, startTime + timeout, params.abortSignal)
+  const executionTimeout = Math.max(0, startTime + timeout - Date.now())
+  if (completion?.preparationError || !executionTimeout) { completion?.dispose(); return completionPreparationBlocked(rawCommand, completion?.preparationError ?? 'budget exhausted', !executionTimeout) }
   if (completion) { sandbox = wrapSandboxCommand(completion.command, params.cwd); command = sandbox.command }
   return new Promise((resolve) => {
     const shell = getShellCommand()
@@ -693,7 +698,7 @@ async function executeBashOnce(params: ToolCallParams): Promise<BashExecResult> 
       // a different one did.
       const headerCommand = rewritten !== rawCommand ? rewritten : rawCommand
       const meta = { command: headerCommand, exitCode, durationMs }
-      const coverage = completion?.read(exitCode)
+      const coverage = await completion?.read(exitCode)
       completion?.dispose()
       const verification = coverage ? { command: rawCommand, kind: 'test' as const, status: exitCode === 0 ? 'passed' as const : 'failed' as const, scope: inferBashVerificationScope(rawCommand, params.cwd)?.scope === 'targeted' ? 'targeted' as const : 'full' as const, exitCode, coverage } : undefined
       const { isError, errorClass } = classifyBashOutcome(exitCode, stderr, process.platform === 'win32')
@@ -724,8 +729,8 @@ async function executeBashOnce(params: ToolCallParams): Promise<BashExecResult> 
       let filtered = process.platform === 'win32'
         ? denoiseWindowsError(commandFiltered, { exitCode, errorClass, command: rawCommand })
         : commandFiltered
-      // POSIX / macOS / Linux: append install guidance for missing python/git/uv.
-      if (errorClass === 'environment' && process.platform !== 'win32') {
+      // Missing names require discovery first; exit 126 is not a missing command.
+      if (errorClass === 'environment' && exitCode !== 126 && process.platform !== 'win32') {
         filtered += buildNotFoundHint(extractMissingCommand(filtered, rawCommand), process.platform)
       }
       const rereadWarn = checkBashReread(rawCommand, params.toolUseId)
@@ -738,9 +743,7 @@ async function executeBashOnce(params: ToolCallParams): Promise<BashExecResult> 
       // no stdout, so this hit constantly). Pass empty through so buildModelOutput
       // emits the explicit "confirmed empty" marker instead. Failures/timeouts
       // keep a synthetic body so the reason is never blank.
-      // environment 类失败（127/126/9009 = 命令缺失/不可执行）：给模型标准化简洁体，
-      // 不把整墙红字灌进上下文（会污染前缀缓存、误导模型自判"代码出错"）。完整原文仍走
-      // uiContent（buildUiOutput(filtered)），用户在 TUI 能看到全部。
+      // Keep the actual error evidence; environment is a classification, not a root cause.
       let modelBody: string
       if (errorClass === 'environment') {
         const missing = extractMissingCommand(filtered, rawCommand)
@@ -748,10 +751,12 @@ async function executeBashOnce(params: ToolCallParams): Promise<BashExecResult> 
         const reason = notFound
           ? `command not found${missing ? `: ${missing}` : ''}`
           : exitCode === 126
-            ? 'command found but not executable (permission denied)'
+            ? 'command could not be executed (exit 126)'
             : `environment error (exit ${exitCode})`
-        const hint = buildNotFoundHint(missing, process.platform)
-        modelBody = `环境/配置问题：${reason}。属环境/依赖缺失，非代码缺陷——请修复环境后重试，勿反复重跑相同命令。${hint}`
+        const nextStep = exitCode === 126
+          ? '先核对执行权限、解释器与文件格式，不将其当作未安装，也不直接提权重试。'
+          : '先核对工作目录、项目脚本与 PATH，优先检查已有且版本兼容的入口；不要原样反复重跑，确需安装时遵守原有授权。'
+        modelBody = `执行入口问题：${reason}。这是分类线索，尚未确认根因，不能据此排除代码或配置问题。${nextStep}\n${filtered}`
       } else {
         modelBody = filtered || (isTimeout ? (isTypecheckCommand(rawCommand) ? TYPECHECK_TIMEOUT_HINT : '命令超时。') : code === 0 ? '' : `退出码：${code}`)
       }
@@ -977,7 +982,7 @@ async function executeBashOnce(params: ToolCallParams): Promise<BashExecResult> 
       killProcessTree(child, 'SIGTERM')
       void finish(0, true)
       forceKillTimer = setTimeout(() => killProcessTree(child, 'SIGKILL'), 3000)
-    }, timeout)
+    }, executionTimeout)
 
     child.on('close', (code) => {
       void finish(code ?? 1, timedOut)
@@ -1060,7 +1065,7 @@ async function executeBashMaybeSerialized(params: ToolCallParams): Promise<BashE
 export const BASH_TOOL: Tool = {
   definition: {
     name: 'bash',
-    description: `执行 shell 命令，用于构建、测试、git 和系统操作。
+    description: `执行 shell 命令，用于构建、测试、git 和系统操作。退出码属于外层进程，复合命令的最终退出码不证明每个子命令成功；测试或任务是否通过须核对对应结果。
 
 用 && 串联独立命令。长时间运行的命令（dev server、watcher、install）与要排跨进程闸门的长验证（typecheck）都传 run_in_background=true 转入后台，用 job 工具查看/等待/终止。自动检测已知长跑命令也会后台化。`,
     input_schema: {

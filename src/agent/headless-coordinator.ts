@@ -12,6 +12,7 @@ import type { AuthProvider } from '../auth/types.js'
 import { profileRegistry } from './profile-registry.js'
 
 export interface HeadlessCoordinatorInput {
+  getUserInstructions: () => import('../prompt/user-instructions.js').UserInstructionsSnapshot
   toolRegistry: ToolRegistry
   provider: ProviderConfig
   providerName: string
@@ -36,6 +37,7 @@ export function createHeadlessCoordinator(input: HeadlessCoordinatorInput): Dele
     ? { provider: input.providerName, model: input.currentModelId, keyId: input.keyId, baseUrl: input.provider.baseUrl }
     : snapshotSessionBinding(input.provider, input.currentModelId, input.apiKey)
   const runtime = createWorkerRuntimeFactory(() => ({
+    getUserInstructions: input.getUserInstructions,
     config: input.config ?? loadConfig({ cwd: input.cwd }), cwd: input.cwd,
     provider: input.provider, apiKey: input.apiKey, auth: input.auth,
     currentModelId: input.currentModelId, rootSessionBinding: { ...rootSessionBinding, credentialPrincipal: input.getRootCredentialPrincipal?.() }, rootSessionId: input.sessionId,

@@ -1457,7 +1457,7 @@ describe('POST /config/providers/test (completion probe)', () => {
     })
     const router = createRouter(buildConfigRoutes(TOKEN))
     const res = await router('POST', '/config/providers/test', {
-      provider: 'custom', baseUrl: server.baseUrl, apiKey: 'sk-test', protocol: 'openai', model: 'my-model',
+      provider: 'custom', baseUrl: server.baseUrl, allowPrivateNetwork: true, apiKey: 'sk-test', protocol: 'openai', model: 'my-model',
     }, AUTH)
     assert.equal(res.status, 200)
     const body = res.body as { ok: boolean; completionOk: boolean; probedModel?: string; latencyMs?: number; models?: string[] }
@@ -1482,7 +1482,7 @@ describe('POST /config/providers/test (completion probe)', () => {
     })
     const router = createRouter(buildConfigRoutes(TOKEN))
     const res = await router('POST', '/config/providers/test', {
-      provider: 'custom', baseUrl: server.baseUrl, apiKey: 'sk-bad', protocol: 'openai', model: 'm',
+      provider: 'custom', baseUrl: server.baseUrl, allowPrivateNetwork: true, apiKey: 'sk-bad', protocol: 'openai', model: 'm',
     }, AUTH)
     assert.equal(res.status, 200)
     const body = res.body as { ok: boolean; completionOk: boolean; error?: string }
@@ -1503,7 +1503,7 @@ describe('POST /config/providers/test (completion probe)', () => {
     })
     const router = createRouter(buildConfigRoutes(TOKEN))
     const res = await router('POST', '/config/providers/test', {
-      provider: 'custom', baseUrl: server.baseUrl, apiKey: 'sk-live', protocol: 'openai',
+      provider: 'custom', baseUrl: server.baseUrl, allowPrivateNetwork: true, apiKey: 'sk-live', protocol: 'openai',
       // model 未传——「只测 URL 连接」场景
     }, AUTH)
     assert.equal(res.status, 200)
@@ -1528,7 +1528,7 @@ describe('POST /config/providers/test (completion probe)', () => {
     })
     const router = createRouter(buildConfigRoutes(TOKEN))
     const res = await router('POST', '/config/providers/test', {
-      provider: 'custom', baseUrl: server.baseUrl, apiKey: 'sk-live', protocol: 'openai',
+      provider: 'custom', baseUrl: server.baseUrl, allowPrivateNetwork: true, apiKey: 'sk-live', protocol: 'openai',
     }, AUTH)
     assert.equal(res.status, 200)
     const body = res.body as { ok: boolean; completionSkipped?: boolean; modelsOk: boolean; error?: string }
@@ -1563,7 +1563,7 @@ describe('POST /config/providers/test (completion probe)', () => {
     const router = createRouter(buildConfigRoutes(TOKEN))
     // 模型名带视觉词 + vision:false → 必须纯文本（string content，非图片 parts 数组）
     const res = await router('POST', '/config/providers/test', {
-      provider: 'custom', baseUrl: server.baseUrl, apiKey: 'sk-x', protocol: 'openai', model: 'glm-4v-flash', vision: false,
+      provider: 'custom', baseUrl: server.baseUrl, allowPrivateNetwork: true, apiKey: 'sk-x', protocol: 'openai', model: 'glm-4v-flash', vision: false,
     }, AUTH)
     assert.equal(res.status, 200)
     const body = res.body as { ok: boolean }
@@ -1593,7 +1593,7 @@ describe('POST /config/providers/test (completion probe)', () => {
     const previous = existsSync(configPath) ? readFileSync(configPath, 'utf8') : undefined
     try {
       writeFileSync(configPath, JSON.stringify({ provider: { default: 'custom', providers: {
-        custom: { baseUrl: server.baseUrl, protocol: 'openai', models: [
+        custom: { baseUrl: server.baseUrl, endpointNetworkPolicy: { origin: new URL(server.baseUrl).origin, allowPrivateNetwork: true }, protocol: 'openai', models: [
           { id: 'mimo-v2.6-flash', supportsVision: false },
           { id: 'custom-image-model', supportsVision: true },
         ] },
@@ -1662,9 +1662,10 @@ describe('POST /config/providers/test (completion probe)', () => {
         }
         res.writeHead(404).end()
       })
+      const savedPath = join(home2, 'config.json'), saved = JSON.parse(readFileSync(savedPath, 'utf8')); saved.provider.providers['multi-key-ov'].baseUrl = server.baseUrl; writeFileSync(savedPath, JSON.stringify(saved))
       const router = createRouter(buildConfigRoutes(TOKEN))
       const res = await router('POST', '/config/providers/test', {
-        provider: 'multi-key-ov', baseUrl: server.baseUrl, protocol: 'openai', model: 'pool-model',
+        provider: 'multi-key-ov', baseUrl: server.baseUrl, allowPrivateNetwork: true, protocol: 'openai', model: 'pool-model',
       }, AUTH)
       const body = res.body as { ok?: boolean; error?: string }
       assert.equal(res.status, 200, `expected 200, got ${res.status}: ${body.error ?? ''}`)
@@ -1715,12 +1716,12 @@ describe('POST /config/providers/test-key — 探测走统一 probeProvider', ()
   it('keyless：无 apiKey 且无存储 key 时仍探测——本地端点返回 200+ok（Ollama/vLLM 无鉴权）', async () => {
     writeConfig(home, { enabled: false, features: {} })
     mockModelsResponse({ data: [{ id: 'local-model' }] })
-    const router = createRouter(buildConfigRoutes(TOKEN))
+    const router = createRouter(buildConfigRoutes(TOKEN, { endpointTransport: { fetchImpl: global.fetch, lookupImpl: async () => ({ address: '93.184.216.34', family: 4 }) } }))
 
     // 无 apiKey、provider 未配置（无存储 key）——keyless 探测应直接走（携带 baseUrl）。
     const res = await router('POST', '/config/providers/test-key', {
       provider: 'whatever',
-      baseUrl: 'http://127.0.0.1:11434/v1',
+      allowPrivateNetwork: true, baseUrl: 'http://127.0.0.1:11434/v1',
     }, AUTH)
     assert.equal(res.status, 200, 'keyless 探测不应因缺 key 被 400')
     assert.equal((res.body as { ok: boolean }).ok, true)
@@ -1738,7 +1739,7 @@ describe('POST /config/providers/test-key — 探测走统一 probeProvider', ()
         headers: { 'content-type': 'application/json' },
       })
     }) as typeof fetch
-    const router = createRouter(buildConfigRoutes(TOKEN))
+    const router = createRouter(buildConfigRoutes(TOKEN, { endpointTransport: { fetchImpl: global.fetch, lookupImpl: async () => ({ address: '93.184.216.34', family: 4 }) } }))
 
     const res = await router('POST', '/config/providers/test-key', {
       provider: 'deepseek',
@@ -1756,7 +1757,7 @@ describe('POST /config/providers/test-key — 探测走统一 probeProvider', ()
   it('识别 401 为 auth-failed', async () => {
     writeConfig(home, { enabled: false, features: {} })
     mockModelsResponse({ error: 'invalid api key' }, 401)
-    const router = createRouter(buildConfigRoutes(TOKEN))
+    const router = createRouter(buildConfigRoutes(TOKEN, { endpointTransport: { fetchImpl: global.fetch, lookupImpl: async () => ({ address: '93.184.216.34', family: 4 }) } }))
 
     const res = await router('POST', '/config/providers/test-key', {
       provider: 'whatever',
@@ -1781,7 +1782,7 @@ describe('POST /config/providers/test-key — 探测走统一 probeProvider', ()
         headers: { 'content-type': 'application/json' },
       })
     }) as typeof fetch
-    const router = createRouter(buildConfigRoutes(TOKEN))
+    const router = createRouter(buildConfigRoutes(TOKEN, { endpointTransport: { fetchImpl: global.fetch, lookupImpl: async () => ({ address: '93.184.216.34', family: 4 }) } }))
 
     const res = await router('POST', '/config/providers/test-key', {
       provider: 'whatever',
@@ -1809,7 +1810,7 @@ describe('POST /config/providers/test-key — 探测走统一 probeProvider', ()
       }
       return new Response('{"error":"not found"}', { status: 404, headers: { 'content-type': 'application/json' } })
     }) as typeof fetch
-    const router = createRouter(buildConfigRoutes(TOKEN))
+    const router = createRouter(buildConfigRoutes(TOKEN, { endpointTransport: { fetchImpl: global.fetch, lookupImpl: async () => ({ address: '93.184.216.34', family: 4 }) } }))
 
     const res = await router('POST', '/config/providers/test-key', {
       provider: 'volc-plan',
@@ -1839,7 +1840,7 @@ describe('POST /config/providers/test-key — 探测走统一 probeProvider', ()
       }
       return new Response('{"error":"not found"}', { status: 404, headers: { 'content-type': 'application/json' } })
     }) as typeof fetch
-    const router = createRouter(buildConfigRoutes(TOKEN))
+    const router = createRouter(buildConfigRoutes(TOKEN, { endpointTransport: { fetchImpl: global.fetch, lookupImpl: async () => ({ address: '93.184.216.34', family: 4 }) } }))
 
     const res = await router('POST', '/config/providers/test-key', {
       provider: 'Agent Plan',
@@ -1869,7 +1870,7 @@ describe('POST /config/providers/test-key — 探测走统一 probeProvider', ()
         { status: 200, headers: { 'content-type': 'text/event-stream' } },
       )
     }) as typeof fetch
-    const router = createRouter(buildConfigRoutes(TOKEN))
+    const router = createRouter(buildConfigRoutes(TOKEN, { endpointTransport: { fetchImpl: global.fetch, lookupImpl: async () => ({ address: '93.184.216.34', family: 4 }) } }))
 
     const res = await router('POST', '/config/providers/test-key', {
       provider: 'volc-plan-anthropic',
@@ -1902,7 +1903,7 @@ describe('POST /config/providers/match-models（纯本地匹配，零网络）',
   })
 
   it('精确 / fuzzy / unknown 三态：保序、rawId 保留、fuzzy 透出 inferredIds', async () => {
-    const router = createRouter(buildConfigRoutes(TOKEN))
+    const router = createRouter(buildConfigRoutes(TOKEN, { endpointTransport: { fetchImpl: global.fetch, lookupImpl: async () => ({ address: '93.184.216.34', family: 4 }) } }))
     const res = await router('POST', '/config/providers/match-models', {
       ids: ['deepseek-v4-pro', 'deepseek-v4-flash-0731', 'zz-definitely-unknown-xyz'],
     }, AUTH)
@@ -1924,7 +1925,7 @@ describe('POST /config/providers/match-models（纯本地匹配，零网络）',
   })
 
   it('非法入参一律 400：非数组 / 空数组 / 空白串 / 非字符串元素', async () => {
-    const router = createRouter(buildConfigRoutes(TOKEN))
+    const router = createRouter(buildConfigRoutes(TOKEN, { endpointTransport: { fetchImpl: global.fetch, lookupImpl: async () => ({ address: '93.184.216.34', family: 4 }) } }))
     const bad: unknown[] = [undefined, 'deepseek-v4-pro', [], ['   '], [1], ['ok', null], [{ id: 'x' }]]
     for (const ids of bad) {
       const res = await router('POST', '/config/providers/match-models', { ids }, AUTH)
@@ -1956,7 +1957,7 @@ describe('workspace routes (issue #147)', () => {
 
   it('GET 未配置时两个字段都是 null，scratchRoot 指向 <rivetHome>/workspace', async () => {
     writeFileSync(process.env.RIVET_CONFIG_PATH!, JSON.stringify({ provider: { default: 'deepseek', providers: {} } }, null, 2))
-    const router = createRouter(buildConfigRoutes(TOKEN))
+    const router = createRouter(buildConfigRoutes(TOKEN, { endpointTransport: { fetchImpl: global.fetch, lookupImpl: async () => ({ address: '93.184.216.34', family: 4 }) } }))
     const res = await router('GET', '/config/workspace', {}, AUTH)
     assert.equal(res.status, 200)
     const body = res.body as { defaultDir: string | null; scratchDir: string | null; scratchRoot: string }
@@ -1966,7 +1967,7 @@ describe('workspace routes (issue #147)', () => {
   })
 
   it('PUT 写入后 GET 回读一致，且落盘到 user config.json', async () => {
-    const router = createRouter(buildConfigRoutes(TOKEN))
+    const router = createRouter(buildConfigRoutes(TOKEN, { endpointTransport: { fetchImpl: global.fetch, lookupImpl: async () => ({ address: '93.184.216.34', family: 4 }) } }))
     const put = await router('PUT', '/config/workspace', { defaultDir: '/work/default', scratchDir: join(home, 'scratch') }, AUTH)
     assert.equal(put.status, 200)
     const putBody = put.body as { defaultDir: string | null; scratchDir: string | null; scratchRoot: string }
@@ -1982,7 +1983,7 @@ describe('workspace routes (issue #147)', () => {
   })
 
   it('PUT 只传单字段 = 部分更新，未传字段保留（审查跟进 2026-09-15）', async () => {
-    const router = createRouter(buildConfigRoutes(TOKEN))
+    const router = createRouter(buildConfigRoutes(TOKEN, { endpointTransport: { fetchImpl: global.fetch, lookupImpl: async () => ({ address: '93.184.216.34', family: 4 }) } }))
     await router('PUT', '/config/workspace', { defaultDir: '/work/default', scratchDir: join(home, 'scratch') }, AUTH)
     // 桌面设置页每个控件独立提交——只改默认工作区不得顺带清掉隔离根
     // （scratchDir 无 UI 编辑入口，被清掉无法自助恢复）。
@@ -1994,7 +1995,7 @@ describe('workspace routes (issue #147)', () => {
   })
 
   it('scratchDir 落在数据根之外 → 400，不落盘（issue #223）', async () => {
-    const router = createRouter(buildConfigRoutes(TOKEN))
+    const router = createRouter(buildConfigRoutes(TOKEN, { endpointTransport: { fetchImpl: global.fetch, lookupImpl: async () => ({ address: '93.184.216.34', family: 4 }) } }))
     const outside = process.platform === 'win32' ? 'C:\\Windows\\Temp\\evil-scratch' : '/tmp/evil-scratch'
     const put = await router('PUT', '/config/workspace', { scratchDir: outside }, AUTH)
     assert.equal(put.status, 400)
@@ -2003,7 +2004,7 @@ describe('workspace routes (issue #147)', () => {
   })
 
   it('PUT 空白字符串 / null = 清除字段（回到旧行为）', async () => {
-    const router = createRouter(buildConfigRoutes(TOKEN))
+    const router = createRouter(buildConfigRoutes(TOKEN, { endpointTransport: { fetchImpl: global.fetch, lookupImpl: async () => ({ address: '93.184.216.34', family: 4 }) } }))
     const put = await router('PUT', '/config/workspace', { defaultDir: '   ', scratchDir: null }, AUTH)
     assert.equal(put.status, 200)
     const body = put.body as { defaultDir: string | null; scratchDir: string | null; scratchRoot: string }
@@ -2013,14 +2014,14 @@ describe('workspace routes (issue #147)', () => {
   })
 
   it('PUT 非字符串 → 400（不静默保存失败值）', async () => {
-    const router = createRouter(buildConfigRoutes(TOKEN))
+    const router = createRouter(buildConfigRoutes(TOKEN, { endpointTransport: { fetchImpl: global.fetch, lookupImpl: async () => ({ address: '93.184.216.34', family: 4 }) } }))
     const res = await router('PUT', '/config/workspace', { defaultDir: 123 }, AUTH)
     assert.equal(res.status, 400)
     assert.match(String((res.body as { error: string }).error), /defaultDir/)
   })
 
   it('无 Bearer token → 401（fail-closed）', async () => {
-    const router = createRouter(buildConfigRoutes(TOKEN))
+    const router = createRouter(buildConfigRoutes(TOKEN, { endpointTransport: { fetchImpl: global.fetch, lookupImpl: async () => ({ address: '93.184.216.34', family: 4 }) } }))
     const res = await router('GET', '/config/workspace', {}, {})
     assert.equal(res.status, 401)
   })
@@ -2053,7 +2054,7 @@ describe('config/permission-dirs 探测成本', () => {
   it('GET 的 exists 走 TTL 记忆：记忆期内不重探，清空后如实反映磁盘', async () => {
     resetRootExistsMemoForTest()
     _resetGrantsForTest()
-    const router = createRouter(buildConfigRoutes(TOKEN))
+    const router = createRouter(buildConfigRoutes(TOKEN, { endpointTransport: { fetchImpl: global.fetch, lookupImpl: async () => ({ address: '93.184.216.34', family: 4 }) } }))
     const late = join(home, 'mounted-later')
     // 保存一个"当下不存在"的路径 → 探测结果（不存在的负结论）进记忆
     await router('PUT', '/config/permission-dirs', { additionalReadDirs: [late], additionalWriteDirs: [] }, AUTH)
@@ -2072,7 +2073,7 @@ describe('config/permission-dirs 探测成本', () => {
   it('PUT 只对新增路径强制实测：未变路径读记忆（force:true 回归会被这条挡住）', async () => {
     resetRootExistsMemoForTest()
     _resetGrantsForTest()
-    const router = createRouter(buildConfigRoutes(TOKEN))
+    const router = createRouter(buildConfigRoutes(TOKEN, { endpointTransport: { fetchImpl: global.fetch, lookupImpl: async () => ({ address: '93.184.216.34', family: 4 }) } }))
     const stable = join(home, 'stable-root')
     const added = join(home, 'added-root')
     mkdirSync(stable, { recursive: true })

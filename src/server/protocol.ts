@@ -499,6 +499,6 @@ export interface ImageGenerationRecord {
   bytes?: number
   width?: number
   height?: number
-  error?: { stage: string; message: string }
+  error?: { stage: string; message: string; code?: string }
   recordSaved?: boolean
 }

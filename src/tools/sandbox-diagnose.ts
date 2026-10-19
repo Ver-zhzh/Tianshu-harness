@@ -104,14 +104,14 @@ export function classifySandboxDenial(opts: {
 
 /** Model-facing hint. Names the paths and routes to the one action that works. */
 export function buildSandboxDenialHint(denial: SandboxDenial): string {
-  const head = `沙箱写边界拦截（backend=${denial.backend}）：命令试图写入工作区之外的路径。`
+  const head = `沙箱写边界线索（backend=${denial.backend}）：输出包含执行拒绝信息，需核对被拒路径与实际写入位置。`
   const body = denial.paths.length > 0
     ? '被拒路径：\n' + denial.paths.map(p => `  - ${p}`).join('\n')
     : '未能从输出中定位具体路径 —— 请从命令本身判断它要写哪个工作区外目录。'
   const action = denial.paths.length > 0
-    ? `继续的唯一正确做法：调用 request_path_access({ path: "${denial.paths[0]}", mode: "write", remember: true }) 取得用户授权，批准后原命令直接重跑即可（授权对下一条 bash 立即生效）。`
-    : '继续的唯一正确做法：用 request_path_access({ path: "<目标目录>", mode: "write", remember: true }) 申请该目录的写权限，批准后重跑原命令。'
-  const antiPattern = '这不是文件权限位问题，也不是代码缺陷 —— 不要用 sudo、chmod、chown 重试，它们在沙箱下同样会被拒。若该路径本就不该被写入，改用工作区内路径（如 ./target、./build、./dist）。'
+    ? `若任务确需写入该路径，调用 request_path_access({ path: "${denial.paths[0]}", mode: "write", remember: true }) 申请用户授权；批准后先核对已产生的副作用，再决定如何继续。`
+    : '先定位实际目标；若确需工作区外写入，用 request_path_access({ path: "<目标目录>", mode: "write", remember: true }) 申请授权，并核对已产生的副作用。'
+  const antiPattern = '该线索不能排除代码或路径配置问题。不要用 sudo、chmod、chown 绕过沙箱；若目标本就不应在工作区外，修正输出路径（如 ./target、./build、./dist）。'
   return [head, body, action, antiPattern].join('\n')
 }
 

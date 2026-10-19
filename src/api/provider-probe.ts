@@ -1,3 +1,5 @@
+import { endpointRequest, endpointHeaderLatency, inheritEndpointHeaderLatency, type EndpointRequestOptions } from '../tools/net/endpoint-request.js'
+import { EndpointNetworkError } from '../tools/net/endpoint-policy.js'
 import { observeAuditResponse } from './transport-audit.js'
 /**
  * provider-probe — probe-first onboarding (Wave 3).
@@ -58,7 +60,7 @@ export function isVisionCapableId(rawId: string, table: readonly ModelAliasEntry
   return match.entry?.metadata.supportsVision === true
 }
 
-export interface ProbeOptions {
+export interface ProbeOptions extends EndpointRequestOptions {
   baseUrl: string
   apiKey?: string
   protocol?: ProviderProtocol
@@ -132,7 +134,7 @@ export interface ProbeReport {
   errors: string[]
 }
 
-const DEFAULT_TIMEOUT_MS = 15_000
+export const DEFAULT_PROBE_TIMEOUT_MS = 15_000
 const MAX_BODY_BYTES = 64 * 1024
 
 /** 连接探测的会话标识——固定值：探测不属于任何真实对话，但上游（OpenCode Go）
@@ -172,19 +174,15 @@ async function fetchWithProbeTimeout(
   timeoutMs: number,
   options?: ProbeOptions & { operationId?: string },
 ): Promise<Response> {
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
   let model: string | undefined
   try { model = typeof init.body === 'string' ? JSON.parse(init.body).model : undefined } catch { /* no body */ }
   const audit = beginCallAudit({ requestId: options?.operationId, provider: options?.providerName ?? new URL(url).hostname, model, purpose: model ? 'provider_probe' : 'provider_models' })
   try {
-    const response = await fetch(url, { ...init, signal: controller.signal })
-    return observeAuditResponse(response, {}, audit)
+    const response = await endpointRequest(url, init, { ...options, timeoutMs, maxBytes: init.body ? MAX_BODY_BYTES : 2 * 1024 * 1024 })
+    return inheritEndpointHeaderLatency(response, observeAuditResponse(response, {}, audit))
   } catch (error) {
-    audit.finish({ status: controller.signal.aborted ? 'aborted' : 'failed', errorName: (error as Error).name })
+    audit.finish({ status: options?.signal?.aborted ? 'aborted' : 'failed', errorName: (error as Error).name })
     throw error
-  } finally {
-    clearTimeout(timer)
   }
 }
 
@@ -297,7 +295,7 @@ async function fetchDashscopeNativeModels(options: ProbeOptions): Promise<{ ids:
       const response = await fetchWithProbeTimeout(url, {
         method: 'GET',
         headers: authHeaders(options.apiKey),
-      }, options.timeoutMs ?? DEFAULT_TIMEOUT_MS, options)
+      }, options.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS, options)
       if (!response.ok) return ids.length > 0 ? { ids, infos } : null
       const parsed = parseDashscopeNative(await response.json() as unknown)
       if (!parsed) return ids.length > 0 ? { ids, infos } : null
@@ -305,7 +303,8 @@ async function fetchDashscopeNativeModels(options: ProbeOptions): Promise<{ ids:
       Object.assign(infos, parsed.infos)
       // 不满一页 = 已到尾页（按原始条目数判定，过滤不能影响翻页）。
       if (parsed.rawCount < DASHSCOPE_MODELS_PAGE_SIZE) break
-    } catch {
+    } catch (error) {
+      if (error instanceof EndpointNetworkError) throw error
       return ids.length > 0 ? { ids, infos } : null
     }
   }
@@ -348,7 +347,7 @@ async function fetchModelList(options: ProbeOptions, errors: string[]): Promise<
         : gemini
           ? geminiHeaders(options.apiKey, probeIdentityHeaders(options))
           : authHeaders(options.apiKey, probeIdentityHeaders(options)),
-    }, options.timeoutMs ?? DEFAULT_TIMEOUT_MS, options)
+    }, options.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS, options)
     if (!response.ok) {
       const bodyText = await response.text().catch(() => '')
       const message = classifyHttpError(response.status, bodyText, options.baseUrl)
@@ -393,8 +392,9 @@ async function fetchModelList(options: ProbeOptions, errors: string[]): Promise<
     }
     return { ids, ...(Object.keys(infos).length ? { infos } : {}) }
   } catch (error) {
+    if (error instanceof EndpointNetworkError) throw error
     const reason = error instanceof Error && error.name === 'AbortError'
-      ? `timed out after ${options.timeoutMs ?? DEFAULT_TIMEOUT_MS}ms`
+      ? `timed out after ${options.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS}ms`
       : (error instanceof Error ? error.message : String(error))
     const code = error instanceof Error && error.name === 'AbortError' ? 'timeout' : 'network-error'
     errors.push(`GET /models failed: ${reason}`)
@@ -471,9 +471,9 @@ async function probeOpenAICompletion(options: ProbeOptions, model: string, visio
         max_tokens: vision ? VISION_PROBE_MAX_TOKENS : 64,
         stream: true,
       }),
-    }, options.timeoutMs ?? DEFAULT_TIMEOUT_MS, options)
+    }, options.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS, options)
 
-    const latencyMs = Date.now() - startedAt
+    const latencyMs = endpointHeaderLatency(response) ?? Date.now() - startedAt
     if (!response.ok) {
       const bodyText = await response.text().catch(() => '')
       return {
@@ -509,9 +509,10 @@ async function probeOpenAICompletion(options: ProbeOptions, model: string, visio
     }
     return { ok: true, hints, latencyMs, answer }
   } catch (error) {
+    if (error instanceof EndpointNetworkError) throw error
     const aborted = error instanceof Error && error.name === 'AbortError'
     const reason = aborted
-      ? `completion probe timed out after ${options.timeoutMs ?? DEFAULT_TIMEOUT_MS}ms`
+      ? `completion probe timed out after ${options.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS}ms`
       : (error instanceof Error ? error.message : String(error))
     return { ok: false, hints: {}, latencyMs: Date.now() - startedAt, error: reason, errorCode: aborted ? 'timeout' : 'network-error' }
   }
@@ -579,9 +580,9 @@ async function probeResponsesCompletion(
         max_output_tokens: vision ? VISION_PROBE_MAX_TOKENS : 64,
         stream: true,
       }),
-    }, options.timeoutMs ?? DEFAULT_TIMEOUT_MS, options)
+    }, options.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS, options)
 
-    const latencyMs = Date.now() - startedAt
+    const latencyMs = endpointHeaderLatency(response) ?? Date.now() - startedAt
     if (!response.ok) {
       const bodyText = await response.text().catch(() => '')
       return {
@@ -615,9 +616,10 @@ async function probeResponsesCompletion(
     }
     return { ok: true, hints: {}, latencyMs, answer }
   } catch (error) {
+    if (error instanceof EndpointNetworkError) throw error
     const aborted = error instanceof Error && error.name === 'AbortError'
     const reason = aborted
-      ? `completion probe timed out after ${options.timeoutMs ?? DEFAULT_TIMEOUT_MS}ms`
+      ? `completion probe timed out after ${options.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS}ms`
       : (error instanceof Error ? error.message : String(error))
     return { ok: false, hints: {}, latencyMs: Date.now() - startedAt, error: reason, errorCode: aborted ? 'timeout' : 'network-error' }
   }
@@ -639,9 +641,9 @@ async function probeAnthropicCompletion(options: ProbeOptions, model: string): P
         messages: [{ role: 'user', content: 'hi' }],
         stream: true,
       }),
-    }, options.timeoutMs ?? DEFAULT_TIMEOUT_MS, options)
+    }, options.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS, options)
 
-    const latencyMs = Date.now() - startedAt
+    const latencyMs = endpointHeaderLatency(response) ?? Date.now() - startedAt
     if (!response.ok) {
       const bodyText = await response.text().catch(() => '')
       return {
@@ -658,9 +660,10 @@ async function probeAnthropicCompletion(options: ProbeOptions, model: string): P
     if (bodyText.includes('thinking')) hints.reasoningSplit = true
     return { ok: true, hints, latencyMs }
   } catch (error) {
+    if (error instanceof EndpointNetworkError) throw error
     const aborted = error instanceof Error && error.name === 'AbortError'
     const reason = aborted
-      ? `completion probe timed out after ${options.timeoutMs ?? DEFAULT_TIMEOUT_MS}ms`
+      ? `completion probe timed out after ${options.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS}ms`
       : (error instanceof Error ? error.message : String(error))
     return { ok: false, hints: {}, latencyMs: Date.now() - startedAt, error: reason, errorCode: aborted ? 'timeout' : 'network-error' }
   }
@@ -683,9 +686,9 @@ async function probeGeminiCompletion(options: ProbeOptions, model: string): Prom
         contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
         generationConfig: { maxOutputTokens: 64 },
       }),
-    }, options.timeoutMs ?? DEFAULT_TIMEOUT_MS, options)
+    }, options.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS, options)
 
-    const latencyMs = Date.now() - startedAt
+    const latencyMs = endpointHeaderLatency(response) ?? Date.now() - startedAt
     if (!response.ok) {
       const bodyText = await response.text().catch(() => '')
       return {
@@ -709,9 +712,10 @@ async function probeGeminiCompletion(options: ProbeOptions, model: string): Prom
     if (parts.some(p => p.thought === true)) hints.reasoningSplit = true
     return { ok: true, hints, latencyMs }
   } catch (error) {
+    if (error instanceof EndpointNetworkError) throw error
     const aborted = error instanceof Error && error.name === 'AbortError'
     const reason = aborted
-      ? `completion probe timed out after ${options.timeoutMs ?? DEFAULT_TIMEOUT_MS}ms`
+      ? `completion probe timed out after ${options.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS}ms`
       : (error instanceof Error ? error.message : String(error))
     return { ok: false, hints: {}, latencyMs: Date.now() - startedAt, error: reason, errorCode: aborted ? 'timeout' : 'network-error' }
   }
@@ -735,7 +739,7 @@ async function readCappedText(response: Response): Promise<string> {
 }
 
 export async function probeProvider(options: ProbeOptions): Promise<ProbeReport> {
-  options = { ...options, operationId: randomUUID() } as ProbeOptions
+  options = { ...options, deadline: options.deadline ?? Date.now() + (options.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS), operationId: randomUUID() } as ProbeOptions
   const errors: string[] = []
   const fetched = await fetchModelList(options, errors)
   const models = fetched.ids

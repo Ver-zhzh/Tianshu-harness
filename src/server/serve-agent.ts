@@ -4,7 +4,7 @@ import { previewContinuityRecovery, applyContinuityRecovery, withContinuityAvail
  * HTTP listener is up (or on first session), so /health cold-start does not pay
  * for AgentLoop / tools / Meridian / council / MCP SDK graph.
  */
-import { join, dirname } from 'node:path'
+import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { createDelegationActivityMapper } from '../tools/worker-activity-stream.js'
 import { buildReplacementAgent } from '../agent/runtime-rebuild.js'
@@ -59,12 +59,12 @@ import { persistCouncilRoutingShadow } from '../agent/council/council-routing.js
 import type { PlanItem } from '../agent/council/council-plan.js'
 import type { CouncilPanelModel } from '../tui/council-panel-model.js'
 import type { McpManager } from '../mcp/manager.js'
-import { findProjectConfig } from '../config/manager.js'
-import { isProjectTrusted, notifyUntrustedOnce } from '../config/project-trust.js'
+import { mergeProjectAgentConfig } from './project-agent-config.js'
+import { loadUserInstructions } from '../config/user-instructions.js'
+export { mergeProjectAgentConfig } from './project-agent-config.js'
 import { proRegistry } from '../api/pro-registry.js'
 import { anchorsFromMessages } from '../agent/reasoning-anchors.js'
 import type { Config } from '../config/schema.js'
-import { readFileSync } from 'node:fs'
 import {
   type ServeContext,
   type ResolvedModelSpec,
@@ -507,60 +507,6 @@ export function resolveSessionBaseConfig(ctx: ServeContext, reload?: () => Serve
 }
 
 /**
- * Merge project-level .rivet-config.json agent block into the startup config.
- * Only agent fields are merged — provider/model/auth stay on the startup snapshot
- * (the sidecar may have been started unconfigured, and the key was set later via
- * Settings). toolGating is deep-merged so project config can add extraCore without
- * clobbering the startup snapshot's other gating fields (enabled, disabledTools).
- *
- * Only reads the project config FILE (if it exists) — does NOT call loadConfig()
- * which merges user-level + defaults, which would clobber the startup snapshot
- * with unrelated user settings.
- *
- * Exported for testing. Malformed project config returns the unmodified startup
- * config.
- */
-export function mergeProjectAgentConfig(
-  startupConfig: Config,
-  cwd: string,
-): Config {
-  try {
-    const projectPath = findProjectConfig(cwd)
-    if (!projectPath) return startupConfig
-    // 信任门：agent 块含 approval/unsandboxed 等授权键——未授信项目不并入
-    // （与 loadConfig Layer 3 剥离同语义；桌面端项目信任 UI 落地前的 fail-closed）。
-    if (!isProjectTrusted(dirname(projectPath))) {
-      notifyUntrustedOnce('config', dirname(projectPath))
-      return startupConfig
-    }
-    const raw = JSON.parse(readFileSync(projectPath, 'utf-8')) as Record<string, unknown>
-    const agent = raw?.agent
-    if (!agent || typeof agent !== 'object' || Array.isArray(agent)) return startupConfig
-    const projectAgent = agent as Record<string, unknown>
-    const projectTG = projectAgent.toolGating
-    const projectToolGating =
-      projectTG && typeof projectTG === 'object' && !Array.isArray(projectTG)
-        ? (projectTG as Record<string, unknown>)
-        : undefined
-    return {
-      ...startupConfig,
-      agent: {
-        ...startupConfig.agent,
-        ...projectAgent,
-        ...(projectToolGating ? {
-          toolGating: {
-            ...startupConfig.agent?.toolGating,
-            ...projectToolGating,
-          },
-        } : {}),
-      },
-    }
-  } catch {
-    return startupConfig
-  }
-}
-
-/**
  * Assemble an AgentLoop from prebuilt session stores + a resolved model spec.
  * Reusing `stores.session` across calls is what lets switchModel hot-swap the
  * model while keeping the conversation history intact.
@@ -583,6 +529,7 @@ function assembleAgentLoop(
   allowedTools?: string[],
   reload?: () => ServeContext,
   inheritFrozenFrom?: import('../prompt/engine.js').PromptEngine | import('../prompt/frozen-snapshot.js').FrozenSnapshotData,
+  userInstructions?: import('../prompt/user-instructions.js').UserInstructionsSnapshot,
 ): AgentLoop {
   // Wave J: domainKnowledgeStore 优先从 sidecar SharedRuntime.domainStores
   // 按 cwd 取；fallback 是 per-call new（与 bootstrap 单 session 行为一致——
@@ -600,6 +547,7 @@ function assembleAgentLoop(
   const mergedConfig = mergeProjectAgentConfig(resolveSessionBaseConfig(ctx, reload), cwd)
 
   const { agent } = createAgentRuntime({
+    userInstructions: userInstructions ?? loadUserInstructions(mergedConfig.agent.userInstructions),
     provider: spec.provider,
     apiKey: spec.apiKey,
     auth: spec.auth,
@@ -831,7 +779,7 @@ export function buildManagedAgent(
     const oldAgent = agent
     const liveApprovalMode = oldAgent.config.approvalMode
     const candidate = buildReplacementAgent(oldAgent, stores.refs, stores.deepRecallAgentRef, explicitModelChange,
-      inherited => assembleAgentLoop(ctx, cwd, sessionId, stores, next, liveApprovalMode, registry, shared, allowedTools, reload, inherited))
+      inherited => assembleAgentLoop(ctx, cwd, sessionId, stores, next, liveApprovalMode, registry, shared, allowedTools, reload, inherited, oldAgent.config.promptEngine.getUserInstructionsSnapshot()))
     spec = next
     agent = candidate
     return oldAgent

@@ -219,18 +219,20 @@ describe('BASH_TOOL timeout cleanup', () => {
   it('kills background descendants when a command times out', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'rivet-bash-timeout-'))
     const marker = join(dir, 'marker.txt')
-    const command = `nohup node -e "setTimeout(()=>require('fs').writeFileSync(process.argv[1], 'alive'), 300)" "${marker}" >/dev/null 2>&1 & wait`
+    const started = join(dir, 'started.txt')
+    const command = `nohup node -e "require('fs').writeFileSync(process.argv[2], 'started');setTimeout(()=>require('fs').writeFileSync(process.argv[1], 'alive'), 2500)" "${marker}" "${started}" >/dev/null 2>&1 & wait`
 
     try {
       const result = await BASH_TOOL.execute({
-        input: { command, timeout: 50 },
+        input: { command, timeout: 2000 },
         toolUseId: 'bash-timeout-tree-test',
         cwd: dir,
       })
-      await wait(700)
+      await wait(2800)
 
       assert.equal(result.isError, true)
       assert.match(result.content, /命令超时/)
+      assert.equal(existsSync(started), true, 'exercise real descendant cleanup after preparation')
       if (process.platform !== 'win32') {
         assert.equal(existsSync(marker), false)
       } else if (existsSync(marker)) {
@@ -339,7 +341,7 @@ describe('BASH_TOOL 空 stdout 的成功命令 → confirmed empty(不是 "Exit 
     }
   })
 
-  it('environment 类失败给模型标准化简洁 body，完整原文入 uiContent', async () => {
+  it('environment 类失败保留证据，并提示入口核查而非根因免责', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'rivet-bash-env-'))
     try {
       const result = await BASH_TOOL.execute({
@@ -350,7 +352,8 @@ describe('BASH_TOOL 空 stdout 的成功命令 → confirmed empty(不是 "Exit 
       assert.equal(result.isError, true)
       assert.equal(result.errorClass, 'environment')
       assert.equal(result.errorKind, 'missing_dep')
-      assert.match(result.content, /环境\/配置问题/, 'model 正文为标准化简洁体')
+      assert.match(result.content, /尚未确认根因/, '分类不能冒充根因')
+      assert.doesNotMatch(result.content, /非代码缺陷/)
       assert.match(result.content, /command not found/, '含具体原因')
       assert.ok(result.uiContent && result.uiContent.length > 0, '完整原文保留在 uiContent 供 TUI 展示')
     } finally {

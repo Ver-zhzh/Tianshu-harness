@@ -40,6 +40,7 @@ import { buildServerEventsRoute } from './server-events-route.js'
 import { buildGreetingRoute } from './greeting-route.js'
 import { buildSettingsIntentRoutes } from './settings-intent-route.js'
 import { isAuthorizedRequest } from './auth.js'
+import { recordRuntimeDiagnostic } from '../utils/runtime-diagnostics.js'
 import { LoopHealthMonitor, LoopStallDetector } from './loop-health.js'
 import { buildScheduleRoutes } from './schedule-routes.js'
 import { buildTaskRoutes } from './task-routes.js'
@@ -1173,7 +1174,7 @@ export async function runServe(opts: RunServeOptions = {}): Promise<RunningServe
   // 打印的 [loop-lag]——同一尖峰会在窗口内多个采样里重复打印，且尖峰只在卡顿
   // **结束后**才可见，恢复后只留一行无归属的 max。LoopHealthMonitor 保留：/health
   // 的 p99/max 字段仍由它回答「服务忙不忙」。
-  const loopStall = new LoopStallDetector({ warn: (line) => serverLogger.warn(line) })
+  const loopStall = new LoopStallDetector({ warn: (line) => serverLogger.warn(line), onStall: event => recordRuntimeDiagnostic({ kind: 'loop_stall', durationMs: event.stalledMs }) })
   loopStall.start()
   // registryOk lets the desktop tell "sidecar up but concurrency dormant" apart
   // from a healthy sidecar. In ephemeral/test mode (no registry wired) it reads

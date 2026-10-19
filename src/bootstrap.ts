@@ -1,5 +1,7 @@
 import { snapshotSessionBinding } from './model/model-binding.js'
 import { buildReplacementAgent } from './agent/runtime-rebuild.js'
+import { loadUserInstructions } from './config/user-instructions.js'
+import { parseUserInstructionsSnapshot, type UserInstructionsSnapshot } from './prompt/user-instructions.js'
 import { resolveDeliveryImpact } from './agent/delivery-impact.js'
 /**
  * bootstrap.ts — 共享初始化层，由 T9 ANSI 唯一生产入口 src/main.ts 调用。
@@ -891,7 +893,7 @@ export function createInteractiveToolRegistry(
  * 把它落到 `<id>.frozen.json`（best-effort——盘存写失败不影响会话，
  * 顶多下次 resume 退化为全量重建）。startup / /resume 切换 / /cd 三处统一挂。
  */
-function wireFrozenSnapshotPersist(persist: SessionPersist, engine: import('./prompt/engine.js').PromptEngine): void {
+export function wireFrozenSnapshotPersist(persist: SessionPersist, engine: import('./prompt/engine.js').PromptEngine): void {
   engine.setExecutionSnapshotCommit(snapshot => persist.commitFrozenSnapshot(snapshot))
   engine.setOnFrozenSnapshotChanged(() => persist.queueFrozenSnapshot(engine.exportFrozenSnapshot()))
 }
@@ -901,6 +903,7 @@ function wireFrozenSnapshotPersist(persist: SessionPersist, engine: import('./pr
 const warnedModelFallback = new Set<string>()
 
 export function createAgentRuntime(deps: {
+  userInstructions: UserInstructionsSnapshot
   provider: ProviderConfig
   apiKey: string
   auth: AuthProvider | undefined
@@ -943,6 +946,7 @@ export function createAgentRuntime(deps: {
     toolRegistry, persist, claimStore, fileHistory, refs,
     domainKnowledgeStore, modelId,
   } = deps
+  const userInstructions = parseUserInstructionsSnapshot(deps.userInstructions)
 
   // 模型名匹配不上时不做静默兜底。用户配的可能是多模态档（deepseek-flash 等），
   // 而兜底的 models[0] 常常是同名的纯文本档——症状是「配了视觉模型却完全看不到
@@ -994,6 +998,7 @@ export function createAgentRuntime(deps: {
   }
 
   const agentCfg = createAgentConfig(createMainAgentConfigInput({
+    userInstructions,
     apiKey,
     model: {
       id: currentModel.id,
@@ -1050,6 +1055,7 @@ export function createAgentRuntime(deps: {
       config: { ...config, provider: saved.provider, workers: saved.workers, agent: { ...config.agent, review: saved.agent.review } },
       cwd, provider, apiKey, auth, currentModelId: currentModel.id, rootSessionBinding: { ...rootSessionBinding, credentialPrincipal: agentForSignals?.config.client.getMainPrefixProof?.()?.credentialScope?.split(':principal:')[1] }, rootSessionId: deps.sessionId,
       listActiveClaims: () => claimStore.listActiveClaims(),
+      getUserInstructions: () => agentCfg.promptEngine.getUserInstructionsForDispatch(),
       sessionMemoryBlock: () => persist.buildMemoryBlock(),
       domainKnowledgeStore,
       writeProfiles: profileRegistry.listWriteProfiles(),
@@ -1487,6 +1493,7 @@ export function switchAgentRuntime(ctx: BootstrapContext, modelId: string, targe
     // 影响有限——但与 sidecar 同源 (serve.ts 已修)，一并对齐避免长会话切换密集
     // 场景累积泄漏。
     const agent = buildReplacementAgent(ctx.agent, ctx.refs, undefined, true, inherited => createAgentRuntime({
+      userInstructions: ctx.agent.config.promptEngine.getUserInstructionsSnapshot(),
       provider,
       apiKey,
       auth,
@@ -1603,6 +1610,9 @@ export function switchAgentSession(ctx: BootstrapContext, targetId: string): Swi
   if (targetId === ctx.sessionId) {
     return { ok: false, error: '已经在该会话中。' }
   }
+  let userInstructions: UserInstructionsSnapshot
+  try { userInstructions = loadUserInstructions(loadLayeredConfig({ cwd: ctx.cwd }).agent.userInstructions) }
+  catch (error) { return { ok: false, error: (error as Error).message } }
 
   let targetPersist: SessionPersist
   try {
@@ -1668,6 +1678,10 @@ export function switchAgentSession(ctx: BootstrapContext, targetId: string): Swi
   let currentModelId: string | undefined
   try { currentModelId = ctx.agent.config.promptEngine.getModel() } catch { /* idle/未初始化 */ }
 
+  let targetFrozen: import('./prompt/frozen-snapshot.js').FrozenSnapshotData | undefined
+  try { targetFrozen = targetPersist.readFrozenSnapshot() }
+  catch (error) { return { ok: false, error: (error as Error).message } }
+
   // flush 旧会话的 volatile store(信息素),避免切换丢数据。
   try { ctx.agent.stigmergyStore.flushSync() } catch { /* best-effort */ }
   // 旧 agent 的 fs.watch 句柄随丢弃释放（三条 switch 路径统一纪律）。
@@ -1684,6 +1698,7 @@ export function switchAgentSession(ctx: BootstrapContext, targetId: string): Swi
   // 整体重建 AgentLoop —— 构造函数内部按 targetId 重建子系统并重挂持久化监听。
   // 冻结快照随目标会话落盘读回（无文件/坏文件 → undefined → 旧的 byte-0 重建）。
   const { agent } = createAgentRuntime({
+    userInstructions,
     provider: resumeTarget?.provider ?? ctx.provider,
     apiKey: resumeTarget?.apiKey ?? ctx.apiKey,
     auth: resumeTarget ? resumeTarget.auth : ctx.auth,
@@ -1698,7 +1713,7 @@ export function switchAgentSession(ctx: BootstrapContext, targetId: string): Swi
     domainKnowledgeStore: ctx.domainKnowledgeStore,
     modelId: resumeTarget?.modelId ?? currentModelId,
     session: ctx.session,
-    inheritFrozenFrom: targetPersist.readFrozenSnapshot(),
+    inheritFrozenFrom: targetFrozen,
     onStatusLine: text => ctx.setStatusLine?.(text),
   })
 
@@ -1862,6 +1877,7 @@ export async function switchAgentCwd(ctx: BootstrapContext, target: string): Pro
   )
 
   const { agent } = createAgentRuntime({
+    userInstructions: oldEngine.getUserInstructionsSnapshot(),
     provider: ctx.provider,
     apiKey: ctx.apiKey,
     auth: ctx.auth,
@@ -2012,6 +2028,7 @@ export async function bootstrapInteractiveSession(opts: BootstrapOptions = {}): 
 
   // 2. Config
   const config = loadRivetConfig(cwd, opts.args)
+  const userInstructions = loadUserInstructions(config.agent.userInstructions)
   setTargetConventions(config.editor.platform, config.editor.eol)
   applyConfiguredGitBashPath(config.env.gitBashPath)
 
@@ -2258,6 +2275,7 @@ export async function bootstrapInteractiveSession(opts: BootstrapOptions = {}): 
   if (startupResume.degradedWarning) console.error(startupResume.degradedWarning)
   const explicitStartupGeneration = wasSessionResumed() && !!(opts.modelId || opts.providerName)
   const { agent } = createAgentRuntime({
+    userInstructions,
     provider: startupResume.target?.provider ?? provider,
     apiKey: startupResume.target?.apiKey ?? apiKey,
     auth: startupResume.target ? startupResume.target.auth : auth,

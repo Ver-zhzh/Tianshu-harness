@@ -12,7 +12,8 @@ import { normalizeOaiMessage, normalizeOaiMessages } from '../api/oai-types.js'
 import type { OaiMessage, OaiToolCall } from '../api/oai-types.js'
 import { legacyMessageToOaiMessages } from './session-message-conversion.js'
 import { isSafeToRerun } from '../tools/write-tool-helpers.js'
-import type { FrozenSnapshotData } from '../prompt/frozen-snapshot.js'
+import { parseFrozenSnapshotData, type FrozenSnapshotData } from '../prompt/frozen-snapshot.js'
+import { UserInstructionsError } from '../prompt/user-instructions.js'
 import { hasSnapshotHistory, recoverCompactionSnapshot } from '../prompt/compaction-recovery.js'
 
 import type { SessionMetadata } from '../context/types.js'
@@ -645,6 +646,17 @@ export class SessionPersist {
     return typeof this.loadMetadata()?.coldStartConsentAt === 'number'
   }
 
+  hasUserInstructionsSnapshot(): boolean {
+    try {
+      const raw = JSON.parse(readFileSync(this.frozenPath, 'utf8'))
+      if (raw?.userInstructions === undefined) return false
+      if (parseFrozenSnapshotData(raw)) return true
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+    }
+    throw new UserInstructionsError('user_instructions_payload_invalid', '无法核验已保存的用户规则状态；请修复会话快照或开始新会话。')
+  }
+
   readFrozenSnapshot(): FrozenSnapshotData | undefined {
     const logPath = join(getSessionDir(this.cwd), this.sessionId, 'cache-log.jsonl')
     const { hasLog, hasRequests } = hasSnapshotHistory(logPath, this.filePath, () => this.loadOai())
@@ -653,6 +665,9 @@ export class SessionPersist {
       if (existsSync(this.frozenPath)) raw = JSON.parse(readFileSync(this.frozenPath, 'utf8'))
     } catch { this.frozenWriter.error = 'snapshot_corrupt' }
     let data = recoverCompactionSnapshot(raw, () => this.loadOai())
+    if (raw && typeof raw === 'object' && 'userInstructions' in raw && !data) {
+      throw new UserInstructionsError('user_instructions_payload_invalid', '已保存的用户规则状态损坏；请修复快照或开始新会话。')
+    }
     if (data?.rewindAuthorization) {
       assertRewindHistory(data.rewindAuthorization, this.loadOai())
       if (JSON.stringify(data.executionSnapshot) !== JSON.stringify(data.rewindAuthorization.prior)) {
@@ -663,7 +678,7 @@ export class SessionPersist {
     if (!hasRequests) return data
     // 显式同意（桌面错误卡按钮写入 meta 标记 / CLI 用 RIVET_ALLOW_COLD_START）：
     // 放弃连续性证据、全新装配——首请求开新缓存代次，后续快照自愈。
-    if (this.hasColdStartConsent() || process.env.RIVET_ALLOW_COLD_START) return undefined
+    if (!data?.userInstructions && (this.hasColdStartConsent() || process.env.RIVET_ALLOW_COLD_START)) return undefined
     if (!data) throw new ColdStartEvidenceError('历史会话缺少完整冻结快照；本次请求受阻，请显式开始新会话')
     if (!isCompleteExecutionSnapshot(data.executionSnapshot)) {
       // Diagnostics contain hashes and normalized options only, never credentials or request bodies.

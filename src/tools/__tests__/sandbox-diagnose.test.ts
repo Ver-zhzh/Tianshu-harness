@@ -108,6 +108,8 @@ describe('buildSandboxDenialHint', () => {
     assert.ok(hint.includes('/Users/b/Library/Developer/Xcode/DerivedData'))
     assert.ok(hint.includes('request_path_access'))
     assert.ok(hint.includes('remember: true'))
+    assert.doesNotMatch(hint, /不是代码缺陷|唯一正确|直接重跑即可/)
+    assert.match(hint, /已产生.*副作用/)
   })
 
   it('forbids the sudo/chmod doom-loop explicitly', () => {

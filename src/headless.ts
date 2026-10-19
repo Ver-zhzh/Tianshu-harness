@@ -3,6 +3,7 @@ import type { AgentCallbacks, AgentLoop } from './agent/loop.js'
 import { tapAgentCallbacks, type EventSink } from './agent/event-tap.js'
 import { serializeEvent } from './stream-json.js'
 import { redactText, redactValue } from './server/redact.js'
+import { UserInstructionsError } from './prompt/user-instructions.js'
 
 export interface HeadlessCliArgs {
   headless: boolean
@@ -73,7 +74,12 @@ export function parseCliArgs(args: string[]): HeadlessCliArgs {
 }
 
 export async function runHeadless(config: HeadlessRunConfig): Promise<HeadlessRunResult> {
-  const agent = config.createAgent()
+  let agent: Pick<AgentLoop, 'run'> | HeadlessAgent
+  try { agent = config.createAgent() }
+  catch (error) {
+    if (!(error instanceof UserInstructionsError)) throw error
+    agent = { run: async (_prompt: string, callbacks: AgentCallbacks) => { callbacks.onError(error) } }
+  }
   const streamJson = config.streamJson
   let text = ''
   let usage: Partial<Usage> | undefined

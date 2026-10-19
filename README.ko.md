@@ -1182,6 +1182,10 @@ tianshu logs open desktop            # sidecar 로그 디렉터리 열기（GUI�
 
 > 위챗 그룹 QR 코드에는 유효기간이 있습니다（7일）. 만료되면 [Discussions](https://github.com/huiliyi37/Tianshu-harness/discussions)나 Issue에 남겨 주시면 관리자가 새 코드를 올려 드립니다.
 
+- **QQ 교류 그룹** → 「TUI」, 군 번호 `1017892942`, QR 코드를 스캔해 입장:
+
+<img src="docs/brand/assets/qq-group-qr.png" width="280" alt="TUI QQ 그룹 QR 코드（군 번호 1017892942）">
+
 > 참고: 먼저 저장소 관리자가 `Settings → General → Discussions`에서 Discussions 기능을 켜 두어야 합니다.
 
 ## 🌐 공식 웹사이트 개발

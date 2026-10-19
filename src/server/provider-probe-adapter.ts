@@ -1,3 +1,4 @@
+import type { EndpointRequestOptions } from '../tools/net/endpoint-request.js'
 /**
  * provider-probe-adapter — 桌面 sidecar 探测契约层。
  *
@@ -8,7 +9,7 @@
  * i18n 键（connect.probeError.*）、模型列表顺带经别名表回填元数据
  * （descriptors）——与 CLI 的 `rivet provider models` 同一条回填链。
  */
-import { probeProvider, aliasTableWithProbeInfos, type ProbeReport } from '../api/provider-probe.js'
+import { DEFAULT_PROBE_TIMEOUT_MS, probeProvider, aliasTableWithProbeInfos, type ProbeReport } from '../api/provider-probe.js'
 import { hasModelsListEndpoint } from '../api/endpoint-map.js'
 import { matchModelIds } from '../api/model-id-matcher.js'
 import { toModelDescriptors } from '../config/provider-cli.js'
@@ -56,7 +57,7 @@ function mapError(report: ProbeReport): TestKeyResult {
 /** 无 /models 端点的 key 验证：最小补全（显式 vision:false——连接测试只验证
  *  key/端点，不强制识图；识图真测留在「测试模型调用」路径）。modelsListUnavailable
  *  显式传入：调用点要么结构命中，要么刚看到 404，无需再打一次列表。 */
-async function probeByCompletion(opts: {
+async function probeByCompletion(opts: EndpointRequestOptions & {
   baseUrl: string
   apiKey?: string
   protocol?: ProviderProtocol
@@ -93,7 +94,7 @@ async function probeByCompletion(opts: {
  * 端点（Ollama/vLLM）无需凭据即可探测通过；需鉴权端点会以 401/403 失败并
  * 分类为 auth-failed。
  */
-export async function probeForTestKey(opts: {
+export async function probeForTestKey(opts: EndpointRequestOptions & {
   baseUrl: string
   apiKey?: string
   protocol?: ProviderProtocol
@@ -101,6 +102,7 @@ export async function probeForTestKey(opts: {
   /** 无 /models 端点或 404 兜底时用于补全探测的型号（预设默认/用户手填/已存首个）。 */
   probeModel?: string
 }): Promise<TestKeyResult> {
+  opts = { ...opts, deadline: opts.deadline ?? Date.now() + (opts.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS) }
   const keyless = !opts.apiKey
   if (!hasModelsListEndpoint(opts.providerName, opts.baseUrl)) {
     // 端点结构上就没有列表——没有模型 id 时无法给 key 下任何结论，如实报专门

@@ -1,3 +1,4 @@
+import { configuredEndpointNetwork, type EndpointAccessInput } from '../config/endpoint-network-policy.js'
 import { setupProvider, registerProvider, upsertProviderModel } from '../config/manager.js'
 import { contractModels } from '../config/contract-models.js'
 import type { Config } from '../config/schema.js'
@@ -13,6 +14,7 @@ export function persistConnectCommit(commit: ConnectCommit): void {
     const options = {
       providerName: commit.providerName, baseUrl: commit.baseUrl,
       ...(commit.apiKey ? { apiKey: commit.apiKey } : {}),
+      endpointNetworkPolicy: commit.endpointNetworkPolicy,
       protocol: commit.protocol, models: commit.models, makeDefault: commit.makeDefault,
       ...(commit.advanced ? { advanced: commit.advanced } : {}),
     }
@@ -37,4 +39,11 @@ export function resolveConnectRuntimeSelection(
     ? models.find(m => m.id === commit.model.id)
     : !makeDefault && active?.provider === provider ? models.find(m => m.id === active.model) ?? models[0] : models[0]
   return selected ? { provider, model: selected.id } : undefined
+}
+
+/** Bind the UI's transient consent before handing the commit to persistence. */
+export function bindConnectEndpointPolicy(commit: ConnectCommit, baseUrl: string | undefined, access: EndpointAccessInput): void {
+  if (commit.mode === 'add-model' || !baseUrl) return
+  const target = commit.mode === 'preset' ? commit.setup : commit
+  target.endpointNetworkPolicy = configuredEndpointNetwork(access, baseUrl, target.providerName).endpointNetworkPolicy
 }

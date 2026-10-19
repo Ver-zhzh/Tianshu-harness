@@ -20,6 +20,9 @@ import { createDefaultToolRegistry } from '../src/tools/default-registry.js'
 import { resolveToolPreset } from '../src/tools/tool-preset.js'
 import { gateToolDefinitions, resolveMainToolTier } from '../src/agent/tool-tiers.js'
 import { STAR_DOMAINS } from '../src/agent/star-domain-data.js'
+import { loadConfig } from '../src/config/manager.js'
+import { loadUserInstructions } from '../src/config/user-instructions.js'
+import { renderUserInstructions } from '../src/prompt/user-instructions.js'
 
 const args = process.argv.slice(2)
 const wantJson = args.includes('--json')
@@ -39,7 +42,8 @@ const gatedTools = gateToolDefinitions(registry.getDefinitions(), {
 const toolsJson = JSON.stringify(gatedTools)
 
 // ── frozen volatile：真实快照 ────────────────────────────────────
-const snapshot = createVolatileSnapshot({ cwd, blockPolicy: policy })
+const userInstructions = loadUserInstructions(loadConfig({ cwd }).agent.userInstructions)
+const snapshot = createVolatileSnapshot({ cwd, blockPolicy: policy, userInstructions })
 const frozenVolatile = buildStableVolatileBlock(snapshot)
 const systemPrompt = buildSystemPrompt({ tools: gatedTools })
 
@@ -50,6 +54,7 @@ const inputs: BudgetInput[] = [
   { name: 'static.ts BASE_PROMPT', category: 'brake', content: systemPrompt },
   { name: 'star-domain volatileBlock', category: 'brake', content: domain.volatileBlock },
   { name: '工具 schema (JSON)', category: 'tools', content: toolsJson },
+  { name: 'user-instructions (new boundary)', category: 'brake', content: userInstructions.state === 'active' ? renderUserInstructions(userInstructions)! + '\n\n' : undefined },
   {
     name: 'project-instructions',
     category: 'reference',

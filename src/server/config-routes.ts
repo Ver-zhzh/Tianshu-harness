@@ -1,3 +1,8 @@
+import type { EndpointRequestOptions } from '../tools/net/endpoint-request.js'
+import { parseImageGenRequest, parseVisionCredentials } from './endpoint-credentials.js'
+import { endpointNetworkInput, endpointFailure, assertCredentialOrigin } from './endpoint-network-input.js'
+import { EndpointNetworkError } from '../tools/net/endpoint-policy.js'
+import { buildEndpointNetworkRoutes } from './endpoint-network-routes.js'
 import { modelBindingAvailability, type ModelBindingRef } from '../model/model-binding.js'
 /**
  * /config/* routes — provider + API key management for the desktop settings UI.
@@ -108,7 +113,6 @@ import { queryDeepSeekBalance } from '../api/balance-client.js'
 import { resolveAccountCredential, type AccountCredential } from './account-credential.js'
 import { discoverVisionModels, validateVisionModel } from '../api/vision-model-onboarding.js'
 import { generateImage } from '../api/image-gen-client.js'
-import { imageGenerationNetwork } from '../api/image-generation-parameters.js'
 import {
   getImageGenModelConfig,
   registerImageGenModelConfig,
@@ -121,68 +125,6 @@ import { resolveEffortSupported } from '../api/provider.js'
 /** 生图真测用的固定提示词——要足够简单，任何生图模型都能画出来。 */
 const IMAGE_GEN_TEST_PROMPT = 'a yellow rubber duck on a white background'
 
-/**
- * 服务端配置文件中已声明的环境变量密钥名集合
- * （provider.apiKeyEnv / provider.keys[].apiKeyEnv）。
- * 试画/探测类端点只允许解析这些名字——见 parseImageGenRequest 的安全边界注释。
- */
-function declaredKeyEnvs(): Set<string> {
-  const names = new Set<string>()
-  const providers = loadConfig().provider.providers ?? {}
-  for (const provider of Object.values(providers)) {
-    if (typeof provider.apiKeyEnv === 'string' && provider.apiKeyEnv) names.add(provider.apiKeyEnv)
-    for (const key of provider.keys ?? []) {
-      if (typeof key.apiKeyEnv === 'string' && key.apiKeyEnv) names.add(key.apiKeyEnv)
-    }
-  }
-  return names
-}
-
-interface ParsedImageGenRequest {
-  baseUrl: string
-  modelId: string
-  providerName?: string
-  /** 用于真测请求的实际 key（apiKey 或由 apiKeyEnv 解析而来）。 */
-  apiKey?: string
-  /** 原样透传给 registerImageGenModelConfig 的凭据字段。 */
-  rawApiKey?: string
-  rawApiKeyEnv?: string
-  sizeField?: 'size' | 'image_size'
-  error?: string
-}
-
-/**
- * 生图 provider 的凭据/参数解析。apiKey 与 apiKeyEnv 互斥；真测需要**实际**的
- * key，因此 apiKeyEnv 会在此刻从 process.env 解析（配置里只持久化变量名）。
- */
-function parseImageGenRequest(body: unknown, options: { requireProviderName?: boolean; envPolicy?: 'reject-undeclared' } = {}): ParsedImageGenRequest {
-  const record = (body ?? {}) as Record<string, unknown>
-  const baseUrl = typeof record.baseUrl === 'string' ? record.baseUrl.trim() : ''
-  const modelId = typeof record.modelId === 'string' ? record.modelId.trim() : ''
-  const providerName = typeof record.providerName === 'string' ? record.providerName.trim() : undefined
-  const apiKey = typeof record.apiKey === 'string' ? record.apiKey.trim() : undefined
-  const apiKeyEnv = typeof record.apiKeyEnv === 'string' ? record.apiKeyEnv.trim() : undefined
-  const sizeField = record.sizeField === 'size' || record.sizeField === 'image_size' ? record.sizeField : undefined
-
-  if (!baseUrl) return { baseUrl: '', modelId, error: 'baseUrl is required' }
-  if (!modelId) return { baseUrl, modelId: '', error: 'modelId is required' }
-  if (options.requireProviderName && !providerName) return { baseUrl, modelId, error: 'providerName is required' }
-  if (apiKey && apiKeyEnv) return { baseUrl, modelId, error: 'Use either apiKey or apiKeyEnv, not both.' }
-  if (options.envPolicy === 'reject-undeclared' && apiKeyEnv && !declaredKeyEnvs().has(apiKeyEnv)) {
-    return { baseUrl, modelId, error: `Environment variable "${apiKeyEnv}" is not declared in the saved provider configuration` }
-  }
-
-  const resolvedKey = apiKey ?? (apiKeyEnv ? process.env[apiKeyEnv] : undefined)
-  return {
-    baseUrl,
-    modelId,
-    ...(providerName ? { providerName } : {}),
-    ...(resolvedKey ? { apiKey: resolvedKey } : {}),
-    ...(apiKey ? { rawApiKey: apiKey } : {}),
-    ...(apiKeyEnv ? { rawApiKeyEnv: apiKeyEnv } : {}),
-    ...(sizeField ? { sizeField } : {}),
-  }
-}
 import { probeForTestKey, matchModelDefaults } from './provider-probe-adapter.js'
 import { buildProviderKeyRoutes } from './config-routes-keys.js'
 import { buildImageGenerationRoutes } from './image-generation-routes.js'
@@ -203,7 +145,10 @@ function withAuth(handler: RouteHandler, apiToken?: string): RouteHandler {
     if (!isAuthorizedRequest({ body, headers }, apiToken)) {
       return { status: 401, body: { error: 'Unauthorized' } }
     }
-    return handler(body, params, headers, res)
+    try { return await handler(body, params, headers, res) } catch (error) {
+      if (error instanceof EndpointNetworkError) return endpointFailure(error)
+      throw error
+    }
   }
 }
 
@@ -227,6 +172,8 @@ function resolveProviderProbeTarget(
   baseUrlOverride: string | undefined,
   opts?: { allowKeyless?: boolean },
 ): { apiKey: string | undefined; baseUrl: string } | { error: string } {
+  const savedProvider = loadConfig().provider.providers[provider]
+  if (baseUrlOverride) assertCredentialOrigin(savedProvider, baseUrlOverride, apiKey)
   // apiKey 可选：缺省时用该 provider 的存储 Key（keyRef 物化 / apiKeyEnv）——
   // 已配置 provider 上的「拉取模型列表/测试调用」不应要求用户重输 Key。
   let resolvedKey = apiKey
@@ -258,60 +205,11 @@ function resolveProviderProbeTarget(
   return { apiKey: resolvedKey, baseUrl }
 }
 
-interface ParsedVisionCredentials {
-  baseUrl?: string
-  providerName?: string
-  apiKey?: string
-  apiKeyEnv?: string
-  error?: string
-}
-
-/** Resolve only nonblank credential input; env values never leave this boundary.
- * 安全边界：'reject-undeclared'（discover）拒绝一切未在服务端配置中声明的变量名；
- * 'no-resolve-undeclared'（onboard）允许声明新变量名，但本次校验不解析它——
- * 否则调用方可让服务端读出任意环境变量并以密钥发往自选的 baseUrl（机密外泄原语）。 */
-function parseVisionCredentials(
-  body: unknown,
-  options: { envPolicy?: 'reject-undeclared' | 'no-resolve-undeclared' } = {},
-): ParsedVisionCredentials {
-  const { baseUrl, providerName, apiKey, apiKeyEnv } = (body ?? {}) as Record<string, unknown>
-  if (baseUrl !== undefined && typeof baseUrl !== 'string') return { error: 'baseUrl must be a string' }
-  if (providerName !== undefined && typeof providerName !== 'string') return { error: 'providerName must be a string' }
-  if (apiKey !== undefined && typeof apiKey !== 'string') return { error: 'apiKey must be a string' }
-  if (apiKeyEnv !== undefined && typeof apiKeyEnv !== 'string') return { error: 'apiKeyEnv must be a string' }
-
-  const normalizedKey = typeof apiKey === 'string' ? apiKey.trim() : undefined
-  const normalizedEnv = typeof apiKeyEnv === 'string' ? apiKeyEnv.trim() : undefined
-  if (apiKey !== undefined && !normalizedKey) return { error: 'apiKey must not be blank' }
-  if (apiKeyEnv !== undefined && !normalizedEnv) return { error: 'apiKeyEnv must not be blank' }
-  if (normalizedKey && normalizedEnv) return { error: 'apiKey and apiKeyEnv cannot both be set' }
-  if (normalizedEnv && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(normalizedEnv)) {
-    return { error: 'apiKeyEnv must be a valid environment variable name' }
-  }
-  if (options.envPolicy && normalizedEnv && !declaredKeyEnvs().has(normalizedEnv)) {
-    if (options.envPolicy === 'reject-undeclared') {
-      return { error: `Environment variable "${normalizedEnv}" is not declared in the saved provider configuration` }
-    }
-    // 'no-resolve-undeclared'：新变量名只做持久化，本次校验不携带解析出的密钥。
-    return {
-      ...(typeof baseUrl === 'string' && baseUrl.trim() ? { baseUrl: baseUrl.trim() } : {}),
-      ...(typeof providerName === 'string' && providerName.trim() ? { providerName: providerName.trim() } : {}),
-      apiKeyEnv: normalizedEnv,
-    }
-  }
-  const resolvedKey = normalizedKey ?? (normalizedEnv ? process.env[normalizedEnv]?.trim() : undefined)
-  if (normalizedEnv && !resolvedKey) return { error: `Environment variable "${normalizedEnv}" is not set or is blank in the server process` }
-  return {
-    ...(typeof baseUrl === 'string' && baseUrl.trim() ? { baseUrl: baseUrl.trim() } : {}),
-    ...(typeof providerName === 'string' && providerName.trim() ? { providerName: providerName.trim() } : {}),
-    ...(resolvedKey ? { apiKey: resolvedKey } : {}),
-    ...(normalizedEnv ? { apiKeyEnv: normalizedEnv } : {}),
-  }
-}
-
 export type { ProviderListItem } from './config-provider-contract.js'
 
 export interface ConfigRouteHooks {
+  endpointTransport?: Pick<EndpointRequestOptions, 'fetchImpl' | 'lookupImpl'>
+
   onApprovalConfigChanged?: (approval: string) => void
   /** 生图槽配置落盘后的实时生效信号（issue #8）：`generate_image` 的 isEnabled 随槽
    *  配置从 false 翻 true，而工具定义是 agent 构建时快照给 promptEngine 的——不广播的话
@@ -351,6 +249,7 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
           name,
           label: resolvePresetLabel(name) ?? name,
           baseUrl: p.baseUrl,
+          endpointNetworkPolicy: p.endpointNetworkPolicy,
           protocol: p.protocol,
           isDefault: name === defaultName,
           userSaved: p.userSaved === true,
@@ -466,11 +365,11 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
       }
 
       try {
-        setupProvider({ providerName, apiKey, apiKeyEnv, baseUrl, model: parsedModel, models: parsedModels, ...(modelsMode ? { modelsMode } : {}), makeDefault, allowProFallback })
+        setupProvider({ providerName, apiKey, apiKeyEnv, baseUrl, endpointNetworkPolicy: endpointNetworkInput(body, baseUrl ?? loadConfig().provider.providers[providerName]?.baseUrl ?? resolvePresetBaseUrl(providerName) ?? '', providerName).endpointNetworkPolicy, model: parsedModel, models: parsedModels, ...(modelsMode ? { modelsMode } : {}), makeDefault, allowProFallback })
         notifyProviderConfigChanged()
         return { status: 200, body: { ok: true, providerName } }
       } catch (err) {
-        return { status: 400, body: { error: (err as Error).message } }
+        return endpointFailure(err)
       }
     }, apiToken),
 
@@ -525,6 +424,7 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
         registerProvider({
           providerName,
           baseUrl,
+          endpointNetworkPolicy: endpointNetworkInput(body, baseUrl, providerName).endpointNetworkPolicy,
           ...(apiKey ? { apiKey } : {}),
           ...(apiKeyEnv ? { apiKeyEnv } : {}),
           ...(protocol ? { protocol } : {}),
@@ -538,7 +438,7 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
         notifyProviderConfigChanged()
         return { status: 200, body: { ok: true, providerName } }
       } catch (err) {
-        return { status: 400, body: { error: (err as Error).message } }
+        return endpointFailure(err)
       }
     }, apiToken),
 
@@ -571,7 +471,7 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
           },
         }
       } catch (err) {
-        return { status: 400, body: { error: (err as Error).message } }
+        return endpointFailure(err)
       }
     }, apiToken),
 
@@ -583,7 +483,7 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
         notifyProviderConfigChanged()
         return { status: 200, body: { ok: true, removed: name } }
       } catch (err) {
-        return { status: 400, body: { error: (err as Error).message } }
+        return endpointFailure(err)
       }
     }, apiToken),
 
@@ -599,7 +499,7 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
         notifyProviderConfigChanged()
         return { status: 200, body: { ok: true, removed: modelId } }
       } catch (err) {
-        return { status: 400, body: { error: (err as Error).message } }
+        return endpointFailure(err)
       }
     }, apiToken),
 
@@ -614,7 +514,7 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
         notifyProviderConfigChanged()
         return { status: 200, body: { ok: true, keyStatus: getApiKeyStatus(name) } }
       } catch (err) {
-        return { status: 400, body: { error: (err as Error).message } }
+        return endpointFailure(err)
       }
     }, apiToken),
 
@@ -628,7 +528,7 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
         notifyProviderConfigChanged()
         return { status: 200, body: { ok: true, keyStatus: result.keyStatus, secretDeleted: result.secretDeleted } }
       } catch (err) {
-        return { status: 400, body: { error: (err as Error).message } }
+        return endpointFailure(err)
       }
     }, apiToken),
 
@@ -653,6 +553,7 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
         : (stored?.models?.[0]?.id ?? resolvePresetDefaultModel(provider))
       const result = await probeForTestKey({
         baseUrl: target.baseUrl,
+        ...endpointNetworkInput(body, target.baseUrl, provider), ...hooks?.endpointTransport,
         apiKey: target.apiKey,
         protocol: protocol ?? stored?.protocol ?? resolvePresetProtocol(provider),
         providerName: provider,
@@ -715,6 +616,7 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
       const storedModel = stored?.models?.find(candidate => candidate.id === model)
       const report = await probeProvider({
         baseUrl: target.baseUrl, apiKey: target.apiKey,
+        ...endpointNetworkInput(body, target.baseUrl, provider), ...hooks?.endpointTransport,
         protocol: protocol ?? stored?.protocol ?? resolvePresetProtocol(provider),
         providerName: provider, probeModel: model || undefined,
         // 已保存模型按用户声明测试；未声明视觉时保守地只测文本。
@@ -750,7 +652,7 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
         notifyProviderConfigChanged()
         return { status: 200, body: { ok: true, default: name } }
       } catch (err) {
-        return { status: 400, body: { error: (err as Error).message } }
+        return endpointFailure(err)
       }
     }, apiToken),
 
@@ -766,7 +668,7 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
         notifyProviderConfigChanged()
         return { status: 200, body: { ok: true, allowProFallback } }
       } catch (err) {
-        return { status: 400, body: { error: (err as Error).message } }
+        return endpointFailure(err)
       }
     }, apiToken),
 
@@ -797,7 +699,7 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
         const result = setRoutingConfig({ review, workers, council })
         return { status: 200, body: { ok: true, ...result } }
       } catch (err) {
-        return { status: 400, body: { error: (err as Error).message } }
+        return endpointFailure(err)
       }
     }, apiToken),
 
@@ -813,7 +715,7 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
       try {
         return { status: 200, body: { ok: true, ...setEditorConfig({ platform, eol }) } }
       } catch (err) {
-        return { status: 400, body: { error: (err as Error).message } }
+        return endpointFailure(err)
       }
     }, apiToken),
 
@@ -849,7 +751,7 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
           },
         }
       } catch (err) {
-        return { status: 400, body: { error: (err as Error).message } }
+        return endpointFailure(err)
       }
     }, apiToken),
 
@@ -866,7 +768,7 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
       try {
         return { status: 200, body: { ok: true, ...setToolPresetConfig({ preset }) } }
       } catch (err) {
-        return { status: 400, body: { error: (err as Error).message } }
+        return endpointFailure(err)
       }
     }, apiToken),
 
@@ -911,7 +813,7 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
           },
         }
       } catch (err) {
-        return { status: 400, body: { error: (err as Error).message } }
+        return endpointFailure(err)
       }
     }, apiToken),
 
@@ -938,7 +840,7 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
       try {
         return { status: 200, body: { ok: true, ...setDefaultDomainConfig({ defaultDomain, domainKeywordRouting }) } }
       } catch (err) {
-        return { status: 400, body: { error: (err as Error).message } }
+        return endpointFailure(err)
       }
     }, apiToken),
 
@@ -957,7 +859,7 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
         notifyProviderConfigChanged()
         return { status: 200, body: { ok: true, ...result } }
       } catch (err) {
-        return { status: 400, body: { error: (err as Error).message } }
+        return endpointFailure(err)
       }
     }, apiToken),
 
@@ -976,7 +878,7 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
       try {
         return { status: 200, body: { ok: true, ...setCheckpointConfig({ checkpointEveryTurns }) } }
       } catch (err) {
-        return { status: 400, body: { error: (err as Error).message } }
+        return endpointFailure(err)
       }
     }, apiToken),
 
@@ -998,7 +900,7 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
         }
         return { status: 200, body: { ok: true, ...result } }
       } catch (err) {
-        return { status: 400, body: { error: (err as Error).message } }
+        return endpointFailure(err)
       }
     }, apiToken),
 
@@ -1015,7 +917,7 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
       try {
         return { status: 200, body: { ok: true, ...setNetworkConfig({ proxy, noProxy }) } }
       } catch (err) {
-        return { status: 400, body: { error: (err as Error).message } }
+        return endpointFailure(err)
       }
     }, apiToken),
 
@@ -1033,7 +935,7 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
       try {
         return { status: 200, body: { ok: true, ...setFetchConfig(input) } }
       } catch (err) {
-        return { status: 400, body: { error: (err as Error).message } }
+        return endpointFailure(err)
       }
     }, apiToken),
 
@@ -1051,7 +953,7 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
       try {
         return { status: 200, body: { ok: true, ...setSearchConfig(input) } }
       } catch (err) {
-        return { status: 400, body: { error: (err as Error).message } }
+        return endpointFailure(err)
       }
     }, apiToken),
 
@@ -1064,7 +966,7 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
         const keyStatus = setSearchApiKey(backend, apiKey ?? '')
         return { status: 200, body: { ok: true, backend, keyStatus } }
       } catch (err) {
-        return { status: 400, body: { error: (err as Error).message } }
+        return endpointFailure(err)
       }
     }, apiToken),
 
@@ -1079,7 +981,7 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
       try {
         return { status: 200, body: { ok: true, mirrors: setMirrorConfig(body ?? {}) } }
       } catch (err) {
-        return { status: 400, body: { error: (err as Error).message } }
+        return endpointFailure(err)
       }
     }, apiToken),
 
@@ -1093,7 +995,7 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
       try {
         return { status: 200, body: { ok: true, prDefaults: setPrDefaultsConfig(body ?? {}) } }
       } catch (err) {
-        return { status: 400, body: { error: (err as Error).message } }
+        return endpointFailure(err)
       }
     }, apiToken),
 
@@ -1177,13 +1079,14 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
           },
         }
       } catch (err) {
-        return { status: 400, body: { error: (err as Error).message } }
+        return endpointFailure(err)
       }
     }, apiToken),
 
     // 授权/权限类路由（bash 白名单 + path-grants）外提到 config-routes-permissions.ts
     // ——config-routes.ts 是点名巨石（source-budgets ceiling），按接缝外提。
     ...buildPermissionRoutes(apiToken),
+    ...buildEndpointNetworkRoutes(apiToken),
 
     // Revoke an app's "always allow" grant. App name in body (may contain
     // spaces/unicode — avoids URL-encoding pitfalls in path params).
@@ -1209,7 +1112,7 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
         const saved = setVisionModelConfig(config as Record<string, unknown> | null)
         return { status: 200, body: { ok: true, config: saved } }
       } catch (err) {
-        return { status: 400, body: { error: (err as Error).message } }
+        return endpointFailure(err)
       }
     }, apiToken),
 
@@ -1220,12 +1123,13 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
       try {
         const result = await discoverVisionModels({
           baseUrl,
+          ...endpointNetworkInput(body, baseUrl, providerName),
           ...(apiKey ? { apiKey } : {}),
           ...(providerName ? { providerName } : {}),
         })
         return { status: 200, body: result }
       } catch (err) {
-        return { status: 400, body: { error: (err as Error).message } }
+        return endpointFailure(err)
       }
     }, apiToken),
 
@@ -1239,14 +1143,17 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
         return { status: 400, body: { error: 'modelId is required' } }
       }
       try {
+        const network = endpointNetworkInput(body, baseUrl, providerName)
         await validateVisionModel({
           baseUrl,
+          ...network,
           ...(apiKey ? { apiKey } : {}),
           providerName,
           modelId: modelId.trim(),
         })
         const config = registerVisionModelConfig({
           providerName,
+          endpointNetworkPolicy: network.endpointNetworkPolicy,
           baseUrl,
           // apiKeyEnv resolves only for the upstream validation request; config persists its name.
           ...(apiKey && !apiKeyEnv ? { apiKey } : {}),
@@ -1255,7 +1162,7 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
         })
         return { status: 200, body: { ok: true, config } }
       } catch (err) {
-        return { status: 400, body: { error: (err as Error).message } }
+        return endpointFailure(err)
       }
     }, apiToken),
 
@@ -1288,7 +1195,7 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
         try { hooks?.onImageGenConfigChanged?.() } catch { /* 广播失败不影响落盘结果 */ }
         return { status: 200, body: { ok: true, config: saved } }
       } catch (err) {
-        return { status: 400, body: { error: (err as Error).message } }
+        return endpointFailure(err)
       }
     }, apiToken),
 
@@ -1306,14 +1213,14 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
           ...(typeof (body as { size?: unknown })?.size === 'string' ? { size: (body as { size: string }).size } : {}),
           ...(parsed.sizeField ? { sizeField: parsed.sizeField } : {}),
           timeoutMs: 60_000,
-          ...imageGenerationNetwork(loadConfig()),
+          ...endpointNetworkInput(body, parsed.baseUrl, parsed.providerName),
         })
         return {
           status: 200,
           body: { ok: true, bytes: result.bytes.length, mimeType: result.mimeType, source: result.source },
         }
       } catch (err) {
-        return { status: 400, body: { error: (err as Error).message } }
+        return endpointFailure(err)
       }
     }, apiToken),
 
@@ -1323,6 +1230,7 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
       if (parsed.error) return { status: 400, body: { error: parsed.error } }
       try {
         const config = registerImageGenModelConfig({
+          endpointNetworkPolicy: endpointNetworkInput(body, parsed.baseUrl, parsed.providerName).endpointNetworkPolicy,
           providerName: parsed.providerName as string,
           baseUrl: parsed.baseUrl,
           ...(parsed.rawApiKey ? { apiKey: parsed.rawApiKey } : {}),
@@ -1333,7 +1241,7 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
         try { hooks?.onImageGenConfigChanged?.() } catch { /* 广播失败不影响落盘结果 */ }
         return { status: 200, body: { ok: true, config } }
       } catch (err) {
-        return { status: 400, body: { error: (err as Error).message } }
+        return endpointFailure(err)
       }
     }, apiToken),
 
@@ -1348,7 +1256,7 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
         const saved = setGreetingConfig(config as Record<string, unknown> | null)
         return { status: 200, body: { ok: true, config: saved } }
       } catch (err) {
-        return { status: 400, body: { error: (err as Error).message } }
+        return endpointFailure(err)
       }
     }, apiToken),
 
@@ -1366,7 +1274,7 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
       try {
         return { status: 200, body: { ok: true, ...setDeliveryConfig({ autoCommit }) } }
       } catch (err) {
-        return { status: 400, body: { error: (err as Error).message } }
+        return endpointFailure(err)
       }
     }, apiToken),
 

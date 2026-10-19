@@ -34,15 +34,14 @@ export interface WindowsErrorContext {
   command: string
 }
 
-function recoveryHint(body: string, command: string): string {
-  const name = extractMissingCommand(body, command)
-  const lower = name.toLowerCase()
-  if (lower === 'python' || lower === 'python3') {
-    return `命令未找到：'${name}' → Windows 上用 'py'（Python launcher），不要重试同一条命令`
+function recoveryHint(body: string, command: string, exitCode: number): string {
+  if (exitCode === 126) {
+    return '命令不可执行：核对文件权限、解释器与文件格式，不将其当作命令未安装，也不直接提权重试。'
   }
-  const installHint = buildNotFoundHint(name, 'win32')
-  if (installHint) {
-    return `命令未找到：'${name}'${installHint}`
+  const name = extractMissingCommand(body, command)
+  const entryHint = buildNotFoundHint(name, 'win32')
+  if (entryHint) {
+    return `命令未找到：'${name}'${entryHint}`
   }
   return `命令未找到：'${name}' → 此环境不可识别该命令，换用可用工具/跨平台命令，不要重试同一条`
 }
@@ -74,7 +73,7 @@ export function denoiseWindowsError(output: string, ctx: WindowsErrorContext): s
   let body = compact.join('\n').trim()
 
   if (ctx.errorClass === 'environment') {
-    const hint = recoveryHint(body, ctx.command)
+    const hint = recoveryHint(body, ctx.command, ctx.exitCode)
     body = body ? `${hint}\n${body}` : hint
   }
 

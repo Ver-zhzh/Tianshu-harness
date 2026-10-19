@@ -2006,3 +2006,13 @@ test('custom flow diy-name step subtitle acknowledges updating existing provider
   assert.match(nameView.subtitle ?? '', /更新.*服务商/)
   assert.match(nameView.subtitle ?? '', /同步默认 Key/)
 })
+
+test('private endpoint recovery requires an explicit choice and consent is bound to its origin', () => {
+  const flow = new ConnectFlow(); toProbe(flow, { url: 'http://127.0.0.1:1234/v1', key: '' })
+  assert.deepEqual(flow.endpointAccess('http://127.0.0.1:1234/v1'), {})
+  flow.probeFailed('endpoint_private_network_denied')
+  assert.ok(flow.view().options?.some(option => option.id === 'allow-private'))
+  assert.equal(flow.submitChoice('allow-private').kind, 'probe')
+  assert.equal(flow.endpointAccess('http://127.0.0.1:1234/v2').allowPrivateNetwork, true)
+  assert.deepEqual(flow.endpointAccess('http://127.0.0.1:1235/v1'), {})
+})

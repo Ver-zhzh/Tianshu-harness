@@ -26,7 +26,9 @@ installEpermFilter()
 // start when it cannot. No-op outside a staged layout (tsx dev runs).
 assertStagedRuntimeIntact(dirname(fileURLToPath(import.meta.url)))
 
-import { bootstrapInteractiveSession, createShutdownHandler, switchAgentRuntime, restorePlanModeFromMeta, getOrCreateSessionId, wasSessionResumed, initializeMcp } from './bootstrap.js'
+import { bootstrapInteractiveSession, createShutdownHandler, switchAgentRuntime, restorePlanModeFromMeta, getOrCreateSessionId, wasSessionResumed, initializeMcp, wireFrozenSnapshotPersist } from './bootstrap.js'
+import { loadUserInstructions } from './config/user-instructions.js'
+import { UserInstructionsError } from './prompt/user-instructions.js'
 import type { BootstrapContext, RuntimeRefs } from './bootstrap.js'
 import { resolveCapabilities, resolveEffortChoices, normalizeReasoningEffort } from './api/provider.js'
 import type { ModelPickerEntry } from './tui/format/overlay.js'
@@ -517,6 +519,7 @@ async function main() {
     const { TokenLedgerService } = await import('./token-ledger/service.js')
     const headlessLedger = new TokenLedgerService(cfg)
     headlessLedger.startAutoSync()
+    const instructionsRuntime: { agent?: import('./agent/loop.js').AgentLoop } = {}
     const result = await runHeadless({
       prompt: effectivePrompt,
       json: parsed.json,
@@ -525,6 +528,10 @@ async function main() {
       model: model.id,
       eventSink: eventStream?.sink,
       createAgent: () => {
+        const userInstructions = loadUserInstructions(cfg.agent.userInstructions)
+        const instructionsPersist = new SessionPersist(sessionId, process.cwd())
+        const useInstructionsPersistence = userInstructions.state === 'active' || instructionsPersist.hasUserInstructionsSnapshot()
+        const instructionsFrozen = useInstructionsPersistence && wasSessionResumed() ? instructionsPersist.readFrozenSnapshot() : undefined
         const toolRegistry = createDefaultToolRegistry([], registryOptions)
 
         // Register plugin tools (loaded during startup, already conflict-checked)
@@ -588,6 +595,10 @@ async function main() {
         // 注意：必须在 createAgentConfig（取 toolDefinitions）之前注册，
         // 否则模型看不到工具定义——registry 有但 prompt 里没有，工具"不在线"。
         const headlessCoordinator = createHeadlessCoordinator({
+          getUserInstructions: () => {
+            if (!headlessAgentRef.current) throw new UserInstructionsError('user_instructions_boundary_required', '主控尚未发布规则，不能派发 worker。')
+            return headlessAgentRef.current.config.promptEngine.getUserInstructionsForDispatch()
+          },
           toolRegistry,
           provider: prov,
           providerName: provName,
@@ -645,6 +656,8 @@ async function main() {
           ? goalBudget
           : Math.max(1, Number(process.env.RIVET_HEADLESS_MAX_TURNS) || 15)
         const agentCfg = createAgentConfig(createMainAgentConfigInput({
+          userInstructions,
+          inheritFrozenFrom: instructionsFrozen,
           apiKey: key,
           meridianIndexer: headlessIndexer,
           model: { id: model.id, maxTokens: model.maxTokens, contextWindow: model.contextWindow, reasoningEffort: model.reasoningEffort, capabilities: model.capabilities, supportsVision: model.supportsVision },
@@ -672,6 +685,12 @@ async function main() {
         // 注：未设 headless: true 是另一件事——它还会联动 tool-pipeline 的审批自动
         // 放行/拒绝分支，属独立改动，不在此处顺手改。
         const agent = new AgentLoop({ ...agentCfg, toolRegistry, zen: undefined, maxTurns: headlessMaxTurns }, session, process.cwd())
+        if (useInstructionsPersistence) {
+          wireFrozenSnapshotPersist(instructionsPersist, agentCfg.promptEngine)
+          const execution = agentCfg.promptEngine.getExecutionSnapshot()
+          if (execution) agentCfg.client.restoreExecutionSnapshot?.(execution)
+          instructionsRuntime.agent = agent
+        }
         headlessAgentRef.current = agent
         agent.config.coordinatorRef = () => headlessCoordinator
 
@@ -728,6 +747,7 @@ async function main() {
     // 尾段（TUI 侧同一份清理挂在 shutdown() 的 cleanup 列表上，无头分支不走
     // shutdown）。finally 同时覆盖 runHeadless 抛错的情形——异常路径也要收尾。
     }).finally(async () => {
+      await instructionsRuntime.agent?.drainPersistWrites()
       try { await eventStream?.close() } finally { await headlessLedger.shutdownFlush() }
     })
 

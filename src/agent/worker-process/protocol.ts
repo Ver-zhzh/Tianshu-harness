@@ -54,6 +54,7 @@ export interface SerializedWorkerConfig {
 }
 
 export interface WorkerChildInitPayload {
+  userInstructions: import('../../prompt/user-instructions.js').UserInstructionsSnapshot
   proAuthorization?: import('../../api/managed-pro-authorization.js').ManagedProAuthorization
   config: SerializedWorkerConfig
   /** 主会话 persist.buildMemoryBlock() 快照——子进程 promptEngine 的会话记忆块。 */

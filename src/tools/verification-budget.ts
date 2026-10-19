@@ -10,7 +10,7 @@ export function runTestsTimeoutMs(params?: ToolCallParams): number {
 }
 
 export function verificationBudgetStop(command: RunnableTestCommand, startedAt: number, reason: 'timeout' | 'cancelled'): ToolResult {
-  const content = reason === 'timeout' ? '验证总预算已耗尽，未启动后续阶段。' : '测试已被用户中止，未取得完整验证证据。'
+  const content = reason === 'timeout' ? '验证总预算已耗尽（超时），未启动后续阶段。' : '测试已被用户中止，未取得完整验证证据。'
   return {
     content, isError: true, ...(reason === 'timeout' ? { errorKind: 'timeout' as const } : {}),
     verification: {

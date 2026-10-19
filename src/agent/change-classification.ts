@@ -348,3 +348,18 @@ export function createGitDiffProvider(
 export function isMechanicalFastPathEnabled(reviewConfig?: { mechanicalFastPath?: boolean }): boolean {
   return reviewConfig?.mechanicalFastPath !== false
 }
+
+/** Preload Git data asynchronously; classification itself only reads immutable strings. */
+export async function createGitDiffProviderAsync(cwd: string, files: readonly string[], dirtyFiles?: readonly string[], signal?: AbortSignal): Promise<DiffProvider> {
+  if (files.every(isDocsOrTestFile)) return { nameStatus: () => '', filePatch: () => '' }
+  const { gitCommand } = await import('../tools/git-command.js')
+  const listed = await gitCommand(cwd, ['-c', 'core.quotePath=false', 'ls-files', '-z', '--', ...files], { signal, timeoutMs: 5000 })
+  const tracked = new Set(listed.status === 0 ? listed.stdout.split('\0') : [])
+  const names = await gitCommand(cwd, ['-c', 'core.quotePath=false', 'diff', '-M', '--name-status', 'HEAD', '--', ...(dirtyFiles?.length ? dirtyFiles : files)], { signal })
+  const patches = new Map<string, string>()
+  for (const file of files) if (!isDocsOrTestFile(file) && tracked.has(file)) {
+    const result = await gitCommand(cwd, ['-c', 'core.quotePath=false', 'diff', 'HEAD', '--', file], { signal })
+    patches.set(file, result.status === 0 ? result.stdout : '')
+  }
+  return { nameStatus: () => names.status === 0 ? names.stdout : '', filePatch: file => patches.get(file) ?? '' }
+}

@@ -48,6 +48,7 @@ describe('image-gen client — request shape (issue #8 协议分歧吸收点)', 
       model: 'gpt-image-1',
       prompt: 'a red circle',
       size: '1024x1024',
+      lookupImpl: PUBLIC_LOOKUP,
       fetchImpl,
     })
 
@@ -97,6 +98,7 @@ describe('image-gen client — request shape (issue #8 协议分歧吸收点)', 
       apiKey: 'sk-test',
       model: 'flux',
       prompt: 'x',
+      lookupImpl: PUBLIC_LOOKUP,
       fetchImpl,
     })
     assert.equal(captured().url, 'http://localhost:3000/api/v1/images/generations')
@@ -113,6 +115,7 @@ describe('image-gen client — request shape (issue #8 协议分歧吸收点)', 
       apiKey: 'sk-secret',
       model: 'gpt-image-1',
       prompt: 'x',
+      lookupImpl: PUBLIC_LOOKUP,
       fetchImpl,
     })
     assert.equal(auth, 'Bearer sk-secret')
@@ -243,9 +246,9 @@ describe('image-gen client — SSRF 预检（审查修复）', () => {
       () => generateImage({
         baseUrl: 'https://api.siliconflow.com/v1', apiKey: 'k', model: 'flux', prompt: 'x',
         fetchImpl,
-        lookupImpl: async () => ({ address: '169.254.169.254', family: 4 }),
+        lookupImpl: PUBLIC_LOOKUP,
       }),
-      /reserved IP|Access denied/i,
+      /endpoint_reserved_address_denied/i,
     )
     assert.equal(downloadAttempted, false, '预检必须在下载之前生效，而不是下载后再判断')
   })
@@ -334,10 +337,10 @@ describe('image-gen client — 超时覆盖 body 读取（审查修复）', () =
   it('body 挂起时按 timeoutMs 中止，而不是无限等待', { timeout: 5_000 }, async () => {
     await assert.rejects(
       () => generateImage({
-        baseUrl: hangingBase, apiKey: 'k', model: 'flux', prompt: 'x',
+        baseUrl: hangingBase, endpointNetworkPolicy: { origin: new URL(hangingBase).origin, allowPrivateNetwork: true }, apiKey: 'k', model: 'flux', prompt: 'x',
         timeoutMs: 400,
       }),
-      /timed out after 400ms/,
+      /endpoint_timeout/,
     )
   })
 })
@@ -351,7 +354,8 @@ describe('image-gen client — 字节上限（审查修复）', () => {
     await assert.rejects(
       () => generateImage({
         baseUrl: 'https://api.openai.com/v1', apiKey: 'k', model: 'gpt-image-1', prompt: 'x',
-        fetchImpl, maxBytes: 1024,
+        lookupImpl: PUBLIC_LOOKUP,
+      fetchImpl, maxBytes: 1024,
       }),
       /too large|上限/i,
     )
@@ -377,6 +381,7 @@ describe('image-gen client — 字节上限（审查修复）', () => {
     const { fetchImpl } = captureOnce(jsonResponse({ data: [{ b64_json: PNG_B64 }] }))
     const result = await generateImage({
       baseUrl: 'https://api.openai.com/v1', apiKey: 'k', model: 'gpt-image-1', prompt: 'x',
+      lookupImpl: PUBLIC_LOOKUP,
       fetchImpl, maxBytes: 1024 * 1024,
     })
     assert.equal(result.source, 'b64_json')

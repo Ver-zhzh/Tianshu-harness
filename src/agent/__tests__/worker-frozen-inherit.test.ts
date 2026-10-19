@@ -287,7 +287,7 @@ describe('OOP 协议面冻结快照往返', () => {
     const cfg = {
       order: { id: 'wo_echo', objective: 'echo', profile: 'code_scout', allowedTools: ['read_file'], budget: { maxTurns: 3, maxTokens: 1000, wallClockMs: 60_000, inputTokens: 10_000, outputTokens: 2_000 } } as unknown as WorkOrder,
       client: {} as WorkerSessionConfig['client'],
-      promptEngine: {} as WorkerSessionConfig['promptEngine'],
+      promptEngine: new PromptEngine({ model: 'deepseek-v4-flash', maxTokens: 4096, staticCtx: { tools: [] }, volatileCtx: { cwd: dir } }),
       toolRegistry: new ToolRegistry(),
       cwd: process.cwd(),
       maxTurns: 3,

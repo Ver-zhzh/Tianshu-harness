@@ -181,7 +181,8 @@ describe('plan_task execute:true 脱离等待（detach）', () => {
       const content = String(result.content)
       assert.match(content, /已转入后台继续执行/, '指引文案：转后台')
       assert.match(content, new RegExp(deriveTeamGroupId(objective)), '指引含 checkpoint 组 id')
-      assert.match(content, /fromWave=N/, '保留续跑指引')
+      assert.match(content, /不要再次派发/, '后台仍在执行时不指导重复启动')
+      assert.doesNotMatch(content, /executePlanWaves fromWave=N/, '内部 API 不是模型可调用的续跑工具')
 
       // ② 核心断言：派发给 worker 的 abortSignal 没有因超时触发——编排不被斩杀。
       // 后台编排链（executePlan→runTeamSkeleton→dispatchWaveAt）有几个异步跳，

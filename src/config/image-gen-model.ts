@@ -3,6 +3,7 @@ import { loadConfig, saveConfig } from './manager.js'
 import { writeSecret } from './secrets-store.js'
 import { modelConfigSchema, type Config, type ProviderConfig } from './schema.js'
 import { imageGenModelSchema, type ImageGenModelConfigSnapshot } from './image-gen-schema.js'
+import { boundEndpointPolicy } from './endpoint-network-schema.js'
 
 /**
  * 生图模型的读取与独立 provider 注册（issue #8）。
@@ -76,6 +77,7 @@ export function setImageGenModelConfig(
 }
 
 export interface RegisterImageGenModelConfigOptions {
+  endpointNetworkPolicy?: ProviderConfig['endpointNetworkPolicy']
   providerName: string
   baseUrl: string
   apiKey?: string
@@ -140,6 +142,7 @@ export function registerImageGenModelConfig(
     ...(apiKey ? { keyRef: providerName } : {}),
     ...(apiKeyEnv ? { apiKeyEnv } : {}),
     baseUrl: options.baseUrl,
+    endpointNetworkPolicy: boundEndpointPolicy(options.endpointNetworkPolicy ?? (cfg.provider.providers[providerName]?.endpointNetworkPolicy?.origin === new URL(options.baseUrl).origin ? cfg.provider.providers[providerName]?.endpointNetworkPolicy : undefined), options.baseUrl),
     protocol: 'openai',
     capabilities: {},
     thinking: 'enabled',

@@ -13,6 +13,7 @@ import { standardPromptBlocks, type PromptBlockPolicy } from './block-policy.js'
 import { projectInstructionsAllowed, projectStateAllowed } from '../config/project-trust.js'
 
 export interface SnapshotInput {
+  userInstructions?: import('./user-instructions.js').UserInstructionsSnapshot
   cwd: string
   /** 前缀块策略（缺省 = standard，与历史行为逐字节一致）。
    *  只作用于参考类块；行为护栏不受它影响，见 block-policy.ts。 */
@@ -102,6 +103,7 @@ export function createVolatileSnapshot(input: SnapshotInput): VolatileContext {
   )
 
   return Object.freeze({
+    userInstructions: input.userInstructions,
     cwd: input.cwd,
     blockCaps: policy.caps,
     blockToggles: policy.blocks,

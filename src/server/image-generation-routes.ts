@@ -1,16 +1,17 @@
+import { endpointNetworkInput, endpointFailure } from './endpoint-network-input.js'
 import { realpath } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { withAuth } from './routes.js'
 import { allowedCorsOrigin } from './cors.js'
 import type { RouteHandler } from './index.js'
 import type { ImageGenerationParameters } from './protocol.js'
-import { resolveImageGeneration, imageSizeSchema, imageGenerationNetwork } from '../api/image-generation-parameters.js'
-import { loadConfig } from '../config/manager.js'
+import { resolveImageGeneration, imageSizeSchema } from '../api/image-generation-parameters.js'
 import type { ImageGenerationInput } from '../api/image-generation-service.js'
 import { z } from 'zod'
 import { imageGenerationService, type ImageGenerationService } from '../api/image-generation-service.js'
 
 const draftSchema = z.object({
+  allowPrivateNetwork: z.boolean().optional(), proxyDns: z.enum(['local-check', 'trusted-proxy']).optional(),
   baseUrl: z.string().trim().url(), modelId: z.string().trim().min(1), providerName: z.string().trim().optional(),
   // 注意：draft 故意不支持 apiKeyEnv。请求体里的变量名若被服务端直接解析，
   // 任意环境变量值会被当作 Bearer 密钥发往调用方自选的 baseUrl（机密外泄原语）。
@@ -28,7 +29,7 @@ export function buildImageGenerationRoutes(apiToken?: string, knownWorkspaces: (
       const known = await Promise.all(knownWorkspaces().map(path => realpath(path).catch(() => '')))
       if (!known.includes(cwd)) return { status: 403, body: { error: 'Workspace is not registered' } }
       return await handler(cwd, data, params ?? {}, headers ?? {}, res)
-    } catch (error) { return { status: 400, body: { error: (error as Error).message } } }
+    } catch (error) { return endpointFailure(error) }
   }, apiToken)
   return {
     'POST /image-generations': scoped(async (cwd, data) => {
@@ -42,7 +43,7 @@ export function buildImageGenerationRoutes(apiToken?: string, knownWorkspaces: (
         const url = new URL(baseUrl)
         if (!['https:', 'http:'].includes(url.protocol) || !model) throw new Error('Enter an endpoint and model')
         const size = typeof draft.size === 'string' && draft.size ? draft.size : undefined
-        selected = { parameters: { provider: String(draft.providerName ?? 'test'), model, prompt: 'a yellow rubber duck on a white background', size, sizeField: draft.sizeField === 'image_size' ? 'image_size' : 'size', timeoutMs: 180_000 }, connection: { baseUrl, apiKey: typeof draft.apiKey === 'string' && draft.apiKey ? draft.apiKey : undefined, ...imageGenerationNetwork(loadConfig()) } }
+        selected = { parameters: { provider: String(draft.providerName ?? 'test'), model, prompt: 'a yellow rubber duck on a white background', size, sizeField: draft.sizeField === 'image_size' ? 'image_size' : 'size', timeoutMs: 180_000 }, connection: { baseUrl, apiKey: typeof draft.apiKey === 'string' && draft.apiKey ? draft.apiKey : undefined, ...endpointNetworkInput(draft, baseUrl) } }
       } else selected = resolveImageGeneration({ ...raw, ...(origin === 'test' ? { prompt: 'a yellow rubber duck on a white background' } : {}) })
       const requestId = z.string().min(1).max(200).parse(data.requestId)
       const record = await service.start({ cwd, requestId, origin, ...selected, ...(typeof data.sessionId === 'string' ? { sessionId: data.sessionId } : {}) })

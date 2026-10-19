@@ -6,6 +6,7 @@ export interface ProviderListItem {
   userSaved?: boolean
   name: string
   label: string
+  endpointNetworkPolicy?: { origin: string; allowPrivateNetwork?: boolean; proxyDns?: 'local-check' | 'trusted-proxy'; proxyOrigin?: string }
   baseUrl: string
   protocol: ProviderProtocol
   isDefault: boolean

@@ -37,9 +37,7 @@ import { rememberGoalInputs } from './goal-rollover-inputs.js'
 import type { AgentCallbacks, ApprovalMode } from '../agent/loop-types.js'
 import { touchActivity, setActivityPhase, beginRun as beginActivityRun, finishRun as finishActivityRun, withActivityRun } from '../agent/stall-observer.js'
 import { randomUUID } from 'node:crypto'
-import { describeFailure } from '../api/failure-scope.js'
-import { errorRecoveryGuidance } from '../api/error-classifier.js'
-import { isColdStartEvidenceError, continuityFailureDetails } from '../api/continuation-prefix.js'
+import { sessionFailureFields } from './session-failure-fields.js'
 import { debugLog } from '../utils/debug.js'
 import { collectPostBoundaryEditIds, type BlockedRewindFile } from '../agent/file-history.js'
 import { makeOwnershipGuard } from '../agent/checkpoint.js'
@@ -2783,28 +2781,7 @@ export class RuntimeSessionManager {
     return this.persistence?.healthSnapshot?.() ?? { failedSessions: 0, pendingEvents: 0 }
   }
 
-  /**
-   * 失败呈现字段（PLAN §3）：能判定时才附 scope/kind，未知类别不假装知道。
-   * 供 error 事件携带，桌面据此按「断网 / DNS-代理-TLS / 鉴权 / 限流 / 服务端」呈现。
-   * guidance = errorRecoveryGuidance 的「下一步」指引（此前只有 TUI 消费，
-   * 桌面 error 块只有类别标签 + 原文）；AbortError 是用户动作不是故障，不给指引。
-   */
-  private failureFields(err: unknown): { scope?: 'local' | 'provider'; kind?: string; guidance?: string; continuity?: ReturnType<typeof continuityFailureDetails> } {
-    try {
-      // resume 证据门（冷启动证据缺失）：不是故障，是待用户抉择——kind 供桌面渲染
-      // 「以当前配置继续」动作，guidance 说清代价（缓存全量重建一次）。
-      if (isColdStartEvidenceError(err)) return { kind: 'cold_start_evidence', guidance: '可显式开始新会话；或点「以当前配置继续」放弃连续性证明——缓存将全量重建一次，之后恢复正常。' }
-      if (continuityFailureDetails(err)) return { scope: 'local', kind: 'continuity_projection', continuity: continuityFailureDetails(err), guidance: errorRecoveryGuidance(err) }
-      const f = describeFailure(err)
-      const guidance = err instanceof Error && err.name === 'AbortError'
-        ? undefined
-        : errorRecoveryGuidance(err)
-      return {
-        ...(f.category === 'unknown' && f.kind === 'other' ? {} : { scope: f.scope, kind: f.kind }),
-        ...(guidance ? { guidance } : {}),
-      }
-    } catch { return {} }
-  }
+  private failureFields(err: unknown) { return sessionFailureFields(err) }
 
   async continuityRecovery(id: string, recoveryId?: string) {
     const session = this.sessions.get(id)

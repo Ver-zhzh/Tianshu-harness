@@ -438,6 +438,12 @@ export const APPENDIX_SURFACES: readonly InjectionSurface[] = [
  */
 export const CHANNEL_SURFACES: readonly InjectionSurface[] = [
   {
+    id: 'trailer.user-instructions', channel: 'trailer-frozen', cost: 'boundary-rebuild', volatility: 'session-constant',
+    producer: 'renderUserInstructions()',
+    anchor: { file: 'src/prompt/volatile.ts', symbol: 'renderUserInstructions(ctx.userInstructions, ctx.userInstructionsRevoked)' },
+    note: '用户显式启用的常驻规则或停用标记；独立完整预算含分隔符最多 1024 字符。会话冻结、按新输入边界发布，历史不改写，每个历史用户边界仍有上下文成本；无额外模型调用。',
+  },
+  {
     id: 'tool-result.verification-guidance', channel: 'tool-result', cost: 'append-tail', volatility: 'per-turn',
     producer: 'bashVerification.userGuidance',
     anchor: { file: 'src/agent/tool-pipeline.ts', symbol: '[验证反馈]' },
@@ -581,6 +587,8 @@ export const INJECTION_SURFACES: readonly InjectionSurface[] = [
  * 改字节 0 之后的字节，整段前缀每轮失效。
  */
 export const FROZEN_KEEP_FIELDS: readonly string[] = [
+  'userInstructions',
+  'userInstructionsRevoked',
   'workspaceRoots',
   'activeDomain',
   'cwdRelation',

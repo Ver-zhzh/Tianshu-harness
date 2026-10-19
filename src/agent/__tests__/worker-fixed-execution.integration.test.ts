@@ -1,3 +1,4 @@
+import { DISABLED_USER_INSTRUCTIONS } from '../../prompt/user-instructions.js'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs'
@@ -73,7 +74,7 @@ test('real worker network exception retains partial transcript and never re-ente
 test('headless dispatch checks the latest root credential principal at the actual HTTP boundary', async () => fetched(async calls => {
   let reads = 0
   const cfg = configSchema.parse({ provider: { default: provider.name, providers: { 'third-party': provider } } })
-  const coordinator = createHeadlessCoordinator({ toolRegistry: new ToolRegistry(), provider, providerName: provider.name, currentModelId: 'exact-main',
+  const coordinator = createHeadlessCoordinator({ getUserInstructions: () => DISABLED_USER_INSTRUCTIONS, toolRegistry: new ToolRegistry(), provider, providerName: provider.name, currentModelId: 'exact-main',
     config: cfg, apiKey: 'fixture', cwd: root, sessionId: 'headless-root', getRootCredentialPrincipal: () => { reads++; return 'different-root-principal' } })
   try {
     const run = await coordinator.delegate({ parentTurnId: 'headless-task', objective: 'Inspect the exact credential owner inherited from the root headless session', kind: 'code_search', profile: 'code_scout', scope: {} })
@@ -136,7 +137,7 @@ test('isolated entry unavailable never falls back to in-process worker', async (
 
 test('fixed unavailable binding is blocked before worker startup; no recommendation or HTTP', async () => fetched(async calls => {
   const cfg = configSchema.parse({ provider: { providers: { [provider.name]: provider }, default: provider.name }, agent: { review: { profiles: { code_scout: { provider: 'deleted-provider', model: 'deleted-model' } } } } })
-  const runtime = createWorkerRuntimeFactory(() => ({ config: cfg, cwd: root, provider, apiKey: 'fixture', auth: undefined, currentModelId: 'exact-main', rootSessionId: 'blocked-binding', listActiveClaims: () => [], sessionMemoryBlock: () => undefined, domainKnowledgeStore: undefined, writeProfiles: [] }))
+  const runtime = createWorkerRuntimeFactory(() => ({ getUserInstructions: () => DISABLED_USER_INSTRUCTIONS, config: cfg, cwd: root, provider, apiKey: 'fixture', auth: undefined, currentModelId: 'exact-main', rootSessionId: 'blocked-binding', listActiveClaims: () => [], sessionMemoryBlock: () => undefined, domainKnowledgeStore: undefined, writeProfiles: [] }))
   const registry = new ToolRegistry()
   for (const name of profileRegistry.get('code_scout')!.allowedTools) registry.register({ definition: { name, description: 'fixture', input_schema: { type: 'object', properties: {} } }, execute: async () => ({ content: '' }), requiresApproval: () => false, isConcurrencySafe: () => true, isEnabled: () => true })
   let starts = 0
@@ -152,7 +153,7 @@ test('fixed unavailable binding is blocked before worker startup; no recommendat
 test('actual coordinator starts a failed worker once; new nonce cannot repeat it while a sibling remains independent', async () => fetched(async calls => {
   const cfg = configSchema.parse({ provider: { providers: { [provider.name]: provider }, default: provider.name } })
   const rootSessionId = 'single-start-parent'
-  const runtime = createWorkerRuntimeFactory(() => ({ config: cfg, cwd: root, provider, apiKey: 'fixture', auth: undefined, currentModelId: 'exact-main', rootSessionId, listActiveClaims: () => [], sessionMemoryBlock: () => undefined, domainKnowledgeStore: undefined, writeProfiles: [] }))
+  const runtime = createWorkerRuntimeFactory(() => ({ getUserInstructions: () => DISABLED_USER_INSTRUCTIONS, config: cfg, cwd: root, provider, apiKey: 'fixture', auth: undefined, currentModelId: 'exact-main', rootSessionId, listActiveClaims: () => [], sessionMemoryBlock: () => undefined, domainKnowledgeStore: undefined, writeProfiles: [] }))
   const registry = new ToolRegistry()
   for (const name of profileRegistry.get('code_scout')!.allowedTools) registry.register({ definition: { name, description: 'fixture', input_schema: { type: 'object', properties: {} } }, execute: async () => ({ content: '' }), requiresApproval: () => false, isConcurrencySafe: () => true, isEnabled: () => true })
   let starts = 0

@@ -1,4 +1,4 @@
-import { prepareCompletionCapture } from './test-completion.js'
+import { prepareCompletionCaptureAsync } from './test-completion-async.js'
 import { classifyVerificationCommand, verificationArgv, shellWord } from './verification-command.js'
 import { applyBatchCounts, formatTestCounts } from './test-output-counts.js'
 import { DisplayOutputBuffer } from './display-output-buffer.js'
@@ -443,7 +443,7 @@ const defaultRunTestDeps: RunTestCommandDeps = {
   createDecoder: () => new WinStreamDecoder(),
 }
 
-export function runTestCommandIn(
+export async function runTestCommandIn(
   cwd: string,
   testCommand: RunnableTestCommand,
   params: ToolCallParams,
@@ -458,10 +458,10 @@ export function runTestCommandIn(
   // Normalize for the host OS: on Windows npm/npx/tsx are `.cmd` shims that need
   // a shell (else modern Node throws EINVAL); node/pytest spawn directly.
   // Declared commands (verify.test / fingerprint) are full shell strings.
-  const completion = prepareCompletionCapture(testCommand.shell ? testCommand.command : [testCommand.command, ...testCommand.args].map(shellWord).join(' '), cwd, 'bash', repositoryRoot, startTime + timeout)
+  const completion = await prepareCompletionCaptureAsync(testCommand.shell ? testCommand.command : [testCommand.command, ...testCommand.args].map(shellWord).join(' '), cwd, 'bash', repositoryRoot, startTime + timeout, params.abortSignal)
   timeout = Math.max(0, timeout - (Date.now() - startTime))
   if (timeout <= 0 || params.abortSignal?.aborted) { completion?.dispose(); return Promise.resolve(verificationBudgetStop(testCommand, startTime, params.abortSignal?.aborted ? 'cancelled' : 'timeout')) }
-  if (completion?.preparationError) { completion.dispose(); return Promise.resolve({ content: completion.preparationError, isError: true, verification: { ...buildBlockedVerification(testCommand, startTime, 'unknown_runner', completion.preparationError), coverage: completion.read(-1), targetFiles: testCommand.targetFiles } }) }
+  if (completion?.preparationError) { completion.dispose(); return Promise.resolve({ content: completion.preparationError, isError: true, verification: { ...buildBlockedVerification(testCommand, startTime, 'unknown_runner', completion.preparationError), coverage: await completion.read(-1), targetFiles: testCommand.targetFiles } }) }
   const capturedArgv = completion ? verificationArgv(completion.command) : undefined
   const executionCommand = capturedArgv?.[0] ?? testCommand.command
   const executionArgs = capturedArgv?.slice(1) ?? testCommand.args
@@ -624,7 +624,7 @@ export function runTestCommandIn(
 
         const parsed = parseOutput(raw, testCommand.runner)
         parsed.exitCode = exitCode
-        const coverage = completion?.read(exitCode)
+        const coverage = await completion?.read(exitCode)
         completion?.dispose()
         Object.assign(parsed, completionFacts(coverage))
         const formatted = formatOutput(parsed)

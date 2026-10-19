@@ -9,12 +9,12 @@ import type { OaiChatRequest, OaiContentPart, OaiMessage } from '../api/oai-type
 import { collapseToolResult } from '../compact/context-collapse.js'
 import { buildSystemPrompt, type StaticPromptContext } from './static.js'
 import type { ToolDefinition } from '../api/types.js'
-import { buildStableVolatileBlock, buildLatestTurnVolatileBlock, buildDynamicAppendixParts, buildConsolidatedBlock, renderTaskDepthAdvisory, renderPlanMethodologyAdvisory, FROZEN_BLOCK_CAPS, type AppendixPart, type VolatileContext, type ToolHistoryEntry } from './volatile.js'
+import { buildStableVolatileBlock, buildLatestTurnVolatileBlock, buildDynamicAppendixParts, buildConsolidatedBlock, renderTaskDepthAdvisory, renderPlanMethodologyAdvisory, type AppendixPart, type VolatileContext, type ToolHistoryEntry } from './volatile.js'
 import { summarizeAppendixParts, type AppendixAnatomy } from './appendix-anatomy.js'
 import type { CvmInjectionSource } from '../context/pressure-monitor.js'
 import type { BudgetInput } from './prefix-budget.js'
 import { analyzeVolatilePayload, LARGE_VOLATILE_PAYLOAD_CHARS, type VolatilePayloadReport } from '../context/payload-diagnostic.js'
-import { selectProjectInstructions } from './project-instructions.js'
+import { enginePrefixBudget, publishedUserInstructionsBlock, userInstructionsStatus } from './engine-prefix-budget.js'
 import type { TaskState } from '../agent/task-state.js'
 import type { ContextClaim } from '../context/claims.js'
 import type { PlaybookBullet } from '../agent/playbook.js'
@@ -35,6 +35,7 @@ import { debugLog } from '../utils/debug.js'
 import { skillRegistry, type SkillRegistry } from '../skills/skill-loader.js'
 import { parseFrozenSnapshotData, type FrozenSnapshotData } from './frozen-snapshot.js'
 import { stableStringify } from '../api/stable-json.js'
+import { DISABLED_USER_INSTRUCTIONS, UserInstructionsError, appliedUserInstructions, userInstructionsMatch, parseUserInstructionsSnapshot, type AppliedUserInstructions, type UserInstructionsSnapshot } from './user-instructions.js'
 import { assertRewindHistory, proveRewindHistory, ContinuationPrefixError, LocalWorkerPolicyError, type RewindGenerationAuthorization, type ContinuationPrefixProof } from '../api/continuation-prefix.js'
 
 export type { PrefixFingerprint, DriftEvent, ContextLayerReport }
@@ -91,6 +92,40 @@ export interface PromptEngineConfig {
 }
 
 export class PromptEngine {
+  private userInstructionsSnapshot: UserInstructionsSnapshot = DISABLED_USER_INSTRUCTIONS
+  private appliedInstructions?: AppliedUserInstructions
+  private restoredInstructionsBoundary = false
+  private instructionsInputAuthorized = false
+
+  getUserInstructionsSnapshot(): UserInstructionsSnapshot { return this.userInstructionsSnapshot }
+
+  getUserInstructionsForDispatch(): UserInstructionsSnapshot {
+    if (!userInstructionsMatch(this.userInstructionsSnapshot, this.appliedInstructions)) {
+      throw new UserInstructionsError('user_instructions_boundary_required', '用户规则尚未在新输入边界发布；暂不能派发 worker。')
+    }
+    return this.userInstructionsSnapshot
+  }
+
+  requiresUserInstructionsBoundary(): boolean {
+    return this.restoredInstructionsBoundary && !userInstructionsMatch(this.userInstructionsSnapshot, this.appliedInstructions)
+  }
+
+  assertUserInstructionsInput(origin?: string): void {
+    if (this.requiresUserInstructionsBoundary() && origin !== 'human' && origin !== 'worker_task') {
+      throw new UserInstructionsError('user_instructions_boundary_required', '用户长期指令已变更，请发送新输入以应用；自动续跑已暂停。')
+    }
+  }
+
+  beginUserInstructionsInput(origin?: string): () => void {
+    this.assertUserInstructionsInput(origin)
+    this.instructionsInputAuthorized = origin === 'human' || origin === 'worker_task'
+    return () => { this.instructionsInputAuthorized = false }
+  }
+
+  getUserInstructionsStatus() {
+    return userInstructionsStatus(this.userInstructionsSnapshot, this.appliedInstructions, this.renderState.publishedPrefixes())
+  }
+
   private readonly renderState = new FrozenRenderState()
   private executionSnapshot?: import('../api/continuation-prefix.js').ContinuationPrefixProof
   private publishedUserCount = 0
@@ -302,12 +337,20 @@ export class PromptEngine {
   private onResetAppendixBaselineCb?: () => void
 
   constructor(config: PromptEngineConfig) {
+    this.userInstructionsSnapshot = config.volatileCtx.userInstructions === undefined ? DISABLED_USER_INSTRUCTIONS : parseUserInstructionsSnapshot(config.volatileCtx.userInstructions)
     config = { ...config, volatileCtx: { ...config.volatileCtx, workspaceRoots: config.volatileCtx.workspaceRoots ?? [...currentWorkspaceRoots(config.volatileCtx.cwd)] } }
     this.config = config
     // /cd frozen inheritance — adopt the previous engine's committed snapshot
     // state BEFORE any build, so historical slots resolve to the old bytes.
     // resume 走同一入口：盘存 FrozenSnapshotData（<id>.frozen.json）与活引擎同语义。
     const inherit = config.inheritFrozenFrom
+    const inheritedInstructions = inherit instanceof PromptEngine ? inherit.exportFrozenSnapshot() : inherit ? parseFrozenSnapshotData(inherit) : undefined
+    this.appliedInstructions = inheritedInstructions?.userInstructions
+    this.restoredInstructionsBoundary = !!(inheritedInstructions?.executionSnapshot || inheritedInstructions?.userInstructions)
+    if (this.userInstructionsSnapshot.state === 'disabled' && this.appliedInstructions) {
+      config.volatileCtx = { ...config.volatileCtx, userInstructionsRevoked: true }
+      this.config = config
+    }
     const initialFrozenBase = buildStableVolatileBlock(config.volatileCtx)
     if (inherit instanceof PromptEngine) {
       const sealed = inherit.exportFrozenSnapshot()
@@ -475,9 +518,10 @@ export class PromptEngine {
     return (this.executionSnapshot && !this.rewindAuthorization ? this.renderState.export() : undefined) ?? this.captureFrozenSnapshot()
   }
 
-  private captureFrozenSnapshot(): FrozenSnapshotData {
+  private captureFrozenSnapshot(instructions = this.appliedInstructions): FrozenSnapshotData {
     return {
       v: 2,
+      ...(instructions ? { userInstructions: instructions } : {}),
       ...(this.executionSnapshot ? { executionSnapshot: this.executionSnapshot, publishedUserCount: this.publishedUserCount,
         ...(this.publishedHistory ? { publishedHistory: structuredClone(this.publishedHistory) } : {}) } : {}),
       ...(this.rewindAuthorization ? { executionSnapshot: this.rewindAuthorization.prior, rewindAuthorization: structuredClone(this.rewindAuthorization) } : {}),
@@ -518,6 +562,13 @@ export class PromptEngine {
     const sidePath = options?.sidePath === true
     const sourceBaseline = this.executionSnapshot
     const sourceHistory = sourceBaseline ? this.publishedHistory : undefined
+    let candidateInstructions = this.appliedInstructions
+    if (!sidePath && this.requiresUserInstructionsBoundary()) {
+      const publishedLength = sourceHistory?.length ?? this.rewindAuthorization?.prior.messages.length ?? inputMessages.length
+      const freshInput = inputMessages.slice(publishedLength).some(message => message.role === 'user'
+        && (message.origin === 'human' || message.origin === 'worker_task') && !isSystemReminder(message.content))
+      if (!freshInput && !this.instructionsInputAuthorized) throw new UserInstructionsError('user_instructions_boundary_required', '用户长期指令已变更，请发送新输入以应用；原边界保持冻结。')
+    }
     if (!sidePath && sourceHistory) {
       const current = proveRewindHistory(inputMessages)
       if (sourceHistory.some((entry, index) => current[index]?.hash !== entry.hash)) {
@@ -694,6 +745,7 @@ export class PromptEngine {
       if (!sidePath && anchorKey && staleActiveAnchor) this.anchors.forget(anchorKey)
       const anchored = anchorKey && !staleActiveAnchor ? this.anchors.render(anchorKey, msg) : undefined
       if (!sidePath && anchored !== undefined) {
+        if (i === lastUserIdx) candidateInstructions = appliedUserInstructions(this.userInstructionsSnapshot, this.appliedInstructions)
         result.push({ role: 'user', content: anchored }); continue
       }
       if (msg.role === 'user' && isSystemReminder(msg.content)) {
@@ -803,6 +855,7 @@ export class PromptEngine {
           // Frozen snapshot captures the full content (including appendix),
           // so historical retrieval returns byte-identical content → cache hit.
           const trailered = this.buildTraileredUserContent(msg, this.cachedAppendix || undefined)
+          candidateInstructions = appliedUserInstructions(this.userInstructionsSnapshot, this.appliedInstructions)
           if (anchorKey) this.anchors.remember(anchorKey, msg, this.trailerTextPrefix(), this.cachedAppendix, undefined, true)
           // Track latest merged bytes for this last-user message; commit once at
           // the next real user boundary (not per tool turn / pseudo-boundary).
@@ -898,6 +951,7 @@ export class PromptEngine {
         const { rewindAuthorization: _authorization, ...rendered } = candidate!.snapshot
         const snapshot = { ...rendered, executionSnapshot: proof, publishedUserCount, publishedHistory }
         const finish = () => {
+          this.appliedInstructions = snapshot.userInstructions
           this.publishedUserCount = publishedUserCount
           this.publishedHistory = publishedHistory
           this.executionSnapshot = proof
@@ -908,7 +962,7 @@ export class PromptEngine {
         return this.renderState.commit(candidate!, snapshot, this.commitExecutionSnapshot, finish)
       },
     }
-    const candidate = sidePath ? undefined : this.renderState.capture(this.captureFrozenSnapshot(), proveRewindHistory(request.messages))
+    const candidate = sidePath ? undefined : this.renderState.capture(this.captureFrozenSnapshot(candidateInstructions), proveRewindHistory(request.messages))
     if (!sidePath && this.rewindAuthorization) {
       const authorization = { ...this.rewindAuthorization, history: proveRewindHistory(request.messages) }
       request.rewindAuthorizationId = authorization.cacheGenerationId
@@ -1006,29 +1060,10 @@ export class PromptEngine {
   /** 当前上线的工具定义（只读）。 */
   getTools(): readonly ToolDefinition[] { return this.config.staticCtx.tools }
 
-  /**
-   * 当前 frozen 前缀的分块构成（`/prefix-budget` 与 scripts/prefix-budget.ts 共用口径）。
-   *
-   * 读的是这个引擎实际持有的字节，不重新加载磁盘——脚本量的是「新会话会是什么样」，
-   * 这里量的是「本会话现在是什么样」。两者在会话中途切过 /domain 或 /cd 后会不同。
-   */
+  /** /prefix-budget reads frozen bytes without reloading any user files. */
   getPrefixBudgetInputs(): BudgetInput[] {
-    const ctx = this.config.volatileCtx
-    const caps = { ...FROZEN_BLOCK_CAPS, ...ctx.blockCaps }
-    return [
-      { name: 'static.ts BASE_PROMPT', category: 'brake', content: this.systemPrompt },
-      { name: 'star-domain volatileBlock', category: 'brake', content: ctx.activeDomain?.volatileBlock },
-      { name: '工具 schema (JSON)', category: 'tools', content: JSON.stringify(this.config.staticCtx.tools) },
-      // 与渲染层同一套按节选取——`slice(0, cap)` 会把报告写成「按前 N 字符收录」，
-      // 而实际收录的是另一组章节，归因数字对不上真实前缀。
-      { name: 'project-instructions', category: 'reference', content: ctx.rivetMd ? selectProjectInstructions(ctx.rivetMd, caps.projectInstructions).text : undefined, cap: caps.projectInstructions, rawChars: ctx.rivetMd?.length },
-      { name: 'project-memory', category: 'reference', content: ctx.projectMemoryBlock?.slice(0, caps.projectMemory), cap: caps.projectMemory, rawChars: ctx.projectMemoryBlock?.length },
-      { name: 'knowledge-manifest', category: 'reference', content: ctx.knowledgeManifestBlock?.slice(0, caps.knowledgeManifest), cap: caps.knowledgeManifest, rawChars: ctx.knowledgeManifestBlock?.length },
-      { name: 'codebase-index', category: 'reference', content: ctx.projectIndexBlock?.slice(0, caps.codebaseIndex), cap: caps.codebaseIndex, rawChars: ctx.projectIndexBlock?.length },
-      { name: 'seed-capsule 索引', category: 'reference', content: ctx.seedCapsuleBlock },
-      { name: 'session-memory', category: 'reference', content: ctx.sessionMemoryBlock },
-      { name: 'appendix（每轮动态）', category: 'appendix', content: this.cachedAppendix },
-    ]
+    return enginePrefixBudget({ ctx: this.config.volatileCtx, systemPrompt: this.systemPrompt, tools: this.config.staticCtx.tools,
+      appendix: this.cachedAppendix, prefixes: this.renderState.publishedPrefixes(), userInstructions: this.userInstructionsSnapshot, applied: this.appliedInstructions })
   }
 
   /** Current cognitive projection length in chars (for cache-log observability). */
@@ -1596,7 +1631,9 @@ export class PromptEngine {
   }
 
   getContextLayerReport(): ContextLayerReport {
-    return this.contextLayerReportData
+    const content = publishedUserInstructionsBlock(this.appliedInstructions, this.renderState.publishedPrefixes())
+    return content ? createContextLayerReport([...this.contextLayerReportData.layers,
+      createContextLayer({ id: 'user-instructions', label: 'User Instructions', stability: 'stable-volatile', channel: 'volatile-user-message', fingerprint: 'included', content })]) : this.contextLayerReportData
   }
 }
 

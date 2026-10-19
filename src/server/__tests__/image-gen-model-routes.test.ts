@@ -79,7 +79,7 @@ test('onboard registers a dedicated provider and selects it, without touching th
 
   const res = await router('POST', '/config/image-gen-model/onboard', {
     providerName: 'imagegen-route',
-    baseUrl,
+    baseUrl, allowPrivateNetwork: true,
     modelId: 'flux-pro',
     apiKey: 'sk-test',
     sizeField: 'image_size',
@@ -128,7 +128,7 @@ test('生图配置落盘后触发 onImageGenConfigChanged', async () => {
 
   const onboard = await router('POST', '/config/image-gen-model/onboard', {
     providerName: 'imagegen-hook',
-    baseUrl,
+    baseUrl, allowPrivateNetwork: true,
     modelId: 'flux-pro',
     apiKey: 'sk-test',
     skipTest: true,
@@ -156,7 +156,7 @@ test('test route really generates (not just probes /models) and reports the size
   const router = createRouter(buildConfigRoutes(TOKEN))
   const before = generationCount
   const res = await router('POST', '/config/image-gen-model/test', {
-    baseUrl,
+    baseUrl, allowPrivateNetwork: true,
     modelId: 'flux-pro',
     apiKey: 'sk-test',
     sizeField: 'image_size',
@@ -172,7 +172,7 @@ test('test route surfaces upstream failures with the actionable classified messa
   try {
     const router = createRouter(buildConfigRoutes(TOKEN))
     const res = await router('POST', '/config/image-gen-model/test', {
-      baseUrl, modelId: 'flux-pro', apiKey: 'sk-test',
+      baseUrl, allowPrivateNetwork: true, modelId: 'flux-pro', apiKey: 'sk-test',
     }, AUTH)
     assert.equal(res.status, 400)
     assert.match(String((res.body as { error: string }).error), /429|Rate limited/)

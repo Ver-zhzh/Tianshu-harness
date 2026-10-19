@@ -32,7 +32,7 @@ export const JOB_TOOL: Tool = {
 
 Actions:
 - list: 列出本会话所有后台任务（状态、已运行时长、最后一行输出）。
-- await: 阻塞直到任务退出、输出命中 \`pattern\`（正则）或 \`timeout\` 到时。依赖后台结果前先用它（例如等 dev server 输出 "Ready" 或 install 完成）。
+- await: 阻塞直到任务退出、输出命中 \`pattern\`（正则）或 \`timeout\` 到时。服务就绪可以匹配实际日志；测试和安装须核对退出状态与结果，日志命中不代表完成或通过。
 - logs: 返回任务捕获的输出。
 - kill: 终止运行中的任务。`,
     input_schema: {
@@ -40,7 +40,7 @@ Actions:
       properties: {
         action: { type: 'string', enum: ['list', 'await', 'logs', 'kill'], description: '要执行的操作' },
         id: { type: 'string', description: '任务 id（await/logs/kill 必填）' },
-        pattern: { type: 'string', description: '仅 await：对输出匹配的正则；命中即提前返回（如 "Ready|listening|compiled"）' },
+        pattern: { type: 'string', description: '仅 await：服务就绪探测可按实际日志设置正则；命中会提前返回，不证明任务退出或测试通过。等待测试结束时省略。' },
         timeout: { type: 'integer', description: '仅 await：最长阻塞毫秒数（默认 120000，上限 600000）' },
       },
       required: ['action'],
@@ -71,15 +71,14 @@ Actions:
         const result = await jobs.await(id, { pattern, timeoutMs })
         if (!result) return { content: `未找到任务 ${id}。用 job(action="list") 查看。`, isError: true }
         const { job, matched, timedOut, tail } = result
-        const verdict = matched
-          ? `✓ 输出命中 pattern`
-          : timedOut
-            ? `⏱ 等待超时（${fmtDuration(timeoutMs)}），任务仍在运行`
-            : `● 任务已${job.status === 'killed' ? '被终止' : '退出'} (exit ${job.exitCode ?? '?'})`
+        const verdict = job.status !== 'running'
+          ? `● 任务已${job.status === 'killed' ? '被终止' : '退出'} (exit ${job.exitCode ?? '?'})`
+          : (matched ? '● 输出命中 pattern' : timedOut ? `⏱ 等待超时（${fmtDuration(timeoutMs)}）` : '● 等待已返回') +
+            '，任务仍在运行；不代表执行完成或测试通过'
         const header = `[${job.id}] ${verdict} · ${fmtStatus(job)}`
         return {
           content: tail ? `${header}\n── 输出尾部 ──\n${tail}` : header,
-          uiContent: `await ${job.id}: ${matched ? '命中' : timedOut ? '超时' : fmtStatus(job)}`,
+          uiContent: `await ${job.id}: ${job.status !== 'running' ? fmtStatus(job) : matched ? '命中（仍在运行）' : timedOut ? '等待超时（仍在运行）' : fmtStatus(job)}`,
           isError: false,
         }
       }

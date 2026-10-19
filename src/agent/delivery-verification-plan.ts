@@ -65,3 +65,20 @@ export function renderDeliveryVerificationPlan(plan: DeliveryVerificationPlan, c
 export function formatDeliveryVerificationPlan(cwd: string, required: readonly string[], uncovered: readonly string[], advisoryCount: number): string[] {
   return renderDeliveryVerificationPlan(buildDeliveryVerificationPlan(cwd, required, uncovered, advisoryCount), cwd)
 }
+
+/** Project configuration and scope discovery never run on the HTTP event loop. */
+export async function buildDeliveryVerificationPlanAsync(signal: AbortSignal | undefined, ...args: Parameters<typeof buildDeliveryVerificationPlan>): Promise<DeliveryVerificationPlan> {
+  const { evidenceProcess } = await import('../workers/evidence-process.js')
+  let worker: ReturnType<typeof evidenceProcess> | undefined
+  try {
+    worker = evidenceProcess(Date.now() + 10_000, signal)
+    return await worker.call('delivery-plan', args)
+  } catch {
+    signal?.throwIfAborted()
+    const [, required, uncovered, advisoryCount] = args
+    return { version: 1, required: [...required], covered: [], pending: [...uncovered], advisoryCount,
+      requiredScopes: [], coveredScopes: [], pendingScopes: [], batches: [],
+      blocked: [{ code: 'unknown_runner', files: [...uncovered], reason: 'verification_worker_unavailable: 无法完成验证计划；义务保留，请稍后重试。' }],
+      pendingReasons: uncovered.map(path => ({ path, state: 'unsupported', reason: '验证计划进程不可用；未取得新证明。' })) }
+  } finally { worker?.dispose() }
+}

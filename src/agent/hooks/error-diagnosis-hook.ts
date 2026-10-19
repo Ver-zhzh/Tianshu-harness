@@ -18,7 +18,7 @@ import { extractPatchTargetPaths } from '../../tools/apply-patch.js'
  */
 
 interface DiagnosisEntry {
-  /** 错误根因——向 agent 解释这是什么错误 */
+  /** 失败分类线索；不能单凭分类证明根因或代码无关。 */
   diagnosis: string
   /** 用户向下一步——agent 应告知用户的行动 */
   userAction: string
@@ -34,8 +34,8 @@ const REGISTRY: Partial<Record<FailureClass, DiagnosisEntry>> = {
     userAction: '断言失败。先对比预期值和实际值：是测试写错了还是实现有 bug？不要盲目改代码让测试通过。',
   },
   missing_dep: {
-    diagnosis: '缺少依赖——命令或包未安装。',
-    userAction: '系统缺少此命令或包。需要安装（如 npm install / pip install）或使用替代方案。这不是代码问题。',
+    diagnosis: '命令或包未被当前入口解析。',
+    userAction: '先核对项目已安装的入口、脚本、工作目录与 PATH；裸命令不存在不证明本地 runner 不可用。使用已安装入口继续，确需安装时遵守授权边界。',
   },
   runtime_gate: {
     diagnosis: '运行时生命周期门禁——协调器正在关闭或会话正在移交。',
@@ -43,19 +43,19 @@ const REGISTRY: Partial<Record<FailureClass, DiagnosisEntry>> = {
   },
   timeout: {
     diagnosis: '操作超时——命令在限时内未完成。',
-    userAction: '操作超时。可增大 timeout 参数、拆分任务分批执行、或检查是否有死循环/未完成的异步调用。',
+    userAction: '先核对进程是否仍运行、实际限时与剩余预算，排查死循环/未完成的异步调用；超时不等于执行完成或环境死路。根据证据拆分或修复，不原样无限重试。',
   },
   snapshot: {
     diagnosis: '快照变更——测试快照与当前输出不匹配。',
     userAction: '快照发生了变化。如果改动是有意的，更新快照即可；如果无意，说明产生了意外的输出差异。',
   },
   module_resolution: {
-    diagnosis: '模块解析失败——import 路径找不到对应文件。',
-    userAction: 'import 路径或文件不存在。检查文件是否已创建、路径拼写是否正确、package.json exports 是否匹配。',
+    diagnosis: '模块解析失败——当前入口未能解析 import。',
+    userAction: '核对真实文件、路径大小写、工作目录、项目 loader 与 package.json exports；未解析不等于文件不存在，不先归因环境。',
   },
   env_missing: {
-    diagnosis: '环境变量/凭证缺失——所需的 API key 或配置未设置。',
-    userAction: '缺少环境变量或 API 凭证。需要设置对应的环境变量（如 API_KEY）或配置项。这不是代码逻辑问题。',
+    diagnosis: '当前进程未取得所需环境字段或凭据。',
+    userAction: '先核对配置入口、变量传递与依赖是否启动；确缺凭据时只报告字段名，不搜索其他数据目录或输出密钥。暂停依赖该凭据的步骤，其余已授权检查继续。',
   },
   permission_denied: {
     diagnosis: '权限不足——文件或操作被系统拒绝。',
@@ -67,7 +67,7 @@ const REGISTRY: Partial<Record<FailureClass, DiagnosisEntry>> = {
   },
   api_error: {
     diagnosis: 'API 服务异常——外部服务返回了错误。',
-    userAction: '外部 API 服务异常（429/500/502/503）。等待后重试即可，不是代码问题。',
+    userAction: '核对实际状态码、请求入口与服务可用性；遵守 Retry-After 和总预算，有界恢复。不能单凭 429/5xx 排除本地请求或代理配置问题，未确认前不宣布根因。',
   },
   syntax_error: {
     diagnosis: '语法/编译错误——代码不符合语言规则。',
@@ -158,7 +158,7 @@ export function createErrorDiagnosisHook(deps: ErrorDiagnosisHookDeps): PostTool
         priority: 0.52,
         category: 'discipline',
         tier: 'operational',
-        content: `${ADVISORY_PREAMBLE} ${tool.name} 失败 (${tool.failureClass})：${entry.diagnosis} → ${entry.userAction}`,
+        content: `${ADVISORY_PREAMBLE} ${tool.name} 失败分类 (${tool.failureClass}，不等于根因)：${entry.diagnosis} → ${entry.userAction}`,
         ttl: 1,
       })
     },

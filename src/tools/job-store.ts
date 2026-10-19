@@ -68,7 +68,7 @@ export interface JobEvent {
 }
 
 export interface JobSpawnOptions {
-  onCompleted?: (result: { job: JobSnapshot; output: string; error?: string; timedOut: boolean }) => void
+  onCompleted?: (result: { job: JobSnapshot; output: string; error?: string; timedOut: boolean }) => void | Promise<void>
   /** The command actually executed (post rtk/mirror/sandbox rewrite). */
   command: string
   /** Original command for display (pre-rewrite). */
@@ -259,20 +259,19 @@ class BackgroundJob {
     try { this.logStream?.end() } catch { /* best-effort */ }
     this.logStream = null
 
-    for (const w of this.waiters) {
+    const completeWaiters = () => { for (const w of this.waiters) {
       if (w.timer) clearTimeout(w.timer)
       w.resolve({ job: this.snapshot(), matched: false, timedOut: false, tail: this.tail() })
     }
-    this.waiters = []
-    try { this.opts.onCompleted?.({ job: this.snapshot(), output: this.ring, error: this.spawnError, timedOut: this.timedOut }) }
-    catch (error) { debugLog(`[job-completion-error] ${error instanceof Error ? error.message : String(error)}`) }
-    this.emit({ kind: 'exit', job: this.snapshot() })
-    void this.logClosed.then(() => this.resolveFinished())
+    this.waiters = [] }
+    const completion = Promise.resolve().then(() => this.opts.onCompleted?.({ job: this.snapshot(), output: this.ring, error: this.spawnError, timedOut: this.timedOut }))
+      .catch(error => { debugLog(`[job-completion-error] ${error instanceof Error ? error.message : String(error)}`) })
+    void Promise.all([this.logClosed, completion]).then(() => { completeWaiters(); this.emit({ kind: 'exit', job: this.snapshot() }); this.resolveFinished() })
   }
 
   await(opts: JobAwaitOptions): Promise<JobAwaitResult> {
     if (this.status !== 'running') {
-      return Promise.resolve({ job: this.snapshot(), matched: false, timedOut: false, tail: this.tail() })
+      return this.finished.then(() => ({ job: this.snapshot(), matched: false, timedOut: false, tail: this.tail() }))
     }
     let regex: RegExp | undefined
     if (opts.pattern) {

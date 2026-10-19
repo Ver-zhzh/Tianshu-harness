@@ -329,16 +329,18 @@ export function formatGitMissingBanner(gitAvailable: boolean, platform: NodeJS.P
   ].join('\n')
 }
 
-/** Build a one-line hint appended to bash not-found errors. */
+/** A missing command name is not proof that the dependency is uninstalled. */
 export function buildNotFoundHint(missingCommand: string, platform: NodeJS.Platform): string {
-  if (missingCommand === 'python' || missingCommand === 'python3' || missingCommand === 'py') {
-    return `\n[环境缺失] ${getInstallCommand('python', platform)}`
+  const name = missingCommand.replace(/\\/g, '/').split('/').at(-1)?.replace(/\.exe$/i, '').toLowerCase()
+  if (name === 'python' || name === 'python3' || name === 'py') {
+    const candidates = platform === 'win32' ? 'py、python、python3' : 'python3、python'
+    return `\n[入口核查] 先核对项目虚拟环境、脚本及候选 ${candidates} 是否存在且版本兼容；未探测的候选不视为可用。不要原样重试；确需安装时遵守原有授权。`
   }
-  if (missingCommand === 'git') {
-    return `\n[环境缺失] ${getInstallCommand('git', platform)}`
+  if (name === 'git') {
+    return '\n[入口核查] 先核对已安装 Git 的实际路径、当前 shell 与 PATH；确认没有可用入口后，再按原有授权处理安装。'
   }
-  if (missingCommand === 'uv') {
-    return `\n[环境缺失] ${getInstallCommand('uv', platform)}`
+  if (name === 'uv') {
+    return '\n[入口核查] 先核对项目约定的环境管理方式及已安装 uv 的路径，不自动下载或切换工具链。'
   }
   return ''
 }

@@ -144,7 +144,7 @@ describe('rivet provider CLI', () => {
     server = await startModelServer(['deepseek-v4-flash', 'mystery-model-x'])
     const { io, stdout } = captureIO()
     await runProviderCLI([
-      'add', 'my-relay', '--base-url', server.baseUrl, '--api-key', 'sk-local', '--default',
+      'add', 'my-relay', '--base-url', server.baseUrl, '--allow-private-network', '--api-key', 'sk-local', '--default',
     ], io)
 
     const cfg = loadConfig()
@@ -187,7 +187,7 @@ describe('rivet provider CLI', () => {
   it('models: prints a pasteable snippet with backfills and TODO annotations', async () => {
     server = await startModelServer(['deepseek-v4-flash', 'alien-model'])
     const { io } = captureIO()
-    await runProviderCLI(['add', 'src', '--base-url', server.baseUrl, '--no-probe'], io)
+    await runProviderCLI(['add', 'src', '--base-url', server.baseUrl, '--allow-private-network', '--no-probe'], io)
 
     const { io: modelsIO, stdout, stderr } = captureIO()
     await runProviderCLI(['models', 'src'], modelsIO)

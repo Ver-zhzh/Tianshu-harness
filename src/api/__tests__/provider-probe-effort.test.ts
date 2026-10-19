@@ -11,7 +11,7 @@ describe('per-model effort metadata from /models', () => {
       ? Response.json({ data: [{ id: 'test-model', effort: { supported_levels: ['high', 'max'], default_level: 'high' } }] })
       : new Response('data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } })
     try {
-      const report = await probeProvider({ baseUrl: 'https://models.example.test/v1', apiKey: 'test-key', vision: false })
+      const report = await probeProvider({ fetchImpl: globalThis.fetch, lookupImpl: async () => ({ address: '93.184.216.34', family: 4 }), baseUrl: 'https://models.example.test/v1', apiKey: 'test-key', vision: false })
       assert.equal(report.modelsOk, true)
       assert.deepEqual(report.modelInfos?.['test-model']?.effortLevels, ['high', 'max'])
       assert.equal(report.modelInfos?.['test-model']?.defaultEffort, 'high')

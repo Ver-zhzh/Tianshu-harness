@@ -4,8 +4,8 @@ import type { ImageGenerationParameters } from '../server/protocol.js'
 import { z } from 'zod'
 import type { Config, ProviderConfig } from '../config/schema.js'
 
-export function imageGenerationNetwork(config: Pick<Config, 'network'>, provider?: Pick<ProviderConfig, 'proxy'>) {
-  return { proxy: { proxyUrl: provider?.proxy ?? config.network?.proxy, noProxy: config.network?.noProxy }, trustProxyFakeIp: config.network?.trustProxyFakeIp }
+export function imageGenerationNetwork(config: Pick<Config, 'network'>, provider?: Pick<ProviderConfig, 'proxy' | 'endpointNetworkPolicy'>) {
+  return { proxy: { proxyUrl: provider?.proxy ?? config.network?.proxy, noProxy: config.network?.noProxy }, trustProxyFakeIp: config.network?.trustProxyFakeIp, endpointNetworkPolicy: provider?.endpointNetworkPolicy }
 }
 
 export const imageSizeSchema = z.string().regex(/^[1-9]\d{0,4}x[1-9]\d{0,4}$/, 'Size must use positive widthxheight, for example 1024x1024')

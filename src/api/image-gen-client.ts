@@ -1,9 +1,6 @@
-import { fetch as undiciFetch, ProxyAgent } from 'undici'
+import { endpointRequest, endpointDownload, type EndpointRequestOptions } from '../tools/net/endpoint-request.js'
+import { EndpointNetworkError } from '../tools/net/endpoint-policy.js'
 import { resolveProbeEndpoints } from './endpoint-map.js'
-// 图片地址来自服务响应；复用网络工具的代理解析、逐跳 SSRF 检查和下载上限。
-import type { LookupFn } from '../tools/net/ssrf.js'
-import { httpFetchGuarded, type FetchLike } from '../tools/net/http-fetch.js'
-import { resolveProxyForUrl, type ProxyResolverOptions } from '../tools/net/proxy-resolver.js'
 
 /**
  * image-gen-client — 文生图端点客户端（issue #8 Wave 2）。
@@ -43,7 +40,7 @@ function assertWithinLimit(actualBytes: number, maxBytes: number, hint: string):
   )
 }
 
-export interface GenerateImageOptions {
+export interface GenerateImageOptions extends EndpointRequestOptions {
   baseUrl: string
   apiKey?: string
   model: string
@@ -54,15 +51,12 @@ export interface GenerateImageOptions {
   timeoutMs?: number
   signal?: AbortSignal
   /** provider/global proxy overrides; otherwise follow environment and system proxy. */
-  proxy?: ProxyResolverOptions
   trustProxyFakeIp?: boolean
   onStage?: (stage: 'generating' | 'downloading') => void
   /** 图片字节上限。缺省 MAX_IMAGE_BYTES。 */
   maxBytes?: number
   /** 测试注入点。生产路径使用与代理 dispatcher 同版本的 undici fetch。 */
   fetchImpl?: typeof fetch
-  /** 测试注入点：SSRF 预检用的 DNS 解析。 */
-  lookupImpl?: LookupFn
 }
 
 export interface GeneratedImage {
@@ -171,70 +165,15 @@ function extractImageRef(payload: unknown): ImageRef | null {
 }
 
 /**
- * 带超时地完成一次请求**及其 body 读取**。
- *
- * 早先的版本在 `await fetchImpl(...)` 返回（响应头到达）时就 clearTimeout，于是后面
- * 的 `response.json()` / `arrayBuffer()` 完全没有保护——一个只发 headers、不写完 body
- * 的端点能让调用一直挂住。写这条修复时的实测：不中止的情况下，那个用例会挂到进程被
- * 外部杀掉为止（这也正是它一开始"看起来通过"的假绿来源）。超时预算必须覆盖到 consume
- * 返回为止，所以 body 读取作为参数传进来，而不是在调用点另起一次计时。
- */
-async function withTimeout<T>(
-  fetchImpl: typeof fetch,
-  url: string,
-  init: RequestInit,
-  timeoutMs: number,
-  consume: (response: Response) => Promise<T>,
-  signal?: AbortSignal,
-  network?: ProxyResolverOptions,
-): Promise<T> {
-  const proxyUrl = network ? resolveProxyForUrl(url, network) : undefined
-  const dispatcher = proxyUrl ? new ProxyAgent({ uri: proxyUrl }) : undefined
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
-  try {
-    signal?.throwIfAborted()
-    const requestInit: RequestInit = { ...init, signal: signal ? AbortSignal.any([controller.signal, signal]) : controller.signal }
-    if (dispatcher) (requestInit as { dispatcher?: unknown }).dispatcher = dispatcher
-    const response = await fetchImpl(url, requestInit)
-    return await consume(response)
-  } catch (error) {
-    if (signal?.aborted) throw signal.reason ?? new DOMException('Cancelled', 'AbortError')
-    if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error(`Image generation timed out after ${timeoutMs}ms. Increase agent.imageGenModel.timeoutMs if the provider is slow.`)
-    }
-    throw describeNetworkError(error, url, !!proxyUrl)
-  } finally {
-    clearTimeout(timer)
-    if (dispatcher) await dispatcher.destroy().catch(() => {})
-  }
-}
-
-/** Only expose the host and known error codes; signed URLs and proxy credentials stay private. */
-function describeNetworkError(error: unknown, url: string, proxied: boolean): unknown {
-  const codes = new Set<string>()
-  const visit = (value: unknown, depth = 0): void => {
-    if (!value || typeof value !== 'object' || depth > 4) return
-    const e = value as { code?: unknown; cause?: unknown; errors?: unknown[] }
-    if (typeof e.code === 'string' && /^(?:E[A-Z_]+|UND_ERR_[A-Z_]+|CERT_[A-Z_]+|ERR_TLS_[A-Z_]+|DEPTH_ZERO_SELF_SIGNED_CERT|SELF_SIGNED_CERT_IN_CHAIN|UNABLE_TO_VERIFY_LEAF_SIGNATURE)$/.test(e.code)) codes.add(e.code)
-    visit(e.cause, depth + 1)
-    if (Array.isArray(e.errors)) e.errors.forEach(child => visit(child, depth + 1))
-  }
-  visit(error)
-  if (!codes.size && !(error instanceof Error && error.message === 'fetch failed')) return error
-  return new Error(`Image network request failed (${new URL(url).hostname}; ${proxied ? 'proxy' : 'direct'}; ${[...codes].join(', ') || 'NETWORK_ERROR'}). Check the network, proxy and certificate configuration.`, { cause: error })
-}
-
-/**
  * 生成一张图片并返回其字节。**不落盘、不返回 base64 字符串**——调用方拿到的
  * 是可以直接写文件的 `Uint8Array`。
  */
 export async function generateImage(options: GenerateImageOptions): Promise<GeneratedImage> {
   options.signal?.throwIfAborted()
   options.onStage?.('generating')
-  const fetchImpl = options.fetchImpl ?? (undiciFetch as unknown as typeof fetch)
   const timeoutMs = options.timeoutMs ?? DEFAULT_IMAGE_GEN_TIMEOUT_MS
   const maxBytes = options.maxBytes ?? MAX_IMAGE_BYTES
+  const deadline = options.deadline ?? Date.now() + timeoutMs
   // 复用 endpoint-map 的归一化：用户从 provider 文档粘贴完整端点 URL 时也不会
   // 拼出 …/images/generations/images/generations。
   const url = resolveProbeEndpoints(options.baseUrl).imagesUrl
@@ -249,25 +188,18 @@ export async function generateImage(options: GenerateImageOptions): Promise<Gene
   const headers: Record<string, string> = { 'content-type': 'application/json' }
   if (options.apiKey) headers.Authorization = `Bearer ${options.apiKey}`
 
-  const payload = await withTimeout(fetchImpl, url, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(body),
-  }, timeoutMs, async (response) => {
-    if (!response.ok) {
-      const bodyText = await response.text().catch(() => '')
-      throw new Error(classifyImageGenError(response.status, bodyText, options.baseUrl))
-    }
-    return (await response.json().catch((error: unknown) => {
-      // 不能把 abort 吞成 null——那会把"超时"伪装成"响应不是 JSON"。
-      if (error instanceof Error && error.name === 'AbortError') throw error
-      return null
-    })) as unknown
-  }, options.signal, options.fetchImpl ? undefined : options.proxy ?? {})
+  const response = await endpointRequest(url, { method: 'POST', headers, body: JSON.stringify(body) },
+    { ...options, deadline, maxBytes: Math.ceil(maxBytes / 3) * 4 + 65_536 })
+  if (!response.ok) {
+    let bodyText = await response.text().catch(() => '')
+    if (options.apiKey) bodyText = bodyText.split(options.apiKey).join('***')
+    throw new Error(classifyImageGenError(response.status, bodyText, new URL(url).origin))
+  }
+  const payload = await response.json().catch(() => null)
   const ref = extractImageRef(payload)
   if (!ref) {
     throw new Error(
-      `Image response did not contain a known image field (looked for data[].b64_json, data[].url, images[].url). Got: ${redactedSnippet(payload)}`,
+      `Image response did not contain a known image field (looked for data[].b64_json, data[].url, images[].url). Got: ${options.apiKey ? redactedSnippet(payload).split(options.apiKey).join('***') : redactedSnippet(payload)}`,
     )
   }
 
@@ -283,20 +215,16 @@ export async function generateImage(options: GenerateImageOptions): Promise<Gene
   options.onStage?.('downloading')
   // SSRF 预检：这个 url 完全来自响应体，不受我们控制。恶意或被劫持的生图端点可以
   // 借它打到内网或云元数据地址（169.254.169.254 一类），而且取回的字节会落盘、进而
-  // 被 read_file 读回上下文——外泄链是闭合的。下载前必须解析目标并确认它不在保留
-  // 网段内，与 web_fetch 走同一套判据（src/tools/net/ssrf.ts）。
+  // 被 read_file 读回上下文。每一跳独立校验；私网许可仅能用于原端点同源的下载。
   try {
-    const download = await httpFetchGuarded(ref.value, {
-      lookup: options.lookupImpl,
-      ...(options.fetchImpl ? { fetch: options.fetchImpl as unknown as FetchLike } : {}),
-    }, { timeoutMs, maxResponseBytes: maxBytes, proxy: options.proxy, trustProxyFakeIp: options.trustProxyFakeIp, signal: options.signal })
+    const download = await endpointDownload(ref.value, { ...options, deadline, maxBytes })
     if (download.status < 200 || download.status >= 300) {
       throw new Error(`Failed to download the generated image from ${new URL(download.finalUrl).hostname} (HTTP ${download.status}).`)
     }
     return { bytes: download.bytes, mimeType: sniffMimeType(download.bytes, download.finalUrl), source: 'url' }
   } catch (error) {
     if (options.signal?.aborted) throw options.signal.reason
-    if (error instanceof Error && error.message.startsWith('Response body exceeds maximum allowed size')) throw new Error(`Image payload too large: exceeds the ${maxBytes} byte limit. ${BIGNESS_HINT}`)
-    throw describeNetworkError(error, ref.value, !options.fetchImpl && !!resolveProxyForUrl(ref.value, options.proxy))
+    if (error instanceof EndpointNetworkError && error.code === 'endpoint_response_too_large') throw new Error(`Image payload too large: exceeds the ${maxBytes} byte limit. ${BIGNESS_HINT}`)
+    throw error
   }
 }

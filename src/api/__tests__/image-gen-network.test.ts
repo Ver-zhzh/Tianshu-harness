@@ -57,7 +57,7 @@ test('NO_PROXY is applied per host: local provider direct, external image throug
   let generations = 0, downloads = 0
   await localServer((req, res) => { downloads++; assert.equal(req.headers.authorization, undefined); res.end(png) }, async proxyUrl => {
     await localServer((_req, res) => { generations++; imageUrl(res) }, async base => {
-      const image = await generateImage({ ...options, baseUrl: `${base}/v1`, proxy: { proxyUrl, noProxy: '127.0.0.1' } })
+      const image = await generateImage({ ...options, baseUrl: `${base}/v1`, endpointNetworkPolicy: { origin: base, allowPrivateNetwork: true }, proxy: { proxyUrl, noProxy: '127.0.0.1' } })
       assert.deepEqual(image.bytes, new Uint8Array(png))
     })
   })
@@ -71,7 +71,7 @@ test('redirects are checked before download and cannot reach a private address',
     return init?.method === 'POST'
       ? new Response(JSON.stringify({ data: [{ url: 'https://cdn.example/image.png' }] }))
       : new Response(null, { status: 302, headers: { location: 'http://169.254.169.254/image' } })
-  }) as typeof fetch }), /Access denied|reserved IP/i)
+  }) as typeof fetch }), /endpoint_reserved_address_denied/i)
   assert.equal(calls, 2, 'Private redirect must be rejected before the third request')
 })
 

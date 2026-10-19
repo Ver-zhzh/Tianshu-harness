@@ -1,3 +1,4 @@
+import { executeVisionOnboarding } from './vision-onboarding-executor.js'
 import { registerRepairPrefixCommand } from './repair-prefix.js'
 import type { AgentLoop } from '../agent/loop.js'
 import type { SessionContext } from '../agent/context.js'
@@ -69,8 +70,7 @@ import type { SlashCommand } from './slash-command-registry.js'
 import type { BootstrapContext } from '../bootstrap.js'
 import type { Config, ProviderConfig } from '../config/schema.js'
 import { isProFeatureEnabled } from '../config/pro-license.js'
-import { loadConfig, saveConfig, registerVisionModelConfig } from '../config/manager.js'
-import { discoverVisionModels, validateVisionModel } from '../api/vision-model-onboarding.js'
+import { loadConfig, saveConfig } from '../config/manager.js'
 import { PROVIDER_PRESETS, isProviderPresetKey } from '../config/provider-presets.js'
 import { installPlugin, removePlugin, getInstalledPlugins, isPluginInstalled } from '../plugins/plugin-installer.js'
 import { parseManifest } from '../plugins/manifest.js'
@@ -2183,9 +2183,10 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
     async handler(ctx) {
       const { pushStatic, setIsStreaming } = ctx
       const { formatBudgetReport } = await import('../prompt/prefix-budget.js')
-      const { profile, toolDescriptions, report } = ctx.agent.getPrefixBudget()
+      const { profile, toolDescriptions, report, userInstructions } = ctx.agent.getPrefixBudget()
       const lines = [
         formatBudgetReport(report),
+        ...(userInstructions ? [`用户长期指令：${JSON.stringify(userInstructions)}（已发布成本含历史边界重复块）`] : []),
         '',
         `档位 ${profile}（工具描述 ${toolDescriptions}）。切档在下个会话生效——改前缀等于全量重建缓存。`,
         '配置：prompt.profile = standard | lean | full，或 RIVET_PROMPT_PROFILE 环境变量。',
@@ -4244,37 +4245,7 @@ export function registerTuiSlashCommands(app: TuiApp, ctx: BootstrapContext): vo
     description: "配置识图桥（发现模型、图片验证后保存；不改变主服务商）",
     immediate: true,
     handler: ({ app }) => {
-      app.startVisionOnboarding(async request => {
-        const apiKeyEnv = request.body.apiKeyEnv
-        if (apiKeyEnv && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(apiKeyEnv)) {
-          throw new Error('apiKeyEnv must be a valid environment variable name')
-        }
-        const resolvedEnvKey = apiKeyEnv ? process.env[apiKeyEnv]?.trim() : undefined
-        if (apiKeyEnv && !resolvedEnvKey) {
-          throw new Error(`Environment variable "${apiKeyEnv}" is not set or is blank in this process`)
-        }
-        const requestWithResolvedKey = {
-          ...request.body,
-          ...(resolvedEnvKey ? { apiKey: resolvedEnvKey } : {}),
-        }
-        if (request.kind === 'discover') {
-          return await discoverVisionModels(requestWithResolvedKey)
-        }
-        await validateVisionModel({
-          baseUrl: request.body.baseUrl,
-          providerName: request.body.providerName,
-          modelId: request.body.modelId,
-          ...(requestWithResolvedKey.apiKey ? { apiKey: requestWithResolvedKey.apiKey } : {}),
-        })
-        registerVisionModelConfig({
-          providerName: request.body.providerName,
-          baseUrl: request.body.baseUrl,
-          ...(request.body.apiKey && !apiKeyEnv ? { apiKey: request.body.apiKey } : {}),
-          ...(apiKeyEnv ? { apiKeyEnv } : {}),
-          modelId: request.body.modelId,
-        })
-        return {}
-      })
+      app.startVisionOnboarding(executeVisionOnboarding)
       return true
     },
   })

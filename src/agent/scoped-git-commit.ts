@@ -1,5 +1,7 @@
-import { captureCommitVersion, type CommitVersion } from './commit-version.js'
-import { spawnGitSync } from '../tools/spawn-git.js'
+import type { CommitVersion } from './commit-version.js'
+import { captureCommitVersionAsync } from './commit-version-async.js'
+import { gitCommand } from '../tools/git-command.js'
+import { setTimeout as delay } from 'node:timers/promises'
 import { existsSync } from 'node:fs'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 
@@ -8,6 +10,8 @@ export interface ScopedCommitInput {
   files: string[]
   message: string
   expectedVersion?: CommitVersion
+  signal?: AbortSignal
+  timeoutMs?: number
 }
 
 export interface ScopedCommitResult {
@@ -27,14 +31,7 @@ const LOCK_RETRY_DELAYS_MS = [1000, 2000, 4000]
 
 function isLockContention(output: string): boolean {
   const lower = output.toLowerCase()
-  return lower.includes('index.lock') || lower.includes('unable to create') || lower.includes('another git process')
-}
-
-/** Synchronous sleep — commitScopedFiles is sync end-to-end (spawnGitSync).
- *  Atomics.wait signature: wait(array, index, EXPECTED_VALUE, timeout) — the
- *  expected value must be 0 (fresh buffer) or it returns 'not-equal' instantly. */
-function sleepSync(ms: number): void {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+  return lower.includes('index.lock') && (lower.includes('file exists') || lower.includes('another git process'))
 }
 
 /** Classify owned paths before `git add`: a path missing from BOTH the worktree
@@ -43,7 +40,7 @@ function sleepSync(ms: number): void {
  *  costs a full outer deliver_task retry. Skip and report instead. A missing
  *  worktree copy still present in the index is a staged deletion (D status):
  *  `git add -- <path>` stages the removal, so it must be kept. */
-function classifyStalePaths(cwd: string, files: string[]): { addable: string[]; stale: string[] } {
+async function classifyStalePaths(cwd: string, files: string[], signal?: AbortSignal): Promise<{ addable: string[]; stale: string[] }> {
   const addable: string[] = []
   const missing: string[] = []
   for (const f of files) {
@@ -51,7 +48,7 @@ function classifyStalePaths(cwd: string, files: string[]): { addable: string[]; 
     else missing.push(f)
   }
   if (missing.length === 0) return { addable, stale: [] }
-  const ls = runGit(cwd, ['ls-files', '-z', '--', ...missing])
+  const ls = await runGit(cwd, ['ls-files', '-z', '--', ...missing], signal)
   const inIndex = new Set(ls.ok ? ls.output.split('\0').filter(Boolean) : [])
   const stale: string[] = []
   for (const f of missing) {
@@ -61,13 +58,15 @@ function classifyStalePaths(cwd: string, files: string[]): { addable: string[]; 
   return { addable, stale }
 }
 
-export function commitScopedFiles(input: ScopedCommitInput): ScopedCommitResult {
+export async function commitScopedFiles(input: ScopedCommitInput): Promise<ScopedCommitResult> {
+  const signal = AbortSignal.any([AbortSignal.timeout(input.timeoutMs ?? 120_000), ...(input.signal ? [input.signal] : [])])
+  signal.throwIfAborted()
   if (!input.message.trim()) return { ok: false, output: 'Commit message is required.' }
 
   const files = normalizeFiles(input.cwd, input.files)
   if (files.length === 0) return { ok: false, output: 'No owned files to commit.' }
 
-  const { addable, stale } = classifyStalePaths(input.cwd, files)
+  const { addable, stale } = await classifyStalePaths(input.cwd, files, signal)
   if (addable.length === 0) {
     return {
       ok: false,
@@ -78,34 +77,41 @@ export function commitScopedFiles(input: ScopedCommitInput): ScopedCommitResult 
     ? `⚠ Skipped ${stale.length} stale path(s) already committed externally: ${stale.join(', ')}\n`
     : ''
 
-  const expected = input.expectedVersion ?? captureCommitVersion(input.cwd, addable)
-  const current = captureCommitVersion(input.cwd, addable)
+  const expected = input.expectedVersion ?? await captureCommitVersionAsync(input.cwd, addable, { signal })
+  const current = await captureCommitVersionAsync(input.cwd, addable, { signal })
   if (!expected || !current || JSON.stringify(expected) !== JSON.stringify(current)) return { ok: false, output: 'Selected files, HEAD or index changed; refresh the commit preview.' }
-  const staged = runGit(input.cwd, ['diff', '--cached', '--name-only', '-z', '--', ...addable])
-  const unstaged = runGit(input.cwd, ['diff', '--name-only', '-z', '--', ...addable])
+  const staged = await runGit(input.cwd, ['diff', '--cached', '--name-only', '-z', '--', ...addable], signal)
+  const unstaged = await runGit(input.cwd, ['diff', '--name-only', '-z', '--', ...addable], signal)
   if (!staged.ok || !unstaged.ok) return { ok: false, output: 'Cannot verify selected index contents.' }
   const unstagedPaths = new Set(unstaged.output.split('\0').filter(Boolean))
   if (staged.output.split('\0').some(file => unstagedPaths.has(file))) return { ok: false, output: 'Selected file is partially staged. Separate its hunks or explicitly commit the reviewed index in Git; no files were staged.' }
 
   for (let attempt = 0; ; attempt++) {
+    signal.throwIfAborted()
+    const retryVersion = await captureCommitVersionAsync(input.cwd, addable, { signal })
+    if (!retryVersion || retryVersion.head !== expected.head || retryVersion.files !== expected.files) return { ok: false, output: 'Selected snapshot changed during retry; refresh the commit preview.' }
     // add is idempotent — safe to re-run when the commit step hit a lock.
-    const add = runGit(input.cwd, ['add', '--', ...addable])
+    const add = await runGit(input.cwd, ['add', '--', ...addable], signal)
     if (!add.ok) {
       const delay = LOCK_RETRY_DELAYS_MS[attempt]
       if (delay !== undefined && isLockContention(add.output)) {
-        sleepSync(delay)
+        await delayWait(delay, signal)
         continue
       }
       return add
     }
 
-    const ready = captureCommitVersion(input.cwd, addable)
+    const ready = await captureCommitVersionAsync(input.cwd, addable, { signal })
     if (!ready || ready.head !== expected.head || ready.files !== expected.files) return { ok: false, output: 'Selected snapshot changed during staging; changes remain available for review.' }
-    const commit = runGit(input.cwd, ['commit', '-m', input.message, '--only', '--', ...addable])
+    const commit = await runGit(input.cwd, ['commit', '-m', input.message, '--only', '--', ...addable], signal)
+    if (!commit.ok && commit.interrupted) {
+      const observed = await captureCommitVersionAsync(input.cwd, addable)
+      return { ok: false, output: observed?.head !== expected.head ? 'Commit outcome uncertain: HEAD changed. Inspect Git before retrying.' : 'Commit interrupted; inspect Git before retrying.' }
+    }
     if (!commit.ok) {
       const delay = LOCK_RETRY_DELAYS_MS[attempt]
       if (delay !== undefined && isLockContention(commit.output)) {
-        sleepSync(delay)
+        await delayWait(delay, signal)
         continue
       }
       // Provide friendlier error for common "nothing changed" case
@@ -131,16 +137,10 @@ function normalizeFiles(cwd: string, files: string[]): string[] {
   return [...new Set(normalized)].sort((a, b) => a.localeCompare(b))
 }
 
-function runGit(cwd: string, args: string[]): ScopedCommitResult {
-  // Force C locale so git's porcelain/error text stays in parseable English
-  // regardless of the user's system locale (e.g. zh_CN would print 无文件要提交).
-  const result = spawnGitSync(args, {
-    cwd,
-    encoding: 'utf-8',
-    timeout: 10_000,
-    env: { ...process.env, LC_ALL: 'C', LANG: 'C' },
-  })
-  const output = `${result.stdout ?? ''}${result.stderr ?? ''}`.trim()
-  if (result.status !== 0) return { ok: false, output: output || `git ${args[0] ?? 'command'} failed` }
-  return { ok: true, output }
+async function delayWait(ms: number, signal: AbortSignal): Promise<void> { await delay(ms, undefined, { signal }) }
+
+async function runGit(cwd: string, args: string[], signal?: AbortSignal): Promise<ScopedCommitResult & { interrupted?: boolean }> {
+  const result = await gitCommand(cwd, args, { signal })
+  const output = `${result.stdout}${result.stderr}`.trim()
+  return { ok: result.status === 0, output: output || (result.status === 0 ? '' : `git ${args[0] ?? 'command'} failed`), interrupted: result.interrupted }
 }

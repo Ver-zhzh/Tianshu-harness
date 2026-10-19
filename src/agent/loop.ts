@@ -28,7 +28,7 @@ import { resolveDecisionsArm } from './decisions-experiment.js'
 import { gateToolDefinitions, isExtendedTool } from './tool-tiers.js'
 import { applyDescriptionMode } from '../tools/description-compact.js'
 import { resolvePromptBlocks } from '../prompt/block-policy.js'
-import { buildBudgetReport } from '../prompt/prefix-budget.js'
+import { wireUserInstructionsPersistence, agentPrefixBudget } from './user-instructions-runtime.js'
 import type { CompactCircuitBreakerState, ContextAnchor } from '../context/types.js'
 import type { ToolErrorClass } from '../tools/types.js'
 import type { FailureClass } from './failure-classifier.js'
@@ -1152,6 +1152,7 @@ export class AgentLoop {
     // 初始化 SessionPersist 用于 fuzzy checkpoint
     if (this.config.sessionId) {
       this.persist = this.config.sessionPersist ?? new SessionPersist(this.config.sessionId, this.cwd)
+      wireUserInstructionsPersistence(this.config.promptEngine, this.persist)
 
       // P1: Initialize session metadata with model info
       this.persist.initMetadata({
@@ -2467,16 +2468,7 @@ export class AgentLoop {
     createSidePathUsageRecorder(this)(kind, usage, model, provider)
   }
 
-  /** 本会话 frozen 前缀的分块归因（`/prefix-budget`）。档位来自会话启动时
-   *  解析的策略——中途改配置不会反映在这里，正如它也不会反映在前缀里。 */
-  getPrefixBudget(): { profile: string; toolDescriptions: string; report: import('../prompt/prefix-budget.js').PrefixBudgetReport } {
-    const policy = this.config.blockPolicy ?? resolvePromptBlocks(this.config.cwd ?? process.cwd())
-    return {
-      profile: policy.profile,
-      toolDescriptions: policy.toolDescriptions,
-      report: buildBudgetReport(this.config.promptEngine.getPrefixBudgetInputs()),
-    }
-  }
+  getPrefixBudget() { return agentPrefixBudget(this.config) }
 
   getDebugInfo() {
     const fp = this.config.promptEngine.getFingerprint()
@@ -2653,7 +2645,8 @@ export class AgentLoop {
     // §4：新 run 丢弃上一轮的改道卡候选——卡片只对当轮投递有效，绝不补弹旧卡。
     this.decisionShifts.discard('run-or-flood')
     this.activeInputOrigin = options?.origin ?? this.config.inputOrigin ?? 'human'
-    return observeRun(this.config.sessionId ?? 'default', () => this.runObserved(userInput, this.courseEpisodes.callbacks(callbacks), images))
+    const endInstructionsInput = this.config.promptEngine.beginUserInstructionsInput(this.activeInputOrigin)
+    return observeRun(this.config.sessionId ?? 'default', () => this.runObserved(userInput, this.courseEpisodes.callbacks(callbacks), images)).finally(endInstructionsInput)
   }
 
   private async runObserved(userInput: string, callbacks: AgentCallbacks, images?: string[]): Promise<AgentRunOutcome> {

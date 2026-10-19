@@ -30,7 +30,17 @@ describe('denoiseWindowsError: PowerShell/cmd 错误降噪', () => {
     const out = denoiseWindowsError(raw, { exitCode: 1, errorClass: 'environment', command: 'python --version' })
     assert.ok(out.startsWith('命令未找到'), '应前置恢复提示')
     assert.ok(out.includes('py'), '应指向 py launcher')
-    assert.ok(out.includes('不要重试'), '应劝阻盲目重试')
+    assert.match(out, /核对.*候选/)
+    assert.doesNotMatch(out, /Windows 上用 'py'/, '未探测不能宣称 py 可用')
+    assert.match(out, /不要(?:原样)?重试/, '应劝阻盲目重试')
+  })
+
+  it('exit 126 is not mislabeled as an uninstalled command', () => {
+    const raw = 'bash: ./runner: Permission denied'
+    const out = denoiseWindowsError(raw, { exitCode: 126, errorClass: 'environment', command: './runner' })
+    assert.match(out, /不可执行/)
+    assert.match(out, /Permission denied/)
+    assert.doesNotMatch(out, /命令未找到|brew install|winget install|环境缺失/)
   })
 
   it('cmd.exe 风格 not-recognized 也能提取命令名给提示', () => {

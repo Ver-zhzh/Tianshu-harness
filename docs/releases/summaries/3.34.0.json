@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "version": "3.34.0",
+  "date": "2026-10-19",
+  "fullNotesUrl": "https://github.com/huiliyi37/Tianshu-harness/releases/tag/v3.34.0",
+  "locales": {
+    "zh": {
+      "title": "安全加固与执行可靠性",
+      "highlights": [
+        "生图与探测端点默认只访问公网，本机/局域网端点须显式授权并绑定 origin（issue #456）。",
+        "修复 GLM pro/资源包账户额度查询恒报失败（issue #516）；余额卡片新增今日 Token 消耗。",
+        "修正工具执行反馈口径：环境类失败不再被误导性归因，退出码与测试证据判读回到正确口径。"
+      ],
+      "notice": "使用 Mimo Token Plan 的用户将在 2026-10-21 V2.5 退役后自动切换 V2.6 Pro，无需操作。"
+    },
+    "en": {
+      "title": "Security hardening and execution reliability",
+      "highlights": [
+        "Image-generation and probing endpoints default to public internet only; local/LAN origins require explicit per-origin authorization (issue #456).",
+        "Fixes GLM pro/resource-pack quota queries always failing (issue #516); the balance card gains today's token usage.",
+        "Corrects tool execution feedback: environment-class failures are no longer misattributed, and exit-code/test-evidence interpretation returns to the right rubric."
+      ],
+      "notice": "Mimo Token Plan users automatically switch to V2.6 Pro when V2.5 retires on 2026-10-21; no action needed."
+    }
+  }
+}

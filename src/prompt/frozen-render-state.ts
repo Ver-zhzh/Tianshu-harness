@@ -43,6 +43,9 @@ export class FrozenRenderState {
     this.committed!.executionSnapshot = snapshot.executionSnapshot
   }
   anchor(key: string) { return this.anchorIndex.get(key) }
+  *publishedPrefixes(): IterableIterator<string> {
+    for (const anchor of this.committed?.anchors ?? []) yield anchor.prefix
+  }
   commit(candidate: FrozenRenderCandidate, snapshot: FrozenSnapshotData, durable: ((snapshot: FrozenSnapshotData) => Promise<void>) | undefined, finish: () => void): void | Promise<void> {
     const publish = () => { this.publish(candidate, snapshot); finish() }
     if (!durable) { publish(); return }

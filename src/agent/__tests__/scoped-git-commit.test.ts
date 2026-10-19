@@ -35,26 +35,26 @@ describe('commitScopedFiles', () => {
     rmSync(TMP, { recursive: true, force: true })
   })
 
-  it('rejects stale previews and mixed staged hunks without absorbing changes', () => {
+  it('rejects stale previews and mixed staged hunks without absorbing changes', async () => {
     writeFileSync(join(TMP, 'owned.txt'), 'first edit')
     const version = captureCommitVersion(TMP, ['owned.txt'])!
     writeFileSync(join(TMP, 'owned.txt'), 'second edit')
-    assert.equal(commitScopedFiles({ cwd: TMP, files: ['owned.txt'], message: 'stale', expectedVersion: version }).ok, false)
+    assert.equal((await commitScopedFiles({ cwd: TMP, files: ['owned.txt'], message: 'stale', expectedVersion: version })).ok, false)
     assert.equal(git(['diff', '--cached', '--name-only']).trim(), '')
     git(['add', '--', 'owned.txt'])
     writeFileSync(join(TMP, 'owned.txt'), 'third edit')
     const before = git(['diff', '--cached'])
-    const result = commitScopedFiles({ cwd: TMP, files: ['owned.txt'], message: 'mixed' })
+    const result = await commitScopedFiles({ cwd: TMP, files: ['owned.txt'], message: 'mixed' })
     assert.equal(result.ok, false); assert.match(result.output, /partially staged/)
     assert.equal(git(['diff', '--cached']), before)
   })
 
-  it('commits only scoped files and leaves external dirty files untouched', () => {
+  it('commits only scoped files and leaves external dirty files untouched', async () => {
     writeFileSync(join(TMP, 'owned.txt'), 'owned change')
     writeFileSync(join(TMP, 'other.txt'), 'external change')
     writeFileSync(join(TMP, 'other-new.txt'), 'external untracked')
 
-    const result = commitScopedFiles({ cwd: TMP, files: ['owned.txt'], message: 'fix: scoped commit' })
+    const result = await commitScopedFiles({ cwd: TMP, files: ['owned.txt'], message: 'fix: scoped commit' })
 
     assert.equal(result.ok, true, result.output)
     const committedFiles = git(['show', '--name-only', '--pretty=format:', 'HEAD']).split('\n').filter(Boolean)
@@ -64,11 +64,11 @@ describe('commitScopedFiles', () => {
     assert.match(status, /\?\? other-new\.txt/)
   })
 
-  it('commits scoped untracked files without staging unrelated untracked files', () => {
+  it('commits scoped untracked files without staging unrelated untracked files', async () => {
     writeFileSync(join(TMP, 'new-owned.txt'), 'owned new')
     writeFileSync(join(TMP, 'other-new.txt'), 'external untracked')
 
-    const result = commitScopedFiles({ cwd: TMP, files: ['new-owned.txt'], message: 'fix: scoped new file' })
+    const result = await commitScopedFiles({ cwd: TMP, files: ['new-owned.txt'], message: 'fix: scoped new file' })
 
     assert.equal(result.ok, true, result.output)
     const committedFiles = git(['show', '--name-only', '--pretty=format:', 'HEAD']).split('\n').filter(Boolean)
@@ -77,38 +77,38 @@ describe('commitScopedFiles', () => {
     assert.match(status, /\?\? other-new\.txt/)
   })
 
-  it('rejects an empty file list without creating a commit', () => {
+  it('rejects an empty file list without creating a commit', async () => {
     const before = git(['rev-parse', 'HEAD']).trim()
-    const result = commitScopedFiles({ cwd: TMP, files: [], message: 'fix: empty' })
+    const result = await commitScopedFiles({ cwd: TMP, files: [], message: 'fix: empty' })
     const after = git(['rev-parse', 'HEAD']).trim()
     assert.equal(result.ok, false)
     assert.match(result.output, /No owned files/)
     assert.equal(after, before)
   })
 
-  it('rejects paths outside cwd without creating a commit', () => {
+  it('rejects paths outside cwd without creating a commit', async () => {
     const before = git(['rev-parse', 'HEAD']).trim()
-    const result = commitScopedFiles({ cwd: TMP, files: ['../outside.txt'], message: 'fix: outside' })
+    const result = await commitScopedFiles({ cwd: TMP, files: ['../outside.txt'], message: 'fix: outside' })
     const after = git(['rev-parse', 'HEAD']).trim()
     assert.equal(result.ok, false)
     assert.match(result.output, /No owned files/)
     assert.equal(after, before)
   })
 
-  it('rejects a blank commit message without creating a commit', () => {
+  it('rejects a blank commit message without creating a commit', async () => {
     writeFileSync(join(TMP, 'owned.txt'), 'owned change')
     const before = git(['rev-parse', 'HEAD']).trim()
-    const result = commitScopedFiles({ cwd: TMP, files: ['owned.txt'], message: '   ' })
+    const result = await commitScopedFiles({ cwd: TMP, files: ['owned.txt'], message: '   ' })
     const after = git(['rev-parse', 'HEAD']).trim()
     assert.equal(result.ok, false)
     assert.match(result.output, /Commit message is required/)
     assert.equal(after, before)
   })
 
-  it('provides friendly error when owned files have no changes', () => {
+  it('provides friendly error when owned files have no changes', async () => {
     // Don't modify owned.txt - it's already committed and clean
     const before = git(['rev-parse', 'HEAD']).trim()
-    const result = commitScopedFiles({ cwd: TMP, files: ['owned.txt'], message: 'fix: no changes' })
+    const result = await commitScopedFiles({ cwd: TMP, files: ['owned.txt'], message: 'fix: no changes' })
     const after = git(['rev-parse', 'HEAD']).trim()
     assert.equal(result.ok, false)
     assert.match(result.output, /No changes in owned files to commit/)
@@ -116,32 +116,31 @@ describe('commitScopedFiles', () => {
     assert.equal(after, before)
   })
 
-  it('retries through transient index.lock contention and commits once the lock clears', { timeout: 30_000 }, () => {
+  it('retries through transient index.lock contention and commits once the lock clears', { timeout: 30_000 }, async () => {
     writeFileSync(join(TMP, 'owned.txt'), 'owned change')
     const lockPath = join(TMP, '.git', 'index.lock')
     writeFileSync(lockPath, '')
-    // The main thread blocks in sleepSync during backoff, so the lock must be
-    // cleared by an external process — simulates the other git process exiting.
+    // Simulate the other Git process releasing its lock.
     const releaser = spawn(process.execPath, ['-e',
       "setTimeout(() => { try { require('node:fs').unlinkSync(process.argv[1]) } catch {} }, 2000)", lockPath],
     { stdio: 'ignore', detached: true })
     releaser.unref()
 
-    const result = commitScopedFiles({ cwd: TMP, files: ['owned.txt'], message: 'fix: retried through lock' })
+    const result = await commitScopedFiles({ cwd: TMP, files: ['owned.txt'], message: 'fix: retried through lock' })
 
     assert.equal(result.ok, true, `expected retry to recover, got: ${result.output}`)
     const committedFiles = git(['show', '--name-only', '--pretty=format:', 'HEAD']).split('\n').filter(Boolean)
     assert.deepEqual(committedFiles, ['owned.txt'])
   })
 
-  it('returns the lock error after retry exhaustion without deleting the lock', { timeout: 30_000 }, () => {
+  it('returns the lock error after retry exhaustion without deleting the lock', { timeout: 30_000 }, async () => {
     writeFileSync(join(TMP, 'owned.txt'), 'owned change')
     const lockPath = join(TMP, '.git', 'index.lock')
     writeFileSync(lockPath, '')
     const before = git(['rev-parse', 'HEAD']).trim()
 
     const started = Date.now()
-    const result = commitScopedFiles({ cwd: TMP, files: ['owned.txt'], message: 'fix: lock persists' })
+    const result = await commitScopedFiles({ cwd: TMP, files: ['owned.txt'], message: 'fix: lock persists' })
     const elapsed = Date.now() - started
 
     assert.equal(result.ok, false)
@@ -156,12 +155,12 @@ describe('commitScopedFiles', () => {
     assert.equal(existsSync(lockPath), true)
   })
 
-  it('commits deletions of tracked files whose worktree copy is gone (D status)', () => {
+  it('commits deletions of tracked files whose worktree copy is gone (D status)', async () => {
     // Anchor: git add -- <path> stages deletions — the D-status path must keep working.
     rmSync(join(TMP, 'owned.txt'))
     const before = git(['rev-parse', 'HEAD']).trim()
 
-    const result = commitScopedFiles({ cwd: TMP, files: ['owned.txt'], message: 'fix: remove owned' })
+    const result = await commitScopedFiles({ cwd: TMP, files: ['owned.txt'], message: 'fix: remove owned' })
 
     assert.equal(result.ok, true, `expected deletion commit, got: ${result.output}`)
     assert.notEqual(git(['rev-parse', 'HEAD']).trim(), before)
@@ -170,14 +169,14 @@ describe('commitScopedFiles', () => {
     assert.equal(existsSync(join(TMP, 'owned.txt')), false)
   })
 
-  it('skips stale owned paths (deleted and committed externally) and reports them', () => {
+  it('skips stale owned paths (deleted and committed externally) and reports them', async () => {
     // owned.txt is removed from both worktree and index by an external commit —
     // the owned set is stale. other.txt carries this session's change.
     git(['rm', 'owned.txt'])
     git(['commit', '-m', 'external removal'])
     writeFileSync(join(TMP, 'other.txt'), 'owned change')
 
-    const result = commitScopedFiles({ cwd: TMP, files: ['owned.txt', 'other.txt'], message: 'fix: skip stale' })
+    const result = await commitScopedFiles({ cwd: TMP, files: ['owned.txt', 'other.txt'], message: 'fix: skip stale' })
 
     assert.equal(result.ok, true, `stale path must not abort the commit, got: ${result.output}`)
     assert.match(result.output, /owned\.txt/, 'stale path must be reported in the output')
@@ -187,12 +186,12 @@ describe('commitScopedFiles', () => {
     assert.equal(status, '', 'worktree must be clean after the scoped commit')
   })
 
-  it('returns an actionable message when every owned path is stale', () => {
+  it('returns an actionable message when every owned path is stale', async () => {
     git(['rm', 'owned.txt'])
     git(['commit', '-m', 'external removal'])
     const before = git(['rev-parse', 'HEAD']).trim()
 
-    const result = commitScopedFiles({ cwd: TMP, files: ['owned.txt'], message: 'fix: all stale' })
+    const result = await commitScopedFiles({ cwd: TMP, files: ['owned.txt'], message: 'fix: all stale' })
 
     assert.equal(result.ok, false)
     assert.doesNotMatch(result.output, /did not match any files/, 'raw pathspec error must be replaced by an actionable message')

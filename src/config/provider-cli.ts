@@ -1,3 +1,4 @@
+import { endpointPolicyInput, savedEndpointPolicy } from './endpoint-network-policy.js'
 /**
  * `rivet provider <add|list|models|probe|remove>` — unified provider
  * onboarding CLI (Wave 3). Same write core (manager.registerProvider) and
@@ -47,8 +48,11 @@ Commands:
   probe <name>                  Probe a configured provider (models + completion)
   remove <name>                 Remove a provider (its model group + stored API key)
 
+Network flags (add/models/probe): --allow-private-network | --deny-private-network, --trust-proxy-dns
+Permissions bind to one endpoint origin and, for proxy DNS, the selected proxy. No automatic DNS fail-open.
+
 Examples:
-  rivet provider add my-relay --base-url http://127.0.0.1:3000/v1 --api-key-env RELAY_API_KEY
+  rivet provider add my-relay --base-url http://127.0.0.1:3000/v1 --api-key-env RELAY_API_KEY --allow-private-network
   rivet provider add claude-proxy --base-url https://proxy.example.com --protocol anthropic
   rivet provider models my-relay`)
 }
@@ -138,6 +142,16 @@ export function effortChannelNotes(
   return notes
 }
 
+function cliEndpointNetwork(args: string[], baseUrl: string, providerName: string) {
+  const cfg = loadConfig(), provider = cfg.provider.providers[providerName]
+  const proxy = { proxyUrl: provider?.proxy ?? cfg.network.proxy, noProxy: cfg.network.noProxy }
+  const explicit = { ...(hasFlag(args, '--allow-private-network') ? { allowPrivateNetwork: true } : {}),
+    ...(hasFlag(args, '--deny-private-network') ? { allowPrivateNetwork: false } : {}),
+    ...(hasFlag(args, '--trust-proxy-dns') ? { proxyDns: 'trusted-proxy' } : {}) }
+  return { proxy, trustProxyFakeIp: cfg.network.trustProxyFakeIp,
+    endpointNetworkPolicy: endpointPolicyInput(explicit, baseUrl, proxy) ?? savedEndpointPolicy(providerName, baseUrl) }
+}
+
 function formatProbeSummary(report: ProbeReport): string[] {
   const lines: string[] = []
   lines.push(
@@ -173,10 +187,11 @@ async function cmdAdd(args: string[], io: ProviderCliIO): Promise<void> {
   const noProbe = hasFlag(args, '--no-probe')
   const key = apiKey ?? (apiKeyEnv ? process.env[apiKeyEnv] : undefined)
 
+  const network = cliEndpointNetwork(args, baseUrl, name)
   let models: Array<Partial<ModelConfig> & { id: string }> = []
   if (!noProbe) {
     out(io, `Probing ${baseUrl} ...`)
-    const report = await probeProvider({ baseUrl, apiKey: key, protocol, providerName: name })
+    const report = await probeProvider({ baseUrl, apiKey: key, protocol, providerName: name, ...network })
     for (const line of formatProbeSummary(report)) out(io, `  ${line}`)
     if (report.models.length > 0) {
       const { models: descriptors, notes } = toModelDescriptors(matchModelIds(report.models, aliasTableWithProbeInfos(report.modelInfos)))
@@ -191,6 +206,7 @@ async function cmdAdd(args: string[], io: ProviderCliIO): Promise<void> {
 
   registerProvider({
     providerName: name,
+    endpointNetworkPolicy: network.endpointNetworkPolicy,
     baseUrl,
     ...(apiKey ? { apiKey } : {}),
     ...(apiKeyEnv ? { apiKeyEnv } : {}),
@@ -216,6 +232,7 @@ async function cmdModels(args: string[], io: ProviderCliIO): Promise<void> {
     return
   }
   const report = await probeProvider({
+    ...cliEndpointNetwork(args, provider.baseUrl, name),
     baseUrl: provider.baseUrl,
     apiKey: bestEffortApiKey(provider),
     protocol: provider.protocol,
@@ -253,6 +270,7 @@ async function cmdProbe(args: string[], io: ProviderCliIO): Promise<void> {
     return
   }
   const report = await probeProvider({
+    ...cliEndpointNetwork(args, provider.baseUrl, name),
     baseUrl: provider.baseUrl,
     apiKey: bestEffortApiKey(provider),
     protocol: provider.protocol,

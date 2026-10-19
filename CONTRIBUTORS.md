@@ -35,9 +35,10 @@
 | **Lin-Dongg** | headless 续聊修复（-p 消费 --continue/--resume）；视觉判定不再采信 L3 推断值；MiMo v2.6 模型元数据补全；headless MCP 提取时排除内建工具 | [#321](https://github.com/huiliyi37/Tianshu-harness/pull/321), [#322](https://github.com/huiliyi37/Tianshu-harness/pull/322), [#323](https://github.com/huiliyi37/Tianshu-harness/pull/323), [#362](https://github.com/huiliyi37/Tianshu-harness/pull/362), [#396](https://github.com/huiliyi37/Tianshu-harness/pull/396), [#404](https://github.com/huiliyi37/Tianshu-harness/pull/404), [#440](https://github.com/huiliyi37/Tianshu-harness/pull/440) |
 | **Eternal-dream-MAX** | CLI 交互、布局与配置流程升级——首次外观选择、交互式帮助与 diff 主题预览；连续问答与计划全文预览、CLI/sidecar 跨平台生命周期及 VS Code 状态隔离修复；远控终端适配与跨平台运行/持久化修复（终端模式自动识别、AppleDouble 元数据过滤、@ 文件补全异步化、审批输入边界复检等）；CLI / VS Code Token 账本、安全同步设置与跨进程持久化；会话回退待写事件保留与项目相对路径进展检查 | [#330](https://github.com/huiliyi37/Tianshu-harness/pull/330), [#333](https://github.com/huiliyi37/Tianshu-harness/pull/333), [#335](https://github.com/huiliyi37/Tianshu-harness/pull/335), [#336](https://github.com/huiliyi37/Tianshu-harness/pull/336), [#389](https://github.com/huiliyi37/Tianshu-harness/pull/389), [#405](https://github.com/huiliyi37/Tianshu-harness/pull/405), [#437](https://github.com/huiliyi37/Tianshu-harness/pull/437), [#448](https://github.com/huiliyi37/Tianshu-harness/pull/448), [#474](https://github.com/huiliyi37/Tianshu-harness/pull/474), [#475](https://github.com/huiliyi37/Tianshu-harness/pull/475), [#478](https://github.com/huiliyi37/Tianshu-harness/pull/478), [#481](https://github.com/huiliyi37/Tianshu-harness/pull/481) |
 | **y521188** | fix(mcp): headless loads project MCP config; stdio connect timeout reclassified as protocol（待润色：请人工归纳贡献） | [#354](https://github.com/huiliyi37/Tianshu-harness/pull/354) |
+| **q0o8o0p** | 用户级常驻指令需求与初版实现；按独立预算、发布事务及 worker 继承边界重新落地 | [#509](https://github.com/huiliyi37/Tianshu-harness/pull/509) |
 
 本文件由 `scripts/contributors.ts` 生成与对账（`--check` 只报告差异；`--write` 合并写回）。
-共 31 位外部贡献者 / 285 个 PR，按首次贡献时间排序。
+共 32 位外部贡献者 / 286 个 PR，按首次贡献时间排序。
 **「贡献」列由人工撰写，自动流程只增不删**——既有条目、描述与顺序不会被覆盖。
 PR 编号以 `huiliyi37/Tianshu-harness` 为准（该仓库由 `Tianshu-Tui` 更名而来，历史链接自动重定向）。
 

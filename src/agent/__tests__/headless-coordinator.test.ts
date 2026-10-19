@@ -1,3 +1,4 @@
+import { DISABLED_USER_INSTRUCTIONS } from '../../prompt/user-instructions.js'
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { buildModelCards, createHeadlessCoordinator } from '../headless-coordinator.js'
@@ -65,7 +66,7 @@ describe('buildModelCards', () => {
 describe('createHeadlessCoordinator', () => {
   it('creates a DelegationCoordinator with maxWorkers=1', () => {
     const toolRegistry = createDefaultToolRegistry([], { desktopTools: false })
-    const coordinator = createHeadlessCoordinator({
+    const coordinator = createHeadlessCoordinator({ getUserInstructions: () => DISABLED_USER_INSTRUCTIONS,
       toolRegistry,
       provider: makeProvider(),
       currentModelId: 'test-model-flash',
@@ -82,7 +83,7 @@ describe('createHeadlessCoordinator', () => {
 
   it('produces a coordinator whose delegate is callable (does not throw on construction)', () => {
     const toolRegistry = createDefaultToolRegistry([], { desktopTools: false })
-    const coordinator = createHeadlessCoordinator({
+    const coordinator = createHeadlessCoordinator({ getUserInstructions: () => DISABLED_USER_INSTRUCTIONS,
       toolRegistry,
       provider: makeProvider(),
       currentModelId: 'test-model-flash',

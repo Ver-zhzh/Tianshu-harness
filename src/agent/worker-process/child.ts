@@ -35,6 +35,7 @@ import { TodoStore } from '../../tools/todo-store.js'
 import { DelegationCoordinator } from '../coordinator.js'
 import { buildModelCards } from '../headless-coordinator.js'
 import { buildWorkerRuntime, createWorkerRuntimeFactory } from '../worker-runtime.js'
+import { parseUserInstructionsSnapshot } from '../../prompt/user-instructions.js'
 import { deriveWorkerSessionId } from '../work-order.js'
 import { DomainKnowledgeStore } from '../domain-knowledge-store.js'
 import { profileRegistry } from '../profile-registry.js'
@@ -147,6 +148,7 @@ async function bootAndRunInWorkspace(
 ): Promise<void> {
   try {
     const cfg = init.config
+    const userInstructions = parseUserInstructionsSnapshot(init.userInstructions)
     const cwd = cfg.cwd
 
     // 2) 运行时重建（全部从落盘 config + init 快照来，无父进程内存态）。
@@ -160,6 +162,7 @@ async function bootAndRunInWorkspace(
     const domainKnowledgeStore = new DomainKnowledgeStore(join(cwd, '.rivet', 'knowledge'))
 
     const deps = {
+      getUserInstructions: () => workerConfig.promptEngine.getUserInstructionsForDispatch(),
       config,
       cwd,
       provider,
@@ -231,7 +234,7 @@ async function bootAndRunInWorkspace(
       model: decision.model,
       maxTokens: decision.maxTokens,
       staticCtx: { tools: applyDescriptionMode(workerRegistry.getDefinitions(), blocks.toolDescriptions), audience: 'subagent' as const },
-      volatileCtx: { cwd, sessionMemoryBlock: init.memoryBlock, blockCaps: blocks.caps },
+      volatileCtx: { cwd, userInstructions, sessionMemoryBlock: init.memoryBlock, blockCaps: blocks.caps },
       // 续跑/复核/重试继承上一轮冻结快照——历史 user 消息恢复原始字节，
       // 前缀缓存只在新 user 边界断尾（缺省/坏数据引擎内降级为冷启动）。
     })
@@ -263,6 +266,7 @@ async function bootAndRunInWorkspace(
       onNestedDelegation: activity => writeFrame({ t: 'nested', activity }),
       checkpoint: cfg.checkpoint,
       priorMessages: cfg.priorMessages,
+      priorFrozenSnapshot: cfg.priorFrozenSnapshot,
       priorPrefixProof: cfg.priorPrefixProof,
       continuationSource: cfg.continuationSource,
       routeReason: cfg.routeReason,
@@ -287,7 +291,7 @@ async function bootAndRunInWorkspace(
         messages,
         // 冻结快照随结果上行——导出失败不毁结果（下一轮退化为冷启动，与旧行为一致）。
         prefixProof: run.prefixProof,
-        frozenSnapshot: (() => { try { return promptEngine.exportFrozenSnapshot() } catch { return undefined } })(),
+        frozenSnapshot: run.frozenSnapshot,
         turnCount: messages.length,
       },
     })

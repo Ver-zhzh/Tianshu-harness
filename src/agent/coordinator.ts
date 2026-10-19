@@ -508,6 +508,7 @@ export function shouldDelegateObjective(objective: string, scope: WorkOrderScope
 }
 
 export function classifyWorkerError(error: unknown): WorkerFailureReason {
+  if (error instanceof Error && error.name === 'UserInstructionsError') return 'policy_short_circuit'
   if (isLocalWorkerPolicyError(error)) return 'policy_short_circuit'
   const msg = error instanceof Error ? error.message : String(error)
   if (/timed out|timeout|exceeded.*time/i.test(msg)) return 'timeout'

@@ -9,6 +9,7 @@
  */
 
 import { isRewindGenerationAuthorization } from '../api/continuation-prefix.js'
+import { isAppliedUserInstructions, type AppliedUserInstructions } from './user-instructions.js'
 
 export interface PendingCompaction {
   version: 1
@@ -17,6 +18,7 @@ export interface PendingCompaction {
 }
 
 export interface FrozenSnapshotData {
+  userInstructions?: AppliedUserInstructions
   executionSnapshot?: import('../api/continuation-prefix.js').ContinuationPrefixProof
   publishedUserCount?: number
   renderedHistory?: import('../api/continuation-prefix.js').ContinuationPrefixProof['messages']
@@ -48,6 +50,7 @@ function isHistorySeal(value: unknown): value is import('../api/continuation-pre
 export function parseFrozenSnapshotData(raw: unknown): FrozenSnapshotData | undefined {
   if (typeof raw !== 'object' || raw === null) return undefined
   const d = raw as Record<string, unknown>
+  if (d.userInstructions !== undefined && !isAppliedUserInstructions(d.userInstructions)) return undefined
   if (d.publishedUserCount !== undefined && (!Number.isSafeInteger(d.publishedUserCount) || (d.publishedUserCount as number) < 0)) return undefined
   if (d.renderedHistory !== undefined && !isHistorySeal(d.renderedHistory)) return undefined
   if (d.publishedHistory !== undefined && (!isHistorySeal(d.publishedHistory)

@@ -53,10 +53,10 @@ after(async () => {
 
 test('dedicated vision onboarding routes discover, validate once, and save without changing default', async () => {
   const router = createRouter(buildConfigRoutes(TOKEN))
-  const unauthorized = await router('POST', '/config/vision-model/discover', { baseUrl }, {})
+  const unauthorized = await router('POST', '/config/vision-model/discover', { baseUrl, allowPrivateNetwork: true }, {})
   assert.equal(unauthorized.status, 401)
 
-  const discovery = await router('POST', '/config/vision-model/discover', { baseUrl }, AUTH)
+  const discovery = await router('POST', '/config/vision-model/discover', { baseUrl, allowPrivateNetwork: true }, AUTH)
   assert.equal(discovery.status, 200)
   assert.deepEqual((discovery.body as { candidates: unknown }).candidates, [
     { id: 'custom-vision-1', knownVision: false },
@@ -64,7 +64,7 @@ test('dedicated vision onboarding routes discover, validate once, and save witho
 
   const defaultBefore = loadConfig().provider.default
   const onboard = await router('POST', '/config/vision-model/onboard', {
-    providerName: 'vision-custom', baseUrl, modelId: 'custom-vision-1', apiKey: 'sk-test',
+    providerName: 'vision-custom', baseUrl, allowPrivateNetwork: true, modelId: 'custom-vision-1', apiKey: 'sk-test',
   }, AUTH)
   assert.equal(onboard.status, 200)
   assert.equal(completionCount, 1)
@@ -83,7 +83,7 @@ test('vision discover/onboard only resolve apiKeyEnv names declared in the saved
     // 未声明的变量名：discover 直接 400，上游零请求——任意环境变量不可被读出外泄。
     const callsBefore = completionCount
     const rejected = await router('POST', '/config/vision-model/discover', {
-      baseUrl, apiKeyEnv: envName,
+      baseUrl, allowPrivateNetwork: true, apiKeyEnv: envName,
     }, AUTH)
     assert.equal(rejected.status, 400)
     assert.match(String((rejected.body as { error?: string }).error ?? ''), /not declared/)
@@ -107,14 +107,14 @@ test('vision discover/onboard only resolve apiKeyEnv names declared in the saved
     saveConfig(cfg)
     requiredAuthorization = ['Bearer', 'env-only-key'].join(' ')
     const discovery = await router('POST', '/config/vision-model/discover', {
-      baseUrl, apiKeyEnv: envName,
+      baseUrl, allowPrivateNetwork: true, apiKeyEnv: envName,
     }, AUTH)
     assert.equal(discovery.status, 200)
 
     // onboard 新变量名：校验阶段不解析不发送（上游放行未认证即通过），只持久化变量名。
     requiredAuthorization = undefined
     const onboarded = await router('POST', '/config/vision-model/onboard', {
-      providerName: 'vision-env-new', baseUrl, modelId: 'custom-vision-1', apiKeyEnv: 'RIVET_VISION_NEW_KEY',
+      providerName: 'vision-env-new', baseUrl, allowPrivateNetwork: true, modelId: 'custom-vision-1', apiKeyEnv: 'RIVET_VISION_NEW_KEY',
     }, AUTH)
     assert.equal(onboarded.status, 200)
     assert.equal(loadConfig().provider.providers['vision-env-new']?.apiKeyEnv, 'RIVET_VISION_NEW_KEY')
@@ -129,10 +129,10 @@ test('vision onboarding rejects blank or unavailable credentials without mutatio
   const router = createRouter(buildConfigRoutes(TOKEN))
   const before = JSON.stringify(loadConfig())
   for (const body of [
-    { baseUrl, apiKey: '   ' },
-    { baseUrl, apiKeyEnv: '   ' },
-    { baseUrl, apiKeyEnv: 'NOT-A-VALID-NAME' },
-    { baseUrl, apiKeyEnv: 'RIVET_MISSING_VISION_KEY' },
+    { baseUrl, allowPrivateNetwork: true, apiKey: '   ' },
+    { baseUrl, allowPrivateNetwork: true, apiKeyEnv: '   ' },
+    { baseUrl, allowPrivateNetwork: true, apiKeyEnv: 'NOT-A-VALID-NAME' },
+    { baseUrl, allowPrivateNetwork: true, apiKeyEnv: 'RIVET_MISSING_VISION_KEY' },
   ]) {
     const response = await router('POST', '/config/vision-model/discover', body, AUTH)
     assert.equal(response.status, 400)
@@ -147,7 +147,7 @@ test('vision onboarding cannot overwrite the default provider', async () => {
   const providerBefore = JSON.stringify(before.provider.providers[providerName])
   const visionBefore = JSON.stringify(before.agent.visionModel)
   const response = await router('POST', '/config/vision-model/onboard', {
-    providerName, baseUrl, modelId: 'custom-vision-1', apiKey: 'sk-test',
+    providerName, baseUrl, allowPrivateNetwork: true, modelId: 'custom-vision-1', apiKey: 'sk-test',
   }, AUTH)
 
   assert.equal(response.status, 400)
@@ -161,7 +161,7 @@ test('vision onboarding rejects unlisted model IDs before completion or config m
   const before = JSON.stringify(loadConfig())
   const completionsBefore = completionCount
   const response = await router('POST', '/config/vision-model/onboard', {
-    providerName: 'vision-rejected', baseUrl, modelId: 'not-returned', apiKey: 'sk-test',
+    providerName: 'vision-rejected', baseUrl, allowPrivateNetwork: true, modelId: 'not-returned', apiKey: 'sk-test',
   }, AUTH)
 
   assert.equal(response.status, 400)
@@ -176,7 +176,7 @@ test('vision onboarding keeps existing config when validation returns empty cont
   completionResponse = ' '
   try {
     const response = await router('POST', '/config/vision-model/onboard', {
-      providerName: 'vision-empty', baseUrl, modelId: 'custom-vision-1', apiKey: 'sk-test',
+      providerName: 'vision-empty', baseUrl, allowPrivateNetwork: true, modelId: 'custom-vision-1', apiKey: 'sk-test',
     }, AUTH)
 
     assert.equal(response.status, 400)

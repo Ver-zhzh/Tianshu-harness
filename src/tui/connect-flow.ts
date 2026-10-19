@@ -1,3 +1,4 @@
+import type { EndpointAccessInput } from '../config/endpoint-network-policy.js'
 /**
  * Headless state machine for the in-TUI `/connect` provider setup wizard.
  *
@@ -98,6 +99,7 @@ export type ConnectCommit =
     }
   | {
       mode: 'custom'
+      endpointNetworkPolicy?: SetupProviderOptions['endpointNetworkPolicy']
       providerName: string
       baseUrl: string
       /** Empty for local endpoints (Ollama/vLLM) that need no auth. */
@@ -1069,6 +1071,10 @@ export class ConnectFlow {
           subtitle: this.collected.probeError ?? '未能获取模型列表',
           stepLabel: this.diyStepLabel(4),
           options: [
+            ...(/endpoint_(private_network_denied|dns_unverified)/.test(this.collected.probeError ?? '') ? [
+              { id: 'allow-private', label: '允许此地址访问本机/局域网并重新探测', description: this.collected.baseUrl },
+              { id: 'trust-proxy', label: '信任当前代理 DNS 并重新探测', description: '只在实际经过当前代理时生效；不能固定代理解析的 IP' },
+            ] : []),
             { id: 'manual', label: '手动输入模型型号', description: '跳过探测，直接填写模型信息' },
             { id: 'back', label: '返回修改 API 地址', description: '地址可能缺 /v1 后缀或拼写有误' },
           ],
@@ -1396,7 +1402,19 @@ export class ConnectFlow {
   }
 
   /** The TUI caught a network/timeout error while running the probe. */
+  private networkAccess: EndpointAccessInput = {}
+  private networkOrigin?: string
+  private networkPreset = false
+  endpointBaseUrl(): string | undefined { return this.collected.baseUrl ?? (this.collected.presetKey ? this.presetBaseUrl() : undefined) }
+  endpointAccess(baseUrl: string): EndpointAccessInput { return this.networkOrigin === new URL(baseUrl).origin ? this.networkAccess : {} }
+
   probeFailed(message: string): ConnectStepResult {
+    if (/endpoint_(private_network_denied|dns_unverified)/.test(message)) {
+      this.networkPreset = this.phase === 'preset-probing'
+      this.collected.probeError = message
+      this.phase = 'diy-probe-failed'
+      return { kind: 'next', view: this.view() }
+    }
     if (this.phase === 'preset-probing') {
       this.collected.probeReport = { models: [], modelsOk: false, completionOk: false, hints: {}, errors: [message] }
       this.phase = 'probe-report'
@@ -1643,6 +1661,13 @@ export class ConnectFlow {
       return { kind: 'next', view: this.view() }
     }
     if (this.phase === 'diy-probe-failed') {
+      if (id === 'allow-private' || id === 'trust-proxy') {
+        const baseUrl = this.collected.baseUrl!
+        this.networkAccess = { ...this.endpointAccess(baseUrl), ...(id === 'allow-private' ? { allowPrivateNetwork: true } : { proxyDns: 'trusted-proxy' as const }) }
+        this.networkOrigin = new URL(baseUrl).origin
+        this.phase = this.networkPreset ? 'preset-probing' : 'diy-probing'
+        return { kind: 'probe', baseUrl, apiKey: this.collected.apiKey, protocol: this.collected.protocol ?? 'openai', providerName: this.collected.presetKey ?? this.collected.providerName }
+      }
       if (id === 'manual') {
         this.phase = 'diy-model'
         return { kind: 'next', view: this.view() }
@@ -1823,6 +1848,7 @@ export class ConnectFlow {
         }
         const normalized = normalizeBaseUrl(url)
         this.collected.urlNormalized = normalized !== url
+        if (this.networkOrigin && this.networkOrigin !== new URL(normalized).origin) { this.networkOrigin = undefined; this.networkAccess = {} }
         this.collected.baseUrl = normalized
         this.phase = 'preset-probing'
         return {
@@ -1841,6 +1867,7 @@ export class ConnectFlow {
         }
         const normalized = normalizeBaseUrl(value)
         this.collected.urlNormalized = normalized !== value
+        if (this.networkOrigin && this.networkOrigin !== new URL(normalized).origin) { this.networkOrigin = undefined; this.networkAccess = {} }
         this.collected.baseUrl = normalized
         // 密钥已在手（探测失败回来改地址 / 草稿恢复）→ 重提地址直接再探测，
         // 不让用户把密钥步重走一遍。

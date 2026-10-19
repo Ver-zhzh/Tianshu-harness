@@ -1,3 +1,4 @@
+import { DISABLED_USER_INSTRUCTIONS } from '../../prompt/user-instructions.js'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
@@ -69,7 +70,7 @@ test('production self-hosted agent config enables the same recovery path as its 
   try {
     const model = { id: 'self-hosted-model', maxTokens: 256_000, contextWindow: 524_288 }
     const provider = providerSchema.parse({ name: 'self-hosted', baseUrl: 'https://self-hosted.example/v1', apiKeyEnv: 'UNUSED_TEST_KEY', models: [model] })
-    const config = createAgentConfig({
+    const config = createAgentConfig({ userInstructions: DISABLED_USER_INSTRUCTIONS,
       apiKey: 'test-only-not-a-real-key', model, cwd, provider,
       compact: compactSchema.parse({ enabled: false }), sessionId: 'self-hosted-budget-test', toolDefinitions: [],
     })

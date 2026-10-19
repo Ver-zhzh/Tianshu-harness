@@ -461,6 +461,10 @@ Please report security vulnerabilities via [GitHub Private Security Advisories](
 
 <img src="docs/brand/assets/wechat-group-qr.png" width="280" alt="Tianshu Harness WeChat Group 5 QR Code">
 
+- **QQ group** → "TUI", group ID `1017892942`, scan the QR code below to join:
+
+<img src="docs/brand/assets/qq-group-qr.png" width="280" alt="TUI QQ Group QR Code (group ID 1017892942)">
+
 ## 🌐 Official Website
 
 The Tianshu ecosystem official website [jiangsx496/Tianshu-Official-Website](https://jiangsx496.github.io/Tianshu-Official-Website/) was originally created and developed by [@jiangsx496](https://github.com/jiangsx496), covering the database, frontend, and initial backend.

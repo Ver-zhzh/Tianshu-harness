@@ -13,12 +13,12 @@ import type { LoopLagSnapshot } from './loop-health.js'
 import type { StoreLockHolder } from './store-lock.js'
 import { isAuthorizedRequest } from './auth.js'
 import { PROTOCOL_VERSION, RUNTIME_CAPABILITIES, type RuntimeCapabilities } from './protocol.js'
-import { randomUUID } from 'node:crypto'
-
-export const RUNTIME_INSTANCE_ID = process.env.RIVET_INSTANCE_ID || randomUUID()
+import { recentRuntimeDiagnostics, RUNTIME_INSTANCE_ID, type RuntimeDiagnostic } from '../utils/runtime-diagnostics.js'
+export { RUNTIME_INSTANCE_ID } from '../utils/runtime-diagnostics.js'
 
 /** 带 token 请求拿到的全量 health 体。`GET /events` 的心跳复用同一份（阶段 4）。 */
 export interface HealthBody {
+  recentDiagnostics?: readonly RuntimeDiagnostic[]
   storage?: { failedSessions: number; pendingEvents: number }
   snapshotAt?: number
   buildId?: string
@@ -70,6 +70,7 @@ export function createHealthSnapshot(
     const lockHolder = storeLockHolder?.()
     return {
       snapshotAt: Date.now(),
+      recentDiagnostics: recentRuntimeDiagnostics(),
       storage: manager.getStorageHealth(),
       buildId: process.env.RIVET_BUILD_ID ?? 'unknown',
       nodeVersion: process.version,

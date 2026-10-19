@@ -212,7 +212,7 @@ export function createSelfVerifyHook(deps: SelfVerifyHookDeps): PostTurnRuntimeH
         key: 'self-verify',
         priority: escalatedPriority(0.58, debtDuration),
         category: 'discipline',
-        content: '【瑶光】最近几步你基于读取/编辑给出了结论，但没有独立验证（未运行测试或类型检查）。在继续推进之前，请先确认该结论有 ground truth 支撑——跑测试/读原文/用原输入自检，而非信任摘要或自己的判断。',
+        content: '【瑶光】最近几步没有独立验证中的测试或类型检查记录。若当前任务需要测试或类型检查，执行对应项目入口并检查结果；读原文、浏览器观测可核实对应事实，但不补测试或类型检查义务。任务只需事实核查时保留其证据，不为核销提醒运行无关测试；不得把摘要或自述当通过。',
         ttl: 1,
         // P1a 核销 + Phase 2 挂起观察：模型常在下一轮自发验证——挂 1 个周期,
         // 窗口内 expect 已满足则自愈撤销（ICU 延迟确认降误报）,否则准时送达。

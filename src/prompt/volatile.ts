@@ -17,6 +17,7 @@ import { detectRuntimeEnvBlock, windowsShellNote } from './runtime-env.js'
 import { FROZEN_BLOCK_CAPS, type FrozenBlockCaps, type PromptBlockToggles } from './block-policy.js'
 import { selectProjectInstructions } from './project-instructions.js'
 import { projectInstructionsAllowed } from '../config/project-trust.js'
+import { renderUserInstructions, type UserInstructionsSnapshot } from './user-instructions.js'
 
 export { FROZEN_BLOCK_CAPS, type FrozenBlockCaps }
 
@@ -270,6 +271,8 @@ export interface ToolHistoryEntry {
 }
 
 export interface VolatileContext {
+  userInstructions?: UserInstructionsSnapshot
+  userInstructionsRevoked?: boolean
   cwd: string
   workspaceRoots?: readonly string[]
   /** 各 frozen 块的字符上限。缺省 = {@link FROZEN_BLOCK_CAPS}（standard 档）。
@@ -1091,6 +1094,9 @@ function buildVolatileBlockInternal(ctx: VolatileContext): string {
   // 档位化上限：缺省回落 standard，保证无 policy 的调用方（worker / 测试 /
   // 直接构造 ctx 的路径）与历史输出逐字节一致。
   const caps = { ...FROZEN_BLOCK_CAPS, ...ctx.blockCaps }
+
+  const instructions = renderUserInstructions(ctx.userInstructions, ctx.userInstructionsRevoked)
+  if (instructions) parts.push(instructions)
 
   const md = ctx.rivetMd ?? readRivetMd(ctx.cwd)
   if (md) {

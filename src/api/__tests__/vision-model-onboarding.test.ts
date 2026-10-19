@@ -44,7 +44,7 @@ describe('vision model onboarding', () => {
       res.end(JSON.stringify({ data: [{ id: 'custom-vision-1' }] }))
     })
 
-    const result = await discoverVisionModels({ baseUrl: server.baseUrl, apiKey: 'sk-test' })
+    const result = await discoverVisionModels({ baseUrl: server.baseUrl, endpointNetworkPolicy: { origin: new URL(server.baseUrl).origin, allowPrivateNetwork: true }, apiKey: 'sk-test' })
     assert.deepEqual(result.candidates.map(candidate => candidate.id), ['custom-vision-1'])
   })
 
@@ -65,7 +65,7 @@ describe('vision model onboarding', () => {
     })
 
     const result = await validateVisionModel({
-      baseUrl: server.baseUrl,
+      baseUrl: server.baseUrl, endpointNetworkPolicy: { origin: new URL(server.baseUrl).origin, allowPrivateNetwork: true },
       apiKey: 'sk-test',
       modelId: 'custom-vision-1',
     })
@@ -92,7 +92,7 @@ describe('vision model onboarding', () => {
     })
 
     await assert.rejects(
-      validateVisionModel({ baseUrl: server.baseUrl, modelId: 'arbitrary-model' }),
+      validateVisionModel({ baseUrl: server.baseUrl, endpointNetworkPolicy: { origin: new URL(server.baseUrl).origin, allowPrivateNetwork: true }, modelId: 'arbitrary-model' }),
       /not returned by \/models/,
     )
     assert.equal(completionCount, 0)
@@ -109,7 +109,7 @@ describe('vision model onboarding', () => {
     })
 
     await assert.rejects(
-      validateVisionModel({ baseUrl: server.baseUrl, modelId: 'custom-vision-1' }),
+      validateVisionModel({ baseUrl: server.baseUrl, endpointNetworkPolicy: { origin: new URL(server.baseUrl).origin, allowPrivateNetwork: true }, modelId: 'custom-vision-1' }),
       /no answer text/,
     )
   })

@@ -130,6 +130,7 @@ export async function runWorkerSessionOop(
 
   const decision = config.runtimeDecision
   const initPayload: WorkerChildInitPayload = {
+    userInstructions: config.promptEngine.getUserInstructionsSnapshot(),
     proAuthorization: captureManagedProAuthorization(),
     config: {
       order: { ...config.order, allowedTools: config.toolRegistry.getDefinitions().map(tool => tool.name) },

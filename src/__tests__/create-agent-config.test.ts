@@ -1,3 +1,4 @@
+import { DISABLED_USER_INSTRUCTIONS } from '../prompt/user-instructions.js'
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { createAgentConfig, createMainAgentConfigInput, type AgentConfigInput } from '../agent/create-agent-config.js'
@@ -66,6 +67,7 @@ const testConfig = {
 
 describe('createAgentConfig', () => {
   const baseInput: AgentConfigInput = {
+    userInstructions: DISABLED_USER_INSTRUCTIONS,
     apiKey: 'test-key',
     model: { id: 'deepseek-r1', maxTokens: 8192, contextWindow: 128000, reasoningEffort: undefined },
     cwd: '/tmp/test',
@@ -145,7 +147,7 @@ describe('createAgentConfig', () => {
   })
 
   it('builds main AgentConfig input from layered config including songlineEnabled', () => {
-    const input = createMainAgentConfigInput({
+    const input = createMainAgentConfigInput({ userInstructions: DISABLED_USER_INSTRUCTIONS,
       apiKey: 'test-key',
       model: baseInput.model,
       cwd: '/tmp/test',
@@ -181,7 +183,7 @@ describe('createAgentConfig', () => {
   // 导致 buildVisionClient 恒返回 undefined、桥接从不触发（"配了却报图片未发送"）。
   // 这两条测试钉住 config → input → visionClient 这条线。
   it('wires config.agent.visionModel through createMainAgentConfigInput', () => {
-    const input = createMainAgentConfigInput({
+    const input = createMainAgentConfigInput({ userInstructions: DISABLED_USER_INSTRUCTIONS,
       apiKey: 'test-key',
       model: baseInput.model,
       cwd: '/tmp/test',
@@ -395,7 +397,7 @@ describe('createAgentConfig', () => {
   })
 
   it('wires config.agent.reconnect into agentReconnect (PLAN §4)', () => {
-    const input = createMainAgentConfigInput({
+    const input = createMainAgentConfigInput({ userInstructions: DISABLED_USER_INSTRUCTIONS,
       apiKey: 'test-key',
       model: baseInput.model,
       cwd: '/tmp/test',
@@ -413,7 +415,7 @@ describe('createAgentConfig', () => {
   })
 
   it('keeps agentReconnect disabled when config.agent.reconnect is unset', () => {
-    const input = createMainAgentConfigInput({
+    const input = createMainAgentConfigInput({ userInstructions: DISABLED_USER_INSTRUCTIONS,
       apiKey: 'test-key',
       model: baseInput.model,
       cwd: '/tmp/test',

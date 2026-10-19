@@ -125,8 +125,8 @@ export function resolveCallerTimeoutBudget(command: string, requestedMs: number,
  * `scripts/source-budgets.manifest.json` 的 budgets）。
  */
 export const TYPECHECK_TIMEOUT_HINT =
-  '命令超时（typecheck 形态）：该命令要过跨进程共享闸门，排队等待可能长于本次预算，中途被杀不会产出任何结果。'
-  + '\n下一步：用 run_in_background=true 重跑，再 job(action="await", id=...) 取结果——不要据此判定代码有问题。'
+  '命令超时（typecheck 形态）：共享闸门的排队可能占用预算，本次未取得完整类型检查结果。'
+  + '\n下一步：先核对已有共享任务、进程状态与日志；确认原执行已结束且无可复用结果，再按剩余预算用 run_in_background=true 执行，并用返回的实际 job id 等待退出。不完整结果不能据此判定代码有问题。'
 
 /**
  * 外层工具看门狗（`tool-pipeline` 读 `toolDef.timeoutMs`）比内层执行预算多留的余量。

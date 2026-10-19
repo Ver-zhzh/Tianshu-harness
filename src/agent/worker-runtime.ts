@@ -1,4 +1,5 @@
 import { currentWorkspaceRoots } from '../tools/workspace-context.js'
+import { parseUserInstructionsSnapshot, type UserInstructionsSnapshot } from '../prompt/user-instructions.js'
 import type { ModelCapabilityCard } from '../model/capability.js'
 import type { Config, ProviderConfig } from '../config/schema.js'
 import type { ContextClaim } from '../context/claims.js'
@@ -20,6 +21,7 @@ import { workerModelPolicy, type WorkerModelPolicy } from './worker-model-policy
 import { resolveModelBinding, snapshotSessionBinding, ModelBindingUnavailable, type ModelBindingRef, type ModelUnavailableReason } from '../model/model-binding.js'
 
 export interface WorkerRuntimeDeps {
+  getUserInstructions: () => import('../prompt/user-instructions.js').UserInstructionsSnapshot
   rootSessionId?: string
   rootSessionBinding?: ModelBindingRef
   config: Config
@@ -41,6 +43,7 @@ export interface WorkerRuntimeDeps {
 
 type Binding = ReturnType<typeof resolveModelBinding>
 interface PreparedModel {
+  userInstructions: UserInstructionsSnapshot
   deps: WorkerRuntimeDeps
   policy: WorkerModelPolicy
   root: ModelBindingRef
@@ -49,15 +52,16 @@ interface PreparedModel {
 }
 
 function prepareModel(deps: WorkerRuntimeDeps, order: WorkOrder): PreparedModel {
+  const userInstructions = parseUserInstructionsSnapshot(deps.getUserInstructions())
   const policy = workerModelPolicy(deps.config, order)
   const root = deps.rootSessionBinding ?? snapshotSessionBinding(deps.provider, deps.currentModelId, deps.apiKey)
-  if ('strategy' in policy.target && policy.target.strategy === 'auto') return { deps, policy, root }
+  if ('strategy' in policy.target && policy.target.strategy === 'auto') return { deps, policy, root, userInstructions }
   let binding: Binding
   if ('provider' in policy.target) {
     if (policy.unavailableReason) throw new ModelBindingUnavailable(policy.unavailableReason)
     binding = resolveModelBinding(deps.config.provider.providers, policy.target, deps.config.network)
   } else binding = resolveModelBinding(deps.config.provider.providers, root, deps.config.network)
-  return { deps, policy, root, binding }
+  return { deps, policy, root, binding, userInstructions }
 }
 
 /** One policy snapshot per dispatch; new saved settings apply only to new orders. */
@@ -84,6 +88,7 @@ export function buildWorkerRuntime(deps: WorkerRuntimeDeps, order: WorkOrder, ca
 function assembleWorkerRuntime(prepared: PreparedModel, _order: WorkOrder, card: ModelCapabilityCard, workerRegistry: ToolRegistry): WorkerSessionConfig {
   const { deps, policy, root } = prepared
   const { config, cwd } = deps
+  const userInstructions = prepared.userInstructions
   let binding = prepared.binding
   const fallbackReason = undefined
   if (!binding) {
@@ -146,7 +151,7 @@ function assembleWorkerRuntime(prepared: PreparedModel, _order: WorkOrder, card:
       // audience:'subagent' — 分档精简的 system 段：删主控专属循环/契约，
       // 工具耦合段按 worker 实际工具集门控。主控路径不传该字段，字节不变。
       staticCtx: { tools: subagentTools(), audience: 'subagent' },
-      volatileCtx: { cwd, sessionMemoryBlock: deps.sessionMemoryBlock(), blockCaps: blocks.caps },
+      volatileCtx: { cwd, userInstructions, sessionMemoryBlock: deps.sessionMemoryBlock(), blockCaps: blocks.caps },
     }),
     toolRegistry: workerRegistry,
     blockPolicy: blocks,

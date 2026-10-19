@@ -4,6 +4,7 @@ import { dirname, join, resolve } from 'node:path'
 import { generateImage, MAX_IMAGE_BYTES, type GenerateImageOptions, type GeneratedImage } from './image-gen-client.js'
 import { imageDimensions } from './image-dimensions.js'
 import { ImageGenerationStore, imageDirectory, legacyImages } from './image-generation-store.js'
+import { EndpointNetworkError } from '../tools/net/endpoint-policy.js'
 import type { ImageGenerationRecord, ImageGenerationParameters } from '../server/protocol.js'
 
 export interface ImageGenerationInput {
@@ -12,7 +13,7 @@ export interface ImageGenerationInput {
   origin: 'chat' | 'workbench' | 'test'
   sessionId?: string
   parameters: ImageGenerationParameters
-  connection: Pick<GenerateImageOptions, 'baseUrl' | 'apiKey' | 'proxy' | 'trustProxyFakeIp'>
+  connection: Pick<GenerateImageOptions, 'baseUrl' | 'apiKey' | 'proxy' | 'trustProxyFakeIp' | 'endpointNetworkPolicy'>
   outputPath?: string
   signal?: AbortSignal
 }
@@ -24,7 +25,7 @@ export class ImageGenerationService {
   private starting = new Map<string, { fingerprint: string; promise: Promise<ImageGenerationRecord> }>()
   constructor(private store = new ImageGenerationStore(), private generate: (options: GenerateImageOptions) => Promise<GeneratedImage> = generateImage) {}
   async start(input: ImageGenerationInput): Promise<ImageGenerationRecord> {
-    input = { ...input, parameters: { ...input.parameters }, connection: { ...input.connection, ...(input.connection.proxy ? { proxy: { ...input.connection.proxy } } : {}) } }
+    input = { ...input, parameters: { ...input.parameters }, connection: { ...input.connection, ...(input.connection.proxy ? { proxy: { ...input.connection.proxy } } : {}), ...(input.connection.endpointNetworkPolicy ? { endpointNetworkPolicy: { ...input.connection.endpointNetworkPolicy } } : {}) } }
     if (!input.parameters.prompt.trim() || input.parameters.prompt.length > 20_000) throw new Error('A description of 1–20000 characters is required')
     if (!input.requestId || input.requestId.length > 200) throw new Error('A request identifier is required')
     input.signal?.throwIfAborted()
@@ -93,7 +94,7 @@ export class ImageGenerationService {
       record.state = signal.aborted ? 'cancelled' : 'failed'
       record.finishedAt = Date.now()
       const raw = error instanceof Error ? error.message : String(error)
-      record.error = { stage: phase, message: input.connection.apiKey ? raw.split(input.connection.apiKey).join('***') : raw }
+      record.error = { stage: phase, message: input.connection.apiKey ? raw.split(input.connection.apiKey).join('***') : raw, ...(error instanceof EndpointNetworkError ? { code: error.code } : {}) }
       try { await this.store.write(record); record.recordSaved = true } catch { record.recordSaved = false }
     }
     return { ...record }

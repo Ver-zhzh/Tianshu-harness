@@ -1,4 +1,5 @@
 import { ToolRegistry } from '../../../tools/registry.js'
+import { PromptEngine } from '../../../prompt/engine.js'
 import { withWorkspaceRoots } from '../../../tools/workspace-context.js'
 import { test, describe, after } from 'node:test'
 import assert from 'node:assert/strict'
@@ -128,7 +129,7 @@ function makeConfig(over: Partial<WorkerSessionConfig> = {}): WorkerSessionConfi
   return {
     order: { id: 'wo_test', objective: 'test', profile: 'code_scout', allowedTools: ['read_file'], budget: { maxTurns: 3, maxTokens: 1000, wallClockMs: 60_000, inputTokens: 10_000, outputTokens: 2_000 } } as unknown as WorkOrder,
     client: {} as WorkerSessionConfig['client'],
-    promptEngine: {} as WorkerSessionConfig['promptEngine'],
+    promptEngine: new PromptEngine({ model: 'fixture', maxTokens: 4096, staticCtx: { tools: [] }, volatileCtx: { cwd: '/synthetic-worker' } }),
     toolRegistry: new ToolRegistry(),
     cwd: process.cwd(),
     maxTurns: 3,

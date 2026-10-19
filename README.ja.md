@@ -1177,6 +1177,10 @@ tianshu logs open desktop            # sidecar ログディレクトリを開く
 
 > WeChat グループの QR コードには有効期限（7 日）があります。期限切れの場合は [Discussions](https://github.com/huiliyi37/Tianshu-harness/discussions) または Issue にコメントしてください。メンテナーが新しい QR を補充します。
 
+- **QQ 交流グループ** →「TUI」、群番号 `1017892942`。QR コードで参加：
+
+<img src="docs/brand/assets/qq-group-qr.png" width="280" alt="TUI QQ グループ QR コード（群番号 1017892942）">
+
 > ヒント：リポジトリメンテナーが先に `Settings → General → Discussions` で Discussions 機能を有効化する必要があります。
 
 ## 🌐 公式サイト開発

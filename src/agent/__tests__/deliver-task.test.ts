@@ -1,6 +1,6 @@
 import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync, utimesSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -1938,14 +1938,14 @@ Do not declare a streamed response duplicate in the middle of the stream.
       return dir
     }
 
-    it('flags a single-line fallback patch', () => {
+    it('flags a single-line fallback patch', async () => {
       const dir = tmpRepo('a.ts', 'const x = v ?? "medium"\n', 'const x = v || "medium"\n')
-      assert.match(detectSymptomPatch(dir)!, /症状处的 fallback 补丁/)
+      assert.match((await detectSymptomPatch(dir))!, /症状处的 fallback 补丁/)
     })
 
-    it('ignores a multi-line structural change', () => {
+    it('ignores a multi-line structural change', async () => {
       const dir = tmpRepo('a.ts', 'const x = 1\n', 'const a = 1\nconst b = 2\nconst c = 3\n')
-      assert.equal(detectSymptomPatch(dir), null)
+      assert.equal(await detectSymptomPatch(dir), null)
     })
   })
 
@@ -3259,6 +3259,7 @@ describe('issue #356 — 门禁拒绝必须带结构化 errorKind（防文本正
     try {
       mkdirSync(join(dir, '.git'), { recursive: true })
       writeFileSync(join(dir, '.git', 'index.lock'), '')
+      utimesSync(join(dir, '.git', 'index.lock'), new Date(0), new Date(0))
       let commitCalls = 0
       const { tool, params } = makeContext({
         taskId: 'issue356-lock',
@@ -3274,6 +3275,7 @@ describe('issue #356 — 门禁拒绝必须带结构化 errorKind（防文本正
 
       assert.equal(result.isError, true)
       assert.ok(result.content.includes('Git index is locked'), '返回文本应含锁提示')
+      assert.ok(existsSync(join(dir, '.git', 'index.lock')), 'age alone cannot authorize lock deletion')
       assert.ok(result.content.includes('timeout 300 dotnet build'), '污染前提：verify 命令回显确实在返回文本里')
       assert.equal(result.errorKind, 'delivery_gate', 'issue #356：锁拒绝不得缺 errorKind（否则文本正则按 timeout 重试）')
       assert.equal(commitCalls, 0, '锁检查先于任何 git 操作——执行器不得被调用')

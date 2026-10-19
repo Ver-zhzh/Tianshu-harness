@@ -21,7 +21,7 @@ describe('probeForTestKey', () => {
 
   it('actual endpoint probe exposes inferred IDs while preserving callable IDs', async () => {
     global.fetch = mock.fn(async () => fetchResponse(200, { data: [{ id: 'deepseek-v4-flash-0731' }, { id: 'custom-unknown-model' }] })) as typeof fetch
-    const result = await probeForTestKey({ baseUrl: 'https://api.example.com/v1' })
+    const result = await probeForTestKey({ fetchImpl: global.fetch, lookupImpl: async () => ({ address: '93.184.216.34', family: 4 }), baseUrl: 'https://api.example.com/v1' })
     assert.deepEqual(result.inferredIds, ['deepseek-v4-flash-0731'])
     assert.equal(result.descriptors?.[0]?.id, 'deepseek-v4-flash-0731')
     assert.equal(result.descriptors?.[1]?.contextWindow, undefined)
@@ -35,7 +35,7 @@ describe('probeForTestKey', () => {
       return fetchResponse(200, { data: [{ id: 'deepseek-v4-pro' }, { id: 'custom-unknown-model' }] })
     }) as typeof fetch
 
-    const result = await probeForTestKey({ baseUrl: 'https://api.example.com/v1', apiKey: 'sk-x' })
+    const result = await probeForTestKey({ fetchImpl: global.fetch, lookupImpl: async () => ({ address: '93.184.216.34', family: 4 }), baseUrl: 'https://api.example.com/v1', apiKey: 'sk-x' })
     assert.equal(result.ok, true)
     assert.deepEqual(result.models, ['deepseek-v4-pro', 'custom-unknown-model'])
     assert.ok(result.descriptors, 'descriptors 必须存在')
@@ -50,19 +50,19 @@ describe('probeForTestKey', () => {
 
   it('treats a 200 with empty/unparseable model list as ok — empty is data, not failure', async () => {
     global.fetch = mock.fn(async () => fetchResponse(200, { data: [] })) as typeof fetch
-    const empty = await probeForTestKey({ baseUrl: 'https://api.example.com/v1', apiKey: 'sk-x' })
+    const empty = await probeForTestKey({ fetchImpl: global.fetch, lookupImpl: async () => ({ address: '93.184.216.34', family: 4 }), baseUrl: 'https://api.example.com/v1', apiKey: 'sk-x' })
     assert.equal(empty.ok, true)
     assert.deepEqual(empty.models, [])
     assert.equal(empty.error, undefined)
     assert.equal(empty.keyless, undefined, '有凭据探测不带 keyless 标记')
 
     global.fetch = mock.fn(async () => fetchResponse(200, {})) as typeof fetch
-    const shapeless = await probeForTestKey({ baseUrl: 'https://api.example.com/v1', apiKey: 'sk-x' })
+    const shapeless = await probeForTestKey({ fetchImpl: global.fetch, lookupImpl: async () => ({ address: '93.184.216.34', family: 4 }), baseUrl: 'https://api.example.com/v1', apiKey: 'sk-x' })
     assert.equal(shapeless.ok, true)
     assert.deepEqual(shapeless.models, [])
 
     // keyless 探测的空列表带 keyless 标记——前端据此不显示权限提示。
-    const keylessEmpty = await probeForTestKey({ baseUrl: 'https://api.example.com/v1' })
+    const keylessEmpty = await probeForTestKey({ fetchImpl: global.fetch, lookupImpl: async () => ({ address: '93.184.216.34', family: 4 }), baseUrl: 'https://api.example.com/v1' })
     assert.equal(keylessEmpty.ok, true)
     assert.deepEqual(keylessEmpty.models, [])
     assert.equal(keylessEmpty.keyless, true)
@@ -70,7 +70,7 @@ describe('probeForTestKey', () => {
 
   it('classifies 401 as auth-failed', async () => {
     global.fetch = mock.fn(async () => fetchResponse(401, { error: 'invalid api key' })) as typeof fetch
-    const result = await probeForTestKey({ baseUrl: 'https://api.example.com/v1', apiKey: 'bad' })
+    const result = await probeForTestKey({ fetchImpl: global.fetch, lookupImpl: async () => ({ address: '93.184.216.34', family: 4 }), baseUrl: 'https://api.example.com/v1', apiKey: 'bad' })
     assert.equal(result.ok, false)
     assert.equal(result.error, 'auth-failed')
     assert.equal(result.status, 401)
@@ -78,7 +78,7 @@ describe('probeForTestKey', () => {
 
   it('classifies quota-exhausted 403 as quota (not auth-failed)', async () => {
     global.fetch = mock.fn(async () => fetchResponse(403, { code: 'AllocationQuota.FreeTierOnly' })) as typeof fetch
-    const result = await probeForTestKey({ baseUrl: 'https://api.example.com/v1', apiKey: 'sk-ok' })
+    const result = await probeForTestKey({ fetchImpl: global.fetch, lookupImpl: async () => ({ address: '93.184.216.34', family: 4 }), baseUrl: 'https://api.example.com/v1', apiKey: 'sk-ok' })
     assert.equal(result.ok, false)
     assert.equal(result.error, 'quota')
     assert.equal(result.status, 403)
@@ -86,7 +86,7 @@ describe('probeForTestKey', () => {
 
   it('classifies a 404 with code http-404', async () => {
     global.fetch = mock.fn(async () => fetchResponse(404, { error: 'not found' })) as typeof fetch
-    const result = await probeForTestKey({ baseUrl: 'https://api.example.com/v1' })
+    const result = await probeForTestKey({ fetchImpl: global.fetch, lookupImpl: async () => ({ address: '93.184.216.34', family: 4 }), baseUrl: 'https://api.example.com/v1' })
     assert.equal(result.ok, false)
     assert.equal(result.error, 'http-404')
     assert.equal(result.status, 404)
@@ -107,7 +107,7 @@ describe('probeForTestKey', () => {
       return sseResponse()
     }) as typeof fetch
 
-    const result = await probeForTestKey({
+    const result = await probeForTestKey({ fetchImpl: global.fetch, lookupImpl: async () => ({ address: '93.184.216.34', family: 4 }),
       baseUrl: 'https://ark.cn-beijing.volces.com/api/plan/v3',
       apiKey: 'sk-plan',
       providerName: 'volc-plan',
@@ -126,7 +126,7 @@ describe('probeForTestKey', () => {
       throw new Error('should not fetch')
     }) as typeof fetch
 
-    const result = await probeForTestKey({
+    const result = await probeForTestKey({ fetchImpl: global.fetch, lookupImpl: async () => ({ address: '93.184.216.34', family: 4 }),
       baseUrl: 'https://ark.cn-beijing.volces.com/api/plan/v3',
       apiKey: 'sk-plan',
       providerName: 'volc-plan',
@@ -144,7 +144,7 @@ describe('probeForTestKey', () => {
       return u.endsWith('/models') ? fetchResponse(404, { error: 'not found' }) : sseResponse()
     }) as typeof fetch
 
-    const result = await probeForTestKey({
+    const result = await probeForTestKey({ fetchImpl: global.fetch, lookupImpl: async () => ({ address: '93.184.216.34', family: 4 }),
       baseUrl: 'https://relay.example.com/v1',
       apiKey: 'sk-x',
       providerName: 'my-relay',
@@ -161,7 +161,7 @@ describe('probeForTestKey', () => {
       return String(url).endsWith('/models') ? fetchResponse(404, { error: 'not found' }) : fetchResponse(401, { error: 'invalid key' })
     }) as typeof fetch
 
-    const result = await probeForTestKey({
+    const result = await probeForTestKey({ fetchImpl: global.fetch, lookupImpl: async () => ({ address: '93.184.216.34', family: 4 }),
       baseUrl: 'https://relay.example.com/v1',
       apiKey: 'bad',
       providerName: 'my-relay',
@@ -174,7 +174,7 @@ describe('probeForTestKey', () => {
 
   it('classifies a 5xx with code http-500', async () => {
     global.fetch = mock.fn(async () => fetchResponse(500, { error: 'boom' })) as typeof fetch
-    const result = await probeForTestKey({ baseUrl: 'https://api.example.com/v1', apiKey: 'sk-x' })
+    const result = await probeForTestKey({ fetchImpl: global.fetch, lookupImpl: async () => ({ address: '93.184.216.34', family: 4 }), baseUrl: 'https://api.example.com/v1', apiKey: 'sk-x' })
     assert.equal(result.ok, false)
     assert.equal(result.error, 'http-500')
     assert.equal(result.status, 500)
@@ -182,7 +182,7 @@ describe('probeForTestKey', () => {
 
   it('classifies a network error as network-error', async () => {
     global.fetch = mock.fn(async () => { throw new Error('ECONNREFUSED') }) as typeof fetch
-    const result = await probeForTestKey({ baseUrl: 'http://127.0.0.1:1/v1', apiKey: 'sk-x' })
+    const result = await probeForTestKey({ fetchImpl: global.fetch, lookupImpl: async () => ({ address: '93.184.216.34', family: 4 }), endpointNetworkPolicy: { origin: 'http://127.0.0.1:1', allowPrivateNetwork: true }, baseUrl: 'http://127.0.0.1:1/v1', apiKey: 'sk-x' })
     assert.equal(result.ok, false)
     assert.equal(result.error, 'network-error')
     assert.equal(result.status, undefined)
@@ -196,7 +196,7 @@ describe('probeForTestKey', () => {
       return fetchResponse(200, { data: [{ id: 'local-model' }] })
     }) as typeof fetch
 
-    const result = await probeForTestKey({ baseUrl: 'http://127.0.0.1:11434/v1' })
+    const result = await probeForTestKey({ fetchImpl: global.fetch, lookupImpl: async () => ({ address: '93.184.216.34', family: 4 }), endpointNetworkPolicy: { origin: 'http://127.0.0.1:11434', allowPrivateNetwork: true }, baseUrl: 'http://127.0.0.1:11434/v1' })
     assert.equal(result.ok, true, '本地无鉴权端点应探测通过')
     assert.deepEqual(result.models, ['local-model'])
     assert.equal(result.keyless, true, 'keyless 探测应携带 keyless 标记')

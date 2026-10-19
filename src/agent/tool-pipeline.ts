@@ -250,10 +250,9 @@ function buildOwnershipGuard(deps: {
   return makeOwnershipGuard(registry, sessionId, deps.cwd)
 }
 
-/** T11 超时恢复指引（withToolTimeout 超时错误文案的一部分）——主控要知道
- *  超时不等于执行停止：worker 写入已落盘、可续跑或交付已完成的波次。 */
+/** Waiting timed out; completion and side effects require independent evidence. */
 export const TOOL_TIMEOUT_RECOVERY_HINT =
-  '— 底层执行可能仍在后台继续（worker 写入已落盘）。检查 git status / 会话 checkpoint；可用 executePlanWaves fromWave=N 续跑或 deliver 已完成的波次'
+  '— 本次等待已超时，底层执行是否结束尚未确认。先查询本次工具已有的任务状态与日志；涉及写入时检查实际文件或提交结果。超时不代表完成或测试通过，确认已产生的副作用前不要重复执行。'
 
 function withToolTimeout<T>(
   promise: Promise<T>,

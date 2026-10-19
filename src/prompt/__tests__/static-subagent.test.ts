@@ -105,7 +105,9 @@ import type { ToolDefinition } from '../../api/types.js'
  */
 // 辅胶囊可读性调校：固定四栏目替换为五条按信息关系组织的规则，保留交付披露。
 // 静态前缀有意变更；新提示词可能冷启动缓存，运行中的冻结快照不在此迁移。
-const MAIN_PROMPT_SHA256 = 'ef3329996c264310e214dfafe24b7d4b817ae6a49f585a694387024c4e3a73e7'
+// 2026-10-19: bounded obstacle recovery and neutral attribution intentionally
+// replace the old isolated-green => external-pollution shortcut.
+const MAIN_PROMPT_SHA256 = '2922178915a08e10647fab35db7348cdbf1c4ac99fe6d477df7e8ece938f8b43'
 
 function tool(name: string): ToolDefinition {
   return { name, description: '', input_schema: { type: 'object', properties: {} } } as ToolDefinition
@@ -192,9 +194,9 @@ describe('sub-agent tiers', () => {
     assert.ok(!prompt.includes('诊断悖论'))
     // 没有写工具就留不下探针——这条纪律对只读 worker 是死条文
     assert.ok(!prompt.includes('probe-discipline'))
-    // 其结果是 <test-harness> 整块消失，<rules> 只剩 evidence-scope 与
-    // case-sensitivity（标识符/路径核实纪律——只读 worker 读路径同样需要）
-    assert.deepEqual(ruleNames(prompt), ['evidence-scope', 'case-sensitivity'])
+    // Recovery stays bounded by the worker's real permissions; it does not
+    // require write tools or invent a test obligation for a read-only task.
+    assert.deepEqual(ruleNames(prompt), ['obstacle-recovery', 'evidence-scope', 'case-sensitivity'])
   })
 
   it('write-capable worker regains the test and text disciplines', () => {

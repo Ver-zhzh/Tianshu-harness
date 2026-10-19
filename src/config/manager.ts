@@ -11,6 +11,8 @@ import { maskConfigSecrets } from './config-display.js'
 export { maskConfigSecrets } from './config-display.js'
 import { DEFAULT_CONFIG } from './default.js'
 import { userConfigPath } from './paths.js'
+import { userEndpointPolicies, restoreUserEndpointPolicies, boundEndpointPolicy } from './endpoint-network-schema.js'
+import { userInstructionsConfig, restoreUserInstructionsConfig } from './user-instructions.js'
 import { findPresetModel, isProviderPresetKey, type ProviderPresetKey } from './provider-presets.js'
 import { cloneResolvedPreset, resolvePreset } from '../api/pro-registry.js'
 import { normalizeBaseUrl } from '../api/endpoint-map.js'
@@ -462,6 +464,8 @@ export function loadConfig(options?: {
     base = deepMerge(base, cpMigrated)
   }
 
+  const endpointPolicies = userEndpointPolicies(base)
+  const instructionsConfig = userInstructionsConfig(base)
   // Layer 3: project config
   const projectPath = options?.projectConfigPath
     ?? (options?.cwd ? findProjectConfig(options.cwd) : undefined)
@@ -511,6 +515,8 @@ export function loadConfig(options?: {
     base = deepMerge(base, options.sessionOverlay)
   }
 
+  base = restoreUserEndpointPolicies(base, endpointPolicies)
+  base = restoreUserInstructionsConfig(base, instructionsConfig)
   // Backfill missing provider names from the providers map key.
   // Older config files or partial overrides may omit `name`; the schema
   // requires it. Auto-populate so user configs stay forward-compatible.
@@ -1606,6 +1612,7 @@ export function setVisionModelConfig(
 }
 
 export interface RegisterVisionModelConfigOptions {
+  endpointNetworkPolicy?: ProviderConfig['endpointNetworkPolicy']
   providerName: string
   baseUrl: string
   apiKey?: string
@@ -1639,6 +1646,7 @@ export function registerVisionModelConfig(
     ...(apiKey ? { keyRef: providerName } : {}),
     ...(apiKeyEnv ? { apiKeyEnv } : {}),
     baseUrl: options.baseUrl,
+    endpointNetworkPolicy: boundEndpointPolicy(options.endpointNetworkPolicy, options.baseUrl),
     protocol: 'openai',
     capabilities: {},
     thinking: 'enabled',
@@ -1948,6 +1956,7 @@ export interface UpsertProviderModelOptions {
 }
 
 export interface SetupProviderOptions {
+  endpointNetworkPolicy?: ProviderConfig['endpointNetworkPolicy']
   providerName: string
   preset?: ProviderPresetKey
   apiKey?: string
@@ -2091,6 +2100,8 @@ export function setupProvider(options: SetupProviderOptions): void {
   if (options.baseUrl) {
     next.baseUrl = resolveProviderBaseUrl(options.baseUrl)
   }
+  if (options.endpointNetworkPolicy) next.endpointNetworkPolicy = boundEndpointPolicy(options.endpointNetworkPolicy, next.baseUrl)
+  else if (next.endpointNetworkPolicy?.origin !== new URL(next.baseUrl).origin) delete next.endpointNetworkPolicy
   if (options.protocol !== undefined) next.protocol = options.protocol
   // 池形态下请求端读的是默认 key 的槽——顶层写了不同步过去，就是「重连后模型/凭据
   // 看起来存上了、实际仍走旧的」（2026-10-08 收编公开仓 PR #381）。
@@ -2183,6 +2194,7 @@ export function setupProvider(options: SetupProviderOptions): void {
 }
 
 export interface RegisterProviderOptions {
+  endpointNetworkPolicy?: ProviderConfig['endpointNetworkPolicy']
   providerName: string
   baseUrl: string
   /** API key — optional for local deployments (Ollama/vLLM) that need no auth. */
@@ -2245,6 +2257,7 @@ export function registerProvider(options: RegisterProviderOptions): void {
     ...(options.apiKey ? { keyRef: options.providerName } : {}),
     ...(options.apiKeyEnv ? { apiKeyEnv: options.apiKeyEnv } : {}),
     baseUrl: normalizedBaseUrl,
+    endpointNetworkPolicy: boundEndpointPolicy(options.endpointNetworkPolicy ?? (existing?.endpointNetworkPolicy?.origin === new URL(normalizedBaseUrl).origin ? existing.endpointNetworkPolicy : undefined), normalizedBaseUrl),
     protocol: options.protocol ?? 'openai',
     capabilities: options.capabilities ?? {},
     thinking: 'enabled',

@@ -263,7 +263,7 @@ export function createPlanTaskTool(deps: {
 
 适用于需要结构化规划的多步骤工作（重构、功能开发）。每个分片是完整自包含的单元（实现 + 跑 tsc/lint/相关测试到绿），由一个有能力的 flash 端到端负责——不是垂直角色流水线（不拆独立的 lint/type/import/test/verify 步骤）。列出范围文件让规划器按模块切出正交分片以并行执行；同模块文件留在同一分片。
 设 execute: true 自动完成所有可推进波次——共享多波驱动 executePlanWaves 从 wave 0 逐波推进至计划末波或停止判据（与 team_orchestrate 同一执行路径）。worker 直接写入共享工作区——用 git diff 审查聚合结果。
-等待上限（executeTimeoutMs，默认 10 分钟）到点不是失败：编排脱离等待转入后台继续推进（worker 不被中止、逐波 checkpoint 落盘、完成时下轮提醒），可用 executePlanWaves fromWave=N 续跑收尾。
+等待上限（executeTimeoutMs，默认 10 分钟）到点不是失败：编排脱离等待转入后台继续推进（worker 不被中止、逐波 checkpoint 落盘、完成时下轮提醒）。后台仍在执行时不要再次派发，等待完成通知并核对 checkpoint 与实际结果。
 
 输出为 UnifiedPlan JSON——传给 team_orchestrate 的 planJson 参数做多波次续跑。
 
@@ -482,8 +482,8 @@ export function createPlanTaskTool(deps: {
               `⏱ 执行等待已达上限（${secs}s）——已转入后台继续执行：编排与 worker 均未中断，每波完成仍写 checkpoint。\n` +
               `- 进度：worker 活动照常流入面板；checkpoint 在 .rivet/checkpoints/${groupId}.json（lastCompletedWave = 最后完成波），也可 git status 实查落盘。\n` +
               `- 完成通知：执行结束时下个对话轮会收到系统提醒（含成败与摘要）。\n` +
-              `- 续跑/收尾：等完成通知；或用 executePlanWaves fromWave=N 续跑（N = lastCompletedWave + 1），也可 team_orchestrate({ objective }) 让会话内已存计划自动消费续跑。\n` +
-              `- 会话结束（退出 / Esc 中止）才会真正终止后台执行。`,
+              `- 续跑/收尾：后台仍在执行时不要再次派发；等完成通知。后台已结束后，核对 checkpoint 和剩余波次，再使用当前可用的计划执行工具续跑，避免重复已完成操作。\n` +
+              `- 会话退出或取消会请求终止后台执行；仍需核对实际执行状态和已落盘结果。`,
           }
         }
         if (raced.kind === 'fail') throw raced.error

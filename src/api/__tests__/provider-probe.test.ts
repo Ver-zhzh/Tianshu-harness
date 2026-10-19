@@ -53,7 +53,7 @@ describe('probeProvider', () => {
       res.writeHead(404).end()
     })
 
-    const report = await probeProvider({ baseUrl: server.baseUrl, apiKey: 'sk-test' })
+    const report = await probeProvider({ baseUrl: server.baseUrl, endpointNetworkPolicy: { origin: new URL(server.baseUrl).origin, allowPrivateNetwork: true }, apiKey: 'sk-test' })
     assert.deepEqual(report.models, ['my-model', 'other-model'])
     assert.deepEqual(report.modelInfos, { 'my-model': { contextWindow: 1_048_576, maxOutputTokens: 393_216 } })
     assert.equal(report.modelsOk, true)
@@ -91,7 +91,7 @@ describe('probeProvider', () => {
     })
 
     const report = await probeProvider({
-      baseUrl: server.baseUrl,
+      baseUrl: server.baseUrl, endpointNetworkPolicy: { origin: new URL(server.baseUrl).origin, allowPrivateNetwork: true },
       apiKey: 'sk-test',
       protocol: 'openai-responses',
       providerName: 'my-relay',
@@ -124,7 +124,7 @@ describe('probeProvider', () => {
     })
 
     const report = await probeProvider({
-      baseUrl: server.baseUrl,
+      baseUrl: server.baseUrl, endpointNetworkPolicy: { origin: new URL(server.baseUrl).origin, allowPrivateNetwork: true },
       apiKey: 'sk-test',
       providerName: 'opencode-go',
     })
@@ -148,7 +148,7 @@ describe('probeProvider', () => {
       res.end(JSON.stringify({ error: 'invalid api key' }))
     })
 
-    const report = await probeProvider({ baseUrl: server.baseUrl, apiKey: 'bad', skipCompletion: true })
+    const report = await probeProvider({ baseUrl: server.baseUrl, endpointNetworkPolicy: { origin: new URL(server.baseUrl).origin, allowPrivateNetwork: true }, apiKey: 'bad', skipCompletion: true })
     assert.equal(report.modelsOk, false)
     assert.deepEqual(report.models, [])
     assert.ok(report.errors.some(e => e.includes('Authentication failed')), report.errors.join('; '))
@@ -162,7 +162,7 @@ describe('probeProvider', () => {
       res.end(JSON.stringify({ code: 'AllocationQuota.FreeTierOnly', message: 'Free quota exhausted. To continue accessing the model on a paid basis, please add funds.' }))
     })
 
-    const report = await probeProvider({ baseUrl: server.baseUrl, apiKey: 'sk-ok', skipCompletion: true })
+    const report = await probeProvider({ baseUrl: server.baseUrl, endpointNetworkPolicy: { origin: new URL(server.baseUrl).origin, allowPrivateNetwork: true }, apiKey: 'sk-ok', skipCompletion: true })
     assert.equal(report.modelsOk, false)
     assert.ok(report.errors.some(e => e.includes('Quota/billing problem')), report.errors.join('; '))
     assert.ok(!report.errors.some(e => e.includes('Authentication failed')), report.errors.join('; '))
@@ -181,7 +181,7 @@ describe('probeProvider', () => {
       res.end('<html>not an api</html>')
     })
 
-    const report = await probeProvider({ baseUrl: server.baseUrl })
+    const report = await probeProvider({ endpointNetworkPolicy: { origin: new URL(server.baseUrl).origin, allowPrivateNetwork: true }, baseUrl: server.baseUrl })
     assert.equal(report.modelsOk, true)
     assert.equal(report.completionOk, false)
     assert.ok(report.errors.some(e => e.includes('SSE')), report.errors.join('; '))
@@ -199,7 +199,7 @@ describe('probeProvider', () => {
       res.writeHead(404).end('{"error":"not found"}')
     })
 
-    const report = await probeProvider({ baseUrl: server.baseUrl, probeModel: 'ghost-model' })
+    const report = await probeProvider({ baseUrl: server.baseUrl, endpointNetworkPolicy: { origin: new URL(server.baseUrl).origin, allowPrivateNetwork: true }, probeModel: 'ghost-model' })
     assert.equal(report.completionOk, false)
     assert.ok(report.errors.some(e => e.includes('404')), report.errors.join('; '))
     await server.close()
@@ -223,7 +223,7 @@ describe('probeProvider', () => {
       })
     })
 
-    const report = await probeProvider({ baseUrl: server.baseUrl, probeModel: 'template-default' })
+    const report = await probeProvider({ baseUrl: server.baseUrl, endpointNetworkPolicy: { origin: new URL(server.baseUrl).origin, allowPrivateNetwork: true }, probeModel: 'template-default' })
     assert.equal(report.completionOk, true)
     assert.equal(probedModel, 'template-default')
     await server.close()
@@ -247,7 +247,7 @@ describe('probeProvider', () => {
       })
     })
 
-    const report = await probeProvider({ baseUrl: server.baseUrl, probeModel: 'template-default' })
+    const report = await probeProvider({ baseUrl: server.baseUrl, endpointNetworkPolicy: { origin: new URL(server.baseUrl).origin, allowPrivateNetwork: true }, probeModel: 'template-default' })
     assert.equal(report.completionOk, true)
     assert.equal(probedModel, 'template-default')
     await server.close()
@@ -267,7 +267,7 @@ describe('probeProvider', () => {
       res.end(sse([JSON.stringify({ choices: [{ delta: { content: 'ok' } }] })]))
     })
 
-    const report = await probeProvider({ baseUrl: `${server.baseUrl}/chat/completions` })
+    const report = await probeProvider({ endpointNetworkPolicy: { origin: new URL(`${server.baseUrl}/chat/completions`).origin, allowPrivateNetwork: true }, baseUrl: `${server.baseUrl}/chat/completions` })
     assert.equal(report.modelsOk, true)
     assert.equal(report.completionOk, true)
     assert.deepEqual(hits, ['/v1/models', '/v1/chat/completions'])
@@ -290,7 +290,7 @@ describe('probeProvider', () => {
 
     // startServer's baseUrl ends in /v1 — strip it to simulate a bare /api base.
     const bareBase = server.baseUrl.replace(/\/v1$/, '')
-    const report = await probeProvider({ baseUrl: bareBase })
+    const report = await probeProvider({ endpointNetworkPolicy: { origin: new URL(bareBase).origin, allowPrivateNetwork: true }, baseUrl: bareBase })
     assert.equal(report.modelsOk, true)
     assert.equal(report.completionOk, true)
     assert.deepEqual(hits, ['/v1/models', '/v1/chat/completions'])
@@ -310,7 +310,7 @@ describe('probeProvider', () => {
       res.writeHead(200).end()
     })
 
-    const report = await probeProvider({ baseUrl: server.baseUrl, skipCompletion: true })
+    const report = await probeProvider({ baseUrl: server.baseUrl, endpointNetworkPolicy: { origin: new URL(server.baseUrl).origin, allowPrivateNetwork: true }, skipCompletion: true })
     assert.deepEqual(report.models, ['only-model'])
     assert.equal(report.completionOk, false)
     assert.equal(completionHits, 0)
@@ -324,7 +324,7 @@ describe('probeProvider', () => {
     const deadUrl = placeholder.baseUrl
     await placeholder.close()
 
-    const report = await probeProvider({ baseUrl: deadUrl, timeoutMs: 3_000 })
+    const report = await probeProvider({ endpointNetworkPolicy: { origin: new URL(deadUrl).origin, allowPrivateNetwork: true }, baseUrl: deadUrl, timeoutMs: 3_000 })
     assert.equal(report.modelsOk, false)
     assert.equal(report.completionOk, false)
     assert.ok(report.errors.length >= 1)
@@ -349,7 +349,7 @@ describe('probeProvider', () => {
 
     // baseUrl for anthropic clients excludes /v1 (the client appends it).
     const baseUrl = server.baseUrl.replace(/\/v1$/, '')
-    const report = await probeProvider({ baseUrl, apiKey: 'sk-ant', protocol: 'anthropic' })
+    const report = await probeProvider({ endpointNetworkPolicy: { origin: new URL(baseUrl).origin, allowPrivateNetwork: true }, baseUrl, apiKey: 'sk-ant', protocol: 'anthropic' })
     assert.equal(report.completionOk, true)
     assert.equal(sawApiKey, true)
     await server.close()
@@ -380,7 +380,7 @@ describe('probeProvider', () => {
 
     // gemini 原生 baseUrl 自带 /v1beta 版本段（startServer 的 baseUrl 带 /v1，剥掉再拼）
     const geminiBase = server.baseUrl.replace(/\/v1$/, '') + '/v1beta'
-    const report = await probeProvider({ baseUrl: geminiBase, apiKey: 'sk-gem', protocol: 'gemini' })
+    const report = await probeProvider({ endpointNetworkPolicy: { origin: new URL(geminiBase).origin, allowPrivateNetwork: true }, baseUrl: geminiBase, apiKey: 'sk-gem', protocol: 'gemini' })
     assert.equal(report.modelsOk, true)
     assert.equal(report.completionOk, true)
     assert.equal(sawGoogKey, true, 'Gemini 原生鉴权走 x-goog-api-key 头')
@@ -402,7 +402,7 @@ describe('probeProvider', () => {
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }))
     })
-    const report = await probeProvider({ baseUrl: `${server.baseUrl.replace(/\/v1$/, '')}/v1beta`, apiKey: 'sk-gem', protocol: 'gemini' })
+    const report = await probeProvider({ endpointNetworkPolicy: { origin: new URL(`${server.baseUrl.replace(/\/v1$/, '')}/v1beta`).origin, allowPrivateNetwork: true }, baseUrl: `${server.baseUrl.replace(/\/v1$/, '')}/v1beta`, apiKey: 'sk-gem', protocol: 'gemini' })
     assert.equal(report.completionOk, false, '非 Gemini 原生载荷不得判 ok')
     await server.close()
     server = undefined
@@ -420,7 +420,7 @@ describe('probeProvider', () => {
       res.writeHead(404).end()
     })
 
-    const report = await probeProvider({ baseUrl: server.baseUrl, skipCompletion: true })
+    const report = await probeProvider({ baseUrl: server.baseUrl, endpointNetworkPolicy: { origin: new URL(server.baseUrl).origin, allowPrivateNetwork: true }, skipCompletion: true })
     assert.equal(report.modelsOk, true)
     assert.equal(sawAuthorization, undefined, 'keyless 探测不得携带 Authorization 头')
     await server.close()
@@ -433,7 +433,7 @@ describe('probeProvider', () => {
       res.end(JSON.stringify({ error: 'invalid api key' }))
     })
 
-    const report = await probeProvider({ baseUrl: server.baseUrl, apiKey: 'bad', skipCompletion: true })
+    const report = await probeProvider({ baseUrl: server.baseUrl, endpointNetworkPolicy: { origin: new URL(server.baseUrl).origin, allowPrivateNetwork: true }, apiKey: 'bad', skipCompletion: true })
     assert.equal(report.modelsOk, false)
     assert.equal(report.modelListError?.code, 'auth-failed')
     assert.equal(report.modelListError?.status, 401)
@@ -448,7 +448,7 @@ describe('probeProvider', () => {
       res.end(JSON.stringify({ code: 'AllocationQuota.FreeTierOnly', message: 'Free quota exhausted.' }))
     })
 
-    const report = await probeProvider({ baseUrl: server.baseUrl, apiKey: 'sk-ok', skipCompletion: true })
+    const report = await probeProvider({ baseUrl: server.baseUrl, endpointNetworkPolicy: { origin: new URL(server.baseUrl).origin, allowPrivateNetwork: true }, apiKey: 'sk-ok', skipCompletion: true })
     assert.equal(report.modelsOk, false)
     assert.equal(report.modelListError?.code, 'quota')
     assert.equal(report.modelListError?.status, 403)
@@ -462,7 +462,7 @@ describe('probeProvider', () => {
       res.end('{"error":"not found"}')
     })
 
-    const report = await probeProvider({ baseUrl: server.baseUrl, skipCompletion: true })
+    const report = await probeProvider({ baseUrl: server.baseUrl, endpointNetworkPolicy: { origin: new URL(server.baseUrl).origin, allowPrivateNetwork: true }, skipCompletion: true })
     assert.equal(report.modelsOk, false)
     assert.equal(report.modelListError?.code, 'http-404')
     assert.equal(report.modelListError?.status, 404)
@@ -495,7 +495,7 @@ describe('endpoints without GET /models (issue #272)', () => {
     })
 
     const report = await probeProvider({
-      baseUrl: server.baseUrl,
+      baseUrl: server.baseUrl, endpointNetworkPolicy: { origin: new URL(server.baseUrl).origin, allowPrivateNetwork: true },
       apiKey: 'sk-x',
       providerName: 'volc-plan',
       probeModel: 'ark-code-latest',
@@ -528,7 +528,7 @@ describe('endpoints without GET /models (issue #272)', () => {
     })
 
     const report = await probeProvider({
-      baseUrl: server.baseUrl,
+      baseUrl: server.baseUrl, endpointNetworkPolicy: { origin: new URL(server.baseUrl).origin, allowPrivateNetwork: true },
       apiKey: 'sk-x',
       providerName: 'volc-plan',
       probeModel: 'not-a-model',
@@ -555,6 +555,7 @@ describe('endpoints without GET /models (issue #272)', () => {
     }) as typeof fetch
     try {
       const report = await probeProvider({
+        fetchImpl: globalThis.fetch, lookupImpl: async () => ({ address: '93.184.216.34', family: 4 }),
         baseUrl: 'https://ark.cn-beijing.volces.com/api/plan',
         apiKey: 'sk-plan',
         providerName: 'volc-plan-anthropic',
@@ -599,7 +600,7 @@ describe('vision real-test (视觉真测)', () => {
   it('sends the built-in image when the probe model is vision-capable, and reports the answer', async () => {
     const capture: { model?: string; body?: unknown } = {}
     server = await visionServer(['glm-4v-flash'], '一张红色的正方形图片', capture)
-    const report = await probeProvider({ baseUrl: server.baseUrl, apiKey: 'sk-x', probeModel: 'glm-4v-flash' })
+    const report = await probeProvider({ baseUrl: server.baseUrl, endpointNetworkPolicy: { origin: new URL(server.baseUrl).origin, allowPrivateNetwork: true }, apiKey: 'sk-x', probeModel: 'glm-4v-flash' })
     assert.equal(report.completionOk, true)
     assert.equal(report.visionTested, true)
     assert.equal(report.visionAnswer, '一张红色的正方形图片')
@@ -627,7 +628,7 @@ describe('vision real-test (视觉真测)', () => {
       ]))
     })
     try {
-      const report = await probeProvider({ baseUrl: server.baseUrl, probeModel: 'glm-4v-flash' })
+      const report = await probeProvider({ baseUrl: server.baseUrl, endpointNetworkPolicy: { origin: new URL(server.baseUrl).origin, allowPrivateNetwork: true }, probeModel: 'glm-4v-flash' })
       assert.equal(report.visionTested, true)
       assert.equal(report.completionOk, true, 'content-parts 数组形态的回答不应被判为无回答')
       assert.equal(report.visionAnswer, '一张红色的正方形')
@@ -641,7 +642,7 @@ describe('vision real-test (视觉真测)', () => {
     const capture: { model?: string } = {}
     // 聚合站没有 glm-4v-flash；列表里第一个是纯文本模型，glm-5.2 是别名表认识的视觉档。
     server = await visionServer(['some-text-model', 'glm-5.2'], '红色方块', capture)
-    const report = await probeProvider({ baseUrl: server.baseUrl, apiKey: 'sk-x', probeModel: 'glm-4v-flash' })
+    const report = await probeProvider({ baseUrl: server.baseUrl, endpointNetworkPolicy: { origin: new URL(server.baseUrl).origin, allowPrivateNetwork: true }, apiKey: 'sk-x', probeModel: 'glm-4v-flash' })
     assert.equal(report.completionOk, true)
     assert.equal(report.probedModel, 'glm-4v-flash', '实际调用必须绑定用户显式选择')
     assert.equal(report.visionTested, true)
@@ -671,7 +672,7 @@ describe('vision real-test (视觉真测)', () => {
         })
       })
       try {
-        const report = await probeProvider({ baseUrl: server.baseUrl, protocol, probeModel: 'mimo-v2.6-flash' })
+        const report = await probeProvider({ baseUrl: server.baseUrl, endpointNetworkPolicy: { origin: new URL(server.baseUrl).origin, allowPrivateNetwork: true }, protocol, probeModel: 'mimo-v2.6-flash' })
         assert.equal(report.completionOk, true, 'reasoning budget must leave room for the final answer')
         assert.equal(report.visionAnswer, 'red square')
       } finally {
@@ -720,7 +721,7 @@ describe('vision real-test (视觉真测)', () => {
       res.end('data: [DONE]\n\n')
     })
     try {
-      const report = await probeProvider({ baseUrl: server.baseUrl, probeModel: 'glm-4v-flash' })
+      const report = await probeProvider({ baseUrl: server.baseUrl, endpointNetworkPolicy: { origin: new URL(server.baseUrl).origin, allowPrivateNetwork: true }, probeModel: 'glm-4v-flash' })
       assert.equal(report.visionTested, true)
       assert.equal(report.completionOk, false)
       assert.equal(report.visionAnswer, undefined)
@@ -734,7 +735,7 @@ describe('vision real-test (视觉真测)', () => {
   it('keeps the plain-text probe for non-vision models (no visionTested flag)', async () => {
     const capture: { body?: unknown } = {}
     server = await visionServer(['deepseek-chat'], 'hi', capture)
-    const report = await probeProvider({ baseUrl: server.baseUrl, apiKey: 'sk-x', probeModel: 'deepseek-chat' })
+    const report = await probeProvider({ baseUrl: server.baseUrl, endpointNetworkPolicy: { origin: new URL(server.baseUrl).origin, allowPrivateNetwork: true }, apiKey: 'sk-x', probeModel: 'deepseek-chat' })
     assert.equal(report.completionOk, true)
     assert.equal(report.visionTested, undefined)
     assert.equal(report.visionAnswer, undefined)
@@ -788,7 +789,7 @@ describe('dashscope native models enrichment (E3)', () => {
     })
 
     const baseUrl = server.baseUrl.replace(/\/v1$/, '/compatible-mode/v1')
-    const report = await probeProvider({ baseUrl, apiKey: 'sk-x', providerName: 'dashscope' })
+    const report = await probeProvider({ endpointNetworkPolicy: { origin: new URL(baseUrl).origin, allowPrivateNetwork: true }, baseUrl, apiKey: 'sk-x', providerName: 'dashscope' })
     // issue #8 §7.2：生图模型（response_modality 含 Image）不再丢弃——否则百炼用户
     // 在模型列表里根本看不到它，也就无法在生图槽里选它。音频模型仍应被过滤。
     assert.deepEqual(report.models, ['qwen-new-max', 'qwen-image-3', 'qwen-vl-new'])
@@ -822,7 +823,7 @@ describe('dashscope native models enrichment (E3)', () => {
     })
 
     const baseUrl = server.baseUrl.replace(/\/v1$/, '/compatible-mode/v1')
-    const report = await probeProvider({ baseUrl, apiKey: 'sk-x', providerName: 'dashscope', skipCompletion: true })
+    const report = await probeProvider({ endpointNetworkPolicy: { origin: new URL(baseUrl).origin, allowPrivateNetwork: true }, baseUrl, apiKey: 'sk-x', providerName: 'dashscope', skipCompletion: true })
     assert.deepEqual(report.models, ['fallback-model'])
     assert.equal(report.modelInfos, undefined)
     assert.deepEqual(report.errors, [])
@@ -852,7 +853,7 @@ describe('dashscope native models enrichment (E3)', () => {
     })
 
     const baseUrl = server.baseUrl.replace(/\/v1$/, '/compatible-mode/v1')
-    const report = await probeProvider({ baseUrl, apiKey: 'sk-x', providerName: 'dashscope', skipCompletion: true })
+    const report = await probeProvider({ endpointNetworkPolicy: { origin: new URL(baseUrl).origin, allowPrivateNetwork: true }, baseUrl, apiKey: 'sk-x', providerName: 'dashscope', skipCompletion: true })
     // 核心判据不变：满页与否按**原始条数**（过滤前）算——第一页 200 条就必须翻页，
     // 哪怕过滤后只剩 1 条。issue #8 §7.2 之后生图模型不再被过滤，于是 199 个 img-*
     // 也留在列表里（这恰好让"按原始数分页"更直观：它们现在都数得出来）。

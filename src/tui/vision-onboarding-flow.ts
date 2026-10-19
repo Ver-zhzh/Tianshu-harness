@@ -1,3 +1,4 @@
+import type { EndpointAccessInput } from '../config/endpoint-network-policy.js'
 /**
  * Pure state machine for configuring the optional image-recognition bridge.
  * The engine executes returned server request descriptors; this flow never
@@ -21,8 +22,8 @@ export interface VisionOnboardingView {
 }
 
 export type VisionOnboardingRequest =
-  | { kind: 'discover'; body: { baseUrl: string; providerName?: string; apiKey?: string; apiKeyEnv?: string } }
-  | { kind: 'onboard'; body: { baseUrl: string; providerName: string; modelId: string; apiKey?: string; apiKeyEnv?: string } }
+  | { kind: 'discover'; body: EndpointAccessInput & { baseUrl: string; providerName?: string; apiKey?: string; apiKeyEnv?: string } }
+  | { kind: 'onboard'; body: EndpointAccessInput & { baseUrl: string; providerName: string; modelId: string; apiKey?: string; apiKeyEnv?: string } }
 
 export type VisionOnboardingResult =
   | { kind: 'next'; view: VisionOnboardingView }
@@ -30,7 +31,7 @@ export type VisionOnboardingResult =
   | { kind: 'error'; message: string; view: VisionOnboardingView }
   | { kind: 'done'; summary: string }
 
-type Phase = 'base-url' | 'provider-name' | 'credential-kind' | 'credential' | 'discovering' | 'candidate' | 'onboarding' | 'success'
+type Phase = 'network' | 'base-url' | 'provider-name' | 'credential-kind' | 'credential' | 'discovering' | 'candidate' | 'onboarding' | 'success'
 type CredentialKind = 'apiKey' | 'apiKeyEnv'
 
 export class VisionOnboardingFlow {
@@ -39,11 +40,13 @@ export class VisionOnboardingFlow {
   private providerName?: string
   private credentialKind: CredentialKind = 'apiKey'
   private credential?: string
+  private network: EndpointAccessInput = {}
   private candidates: VisionCandidate[] = []
   private selectedModelId?: string
 
   view(): VisionOnboardingView {
     switch (this.phase) {
+      case 'network': return { kind: 'choice', title: '端点网络权限', subtitle: this.baseUrl, options: [{ id: 'public', label: '仅公网（默认）' }, { id: 'private', label: '允许此地址访问本机/局域网' }, { id: 'proxy', label: '信任当前代理 DNS（客户端无法固定目标 IP）' }, { id: 'both', label: '允许局域网并信任当前代理 DNS' }] }
       case 'base-url': return { kind: 'input', title: '配置识图桥', subtitle: '输入视觉服务 endpoint；不会改变主模型服务商', stepLabel: '步骤 1 / 5', placeholder: 'https://api.example.com/v1' }
       case 'provider-name': return { kind: 'input', title: '配置识图桥', subtitle: '为这个专用视觉服务命名', stepLabel: '步骤 2 / 5', placeholder: 'vision-custom' }
       case 'credential-kind': return { kind: 'choice', title: '配置识图桥', subtitle: '选择凭证来源', stepLabel: '步骤 3 / 5', options: [
@@ -82,6 +85,12 @@ export class VisionOnboardingFlow {
   }
 
   choose(id: string): VisionOnboardingResult {
+    if (this.phase === 'network') {
+      if (!['public', 'private', 'proxy', 'both'].includes(id)) return this.error('未知网络权限')
+      this.network = { allowPrivateNetwork: id === 'private' || id === 'both', proxyDns: id === 'proxy' || id === 'both' ? 'trusted-proxy' : 'local-check' }
+      this.phase = 'discovering'
+      return { kind: 'request', request: { kind: 'discover', body: this.discoveryBody() } }
+    }
     if (this.phase === 'credential-kind') {
       if (id !== 'apiKey' && id !== 'apiKeyEnv') return this.error('未知凭证来源')
       this.credentialKind = id
@@ -111,7 +120,8 @@ export class VisionOnboardingFlow {
   }
 
   requestFailed(message: string): VisionOnboardingResult {
-    if (this.phase === 'discovering') this.phase = 'credential'
+    if (/endpoint_(private_network_denied|dns_unverified)/.test(message)) this.phase = 'network'
+    else if (this.phase === 'discovering') this.phase = 'credential'
     else if (this.phase === 'onboarding') this.phase = 'candidate'
     return this.error(message)
   }
@@ -122,8 +132,9 @@ export class VisionOnboardingFlow {
     return { kind: 'done', summary: `识图桥已保存：${this.providerName}:${this.selectedModelId}` }
   }
 
-  private discoveryBody(): { baseUrl: string; providerName: string; apiKey?: string; apiKeyEnv?: string } {
+  private discoveryBody(): EndpointAccessInput & { baseUrl: string; providerName: string; apiKey?: string; apiKeyEnv?: string } {
     return {
+      ...this.network,
       baseUrl: this.baseUrl!,
       providerName: this.providerName!,
       ...(this.credentialKind === 'apiKey' ? { apiKey: this.credential! } : { apiKeyEnv: this.credential! }),

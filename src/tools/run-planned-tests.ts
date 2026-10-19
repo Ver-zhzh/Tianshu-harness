@@ -1,5 +1,6 @@
 import { relative } from 'node:path'
-import { buildTestExecutionPlan, type TestPlanBlock } from './test-execution-plan.js'
+import type { TestPlanBlock, TestExecutionPlan } from './test-execution-plan.js'
+import { buildTestExecutionPlanAsync } from './test-plan-async.js'
 import { runTestPhases } from './run-test-phases.js'
 import type { ToolCallParams, ToolResult } from './types.js'
 
@@ -16,7 +17,19 @@ export async function runPlannedTests(params: ToolCallParams, remaining: () => n
   const files = params.input.files
   if (files !== undefined && (!Array.isArray(files) || files.some(file => typeof file !== 'string'))) return blockedResult({ files: [], code: 'invalid_selection', reason: 'files 必须是测试文件路径列表。' })
   if (params.input.projects !== undefined && (!Array.isArray(params.input.projects) || params.input.projects.some(p => typeof p !== 'string' || !p)) || params.input.shard !== undefined && params.input.shard !== false) return blockedResult({ files: [], code: 'invalid_selection', reason: 'projects 必须为非空名称列表；shard 只接受显式 false 覆盖。' })
-  const plan = buildTestExecutionPlan(params.cwd, { files: files as string[] | undefined, filter: params.input.filter as string | undefined, projects: params.input.projects as string[] | undefined, shard: params.input.shard as false | undefined })
+  let plan: TestExecutionPlan
+  try {
+    plan = await buildTestExecutionPlanAsync(Date.now() + remaining(), params.abortSignal, params.cwd,
+      { files: files as string[] | undefined, filter: params.input.filter as string | undefined, projects: params.input.projects as string[] | undefined, shard: params.input.shard as false | undefined })
+  } catch {
+    const stopped = params.abortSignal?.aborted || remaining() <= 0
+    const result = blockedResult({ files: files as string[] ?? [], code: 'unknown_runner', reason: stopped ? '测试准备已取消或超时，未启动后续执行。' : '验证计划进程不可用或超时；未在服务线程同步重算，测试义务保留。' })
+    if (!params.abortSignal?.aborted && remaining() <= 0) {
+      result.errorKind = 'timeout'
+      Object.assign(result.verification!, { failureKind: 'timeout', blockedReason: 'timeout' })
+    }
+    return result
+  }
   const results: ToolResult[] = []
   for (const group of plan.groups) {
     const command = { type: 'run' as const, command: group.command, args: group.args, display: group.display,

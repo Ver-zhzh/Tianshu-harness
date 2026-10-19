@@ -66,3 +66,13 @@ describe('VisionOnboardingFlow', () => {
     assert.notEqual(flow.view().kind, 'busy')
   })
 })
+
+it('private discovery cannot retry or persist consent before an explicit network choice', () => {
+  const flow = new VisionOnboardingFlow()
+  flow.submit('http://localhost:1234/v1'); flow.submit('local'); flow.choose('apiKey'); flow.submit('fixture')
+  assert.equal(flow.requestFailed('endpoint_private_network_denied').kind, 'error')
+  assert.equal(flow.view().options?.[0]?.id, 'public')
+  const retry = flow.choose('private')
+  assert.equal(retry.kind, 'request')
+  if (retry.kind === 'request') assert.equal(retry.request.body.allowPrivateNetwork, true)
+})

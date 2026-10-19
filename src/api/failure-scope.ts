@@ -7,6 +7,7 @@
  * 零副作用、可独立演进。
  */
 import { classifyApiError, type ErrorCategory } from './error-classifier.js'
+import { UserInstructionsError } from '../prompt/user-instructions.js'
 
 /** 故障归属：本机链路（断网/DNS/代理/TLS） vs 外网提供商（鉴权/限流/服务端）。 */
 export type FailureScope = 'local' | 'provider'
@@ -52,6 +53,7 @@ function failureText(error: unknown, depth = 0): string {
  * - 其余落 other（不假装知道）。
  */
 export function describeFailure(error: unknown): FailurePresentation {
+  if (error instanceof UserInstructionsError) return { scope: 'local', kind: 'other', category: 'client_error', retryable: false, shouldReconnect: false }
   const c = classifyApiError(error)
   const text = failureText(error)
 

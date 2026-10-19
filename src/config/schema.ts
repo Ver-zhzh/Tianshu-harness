@@ -3,6 +3,9 @@ import { mcpConfigSchema, type McpConfig } from '../mcp/config.js'
 import { workspaceConfigSchema, type WorkspaceConfig } from './workspace-schema.js'
 import { providerRetrySchema } from './retry-schema.js'
 import { imageGenModelSchema } from './image-gen-schema.js'
+import { compactSchema } from './compact-schema.js'
+export { compactSchema } from './compact-schema.js'
+import { endpointNetworkPolicySchema } from './endpoint-network-schema.js'
 export type { ProviderRetryConfig } from './retry-schema.js'
 import { THEME_NAMES } from '../tui/theme.js'
 import { MIN_MAX_EVENTS_DISK_BYTES, MIN_MAX_LOADED_SESSIONS, MIN_IDLE_AGENT_TTL_MS } from './runtime-lean.js'
@@ -163,6 +166,7 @@ export const providerBaseSchema = z.object({
    *  config.json never holds the plaintext key. Resolved first in the key chain. */
   keyRef: z.string().nullable().optional().transform(value => value ?? undefined),
   baseUrl: z.string().url(),
+  endpointNetworkPolicy: endpointNetworkPolicySchema.optional(),
   /** Wire protocol of the endpoint. 'openai' = chat/completions-compatible;
    *  'anthropic' = /v1/messages with cache_control breakpoints;
    *  'openai-responses' = OpenAI Responses API (POST /v1/responses) — for
@@ -411,6 +415,7 @@ export const agentSchema = z.object({
   /** 关写沙箱——完全权限档（approval 仍为 dangerously-skip-permissions 但
    *  写边界不做限制）。默认 false；桌面端选「完全权限」时写入 true。 */
   unsandboxed: z.boolean().default(false),
+  userInstructions: z.object({ enabled: z.boolean().optional(), path: z.string().optional() }).strict().optional(),
   // 长任务远端兜底。runaway 由 wedged-loop/convergence/watchdog/context-pressure
   // 先行拦截，此值对标 Claude Code/Codex 的"无硬上限"取宽松 4 倍余量（50→200，
   // 会话 5158719d 证明 50 轮迫使用户在正常长任务中反复手动「继续」）。
@@ -616,43 +621,6 @@ export const agentSchema = z.object({
      *  设为 false 后，deliver_task 仍会运行门禁和审查，但不会实际提交——
      *  用户需手动审查变更后自行 git commit。 */
     autoCommit: z.boolean().default(true),
-  }).default({}),
-})
-
-export const compactSchema = z.object({
-  /** Master switch for discretionary compaction (ratio tiers, 1M LLM compact).
-   *  Emergency paths (session split, 95% ceiling) ignore this. */
-  enabled: z.boolean().default(true),
-  /** @deprecated Superseded by ratio-based policy (compactPolicyRatios).
-   *  Retained for config compatibility; not read by the runtime. */
-  autoThreshold: z.number().int().positive().default(800_000),
-  /** @deprecated Superseded by ratio-based policy (compactPolicyRatios).
-   *  Retained for config compatibility; not read by the runtime. */
-  autoFloor: z.number().int().positive().default(500_000),
-  /** Model that performs the compaction summarization (LLM compact / partial
-   *  compact). When the model exists on the primary (or any configured)
-   *  provider, a dedicated cheap client is built even if `provider` is unset
-   *  — see resolveCompactProviderName(). Pair with `provider` to force a
-   *  specific host. Without a resolvable provider+credentials, compaction
-   *  uses the session's primary model (backward compatible). */
-  model: z.string().default('deepseek-flash'),
-  /** Provider hosting the compaction model (must exist in provider.providers).
-   *  Optional: when omitted, the runtime infers a provider that lists `model`
-   *  (preferring the session primary). Set explicitly to pin compaction onto
-   *  an isolated cheap model. Unknown provider / missing model / no
-   *  credentials → silent fallback to the session primary. */
-  provider: z.string().optional(),
-  /** T9 turn-0 quality-compaction trigger ratios (provider cost-aware).
-   *  Only the turn-0, phase-gated quality lever — mid-turn delay guards are
-   *  unaffected. Per-token cache-preserving providers (DeepSeek) skip T9
-   *  entirely regardless of these. */
-  qualityCompact: z.object({
-    /** Context ratio to trigger T9 on per-token providers (e.g. openai). */
-    perTokenThreshold: z.number().min(0).max(1).default(0.55),
-    /** Leaner ratio for cost-insensitive subscription providers (GLM/MiMo/Codex/Claude). */
-    subscriptionThreshold: z.number().min(0).max(1).default(0.45),
-    /** Ceiling ratio that fires T9 for subscription providers even with no phase transition. */
-    subscriptionCeiling: z.number().min(0).max(1).default(0.6),
   }).default({}),
 })
 

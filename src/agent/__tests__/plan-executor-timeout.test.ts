@@ -26,8 +26,9 @@ import { createReadOnlyWorkOrder } from '../work-order.js'
 describe('T11 — 超时错误文案含恢复指引', () => {
   it('TOOL_TIMEOUT_RECOVERY_HINT 导出且带恢复语义', () => {
     assert.ok(TOOL_TIMEOUT_RECOVERY_HINT.length > 40, '指引必须可操作')
-    assert.ok(TOOL_TIMEOUT_RECOVERY_HINT.includes('fromWave'), '必须提示 fromWave=N 续跑')
-    assert.ok(TOOL_TIMEOUT_RECOVERY_HINT.includes('git status'), '必须提示检查 worker 已落盘')
+    assert.match(TOOL_TIMEOUT_RECOVERY_HINT, /尚未确认/)
+    assert.match(TOOL_TIMEOUT_RECOVERY_HINT, /副作用/)
+    assert.doesNotMatch(TOOL_TIMEOUT_RECOVERY_HINT, /写入已落盘|executePlanWaves|fromWave/)
   })
 })
 

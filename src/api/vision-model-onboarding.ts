@@ -1,3 +1,4 @@
+import { endpointRequest, type EndpointRequestOptions } from '../tools/net/endpoint-request.js'
 import { resolveProbeEndpoints } from './endpoint-map.js'
 import { providerIdentityHeaders } from './caller-identity.js'
 import { matchModelId } from './model-id-matcher.js'
@@ -13,7 +14,7 @@ const GLM_VISION_THINKING_MODELS = new Set([
   'glm-4v-flash',
 ])
 
-export interface VisionDiscoveryOptions {
+export interface VisionDiscoveryOptions extends EndpointRequestOptions {
   baseUrl: string
   apiKey?: string
   providerName?: string
@@ -51,16 +52,6 @@ function visionIdentityHeaders(options: VisionDiscoveryOptions | VisionValidatio
 
 const VISION_PROBE_SESSION_ID = 'tianshu-vision-probe'
 
-async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
-  try {
-    return await fetch(url, { ...init, signal: controller.signal })
-  } finally {
-    clearTimeout(timer)
-  }
-}
-
 function parseModelIds(payload: unknown): string[] {
   const data = Array.isArray(payload) ? payload : (payload as { data?: unknown })?.data
   if (!Array.isArray(data)) return []
@@ -85,13 +76,13 @@ function responseSnippet(text: string): string {
 
 async function fetchVisionModelIds(options: VisionDiscoveryOptions): Promise<string[]> {
   const url = resolveProbeEndpoints(options.baseUrl, options.providerName).modelsUrl
-  const response = await fetchWithTimeout(url, {
+  const response = await endpointRequest(url, {
     method: 'GET',
     headers: authHeaders(options.apiKey, visionIdentityHeaders(options)),
-  }, options.timeoutMs ?? DEFAULT_TIMEOUT_MS)
+  }, { ...options, timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS })
   if (!response.ok) {
     const body = await response.text().catch(() => '')
-    const suffix = responseSnippet(body)
+    const suffix = responseSnippet(options.apiKey ? body.split(options.apiKey).join('***') : body)
     throw new Error(`GET /models failed with HTTP ${response.status}${suffix ? `: ${suffix}` : ''}`)
   }
   let payload: unknown
@@ -106,6 +97,7 @@ async function fetchVisionModelIds(options: VisionDiscoveryOptions): Promise<str
 }
 
 export async function discoverVisionModels(options: VisionDiscoveryOptions): Promise<VisionDiscoveryResult> {
+  options = { ...options, deadline: options.deadline ?? Date.now() + (options.timeoutMs ?? DEFAULT_TIMEOUT_MS) }
   const ids = await fetchVisionModelIds(options)
   return {
     candidates: ids.map(id => {
@@ -159,13 +151,14 @@ function assistantText(payload: unknown): string {
 }
 
 export async function validateVisionModel(options: VisionValidationOptions): Promise<VisionValidationResult> {
+  options = { ...options, deadline: options.deadline ?? Date.now() + (options.timeoutMs ?? DEFAULT_TIMEOUT_MS) }
   const modelIds = await fetchVisionModelIds(options)
   if (!modelIds.includes(options.modelId)) {
     throw new Error(`Selected model "${options.modelId}" was not returned by /models`)
   }
 
   const url = resolveProbeEndpoints(options.baseUrl, options.providerName).chatUrl
-  const response = await fetchWithTimeout(url, {
+  const response = await endpointRequest(url, {
     method: 'POST',
     headers: { 'content-type': 'application/json', ...authHeaders(options.apiKey, visionIdentityHeaders(options)) },
     body: JSON.stringify({
@@ -181,10 +174,10 @@ export async function validateVisionModel(options: VisionValidationOptions): Pro
       stream: false,
       ...vendorVisionRequestExtras(options.baseUrl, options.modelId),
     }),
-  }, options.timeoutMs ?? DEFAULT_TIMEOUT_MS)
+  }, { ...options, timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS })
   if (!response.ok) {
     const body = await response.text().catch(() => '')
-    const suffix = responseSnippet(body)
+    const suffix = responseSnippet(options.apiKey ? body.split(options.apiKey).join('***') : body)
     throw new Error(`Vision validation failed with HTTP ${response.status}${suffix ? `: ${suffix}` : ''}`)
   }
 
