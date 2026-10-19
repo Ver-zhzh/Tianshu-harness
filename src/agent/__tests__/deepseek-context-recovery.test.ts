@@ -15,6 +15,7 @@ import { AgentLoop, type AgentCallbacks } from '../loop.js'
 import { SessionPersist } from '../session-persist.js'
 import { serializeOaiSessionMessage } from '../session-message-serialization.js'
 import { MAX_SESSION_MESSAGE_JSON_CHARS } from '../../compact/constants.js'
+import { DISABLED_USER_INSTRUCTIONS } from '../../prompt/user-instructions.js'
 
 const summary = JSON.stringify({ version: 1, summary: 'Prior project inspection is complete; preserve the current human request.', facts: [], requirements: [], pendingApprovals: [] })
 
@@ -27,7 +28,8 @@ async function fixture(context: TestContext, baseUrl: string, contextWindow = 1_
   writeFileSync(join(process.env.RIVET_HOME, 'config.json'), '{}')
   const model = { id: 'deepseek-v4-pro', contextWindow, maxTokens: 256_000 }
   const provider = providerSchema.parse({ name: 'deepseek', baseUrl, protocol: 'openai', maxRetries: 0, models: [model] })
-  const config = createAgentConfig({ provider, model, apiKey: 'fixture-placeholder', sessionId: 'context-recovery', cwd,
+  const config = createAgentConfig({ userInstructions: DISABLED_USER_INSTRUCTIONS,
+    provider, model, apiKey: 'fixture-placeholder', sessionId: 'context-recovery', cwd,
     compact: { enabled: true, model: model.id }, toolDefinitions: [], agentReconnect: { enabled: false, maxAttempts: 0 } })
   const session = new SessionContext()
   const persist = new SessionPersist('context-recovery', cwd)
