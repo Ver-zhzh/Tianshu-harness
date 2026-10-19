@@ -34,6 +34,7 @@ import { summarizeRepairTelemetry } from './repair-pipeline.js'
 import { extractErrorHead, generateToolSummary } from './tool-summary.js'
 import type { InterventionLevel } from './prediction-error.js'
 import { CONFIDENCE_THRESHOLDS, hasOutOfWorkspaceWriteTarget, isDestructiveGitAction, isSafeWriteOnly, requiresBashWriteApproval, requiresUnconditionalApproval } from './approval-risk.js'
+import { gitCommitStagesSensitiveDualView } from '../tools/sensitive-file-detector.js'
 import type { Sensorium } from './sensorium.js'
 import { isToolAllowed, isToolDenied, isBashCommandAllowlisted, isBashCommandDenied, learnBashPrefix, learnFileApproval, extractBashPrefix } from './permissions.js'
 import { appendBashAllowPrefix } from '../config/bash-permissions.js'
@@ -1106,6 +1107,20 @@ async function executeToolUseInner(
       && needsApproval
       && (approvalMode === 'manual' || approvalMode === 'auto-safe')
 
+    // bash git commit 暂存区敏感文件硬门（P1-1）：BASH_TOOL.requiresApproval 的
+    // commit 检查只在 manual 档被消费，auto-safe 档按风险等级决策——普通
+    // `git commit -m` 风险为 medium，会在沙箱开启时也被静默执行（实测
+    // needsApproval=true / risk=medium / approvalCallbacks=0 / executeCalls=1）。
+    // 这里把它升级为模式无关不变量：暂存区含敏感文件的 commit 在 manual /
+    // auto-safe 两档都必须弹审批（与 computerUsePerAppGate 同构；双视图并检
+    // 与 requiresApproval 侧同口径）。yolo 档保持历史语义不收窄。
+    const bashCommit = tu.name === 'bash' && typeof tu.input.command === 'string'
+      ? tu.input.command
+      : ''
+    const bashCommitStagesSensitiveGate = bashCommit.length > 0
+      && (approvalMode === 'manual' || approvalMode === 'auto-safe')
+      && gitCommitStagesSensitiveDualView(deps.cwd, bashCommit)
+
     let shouldAsk = (unconditionalApproval && !yoloBypassesUnconditional)
       ? true
       : skipAllApproval
@@ -1116,17 +1131,19 @@ async function executeToolUseInner(
             ? true
             : bashWriteRequiresApproval
               ? true
-              : runtimeApprovalGate || computerUsePerAppGate
+              : bashCommitStagesSensitiveGate
                 ? true
-                : allowlisted
-                  ? false
-                  : canAutoApprove
+                : runtimeApprovalGate || computerUsePerAppGate
+                  ? true
+                  : allowlisted
                     ? false
-                    : approvalMode === 'manual'
-                      ? needsApproval
-                      : approvalMode === 'auto-safe'
-                        ? isHighRisk
-                        : false
+                    : canAutoApprove
+                      ? false
+                      : approvalMode === 'manual'
+                        ? needsApproval
+                        : approvalMode === 'auto-safe'
+                          ? isHighRisk
+                          : false
 
     // YOLO mode intelligent fallback: auto-grant write access for file-tool
     // paths already covered by a read grant. This eliminates the validatePath →
