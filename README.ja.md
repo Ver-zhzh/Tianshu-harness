@@ -592,7 +592,7 @@ tianshu config mcp list                                              # 一覧＋
 | `Ctrl+V` | クリップボード画像をペースト（base64 インラインに自動変換） |
 | `F1`–`F8` | 高頻度コマンドを直接バインド：F1 /help · F2 /tasks · F3 /cache · F4 /cockpit · F5 /theme · F6 /model · F7 /permission · F8 /sessions |
 
-TUI は CLI のデフォルトサーフェスです。デスクトップ版（Tauri）と VS Code/Cursor プラグインは同じ agent カーネルを共有し、TUI の上に可視化インタラクション層を重ねているだけです——下記と [VS Code プラグインドキュメント](docs/VSCODE-EXTENSION-RELEASE.md) を参照。
+TUI は CLI のデフォルトサーフェスです。デスクトップ版（Tauri）と VS Code/Cursor プラグインは同じ agent カーネルを共有し、TUI の上に可視化インタラクション層を重ねているだけです——下記を参照。
 
 ### デスクトップ版（Tauri）
 

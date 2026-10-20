@@ -595,7 +595,7 @@ tianshu config mcp list                                              # 목록 + 
 | `Ctrl+V` | 클립보드 이미지 붙여넣기（자동 base64 인라인） |
 | `F1`–`F8` | 고빈도 명령 직접 바인딩: F1 /help · F2 /tasks · F3 /cache · F4 /cockpit · F5 /theme · F6 /model · F7 /permission · F8 /sessions |
 
-TUI는 CLI의 기본 표면입니다. 데스크톱 앱（Tauri）과 VS Code/Cursor 플러그인은 동일한 agent 커널을 공유하며, TUI 위에 시각적 인터랙션 레이어를 얹은 것뿐입니다——아래 절과 [VS Code 플러그인 문서](docs/VSCODE-EXTENSION-RELEASE.md)를 참조하세요.
+TUI는 CLI의 기본 표면입니다. 데스크톱 앱（Tauri）과 VS Code/Cursor 플러그인은 동일한 agent 커널을 공유하며, TUI 위에 시각적 인터랙션 레이어를 얹은 것뿐입니다——아래 절을 참조하세요.
 
 ### 데스크톱 앱（Tauri）
 
