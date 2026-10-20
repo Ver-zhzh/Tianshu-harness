@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/brand/assets/tianshu-banner-dark.jpg" alt="Tianshu Harness" width="100%">
+  <img src="docs/brand/assets/tianshu-banner.svg" alt="Tianshu Harness" width="100%">
 </p>
 
 <h1 align="center">Tianshu Harness</h1>
