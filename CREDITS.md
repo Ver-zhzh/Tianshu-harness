@@ -486,3 +486,4 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 
 - #509 feat(prompt): 新增用户级全局常驻指令位点（agent.userInstructions）（OPEN）
 - #527 docs(readme): 重新设计中文 README 版式与配图（OPEN）
+- #518 fix(context): 补齐 #511 原模型恢复与无损会话落盘（OPEN）
