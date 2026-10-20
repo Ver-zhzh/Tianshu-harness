@@ -493,3 +493,4 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 署名：xxy757 <96516909+xxy757@users.noreply.github.com>
 
 - #522 fix(api): 修复增量清洗导致的续跑前缀分歧 (#521)（CLOSED）
+- #520 fix(tui): 补齐 /repair-prefix 帮助与确认参数（OPEN）
