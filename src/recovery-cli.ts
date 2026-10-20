@@ -70,10 +70,10 @@ export async function runRecoveryCli(ctx: BootstrapContext, options: RecoveryCli
     onTurnComplete: (usage, turnNumber) => output.line(`\n[turn ${turnNumber} complete]${usage && Object.keys(usage).length ? ` usage: ${JSON.stringify(usage)}` : ''}`),
     onError: error => output.line(`\n[error] ${error.message}`),
     onAbort: reason => { pendingQuestions = []; questionCalls.clear(); output.line(`\n[abort] ${reason ?? 'interrupted'}`) },
-    onApprovalRequired: (id, name, toolInput) => {
+    onApprovalRequired: (id, name, toolInput, context) => {
       const decision = approvalTail.then(async () => {
         if (interrupted || stopped) return false
-        output.line(`\n[approval ${id}] ${name}\n${JSON.stringify(toolInput, null, 2)}`)
+        output.line(`\n[approval ${id}] ${name}\n${JSON.stringify(toolInput, null, 2)}${context ? '\n' + JSON.stringify(context, null, 2) : ''}`)
         const answer = await input.read('Type /approve (or yes) to allow; /reject to deny: ', true)
         if (answer === null) { interrupt(false); return false }
         if (EXIT_COMMANDS.has(answer.trim().toLowerCase())) { interrupt(true); return false }

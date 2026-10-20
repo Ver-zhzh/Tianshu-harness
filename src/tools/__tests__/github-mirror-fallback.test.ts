@@ -87,17 +87,17 @@ describe('github-mirror-fallback', () => {
         originalUrl: 'https://github.com/alice/repo.git',
         config: baseConfig(),
         cwd: '/tmp/proj',
-        cloneFn: flakyClone(1), // direct fails, gitcode succeeds
+        cloneFn: flakyClone(1), // direct fails, first mirror (ghproxy, table order) succeeds
         fallbackMemoryMinutes: 10,
         onAttempt: (info) => attempts.push(info),
       })
       assert.equal(result.reason, 'fallback')
-      assert.equal(result.mirrorId, 'gitcode')
+      assert.equal(result.mirrorId, 'ghproxy')
       assert.equal(result.triedFailures.length, 1)
       assert.equal(result.triedFailures[0]?.mirrorId, 'direct')
       assert.ok(attempts.length >= 2)
 
-      // Memory: next call should skip direct and hit gitcode
+      // Memory: next call should skip direct and hit ghproxy
       const result2 = await cloneWithFallback({
         originalUrl: 'https://github.com/alice/repo.git',
         config: baseConfig(),
@@ -106,7 +106,7 @@ describe('github-mirror-fallback', () => {
         fallbackMemoryMinutes: 10,
       })
       assert.equal(result2.reason, 'memory')
-      assert.equal(result2.mirrorId, 'gitcode')
+      assert.equal(result2.mirrorId, 'ghproxy')
     })
 
     it('all fail → aggregate error', async () => {
@@ -146,7 +146,7 @@ describe('github-mirror-fallback', () => {
         onAttempt: (info) => attempts.push(info),
       })
       assert.equal(result.reason, 'memory')
-      assert.equal(result.mirrorId, 'gitcode')
+      assert.equal(result.mirrorId, 'ghproxy')
       // Only one attempt — memory hit, no direct try
       assert.equal(attempts.length, 1)
     })
@@ -173,11 +173,12 @@ describe('github-mirror-fallback', () => {
     })
 
     it('user explicit mirror → only that mirror, no fallback', async () => {
-      // User chose kkgithub explicitly
-      const config = baseConfig({ enabled: true, github: 'kkgithub' })
+      // User chose gitcode explicitly (post-#524 table: ghproxy/gitcode alive;
+      // legacy kkgithub/fastgit resolve to undefined → auto-fallback path)
+      const config = baseConfig({ enabled: true, github: 'gitcode' })
       const attempts: string[] = []
 
-      // kkgithub succeeds
+      // gitcode succeeds
       const result = await cloneWithFallback({
         originalUrl: 'https://github.com/alice/repo.git',
         config,
@@ -186,12 +187,12 @@ describe('github-mirror-fallback', () => {
         onAttempt: (info) => attempts.push(info.url),
       })
       assert.equal(result.reason, 'direct')
-      assert.equal(result.mirrorId, 'kkgithub')
-      assert.ok(attempts[0]?.includes('kkgithub'))
+      assert.equal(result.mirrorId, 'gitcode')
+      assert.ok(attempts[0]?.includes('gitcode.com'))
     })
 
     it('user explicit mirror fails → throws, no retry', async () => {
-      const config = baseConfig({ enabled: true, github: 'kkgithub' })
+      const config = baseConfig({ enabled: true, github: 'gitcode' })
 
       await assert.rejects(
         cloneWithFallback({
@@ -201,10 +202,25 @@ describe('github-mirror-fallback', () => {
           cloneFn: failClone('mirror down'),
         }),
         (err: Error) => {
-          assert.ok(err.message.includes('user-selected mirror kkgithub'))
+          assert.ok(err.message.includes('user-selected mirror gitcode'))
           return true
         },
       )
+    })
+
+    it('legacy dead mirror id (kkgithub) resolves to auto-fallback path', async () => {
+      // issue #524: kkgithub dropped from the table → resolveGithubMirrorId
+      // returns undefined → the user-respect branch is skipped and normal
+      // auto-fallback (direct first) applies instead of a dead mirror.
+      const config = baseConfig({ enabled: true, github: 'kkgithub' })
+      const result = await cloneWithFallback({
+        originalUrl: 'https://github.com/alice/repo.git',
+        config,
+        cwd: '/tmp/proj',
+        cloneFn: okClone(),
+      })
+      assert.equal(result.reason, 'direct')
+      assert.equal(result.mirrorId, undefined)
     })
 
     it('autoFallback=false → only direct, no mirrors', async () => {

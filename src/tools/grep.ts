@@ -24,6 +24,7 @@ import { isScanExcludedDir } from './scan-excludes.js'
 import { scanForMatches, scanForRange, DEFAULT_MAX_LINE_CHARS, type ScanBudget, type MatchLine } from './bounded-scan.js'
 import { cpuPool } from '../workers/cpu-pool.js'
 import type { GrepScanRawResult } from '../workers/grep-scan-task.js'
+import { grepTruncationMarker } from '../utils/grep-output.js'
 
 const MAX_RESULTS_DEFAULT = 100
 const MIN_RESULTS = 1
@@ -34,6 +35,14 @@ const MAX_RESULTS = 1_000_000
 const MAX_CONTEXT_LINES = 20
 const ANCHOR_LINE_LIMIT = 10
 const TIMEOUT_MS = 30_000
+
+function boundGrepContent(content: string, cap: ModelReadCap): string {
+  const bounded = truncateContent(content, cap.maxChars, cap.headChars, cap.tailChars)
+  if (bounded === content) return bounded
+  const marker = grepTruncationMarker(bounded)
+  const existing = /^\[truncated: showing \d+ matches[^\r\n]*\]$/m
+  return existing.test(bounded) ? bounded.replace(existing, marker) : `${bounded}\n${marker}`
+}
 
 /** Safe label for debug logs — pattern may be missing if tool JSON is malformed. */
 function grepPatternLabel(pattern: unknown): string {
@@ -168,7 +177,7 @@ Bad: grep(pattern="x") (too broad — will match too many lines)`,
     }
 
     try {
-      const { results, incompleteReason } = await nativeSearch(
+      const { results, incompleteReason, truncated } = await nativeSearch(
         absPath, { source: pattern, literal }, glob, maxResults, params.cwd, contextLines,
         { signal: params.abortSignal, deadlineAt: Date.now() + TIMEOUT_MS },
       )
@@ -179,13 +188,12 @@ Bad: grep(pattern="x") (too broad — will match too many lines)`,
       const INCOMPLETE_NOTE = incompleteReason
         ? `[grep] 回退搜索不完整（${incompleteReason}）：以下结果不覆盖全部文件——缩小 path 或改用更具体的 glob 重试。\n`
         : ''
-      if (results.length === 0) {
+      if (results.length === 0 && !truncated) {
         return { content: `[grep] 未找到 ripgrep (rg) 或其执行失败；已使用慢速回退。\n${INCOMPLETE_NOTE}${incompleteReason ? '' : GREP_EMPTY_RESULT}` }
       }
       const FALLBACK_PREFIX = '[grep] 未找到 ripgrep (rg) 或其执行失败；已使用慢速回退。\n' + INCOMPLETE_NOTE
-      const text = results.length > maxResults
-        ? FALLBACK_PREFIX + results.slice(0, maxResults).join('\n') + '\n...（已截断）'
-        : FALLBACK_PREFIX + results.join('\n')
+      const matches = results.join('\n')
+      const text = FALLBACK_PREFIX + matches + (truncated ? `\n${grepTruncationMarker(matches)}` : '')
       let hintedText = appendLogRangeHints(text, searchPath)
       hintedText = await appendHashEditHints(hintedText, absPath, params.cwd, params.sessionId)
       await registerGrepFilesFromOutput(hintedText, params.cwd, params.sessionId)
@@ -193,7 +201,7 @@ Bad: grep(pattern="x") (too broad — will match too many lines)`,
       if (params.artifactStore) {
         if (hintedText.length < artifactThreshold) {
           debugLog(`[artifact-skip] tool=grep pattern=${grepPatternLabel(pattern)} raw=${hintedText.length} threshold=${artifactThreshold}`)
-          return { content: truncateContent(hintedText, modelCap.maxChars, modelCap.headChars, modelCap.tailChars) }
+          return { content: boundGrepContent(hintedText, modelCap) }
         }
         debugLog(`[artifact-wrap] tool=grep pattern=${grepPatternLabel(pattern)} raw=${hintedText.length} threshold=${artifactThreshold}`)
         const { summary, sections } = summarizeGrepResult(hintedText, pattern)
@@ -204,13 +212,13 @@ Bad: grep(pattern="x") (too broad — will match too many lines)`,
           summary,
           sections,
         })
-        const truncated = truncateContent(hintedText, modelCap.maxChars, modelCap.headChars, modelCap.tailChars)
+        const truncated = boundGrepContent(hintedText, modelCap)
         return {
           content: `${truncated}\n\n${summary}\n使用 read_section(artifactId="${artifactId}", section="L1-L500") 获取完整匹配列表。\n[artifact:${artifactId}]`,
         }
       }
 
-      return { content: truncateContent(hintedText, modelCap.maxChars, modelCap.headChars, modelCap.tailChars) }
+      return { content: boundGrepContent(hintedText, modelCap) }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err)
       return { content: `错误：${message}`, isError: true }
@@ -458,7 +466,8 @@ async function tryRipgrep(
       maxResults, timeoutMs: TIMEOUT_MS, signal: abortSignal,
     })
     if (lines.length === 0) return { content: GREP_EMPTY_RESULT }
-    const text = lines.join('\n') + (truncated ? '\n...（已截断）' : '')
+    const matches = lines.join('\n')
+    const text = matches + (truncated ? `\n${grepTruncationMarker(matches)}` : '')
     let hintedText = appendLogRangeHints(text, searchPath)
     hintedText = await appendHashEditHints(hintedText, absPath, cwd, sessionId)
     await registerGrepFilesFromOutput(hintedText, cwd, sessionId)
@@ -466,11 +475,11 @@ async function tryRipgrep(
       const { summary, sections } = summarizeGrepResult(hintedText, pattern)
       try {
         const artifactId = await artifactStore.save({ tool: 'grep', target: absPath, rawContent: hintedText, summary, sections })
-        const text = truncateContent(hintedText, modelCap.maxChars, modelCap.headChars, modelCap.tailChars)
+        const text = boundGrepContent(hintedText, modelCap)
         return { content: `${text}\n\n${summary}\n使用 read_section(artifactId="${artifactId}", section="L1-L500") 获取完整匹配列表。\n[artifact:${artifactId}]` }
       } catch { /* use the bounded inline result */ }
     }
-    return { content: truncateContent(hintedText, modelCap.maxChars, modelCap.headChars, modelCap.tailChars) }
+    return { content: boundGrepContent(hintedText, modelCap) }
   } catch (error) {
     debugLog(`[grep] rg fallback: ${error instanceof Error ? error.message : String(error)}`)
     return null
@@ -479,6 +488,7 @@ async function tryRipgrep(
 
 interface NativeSearchOutcome {
   results: string[]
+  truncated: boolean
   /** Non-null when the walk or a file scan ended early — results are partial. */
   incompleteReason: string | null
 }
@@ -507,6 +517,7 @@ async function nativeSearch(
   // is hostile.
   const deadlineAt = options.deadlineAt ?? Date.now() + TIMEOUT_MS
   let incompleteReason: string | null = null
+  let truncated = false
 
   /** Budget left for the next bounded file scan. */
   function remainingMs(): number {
@@ -577,10 +588,11 @@ async function nativeSearch(
 
         if (!validatePathSafe(cwd, fullPath).ok) continue
         const matched = await scanOne(fullPath)
+        truncated ||= matched.truncated
         if (matched.incomplete) incompleteReason ??= matched.incomplete
         for (const line of matched.lines) {
           results.push(`${relPath}:${line}`)
-          if (results.length >= maxResults) return
+          if (results.length >= maxResults) { truncated = true; return }
         }
       }
     }
@@ -590,20 +602,22 @@ async function nativeSearch(
   if (s?.isFile()) {
     const relPath = relativePosix(cwd, absPath)
     const matched = await scanOne(absPath)
+    truncated ||= matched.truncated
     if (matched.incomplete) incompleteReason ??= matched.incomplete
     for (const line of matched.lines) {
       results.push(`${relPath}:${line}`)
-      if (results.length >= maxResults) break
+      if (results.length >= maxResults) { truncated = true; break }
     }
   } else {
     await walk(absPath, true)
   }
 
-  return { results, incompleteReason }
+  return { results, incompleteReason, truncated }
 }
 
 interface FileSearchOutcome {
   lines: string[]
+  truncated: boolean
   /** Non-null when the scan did not cover the whole file. */
   incomplete: string | null
 }
@@ -692,7 +706,7 @@ async function searchFile(
     : await isolatedRegexScan(filePath, pattern.source, contextLines, maxMatches, maxLineChars, budget)
   if (outcome === null) {
     const regex = buildRegex(pattern.source, pattern.literal)
-    if (!regex) return { lines: [], incomplete: 'syntax_error' }
+    if (!regex) return { lines: [], incomplete: 'syntax_error', truncated: false }
     const res = await scanForMatches(filePath, line => regex.test(line), {
       contextLines,
       maxMatches,
@@ -716,7 +730,7 @@ async function searchFile(
     || outcome.stoppedReason === 'regexTimeout'
     ? outcome.stoppedReason
     : null
-  return { lines, incomplete }
+  return { lines, incomplete, truncated: outcome.stoppedReason !== 'eof' }
 }
 
 function formatContextLines(matchLines: MatchLine[]): string[] {

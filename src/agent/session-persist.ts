@@ -24,7 +24,7 @@ import { ContextClaimStore } from '../context/claim-store.js'
 import type { ContextClaim } from '../context/claims.js'
 import { assertValidSessionId } from '../validation.js'
 import { appendChecksum, verifyLines } from './checksum.js'
-import { decodeTranscriptText, encodeBatch } from './session-transcript-codec.js'
+import { decodeTranscriptText, encodeBatch, isZstdFrameStream, scanZstdFrames } from './session-transcript-codec.js'
 import { serializeSessionMessage, serializeOaiSessionMessage } from './session-message-serialization.js'
 import { SessionBatchWriter } from './session-batch-writer.js'
 import { SessionMetadataStore, FrozenSnapshotWriter, compactEventKey, mergeCompactEvent } from './session-metadata.js'
@@ -151,9 +151,11 @@ export class SessionPersist {
   private lastInjectedUncertain: Array<{ id: string; name: string }> = []
 
   /** Read the transcript file as JSONL text (zstd frames or legacy passthrough). */
-  private readTranscriptText(): string {
+  private readTranscriptText(requireComplete = false): string {
     const snapshot = this.batchWriter.captureReadSnapshot()
+    if (requireComplete && (snapshot.committedBytes !== undefined || snapshot.tail)) throw new Error('Transcript writes are not drained')
     const onDisk = existsSync(this.filePath) ? readFileSync(this.filePath) : Buffer.alloc(0)
+    if (requireComplete && isZstdFrameStream(onDisk) && scanZstdFrames(onDisk).tornStart !== undefined) throw new Error('Transcript has an incomplete frame')
     // In-process readers must also see lines still queued in the write-behind
     // batch — append() followed by loadOai()/fork without a flush is valid.
     return decodeTranscriptText(onDisk.subarray(0, snapshot.committedBytes)) + snapshot.tail
@@ -233,6 +235,19 @@ export class SessionPersist {
     while (!next.done) next = parser.next()
     this.alignTranscriptWatermark(next.value.length, appendedBefore)
     return next.value
+  }
+
+  matchesOaiSessionProjection(messages: readonly OaiMessage[], maxChars?: number): boolean {
+    try {
+      const lines = this.readTranscriptText(true).trim().split('\n').filter(Boolean)
+      const { validLines, invalidCount } = verifyLines(lines)
+      if (invalidCount > 0) return false
+      const rows = validLines.filter(line => {
+        const parsed = JSON.parse(line) as { type?: string }
+        return !parsed.type || !SessionPersist.AUDIT_LINE_TYPES.has(parsed.type)
+      })
+      return rows.length === messages.length && rows.every((line, index) => line === serializeOaiSessionMessage(messages[index]!, maxChars))
+    } catch { return false }
   }
 
   async loadOaiAsync(signal?: AbortSignal): Promise<OaiMessage[]> {

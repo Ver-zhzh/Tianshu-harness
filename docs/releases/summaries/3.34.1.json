@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "version": "3.34.1",
+  "date": "2026-10-20",
+  "fullNotesUrl": "https://github.com/huiliyi37/Tianshu-harness/releases/tag/v3.34.1",
+  "locales": {
+    "zh": {
+      "title": "Skill Python 运行时与环境修复",
+      "highlights": [
+        "Skill Python 运行时完整闭环（issue #523）：技能声明 runtime.yaml 后，经审批在隔离 venv 安装依赖并参数化执行脚本，CLI 与桌面端共用同一套内核能力。",
+        "修复桌面自定义存储路径下 CLI 数据根漂移（#525）；GitHub 镜像改用 git 原生 insteadOf，不再污染仓库配置（#524）。",
+        "桌面工具命令区降噪（进行中的工作组默认折叠）；新增对话式技能创建与草稿审阅发布。"
+      ],
+      "notice": "曾配置 kkgithub/fastgit 镜像的用户将解析为直连，建议改用 ghproxy 或 gitcode。"
+    },
+    "en": {
+      "title": "Skill Python runtime and environment fixes",
+      "highlights": [
+        "Full Skill Python runtime loop (issue #523): skills declaring runtime.yaml get approved dependency installs into isolated venvs and parameterized script execution; CLI and desktop share one kernel.",
+        "Fixes the CLI data root drifting from the desktop's custom storage location (#525); GitHub mirroring now uses git's native insteadOf and no longer pollutes repo config (#524).",
+        "Desktop tool-call noise reduction with collapsed live work groups, plus conversational skill creation with draft review and publication."
+      ],
+      "notice": "kkgithub/fastgit mirror configurations now resolve to direct connections; switch to ghproxy or gitcode if needed."
+    }
+  }
+}

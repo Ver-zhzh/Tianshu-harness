@@ -193,6 +193,8 @@ export interface VerificationSnapshotPlan {
 }
 
 export interface ToolCallParams {
+  runtimeExecutionPlan?: import('../skills/runtime/operation.js').RuntimeExecutionPlan
+  saveSkillDraft?: import('../skills/skill-creation.js').SkillDraftWriter
   onVerificationCompleted?: (verification: VerificationMetadata) => void
   input: Record<string, unknown>
   toolUseId: string
@@ -431,6 +433,7 @@ export interface VerificationMetadata {
 export type ToolErrorClass = 'environment' | 'exec-failure' | 'timeout'
 
 export interface ToolResult {
+  skillDraft?: import('../server/protocol.js').SkillDraftReference
   verificationPlan?: import('./test-execution-plan.js').DeliveryVerificationPlan
   generatedImageId?: string
   /** Runtime presentation contract, never sent as model-generated metadata. */

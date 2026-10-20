@@ -124,7 +124,8 @@ export function deriveDisciplineEligibility(
   // 纪律——不静默丢失 TDD。两级触发：≥2 文件直接升级；1 文件需问题信号词
   // （"看看 src/auth.ts 登录有点怪"类单文件 bug 报告不再漏网，而
   //  "解释 src/auth.ts" 无信号词，保持 light）。
-  if (!hasAnyKind) {
+  // 明示只读约束必须先于漏判兜底，不能因文件数或错误信号被升级。
+  if (!hasAnyKind && !explicitNoMutation) {
     const fileCount = input.mentionedCodeFileCount ?? 0
     const hasCodeFiles = fileCount >= 2 || (fileCount >= 1 && input.problemSignal === true)
     return {

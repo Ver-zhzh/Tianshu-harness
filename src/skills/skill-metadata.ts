@@ -1,4 +1,5 @@
 import { parseDocument } from 'yaml'
+import type { SkillRuntimeMetadata } from './runtime/declaration.js'
 
 export type SkillMode = 'auto' | 'manual' | 'off'
 export interface SkillMetadata {
@@ -8,6 +9,9 @@ export interface SkillMetadata {
   defaultMode: SkillMode
   dependencies: unknown[]
   unsupported: string[]
+  /** Python 运行时声明（issue #523）：目录型技能根的 runtime.yaml 解析结果。
+   *  解析失败不阻断加载，错误记录在 error 里由 doctor 展示。 */
+  runtime?: SkillRuntimeMetadata
 }
 
 export function parseSkillYaml(raw: string): Record<string, unknown> {

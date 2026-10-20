@@ -6,7 +6,6 @@ import {
   noteEligibilityMissing,
   __resetEligibilityMissingForTest,
   type DisciplineEligibility,
-  type ProjectionMode,
 } from '../discipline-eligibility.js'
 import type { IntentTaskKind } from '../intent-retrieval-route.js'
 import type { TurnMode } from '../../context/task-contract.js'
@@ -28,6 +27,20 @@ function e(input: {
 }
 
 describe('deriveDisciplineEligibility — discriminant matrix', () => {
+  for (const turnMode of ['task', 'followUp'] as const) {
+    for (const taskKinds of [[], ['social_idle']] as const) {
+      for (const mentionedCodeFileCount of [1, 2]) {
+        it(`explicitNoMutation overrides fallback: ${turnMode}, ${taskKinds.length} kinds, ${mentionedCodeFileCount} files`, () => {
+          const d = e({ turnMode, taskKinds, mentionedCodeFileCount, problemSignal: true, explicitNoMutation: true })
+          assert.equal(d.requiresEngineeringDiscipline, false)
+          assert.equal(d.requiresCodeVerification, false)
+          assert.equal(d.canSuggestPlan, false)
+          assert.equal(d.canDispatch, false)
+          assert.equal(d.projectionMode, 'light')
+        })
+      }
+    }
+  }
   // ── chat / social ──
   it('chat + social_idle → all false, projection none', () => {
     const d = e({ turnMode: 'chat', taskKinds: ['social_idle'] })

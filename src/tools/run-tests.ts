@@ -311,12 +311,13 @@ function extractTargetFilesFromCommand(testCommand: RunnableTestCommand, filter?
   return [...new Set(allMatches.map(m => m[1]!))]
 }
 
-function truncateOutput(output: string): string {
+function truncateOutput(output: string, rawPath?: string, tailOnly = false): string {
   if (output.length <= MAX_OUTPUT) return output
   const head = output.slice(0, HEAD_CHARS)
   const tail = output.slice(-TAIL_CHARS)
   const omitted = output.length - HEAD_CHARS - TAIL_CHARS
-  return `${head}\n...（已省略 ${omitted} 字符）...\n${tail}`
+  const suffix = rawPath ? `——${tailOnly ? '已保存输出尾部见' : '完整日志见'} ${rawPath}` : ''
+  return `${head}\n...（中间省略 ${omitted} 字符${suffix}）...\n${tail}`
 }
 
 function buildExecutionEnv(cwd: string): NodeJS.ProcessEnv {
@@ -329,6 +330,13 @@ function buildExecutionEnv(cwd: string): NodeJS.ProcessEnv {
   // PATH may be spelled `Path` on Windows — look it up case-insensitively.
   const pathKey = Object.keys(base).find(k => k.toLowerCase() === 'path') ?? 'PATH'
   const currentPath = base[pathKey] ?? ''
+  // Snapshot worktrees have no node_modules — inherit tool-path env vars from
+  // the parent process so tests that depend on external tools (rg, etc.) work
+  // identically in-place and in isolation.
+  const toolEnvVars = ['RIVET_RIPGREP_PATH', 'RIVET_BUNDLED_RIPGREP_DIR'] as const
+  for (const key of toolEnvVars) {
+    if (base[key] === undefined && process.env[key] !== undefined) base[key] = process.env[key]
+  }
   return {
     ...base,
     [pathKey]: [localBin, repoBin, currentPath].filter(Boolean).join(delimiter),
@@ -501,6 +509,11 @@ export async function runTestCommandIn(
       let stdout = ''
       let hasNonWhitespaceOutput = false
       let stderr = ''
+      let omittedStdout = 0
+      let omittedStderr = 0
+      const logScopeNote = () => omittedStdout || omittedStderr
+        ? `[run_tests 输出尾部：stdout 早期省略 ${omittedStdout} 字符；stderr 早期省略 ${omittedStderr} 字符。此前输出未保留。]`
+        : ''
       const displayOutput = new DisplayOutputBuffer()
 
       const stdoutDecoder = deps.createDecoder()
@@ -519,6 +532,7 @@ export async function runTestCommandIn(
         displayOutput.append(text)
         uiOutput.push(text)
         if (stdout.length > 100_000) {
+          omittedStdout += stdout.length - 80_000
           stdout = stdout.slice(-80_000)
         }
       })
@@ -530,6 +544,7 @@ export async function runTestCommandIn(
         displayOutput.append(text)
         uiOutput.push(text)
         if (stderr.length > 100_000) {
+          omittedStderr += stderr.length - 80_000
           stderr = stderr.slice(-80_000)
         }
       })
@@ -551,9 +566,10 @@ export async function runTestCommandIn(
         uiOutput.dispose()
         const raw = finalStdout + (finalStderr ? '\n' + finalStderr : '')
         const meta = { command: testCommand.display, exitCode: -1, durationMs: Date.now() - startTime }
-        const rawPath = await deps.persist(params.toolUseId, raw)
+        const logNote = logScopeNote()
+        const rawPath = await deps.persist(params.toolUseId, logNote ? `${logNote}\n${raw}` : raw)
         resolve({
-          content: `测试在 ${timeout}ms 后超时`,
+          content: `测试在 ${timeout}ms 后超时` + (logNote ? `\n${logNote}\n已保存输出尾部见 ${rawPath}` : ''),
           uiContent: buildUiOutput(raw, meta),
           displayOutput: displayOutput.text(),
           displayOutputTruncated: displayOutput.truncated,
@@ -628,8 +644,9 @@ export async function runTestCommandIn(
         completion?.dispose()
         Object.assign(parsed, completionFacts(coverage))
         const formatted = formatOutput(parsed)
-        const truncated = truncateOutput(formatted)
-        const rawPath = await deps.persist(params.toolUseId, raw)
+        const logNote = logScopeNote()
+        const rawPath = await deps.persist(params.toolUseId, logNote ? `${logNote}\n${raw}` : raw)
+        const truncated = truncateOutput(formatted, rawPath, !!logNote)
         const meta = { command: testCommand.display, exitCode, durationMs }
 
         // Declared commands (verify.test) are explicit user intent — exit != 0
@@ -692,12 +709,13 @@ export async function runTestCommandIn(
           if (rawTail.length > 0) failureContent = `${truncated}\n\n[运行器输出尾部]\n${rawTail}`
         }
 
-        resolve({
-          content: exitCode === 0
+        const content = exitCode === 0
             ? (parsed.passed === 0 && !parsed.duration
               ? truncated  // parse likely failed — fall back to full formatted output
               : `✓ ${parsed.passed} 通过${parsed.skipped ? `，${parsed.skipped} 跳过` : ''}${parsed.duration ? `（${parsed.duration}）` : ''}`)
-            : failureContent,
+            : failureContent
+        resolve({
+          content: content + (logNote ? `\n\n${logNote}\n已保存输出尾部见 ${rawPath}` : ''),
           uiContent: buildUiOutput(raw, meta),
           displayOutput: displayOutput.text(),
           displayOutputTruncated: displayOutput.truncated,

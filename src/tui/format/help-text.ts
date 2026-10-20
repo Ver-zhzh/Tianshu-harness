@@ -113,6 +113,7 @@ export const HELP_TEXT = `天枢帮助
 /debug [prompt|fingerprint|cache|context-payload|mcp] — Debug info
 /mcp — Show MCP server status
 /logs [open [desktop]] — 本会话日志落点（会话 / 缓存 / 六维 / 桌面 sidecar），带写入门控与回收策略；open 直接在文件管理器里打开
+/repair-prefix [--confirm <recoveryId>] — 连续性前缀证据检查与冻结投影修复（两阶段，需会话空闲）：无参预览并给出 recoveryId，再 /repair-prefix --confirm <recoveryId> 执行；保留聊天，不重放已完成工具，缓存重建一次
 /sensorium — Show 天枢 3D self-awareness state
 /prefix-budget — 前缀预算归因：各块字符/token 占比 + 当前档位
 /index — Rebuild codebase index (modules + CLI entries)

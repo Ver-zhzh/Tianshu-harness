@@ -58,7 +58,12 @@ function extractRepo(url: string): string | null {
 
 /** Build a mirror URL for a given `owner/repo` path. */
 function buildMirrorUrl(repo: string, mirrorId: Exclude<GithubMirrorId, 'default'>): string {
-  return GITHUB_MIRRORS[mirrorId].template.replace('{repo}', repo)
+  const mirror = GITHUB_MIRRORS[mirrorId]
+  // Legacy dead mirror ids resolve to undefined → caller's mirror list simply
+  // skips them (issue #524 fail-open). Defensively return a non-URL sentinel
+  // that will fail fast if ever used.
+  if (!mirror) return `https://github.com/${repo}`
+  return mirror.template.replace('{repo}', repo)
 }
 
 // ── session memory ─────────────────────────────────────────────────

@@ -29,6 +29,7 @@ import { FieldHabituationTracker } from './field-habituation.js'
 import { messageSignature } from './message-signature.js'
 import { isSystemReminder } from './system-reminder.js'
 import { runResumePreflightOai } from '../context/resume-preflight.js'
+import { recoverLegacyPreflightSource, preservesPublishedWire } from './preflight-source-recovery.js'
 import type { WriteProbe } from '../context/write-evidence-probe.js'
 import { createContextLayer, createContextLayerReport, type ContextLayerReport } from './context-layer.js'
 import { debugLog } from '../utils/debug.js'
@@ -569,14 +570,15 @@ export class PromptEngine {
         && (message.origin === 'human' || message.origin === 'worker_task') && !isSystemReminder(message.content))
       if (!freshInput && !this.instructionsInputAuthorized) throw new UserInstructionsError('user_instructions_boundary_required', '用户长期指令已变更，请发送新输入以应用；原边界保持冻结。')
     }
-    if (!sidePath && sourceHistory) {
-      const current = proveRewindHistory(inputMessages)
-      if (sourceHistory.some((entry, index) => current[index]?.hash !== entry.hash)) {
-        throw new ContinuationPrefixError('source', sourceBaseline!, { ...sourceBaseline!, messages: current })
-      }
-    }
     const publishedUserCount = sidePath ? 0 : inputMessages.filter(message => message.role === 'user').length
-    const publishedHistory = sidePath ? undefined : proveRewindHistory(inputMessages)
+    const sourceProof = sidePath ? undefined : proveRewindHistory(inputMessages)
+    let publishedHistory = sourceProof
+    const sourceChanged = sourceHistory?.some((message, index) => sourceProof?.[index]?.hash !== message.hash)
+    const legacySourceRepair = sourceChanged && sourceProof && sourceHistory
+      ? recoverLegacyPreflightSource(inputMessages, sourceProof, sourceHistory) : undefined
+    if (!sidePath && sourceChanged && !legacySourceRepair) {
+      throw new ContinuationPrefixError('source', sourceBaseline!, { ...sourceBaseline!, messages: sourceProof! }, { stage: 'source', sourcePrefix: 'changed', renderPrefix: 'unknown' })
+    }
     if (!sidePath) {
       this.preparedUserCount = publishedUserCount
       this.preparedUserInput = undefined
@@ -635,8 +637,14 @@ export class PromptEngine {
     // not written back to session), the same orphans are detected every turn,
     // causing the model to see "会话中断导致工具结果丢失" on every tool call.
     // Write repaired messages back to the session so orphans are healed once.
-    if (preflight.repaired && preflight.syntheticResultsInserted > 0 && !sidePath && options?.onOrphanRepair) {
+    if (preflight.repaired && !sidePath && options?.onOrphanRepair) {
+      const repairedHistory = proveRewindHistory(oaiMessages)
+      if (sourceBaseline && sourceHistory?.some((message, index) => sourceProof?.[index]?.hash !== message.hash
+        || repairedHistory[index]?.hash !== message.hash)) {
+        throw new ContinuationPrefixError('source', sourceBaseline, { ...sourceBaseline, messages: repairedHistory })
+      }
       options.onOrphanRepair(oaiMessages, preflight.syntheticResultsInserted)
+      publishedHistory = repairedHistory
     }
 
     // Compute GWT budget for dynamic appendix (context-update sub-blocks).
@@ -940,9 +948,9 @@ export class PromptEngine {
       // fingerprints final send bytes for these requests (side-path calls
       // through the same client would poison its baseline too).
       prefixProbe: !sidePath || undefined,
-      validateSourceHistory: sidePath || !sourceBaseline || !sourceHistory ? undefined : () => {
-        if (sourceHistory.some((message, index) => publishedHistory?.[index]?.hash !== message.hash)) {
-          throw new ContinuationPrefixError('source', sourceBaseline, { ...sourceBaseline, messages: publishedHistory! })
+      validateSourceHistory: sidePath || !sourceBaseline || !sourceHistory ? undefined : next => {
+        if (sourceChanged && !(legacySourceRepair && preservesPublishedWire(sourceBaseline, next, legacySourceRepair))) {
+          throw new ContinuationPrefixError('source', sourceBaseline, { ...sourceBaseline, messages: sourceProof! })
         }
       },
       onExecutionSnapshot: sidePath ? undefined : proof => {
@@ -963,6 +971,7 @@ export class PromptEngine {
       },
     }
     const candidate = sidePath ? undefined : this.renderState.capture(this.captureFrozenSnapshot(candidateInstructions), proveRewindHistory(request.messages))
+    if (candidate) request.continuityEvidence = { sourcePrefix: sourceHistory ? 'same' : 'unknown', renderPrefix: this.renderState.comparePublishedRender(candidate.snapshot.renderedHistory!) }
     if (!sidePath && this.rewindAuthorization) {
       const authorization = { ...this.rewindAuthorization, history: proveRewindHistory(request.messages) }
       request.rewindAuthorizationId = authorization.cacheGenerationId

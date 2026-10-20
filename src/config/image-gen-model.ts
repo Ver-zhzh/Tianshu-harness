@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { loadConfig, saveConfig } from './manager.js'
+import { contractModels } from './contract-models.js'
 import { writeSecret } from './secrets-store.js'
 import { modelConfigSchema, type Config, type ProviderConfig } from './schema.js'
 import { imageGenModelSchema, type ImageGenModelConfigSnapshot } from './image-gen-schema.js'
@@ -32,13 +33,15 @@ export function getImageGenModelConfig(): ImageGenModelConfigSnapshot | undefine
 }
 
 /** 校验 provider 在 provider.providers 里存在、且该 provider 下有指定 model。
- *  与 manager.ts 的同名私有函数同义，就地实现以避免为它扩大 manager 的导出面。 */
+ *  与 manager.ts 的同名私有函数同义，就地实现以避免为它扩大 manager 的导出面。
+ *  模型存在性查 contractModels 契约并集（keys 池是事实源）——顶层 provider.models
+ *  是迁移快照，key 级增删不回写，只查顶层会把只在 key 池里的模型误判不存在。 */
 function assertProviderModelExists(cfg: Config, providerName: string, modelId: string, label: string): void {
   const provider = cfg.provider.providers[providerName]
   if (!provider) {
     throw new Error(`${label}：provider "${providerName}" 不在已配置的 provider 列表里（先用 rivet config setup ${providerName} 添加）`)
   }
-  if (!provider.models.some(m => m.id === modelId)) {
+  if (!contractModels(provider).some(m => m.id === modelId)) {
     throw new Error(`${label}：provider "${providerName}" 下没有模型 "${modelId}"（检查拼写或用 rivet config add-model 添加）`)
   }
 }

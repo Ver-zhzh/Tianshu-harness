@@ -62,6 +62,23 @@ describe('SessionPersist', () => {
     assert.match(serialized, /session-message-truncated/)
   })
 
+  it('repair projection matching rejects torn physical frames while normal resume preserves complete frames', () => {
+    const persist = new SessionPersist('torn-repair-projection', tempDir)
+    const messages: OaiMessage[] = [{ role: 'user', content: 'full text. '.repeat(30_000) }]
+    const text = appendChecksum(serializeOaiSessionMessage(messages[0]!, MAX_SESSION_MESSAGE_JSON_CHARS)) + '\n'
+    const complete = encodeBatch(text)
+    const appended = encodeBatch(appendChecksum(JSON.stringify({ role: 'user', content: 'unexplained appended input' })) + '\n')
+    mkdirSync(getSessionDir(tempDir), { recursive: true })
+    for (const length of [1, 3, 5, appended.length - 1]) {
+      writeFileSync(persist.getFilePath(), Buffer.concat([complete, appended.subarray(0, length)]))
+      assert.equal(persist.loadOai().length, 1, 'ordinary crash recovery must retain its permissive complete-frame behavior')
+      assert.equal(persist.matchesOaiSessionProjection(messages, MAX_SESSION_MESSAGE_JSON_CHARS), false,
+        'repair authorization must cover physical bytes, not silently discard a partial frame')
+    }
+    writeFileSync(persist.getFilePath(), complete)
+    assert.equal(persist.matchesOaiSessionProjection(messages, MAX_SESSION_MESSAGE_JSON_CHARS), true)
+  })
+
   it('落盘上限必须容得下内存侧允许的单条工具结果（不二次削小）', () => {
     // 回归（2026-09-24）：内存裁顶 50K→120K 后，落盘侧仍是 100K，且 capJsonValue
     // 按 floor(maxChars * 0.8) 逐字符串截——于是 (80K, 120K] 的单条工具结果在
@@ -81,6 +98,31 @@ describe('SessionPersist', () => {
     const parsed = JSON.parse(serialized) as { role: string; content: string; tool_call_id?: string }
     assert.equal(parsed.tool_call_id, 'call-1')
     assert.equal(parsed.content, content, '整条内容应原样落盘（含尾部）')
+  })
+
+  it('canonical OAI history preserves long human text, output, reasoning and tool arguments across append and rewrites', async () => {
+    const persist = new SessionPersist('canonical-large-history', tempDir)
+    const content = 'canonical text. '.repeat(20_000)
+    const messages: OaiMessage[] = [
+      { role: 'user', origin: 'human', content },
+      { role: 'assistant', content, reasoning_content: 'reasoning. '.repeat(30_000) },
+      { role: 'assistant', content: null, tool_calls: [{ id: 'canonical-call', type: 'function', function: { name: 'read_file', arguments: JSON.stringify({ value: content }) } }] },
+      { role: 'tool', tool_call_id: 'canonical-call', content: 'tool result' },
+    ]
+    for (const message of messages) await persist.appendOaiWithChecksum(message, { flush: true })
+    assert.deepEqual(persist.loadOai(), messages)
+    await persist.compactOaiAsync(messages, true)
+    assert.deepEqual(persist.loadOai(), messages)
+    persist.compactOai(messages)
+    assert.deepEqual(persist.loadOai(), messages)
+  })
+
+  it('explicit OAI preview budgets remain bounded without altering canonical default serialization', () => {
+    const message: OaiMessage = { role: 'assistant', content: 'output'.repeat(50_000) }
+    assert.deepEqual(JSON.parse(serializeOaiSessionMessage(message)), message)
+    const preview = serializeOaiSessionMessage(message, 1_000)
+    assert.ok(preview.length <= 1_512)
+    assert.match(preview, /session-message-truncated/)
   })
 })
 

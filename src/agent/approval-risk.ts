@@ -427,6 +427,11 @@ export function requiresBashWriteApproval(toolName: string, input: Record<string
  */
 export function requiresUnconditionalApproval(toolName: string, input: Record<string, unknown>): boolean {
   if (toolName === 'request_path_access') return true
+  // skill_runtime 源码构建安装（issue #523）：从 sdist 编译拉取构建链、跑
+  // setup.py 任意代码——allow 规则/sensorium/auto-safe 均不得豁免，仅 yolo 可跳。
+  if (toolName === 'skill_runtime') {
+    return input.action === 'prepare' && input.buildPolicy === 'source'
+  }
   if (toolName !== 'computer_use') return false
   const action = typeof input.action === 'string' ? input.action : ''
   if (action === 'js_eval' || action === 'browser_adopt') return true

@@ -31,8 +31,9 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { open, readFile, stat } from 'node:fs/promises'
-import { appendFile, mkdir, writeFile, rename } from 'node:fs/promises'
+import { appendFile, mkdir, writeFile, rename, rm } from 'node:fs/promises'
 import { setImmediate as yieldToLoop } from 'node:timers/promises'
+import { randomUUID } from 'node:crypto'
 import { extname, join } from 'node:path'
 import { contextFileKind, CONTEXT_DOCUMENT_MIME } from './file-context-policy.js'
 import { registerSessionStorageRuntime } from '../storage/maintenance-gate.js'
@@ -53,8 +54,30 @@ type EventWriteChain = { running: boolean; again: boolean; active?: { line: stri
 export class FileSessionPersistence implements SessionPersistenceAdapter {
   constructor(
     private readonly baseDir: string,
-    private readonly opts: { maxEventsDiskBytes?: number; maxTransientWriteRetries?: number } = {},
+    private readonly opts: {
+      maxEventsDiskBytes?: number
+      maxTransientWriteRetries?: number
+      /**
+       * 写资格谓词（实时求值）：serve 注入 `() => ownsSessionStore`，StoreLock 丢锁即翻
+       * false。所有写路径在**提交前**检查——撤销后火忘式写入直接丢弃，调用方依赖结果的
+       * 写路径（saveArchive/flushThrough）抛错。缺省 = 恒可写（兼容存量调用方）。
+       */
+      canWrite?: () => boolean
+    } = {},
   ) { registerSessionStorageRuntime(baseDir) }
+
+  /** 写资格实时检查（谓词不可缓存——丢锁是运行期事件）。 */
+  private writesAllowed(): boolean {
+    return this.opts.canWrite?.() ?? true
+  }
+
+  private writeRevokeWarned = false
+  /** 丢锁后的丢弃只 warn 一次（100ms 写链下逐条 warn 会刷屏）。 */
+  private noteWriteRevoked(): void {
+    if (this.writeRevokeWarned) return
+    this.writeRevokeWarned = true
+    console.warn('[persistence] 会话库写资格已撤销（store lock lost）——后续写入直接丢弃')
+  }
 
   /** Accepted rows start the async single writer; only flushThrough confirms writes and fsync. */
   private eventBuffers = new Map<string, BufferedLine[]>()
@@ -70,6 +93,8 @@ export class FileSessionPersistence implements SessionPersistenceAdapter {
   /** A barrier confirms writes and fsync; a drained queue alone is not evidence. */
   async flushThrough(sessionId: string, seq: number, signal?: AbortSignal): Promise<number> {
     if (!Number.isSafeInteger(seq) || seq < 0) throw new Error('Invalid persistence watermark')
+    // 丢锁后 fail-fast：写链已被闸门兜成丢弃，水位永远不会推进——空等 30s 没有意义。
+    if (!this.writesAllowed()) throw new Error('Session store write access revoked (store lock lost)')
     const deadline = AbortSignal.any([AbortSignal.timeout(30_000), ...(signal ? [signal] : [])])
     deadline.throwIfAborted()
     this.kickWriteChain(sessionId)
@@ -77,6 +102,7 @@ export class FileSessionPersistence implements SessionPersistenceAdapter {
       let watermark = this.writtenWatermarks.get(sessionId) ?? 0
       while (watermark < seq) {
         deadline.throwIfAborted()
+        if (!this.writesAllowed()) throw new Error('Session store write access revoked (store lock lost)')
         if (this.eventChainFailures.get(sessionId)?.permanent) throw new Error('Event persistence failed')
         // 内存水位只覆盖本进程写链；rehydrate 的存量会话盘上早已达标——盘上
         // 高水位 ≥ seq 即认可，别让「本进程没写过」在死等里吃掉整个 30s 更新
@@ -90,8 +116,11 @@ export class FileSessionPersistence implements SessionPersistenceAdapter {
       }
       if (seq === 0) return 0
       const file = await open(join(this.dir(sessionId), 'events.jsonl'), 'r+')
-      deadline.throwIfAborted()
-      try { await file.sync() } finally { await file.close() }
+      try {
+        deadline.throwIfAborted()
+        if (!this.writesAllowed()) throw new Error('Session store write access revoked (store lock lost)')
+        await file.sync()
+      } finally { await file.close() }
       return watermark
     }
     let onAbort!: () => void
@@ -187,6 +216,7 @@ export class FileSessionPersistence implements SessionPersistenceAdapter {
   private recordWrites = new Map<string, { latest: SessionRecord; dirty: boolean; running: boolean }>()
 
   saveRecord(record: SessionRecord): void {
+    if (!this.writesAllowed()) { this.noteWriteRevoked(); return }
     // 2026-09-06 write-behind（issue #61 族）：writeFileSync+renameSync 同步写
     // 在 OneDrive/AV 栈上同样冻结事件循环。改 latest-wins 异步链：只保证最新
     // 快照最终落盘（中间态合并），同步读路径由 flushSync 的同步排空兜底。
@@ -208,13 +238,18 @@ export class FileSessionPersistence implements SessionPersistenceAdapter {
         try {
           while (st.dirty) {
             st.dirty = false
+            // 提交前复查：退避/等待窗口内可能已丢锁——撤销后快照直接丢弃
+            if (!this.writesAllowed()) { this.noteWriteRevoked(); break }
             const snapshot = st.latest
             const d = this.dir(record.id)
+            let tmp: string | undefined
             try {
               await mkdir(d, { recursive: true })
-              const tmp = join(d, 'index.json.tmp')
+              if (!this.writesAllowed()) { this.noteWriteRevoked(); break }
+              tmp = join(d, `index.json.${randomUUID()}.tmp`)
               const final = join(d, 'index.json')
               await writeFile(tmp, JSON.stringify(snapshot), 'utf8')
+              if (!this.writesAllowed()) { this.noteWriteRevoked(); break }
               await rename(tmp, final)
               // 写成功 = 环境健康：清失败计数（与 events 链/claim-store 对称，
               // 否则「失败→成功→失败」交替时计数跨成功累计，8 次非连续失败即提前停链）
@@ -226,6 +261,9 @@ export class FileSessionPersistence implements SessionPersistenceAdapter {
               // 等下一次 saveRecord / flushSync 清位重试）；其余 250ms 退避续跑。
               if (this.registerWriteFailure(this.recordChainFailures, record.id, code)) break
               await new Promise((r) => setTimeout(r, 250))
+            } finally {
+              // 只清理本次写入独占的临时文件，不碰新属主的快照或临时文件。
+              if (tmp) try { await rm(tmp, { force: true }) } catch { /* best-effort */ }
             }
           }
         } finally {
@@ -242,6 +280,7 @@ export class FileSessionPersistence implements SessionPersistenceAdapter {
 
   /** record 写链同步排空（flushSync 用）：链未启动且有脏快照时同步写。 */
   private flushRecordSync(id: string): void {
+    if (!this.writesAllowed()) { this.noteWriteRevoked(); this.recordWrites.delete(id); return }
     const st = this.recordWrites.get(id)
     if (!st || st.running || !st.dirty) {
       if (st && !st.dirty && !st.running) this.recordWrites.delete(id)
@@ -260,6 +299,8 @@ export class FileSessionPersistence implements SessionPersistenceAdapter {
   }
 
   appendEvent(sessionId: string, event: SessionEvent): void {
+    // 丢锁后新事件直接丢弃——缓冲下来也只会被写链闸门丢一次，入口拦更干净
+    if (!this.writesAllowed()) { this.noteWriteRevoked(); return }
     let line = JSON.stringify(event) + '\n'
 
     // Safety ceiling: truncate oversized events instead of letting a single
@@ -325,6 +366,14 @@ export class FileSessionPersistence implements SessionPersistenceAdapter {
     try {
       for (;;) {
         st.again = false
+        // 提交前闸门：丢锁后滞留行直接丢弃，绝不落盘到已经不再属于本进程的会话库
+        if (!this.writesAllowed()) {
+          this.noteWriteRevoked()
+          this.eventBuffers.delete(sessionId)
+          this.pendingChainTrims.delete(sessionId)
+          this.pendingTrims.delete(sessionId)
+          break
+        }
         const buf = this.eventBuffers.get(sessionId) ?? []
         const wantTrim = this.pendingChainTrims.delete(sessionId)
         if (buf.length === 0 && !wantTrim) break
@@ -335,7 +384,9 @@ export class FileSessionPersistence implements SessionPersistenceAdapter {
           st.active = buf
           try {
             await mkdir(d, { recursive: true })
+            if (!this.writesAllowed()) { this.noteWriteRevoked(); break }
             await appendFile(join(d, 'events.jsonl'), text, { encoding: 'utf8', mode: 0o600 })
+            if (!this.writesAllowed()) { this.noteWriteRevoked(); break }
             this.writtenWatermarks.set(sessionId, buf.at(-1)!.seq)
             this.eventChainFailures.delete(sessionId) // 写成功 = 环境健康，清失败状态
           } catch (err) {
@@ -406,6 +457,16 @@ export class FileSessionPersistence implements SessionPersistenceAdapter {
       clearTimeout(this.flushTimer)
       this.flushTimer = null
     }
+    // 丢锁后：滞留缓冲/快照直接丢弃并立即返回——写链闸门也会丢，但 record 写链的
+    //  stalled-dirty 循环会把 flushAllAsync 拖到超时，这里先清场。
+    if (!this.writesAllowed()) {
+      this.noteWriteRevoked()
+      this.eventBuffers.clear()
+      this.recordWrites.clear()
+      this.pendingChainTrims.clear()
+      this.pendingTrims.clear()
+      return
+    }
     for (const id of this.eventBuffers.keys()) this.kickWriteChain(id)
     const deadline = Date.now() + timeoutMs
     // 停链但有滞留的会话：清位重踢一次（同 flushSessionAsync 的补踢语义——
@@ -451,6 +512,16 @@ export class FileSessionPersistence implements SessionPersistenceAdapter {
   /** Drain buffered events synchronously only while their async writer is idle.
    *  A running chain owns its batch; synchronous readers must not double-write. */
   private flushSession(sessionId: string, immediateTrim = false): void {
+    // 丢锁后同步排空 = 丢弃滞留行（含读路径前的 flushSession 调用）
+    if (!this.writesAllowed()) {
+      this.noteWriteRevoked()
+      this.eventBuffers.delete(sessionId)
+      if (immediateTrim) {
+        this.pendingChainTrims.delete(sessionId)
+        this.pendingTrims.delete(sessionId)
+      }
+      return
+    }
     const st = this.writeChains.get(sessionId)
     if (st?.running) return
     const buf = this.eventBuffers.get(sessionId)
@@ -521,6 +592,7 @@ export class FileSessionPersistence implements SessionPersistenceAdapter {
       track.bytes += Buffer.byteLength(b.line, 'utf8')
     }
     if (entryLines.length > 0) {
+      if (!this.writesAllowed()) { this.noteWriteRevoked(); return }
       await appendFile(join(dir, 'events.index.jsonl'), entryLines.join('\n') + '\n', 'utf8')
     }
   }
@@ -540,6 +612,7 @@ export class FileSessionPersistence implements SessionPersistenceAdapter {
    * so the next cold read rebuilds it.
    */
   trimEventsFileIfNeeded(sessionId: string, dir?: string): void {
+    if (!this.writesAllowed()) { this.noteWriteRevoked(); return }
     const d = dir ?? this.dir(sessionId)
     const file = join(d, 'events.jsonl')
     let size = 0
@@ -666,6 +739,7 @@ export class FileSessionPersistence implements SessionPersistenceAdapter {
   }
 
   saveToolOutput(sessionId: string, outputId: string, text: string): void {
+    if (!this.writesAllowed()) { this.noteWriteRevoked(); return }
     const dir = join(this.ensureDir(sessionId), 'tool-outputs')
     mkdirSync(dir, { recursive: true })
     writeFileSync(join(dir, `${sanitize(outputId)}.txt`), text, 'utf8')
@@ -678,6 +752,7 @@ export class FileSessionPersistence implements SessionPersistenceAdapter {
   }
 
   saveImage(sessionId: string, imgId: string, base64: string, mime: string): void {
+    if (!this.writesAllowed()) { this.noteWriteRevoked(); return }
     const d = join(this.ensureDir(sessionId), 'images')
     if (!existsSync(d)) mkdirSync(d, { recursive: true })
     const ext = extForMime(mime)
@@ -704,6 +779,7 @@ export class FileSessionPersistence implements SessionPersistenceAdapter {
    *  与 images 同构：<id>/documents/<docId>.<ext>，ext 取原始文件名的扩展名
    *  （白名单抽取集内），mime 由扩展名静态映射。 */
   saveDocument(sessionId: string, docId: string, base64: string, fileName: string): void {
+    if (!this.writesAllowed()) { this.noteWriteRevoked(); return }
     const d = join(this.ensureDir(sessionId), 'documents')
     if (!existsSync(d)) mkdirSync(d, { recursive: true })
     const ext = extname(fileName).toLowerCase().replace(/^\./, '')
@@ -723,6 +799,8 @@ export class FileSessionPersistence implements SessionPersistenceAdapter {
    *  与 saveDocument 分立：saveDocument 的 safeExt 归一（txt/bin）面向抽取集，
    *  压缩包必须保扩展名才回读得出正确 mime。 */
   saveArchive(sessionId: string, docId: string, source: { base64: string } | { srcPath: string }, fileName: string): string {
+    // 调用方依赖返回路径真实存在（进句柄文本）——丢锁后抛错 fail-closed，不静默丢弃
+    if (!this.writesAllowed()) { this.noteWriteRevoked(); throw new Error('Session store write access revoked (store lock lost)') }
     const d = join(this.ensureDir(sessionId), 'documents')
     if (!existsSync(d)) mkdirSync(d, { recursive: true })
     const ext = extname(fileName).toLowerCase().replace(/^\./, '')
@@ -1077,27 +1155,30 @@ export class FileSessionPersistence implements SessionPersistenceAdapter {
       return { events: [], atLogStart: true, firstSeq: 0 }
     }
     const { events, entryLines, validCount } = await scanLogWithOffsets(text)
-    // 写回重建的索引（best-effort）+ 同步进程内写指针。
-    try {
-      const idx = join(dir, 'events.index.jsonl')
-      if (entryLines.length > 0) {
-        const tmp = idx + '.tmp'
-        writeFileSync(tmp, entryLines.join('\n') + '\n', 'utf8')
-        renameSync(tmp, idx)
-      } else {
-        rmSync(idx, { force: true })
+    // 写回重建的索引（best-effort）+ 同步进程内写指针。丢锁后跳过修复性写入，
+    // 读结果照常返回——闸门只拦写，不拦读。
+    if (this.writesAllowed()) {
+      try {
+        const idx = join(dir, 'events.index.jsonl')
+        if (entryLines.length > 0) {
+          const tmp = idx + '.tmp'
+          writeFileSync(tmp, entryLines.join('\n') + '\n', 'utf8')
+          renameSync(tmp, idx)
+        } else {
+          rmSync(idx, { force: true })
+        }
+        this.indexTracks.set(id, {
+          bytes: Buffer.byteLength(text, 'utf8'),
+          // 上一条目落在 valid 行序号 floor((validCount-1)/N)*N（0 起）——
+          // 之后已写入 validCount-1-那个序号 个事件。
+          sinceEntry: validCount === 0
+            ? FileSessionPersistence.INDEX_INTERVAL
+            : validCount - Math.floor((validCount - 1) / FileSessionPersistence.INDEX_INTERVAL)
+              * FileSessionPersistence.INDEX_INTERVAL,
+        })
+      } catch {
+        this.indexTracks.delete(id)
       }
-      this.indexTracks.set(id, {
-        bytes: Buffer.byteLength(text, 'utf8'),
-        // 上一条目落在 valid 行序号 floor((validCount-1)/N)*N（0 起）——
-        // 之后已写入 validCount-1-那个序号 个事件。
-        sinceEntry: validCount === 0
-          ? FileSessionPersistence.INDEX_INTERVAL
-          : validCount - Math.floor((validCount - 1) / FileSessionPersistence.INDEX_INTERVAL)
-            * FileSessionPersistence.INDEX_INTERVAL,
-      })
-    } catch {
-      this.indexTracks.delete(id)
     }
     const head = events.filter((e) => e.seq < before)
     const keep = Math.max(1, minCount)
@@ -1144,6 +1225,8 @@ export class FileSessionPersistence implements SessionPersistenceAdapter {
     // 在途的延迟裁剪任务指向的目录即将消失——清掉防 Set 泄漏，回调里
     // statSync 失败也会自行返回。
     this.pendingTrims.delete(id)
+    // 丢锁后内存清场照常，磁盘删除跳过——会话库已不属于本进程
+    if (!this.writesAllowed()) { this.noteWriteRevoked(); return }
     try { rmSync(this.dir(id), { recursive: true, force: true }) } catch { /* best-effort */ }
   }
 

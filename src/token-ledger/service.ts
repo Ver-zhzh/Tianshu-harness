@@ -16,13 +16,13 @@ import type { Config } from '../config/schema.js'
 import { findUsagePricing } from '../utils/deepseek-pricing.js'
 import type { PricingResolver } from '../cache/usage-aggregator.js'
 import { pushTokenUsageSnapshot, type FetchLike, type ForumPushResult } from './forum-sync.js'
-import { DEFAULT_FORUM_ENDPOINT } from './settings.js'
+import { DEFAULT_FORUM_ENDPOINT, DEFAULT_SYNC_INTERVAL_MINUTES } from './settings.js'
 import { TokenLedgerStore, type LedgerRefreshResult } from './store.js'
 import type { TokenDayModelRecord, TokenLedgerTotals,TokenHourlyCoverage } from './types.js'
-
-const DEFAULT_SYNC_INTERVAL_MINUTES = 1
+import type { AccountLedgerCredentials } from './account-credentials.js'
 
 export interface TokenLedgerServiceDeps {
+  accountCredentials?: AccountLedgerCredentials
   statePath?: string
   sessionsRoot?: string
   fetchImpl?: FetchLike
@@ -32,7 +32,8 @@ export interface TokenLedgerServiceDeps {
 export interface TokenLedgerSyncOutcome {
   ok: boolean
   /** 未发起推送的原因 */
-  skipped?: 'disabled' | 'no_endpoint' | 'no_key' | 'unchanged'
+  skipped?: 'disabled' | 'no_endpoint' | 'no_key' | 'unchanged' | 'backoff'
+  retryAt?: number
   push?: ForumPushResult
   newRows?: number
   digest?: string
@@ -54,6 +55,7 @@ export interface TokenLedgerStatus {
   lastPushAt?: string
   lastPushResult?: { ok: boolean; status?: number; code?: string; error?: string; at?: string }
   statePath: string
+  nextSyncAt?: number
 }
 
 export class TokenLedgerService {
@@ -67,9 +69,13 @@ export class TokenLedgerService {
   private syncingGeneration = 0
   private syncQueueEpoch = 0
   private syncAbort: AbortController | undefined
+  private retryAt = 0
+  private consecutiveFailures = 0
+  private readonly accountCredentials?: AccountLedgerCredentials
 
   constructor(config: Config, deps: TokenLedgerServiceDeps = {}) {
     this.config = config
+    this.accountCredentials = deps.accountCredentials
     this.fetchImpl = deps.fetchImpl
     this.now = deps.now ?? (() => Date.now())
     const resolvePricing: PricingResolver = (model, provider, timestamp) =>
@@ -87,11 +93,23 @@ export class TokenLedgerService {
   }
 
   get endpoint(): string | undefined {
-    return process.env.RIVET_FORUM_API || this.config.tokenLedger.forum?.endpoint || (this.apiKey?.trim() ? DEFAULT_FORUM_ENDPOINT : undefined)
+    return process.env.RIVET_FORUM_API || this.config.tokenLedger.forum?.endpoint || (this.apiKey?.trim() || this.accountCredentials?.available() ? DEFAULT_FORUM_ENDPOINT : undefined)
   }
 
   private get apiKey(): string | undefined {
-    return process.env.RIVET_FORUM_TOKEN || this.config.tokenLedger.forum?.apiKey
+    return process.env.RIVET_FORUM_TOKEN || this.config.tokenLedger.forum?.apiKey || (this.endpointIsOfficial() ? this.accountCredentials?.cached(this.store.deviceId)?.key : undefined)
+  }
+
+  private endpointIsOfficial(): boolean { return (process.env.RIVET_FORUM_API || this.config.tokenLedger.forum?.endpoint || DEFAULT_FORUM_ENDPOINT) === DEFAULT_FORUM_ENDPOINT }
+  accountConnection(): { available: boolean; ready: boolean } { return {available:this.endpointIsOfficial() && Boolean(this.accountCredentials?.available()),ready:Boolean(this.accountCredentials?.cached(this.store.deviceId))} }
+  accountChanged(): void {
+    this.configGeneration++
+    this.retryAt = 0
+    this.consecutiveFailures = 0
+    this.syncAbort?.abort()
+    this.accountCredentials?.changed()
+    this.stopAutoSync()
+    void this.accountCredentials?.resolve(this.store.deviceId).finally(()=>this.startAutoSync())
   }
 
   private get deviceName(): string {
@@ -99,15 +117,18 @@ export class TokenLedgerService {
   }
 
   reconfigure(config: Config): void {
+    const previousTarget = this.targetHash
     this.configGeneration++
     this.syncAbort?.abort()
     this.stopAutoSync()
     this.config = config
+    if (previousTarget !== this.targetHash) { this.retryAt = 0; this.consecutiveFailures = 0 }
     this.startAutoSync()
   }
 
   private get targetHash(): string {
-    return createHash('sha256').update(this.endpoint ?? '').update('\0').update(this.apiKey ?? '').digest('hex')
+    const account = !process.env.RIVET_FORUM_TOKEN && !this.config.tokenLedger.forum?.apiKey ? this.accountCredentials?.cached(this.store.deviceId) : undefined
+    return createHash('sha256').update(this.endpoint ?? '').update('\0').update(account ? `account:${account.userId}:${account.deviceId}` : this.apiKey ?? '').digest('hex')
   }
 
   /** 折叠 cache-log 新增计费行（幂等增量，游标推进后落盘）。 */
@@ -139,6 +160,7 @@ export class TokenLedgerService {
       statePath: this.store.filePath,
       hourlyCoverage:this.store.hourlyCoverage(),
       syncProgress:this.store.syncProgress(),
+      ...(this.retryAt > this.now() ? { nextSyncAt: this.retryAt } : {}),
     }
   }
 
@@ -162,7 +184,7 @@ export class TokenLedgerService {
    */
   startAutoSync(): boolean {
     if (this.timer || !this.enabled) return false
-    if (this.config.tokenLedger.forum?.autoSync !== true || !this.endpoint || !this.apiKey?.trim()) return false
+    if (this.config.tokenLedger.forum?.autoSync !== true || !this.endpoint || !(this.apiKey?.trim() || this.accountConnection().available)) return false
     const minutes = this.config.tokenLedger.forum.intervalMinutes ?? DEFAULT_SYNC_INTERVAL_MINUTES
     this.timer = setInterval(() => {
       void this.syncNow().catch(() => { /* fire-and-forget：失败回执已落在状态里 */ })
@@ -198,6 +220,10 @@ export class TokenLedgerService {
     const { newRows } = await this.refresh()
     const endpoint = this.endpoint
     if (!endpoint) return { ok: false, skipped: 'no_endpoint', newRows }
+    if (this.retryAt > this.now()) return { ok: false, skipped: 'backoff', retryAt: this.retryAt, newRows }
+
+    if (!process.env.RIVET_FORUM_TOKEN && !this.config.tokenLedger.forum?.apiKey && this.endpointIsOfficial()) await this.accountCredentials?.resolve(this.store.deviceId)
+    if (signal.aborted) return {ok:false,newRows}
 
     const apiKey = this.apiKey
     if (!apiKey?.trim()) return { ok: false, skipped: 'no_key', newRows }
@@ -219,18 +245,33 @@ export class TokenLedgerService {
       const page=await this.store.nextSyncPage(batch.digest,targetHash)
       if(!page)break
       for(let attempt=0;attempt<2;attempt++){
-        const current=attempt?await this.store.nextSyncPage(batch.digest,targetHash):page
+        const current=page
         if(!current||current.index!==page.index||signal.aborted||generation!==this.configGeneration||targetHash!==this.targetHash)return cancelled()
         lastSentAt=current.snapshot.sentAt
         push=await pushTokenUsageSnapshot(current.snapshot,{endpoint,apiKey,signal,fetchImpl:this.fetchImpl,retries:0})
-        if(push.ok||('status' in push&&push.status!==undefined&&push.status>=400&&push.status<500&&push.status!==429))break
+        if(push.ok||push.retryAfterMs||('status' in push&&push.status!==undefined&&push.status>=400&&push.status<500))break
+        if((endpoint===DEFAULT_FORUM_ENDPOINT||endpoint===DEFAULT_FORUM_ENDPOINT.replace('/v1/','/v2/'))&&push.code!=='timeout')break
       }
       if(signal.aborted||generation!==this.configGeneration||targetHash!==this.targetHash)return cancelled()
-      if(!push.ok){await this.store.markPushed({ok:false,status:push.status,code:push.code},batch.digest,targetHash,lastSentAt);return {ok:false,push,newRows,digest:batch.digest}}
+      if(!push.ok){
+        if (push.status === undefined || push.status === 429 || push.status >= 500) {
+          this.consecutiveFailures = Math.min(7, this.consecutiveFailures + 1)
+          this.retryAt = this.now() + Math.max(push.retryAfterMs ?? 0, Math.min(3_600_000, 60_000 * 2 ** (this.consecutiveFailures - 1)))
+        }
+        await this.store.markPushed({ok:false,status:push.status,code:push.code},batch.digest,targetHash,lastSentAt)
+        return {ok:false,push,newRows,digest:batch.digest,retryAt:this.retryAt}
+      }
       if(!await this.store.confirmSyncPage(batch.digest,targetHash,page.index,lastSentAt!))return {ok:false,newRows,digest:batch.digest}
+      if(push.nextUploadAfterMs){
+        this.retryAt=this.now()+push.nextUploadAfterMs
+        this.consecutiveFailures=0
+        if(page.index+1<batch.pageCount)return {ok:false,skipped:'backoff',retryAt:this.retryAt,push,newRows,digest:batch.digest}
+      }
     }
     if(signal.aborted||generation!==this.configGeneration||targetHash!==this.targetHash)return cancelled()
     await this.store.markPushed({ok:true,status:push.status},batch.digest,targetHash,lastSentAt)
+    if(!push.ok||!push.nextUploadAfterMs)this.retryAt = 0
+    this.consecutiveFailures = 0
     return {ok:true,push,newRows,digest:batch.digest}
   }
 }

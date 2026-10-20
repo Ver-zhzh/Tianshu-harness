@@ -35,7 +35,7 @@ export function createHeadlessCoordinator(input: HeadlessCoordinatorInput): Dele
   const modelCards = buildModelCards(input.provider)
   const rootSessionBinding = input.keyId
     ? { provider: input.providerName, model: input.currentModelId, keyId: input.keyId, baseUrl: input.provider.baseUrl }
-    : snapshotSessionBinding(input.provider, input.currentModelId, input.apiKey)
+    : snapshotSessionBinding(input.provider, input.currentModelId, input.apiKey, input.providerName)
   const runtime = createWorkerRuntimeFactory(() => ({
     getUserInstructions: input.getUserInstructions,
     config: input.config ?? loadConfig({ cwd: input.cwd }), cwd: input.cwd,

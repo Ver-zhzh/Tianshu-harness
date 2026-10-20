@@ -6,6 +6,13 @@ import { join } from 'node:path'
 const source = readFileSync(join(process.cwd(), 'src', 'server', 'serve-agent.ts'), 'utf8')
 
 describe('serve-agent gate wiring', () => {
+  it('reapplies creation restrictions and the trusted writer on every agent assembly', () => {
+    const assembly = source.slice(source.indexOf('function assembleAgentLoop('), source.indexOf('export function buildManagedAgent('))
+    assert.match(assembly, /getSession\(sessionId\)\?\.skillCreation/)
+    assert.match(assembly, /agent\.config\.executionToolAllowlist = \[\.\.\.SKILL_CREATION_TOOLS\]/)
+    assert.match(assembly, /agent\.config\.saveSkillDraft = createSkillDraftWriter\(\(\) => shared\?\.sessions\?\.getSession\(sessionId\)\?\.skillCreation\)/)
+    assert.match(source, /inherited => assembleAgentLoop\(/)
+  })
   it('assigns refs.getImpactedTests so delivery gate module coverage runs on sidecar', () => {
     assert.match(source, /refs\.getImpactedTests\s*=/,
       'sidecar 未接 getImpactedTests —— delivery-gate-v2 的 moduleCoverage 分支在桌面端/插件上永不触发')
@@ -48,4 +55,21 @@ it('all shared tool registries resolve current delivery impact rather than histo
   const bootstrap = readFileSync(join(process.cwd(), 'src/bootstrap.ts'), 'utf8')
   assert.match(bootstrap, /resolveDeliveryImpact: \(cwd, files\) => resolveDeliveryImpact\(cwd, files, refs\.meridianIndexer\)/)
   assert.match(source, /createInteractiveToolRegistry\(/)
+})
+
+it('skill runtime policy accessor carries live denies, overlay and Plan Mode to HTTP', () => {
+  assert.match(source, /getRuntimePolicyContext: \(\) => \(?\{[^\n]*agent\.config\.permissions\?\.deny[^\n]*agent\.config\.permissionsOverlay[^\n]*agent\.getPlanModeState\(\)/)
+  const routes = readFileSync(join(process.cwd(), 'src/server/skill-runtime-routes.ts'), 'utf8')
+  assert.match(routes, /!agent\.getRuntimePolicyContext/)
+  assert.match(routes, /const livePolicy = agent\.getRuntimePolicyContext\(\)/)
+  assert.match(routes, /record\.planMode === 'planning' \|\| livePolicy\.planMode === 'planning'/)
+})
+
+it('TUI approval wrappers forward immutable runtime metadata to the final consumer', () => {
+  const bridge = readFileSync(join(process.cwd(), 'src/tui/engine/bridge.ts'), 'utf8')
+  const app = readFileSync(join(process.cwd(), 'src/tui/engine/app.ts'), 'utf8')
+  assert.match(bridge, /original\.onApprovalRequired\(id, name, input, context\)/)
+  assert.match(bridge, /app\.callbacks\.onApprovalRequired\(id, name, input, context\)/)
+  assert.match(app, /this\.handleApprovalRequired\(id, name, input, context\)/)
+  assert.match(app, /enqueue\(\{ id, name, input, runtimeContext: context,/)
 })

@@ -71,7 +71,7 @@ tianshu --goal "修复所有类型错误" --budget 50   # 无头目标自主模�
 | `--skip-welcome` | 跳过欢迎屏 |
 | `--stream-events <path>` | 把本次 run 镜像为 NDJSON `SessionEvent` 写入文件（TUI 与 `-p`/`--goal` 均支持；无头下与 `--stream-json` 同源、同一份脱敏口径。事件按行追加，可 `tail -f` / `jq` 消费；run 期间实时增长） |
 
-子命令：`tianshu config`（查看配置命令帮助；交互式 Provider 配置使用 TUI `/connect`）、`tianshu provider`（Provider 与模型管理：`add | list | models | probe | remove`）、`tianshu skills`（技能管理：`list | inspect | add | mode | update | remove | doctor | drafts | approve | reject | generate`）、`tianshu serve`（启动 sidecar HTTP/SSE）、`tianshu sessions`（列会话）、`tianshu logs`（日志落点）、`tianshu browser status` / `tianshu browser install [--no-mirror]`（`browser_debug` 所需 chromium 的体检与一键安装，默认走国内镜像）、`tianshu web`（命令行搜索与抓取：`search | fetch | status`）。
+子命令：`tianshu config`（查看配置命令帮助；交互式 Provider 配置使用 TUI `/connect`）、`tianshu provider`（Provider 与模型管理：`add | list | models | probe | remove`）、`tianshu skills`（技能管理：`list | inspect | add | mode | update | remove | doctor | draft | drafts | approve | reject | generate`）、`tianshu serve`（启动 sidecar HTTP/SSE）、`tianshu sessions`（列会话）、`tianshu logs`（日志落点）、`tianshu browser status` / `tianshu browser install [--no-mirror]`（`browser_debug` 所需 chromium 的体检与一键安装，默认走国内镜像）、`tianshu web`（命令行搜索与抓取：`search | fetch | status`）。
 
 ### 事件流文件（`--stream-events`）
 
@@ -345,7 +345,44 @@ triggers: [deploy, 部署, release]
 
 可按名称导入 Claude Code 的技能。`writing-plans` / `executing-plans` 已内置为原生流程（规划期按系统提示的 `<plan-mode>` 纪律、执行期按 `<plan-executing>` 纪律执行），不再需要技能文件。`agent-harness-testing` / `research-spec` 撤出默认分发，归档在 [`docs/skills/optional/`](skills/optional/)——需要时手动拷入 `.rivet/skills/` 即可启用。
 
+可通过 `/skill skill-creator <想创建的技能>` 逐轮澄清用途、输入、步骤与验收标准。本期创建单文件技能。支持原生草稿写入的专用会话使用 `skill(action="save_draft", name, scope, content, expectedVersion)`；该动作只保存草稿，不能安装。没有草稿写入能力的宿主会明确拒绝，不尝试私有接口或查找凭据。
+
+CLI 可保存已准备好的完整 Markdown，先审阅再批准：
+
+```bash
+rivet skills draft weekly-report --file ./weekly-report.md --scope personal --json
+rivet skills drafts --scope personal --json
+rivet skills draft weekly-report --file ./weekly-report.md --scope personal --version <已审阅版本>
+rivet skills approve weekly-report --scope personal --version <已审阅版本>
+rivet skills reject weekly-report --scope personal --version <已审阅版本>
+```
+
+项目范围使用 `--scope project --project /absolute/project`。草稿名（可带末尾 `.md`）必须与 YAML 中的 `name` 相同，描述和正文均不可为空。新建同名不同内容会冲突，更新须携带原始内容的 SHA-256 版本；同内容重试幂等。保存、批准和拒绝共用草稿锁，避免 CLI 与界面并发覆盖。旧的不完整草稿保留供查看、修正或拒绝，批准时不会自动纠正名称或覆盖同名已安装技能。草稿不进入可用技能列表，发布后需新会话使用。
+
 技能正文与资源在会话创建时固定版本；安装更新只影响新会话。新会话的 `.skills.json` 使用 v2 轻量引用，相同资源版本共享保存在会话根目录 `_skill-store/v1/`，首次调用技能时才展开到会话私有目录。`__pycache__/` 与 `.pyc` 不进入新技能包；真实脚本、参考资料和附件保留。私有目录优先使用写时复制，不支持时独立复制，因此 Windows 上已使用技能仍会占用私有副本空间。
+
+**Python 运行时（issue #523）**：目录型技能可在包根放 `runtime.yaml` 声明 Python 脚本入口，经审批后在隔离 venv 环境中运行：
+
+```yaml
+version: 1
+python:
+  requires: ">=3.10,<3.15"        # 可省略 = 不约束
+  requirements: requirements.txt  # 可省略 = 仅标准库
+  entries:
+    calculate:
+      script: scripts/calculate.py   # 必须是包内 .py
+      timeoutSeconds: 120            # 可省略
+```
+
+requirements 白名单审核：允许包名+版本约束/extras/环境标记/哈希与包内 -r/-c 引用；拒绝 editable、本地路径、VCS/URL、包内 index 源选项（包源只来自 `mirrors.pypi` 配置）。环境按工作区+技能+包版本+解释器+平台隔离在 `~/.rivet/skill-runtimes/`，wheel 默认、源码构建需单独确认。解释器可用 设置→环境 的「Python 解释器路径」或 `env.pythonPath` 指定。
+
+```bash
+rivet skills doctor <id>        # 声明/解释器/环境状态诊断
+rivet skills prepare <id> --yes # 打印安装预览并准备环境（--source 需加 --allow-source-build）
+rivet skills run <id> <entry> -- <args...>  # 运行入口，透传真实退出码
+```
+
+会话内模型经 `skill_runtime` 工具执行同三动作（prepare/run 恒需审批；plan-mode 仅 doctor）。桌面端技能库详情页有「运行环境」区（检查/准备/源码构建准备/删除环境）。
 
 旧 v1 快照仍能恢复，不会自动改写或删除。需压缩旧快照 JSON 时，先停止该会话，再显式迁移：
 

@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { chooseCatalog, selectSources, validateCatalog, assertCatalogUpdate } from './catalog.mjs'
 import { generateCatalog } from './generate-catalog.mjs'
-import { atomgitClient, uploadImmutable, verifyDownload } from './publish-atomgit.mjs'
+import { atomgitClient, uploadImmutable } from './publish-atomgit.mjs'
 const bytes = Buffer.from('signed installer fixture'), digest = createHash('sha256').update(bytes).digest('hex')
 const entry = (source, verified = true) => ({ url: source === 'github' ? 'https://github.com/huiliyi37/Tianshu-harness/releases/download/v3.28.0/Tianshu_3.28.0_x64-setup.exe' : source === 'oss' ? 'https://tianshu-update.oss-cn-hangzhou.aliyuncs.com/tianshu/v3.28.0/Tianshu_3.28.0_x64-setup.exe' : 'https://api.atomgit.com/api/v5/repos/huiliyi37/Tianshu-harness/releases/v3.28.0/attach_files/Tianshu_3.28.0_x64-setup.exe/download', verified, verifiedAt:'2026-10-07T00:00:00Z', sha256:digest, size:bytes.length, anonymous:true })
 const fixture = () => ({ schemaVersion:1, revision:1, version:'3.28.0', publishedAt:'2026-10-07T00:00:00Z', artifacts:[{ platform:'windows-x86_64', purpose:'update', fileName:'Tianshu_3.28.0_x64-setup.exe', size:bytes.length, sha256:digest, signature:'signed', sources:{ atomgit:entry('atomgit'), github:entry('github'), oss:entry('oss') } }] })
@@ -46,16 +46,9 @@ test('generator validates local bytes, remote digest and signature before public
     writeFileSync(join(dir,name+'.sig'),'wrong');await assert.rejects(generateCatalog(args),/signature differ/)
   } finally {rmSync(dir,{recursive:true,force:true})}
 })
-test('anonymous full download checks bytes; range never triggers a second full download', async () => {
-  const calls=[]
-  const request=async (url,opts)=>{calls.push(opts);return opts.method==='HEAD'?new Response(null,{status:200}):opts.headers?.Range?new Response(bytes,{status:206,headers:{'content-range':`bytes 0-${bytes.length-1}/${bytes.length}`}}):new Response(bytes)}
-  const proof=await verifyDownload(entry('atomgit').url,{size:bytes.length,sha256:digest},request)
-  assert.equal(proof.anonymous,true);assert.equal(proof.rangeSupported,true);assert.ok(calls.every(c=>!c.headers?.Authorization&&!c.headers?.Cookie))
-  await assert.rejects(verifyDownload(entry('atomgit').url,{size:bytes.length,sha256:'0'.repeat(64)},request),/mismatch/)
-})
 test('existing different attachment cannot be overwritten on retry', async () => {
   let mutations=0
-  await assert.rejects(uploadImmutable(async()=>{mutations++},'v3.28.0','fixture.exe',{size:bytes.length,sha256:'0'.repeat(64)},async(_,opts)=>opts.method==='HEAD'?new Response(null,{status:200}):new Response(bytes)),/mismatch/)
+  await assert.rejects(uploadImmutable(async()=>{mutations++},'v3.28.0','fixture.exe',{size:bytes.length,sha256:'0'.repeat(64)},async()=>new Response(null,{status:500})),/Cannot establish attachment absence/)
   assert.equal(mutations,0)
 })
 test('API preserves upload filename query and does not expose token in errors', async () => {

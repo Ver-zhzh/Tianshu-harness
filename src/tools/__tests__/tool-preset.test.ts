@@ -115,9 +115,9 @@ describe('assembly counts per preset', () => {
     // 它必须对 readonly worker 可见，而 worker 与主控共用同一张注册表，按档位
     // 排除会连带把 worker 也排掉（readonly profile 无 bash/git，正是要补这条缝）。
     // taiyi 仍按评测档纪律排除（冻结基线，见 tool-preset 的 drop 断言）。
-    assert.equal(totalCount('minimal'), 33)
-    assert.equal(totalCount('frontend'), 34)
-    assert.equal(totalCount('full'), 54)
+    assert.equal(totalCount('minimal'), 34)
+    assert.equal(totalCount('frontend'), 35)
+    assert.equal(totalCount('full'), 55)
     // taiyi = 13（kernel 侧，即 tool-preset.ts 文件头 14 名清单除去 deliver_task）
     // + deliver_task（bootstrap 唯一无条件注册件）。
     assert.equal(totalCount('taiyi'), 14)
@@ -134,8 +134,8 @@ describe('assembly counts per preset', () => {
       for (const n of SCHEDULE_TOOLS) {
         assert.ok(createDefaultToolRegistry([], { preset: 'full' }).has(n), `有调度器要注册 ${n}`)
       }
-      assert.equal(totalCount('minimal'), 36)
-      assert.equal(totalCount('full'), 57)
+      assert.equal(totalCount('minimal'), 37)
+      assert.equal(totalCount('full'), 58)
     } finally {
       setActiveScheduler(undefined)
     }
@@ -183,7 +183,7 @@ describe('assembly counts per preset', () => {
     for (const keep of ['read_file', 'write_file', 'edit_file', 'hash_edit', 'grep', 'glob', 'bash', 'job', 'git', 'diff', 'run_tests', 'todo', 'plan']) {
       assert.ok(reg.has(keep), `taiyi must keep ${keep}`)
     }
-    for (const drop of ['web_fetch', 'web_search', 'ask_image', 'repo_map', 'read_section', 'ast_grep', 'skill', 'git_scout']) {
+    for (const drop of ['web_fetch', 'web_search', 'ask_image', 'repo_map', 'read_section', 'ast_grep', 'skill', 'git_scout', 'skill_runtime']) {
       assert.ok(!reg.has(drop), `taiyi must drop ${drop}`)
     }
   })

@@ -44,6 +44,7 @@ import { buildGitPrRoutes } from './git-pr-routes.js'
 import { buildApprovalRoutes, sendApprovalSnapshot } from './approval-routes.js'
 import { boundedEventPage } from './event-page.js'
 import { buildGitReviewRoutes } from './git-review-jobs.js'
+import { buildSkillRuntimeRoutes } from './skill-runtime-routes.js'
 import { normalizeRolloverConfig } from '../agent/goal-tracker.js'
 import { decodeRouteParam, type RouteHandler } from './index.js'
 import { allowedCorsOrigin } from './cors.js'
@@ -77,6 +78,7 @@ import {
 import { listPrs, getPrDetail, isGhAvailable, getPrDiff, submitPrReview, listPrChecks, getCheckRunLog, mergePr, type PrReviewInput } from './gh-cli.js'
 import { pushFixToPrBranch } from './pr-fix-push.js'
 import { SlashPromptError, resolveSlashCommandPrompt, prepareSessionPrompt, isDraftSessionId, draftSkills } from './session-skills-helper.js'
+import { buildSkillCreationRoutes, creationPrompt, readCreationRequest, isPlanModeState, isAskModeState } from './skill-creation-session.js'
 import { RECOMMENDED_MAX_SKILLS } from '../skills/skill-loader.js'
 import { validatePath } from '../tools/path-validate.js'
 import { convertOfficeToPdf, ConverterUnavailableError, OFFICE_CONVERTIBLE_EXTS } from './file-preview.js'
@@ -134,10 +136,6 @@ const isApprovalMode = (v: unknown): v is ApprovalMode =>
 const REASONING_EFFORTS: ReadonlySet<string> = new Set(['off', 'low', 'medium', 'high', 'max', 'auto'])
 const isReasoningEffort = (v: unknown): v is string =>
   typeof v === 'string' && REASONING_EFFORTS.has(v)
-const isPlanModeState = (v: unknown): v is 'off' | 'planning' =>
-  v === 'off' || v === 'planning'
-const isAskModeState = (v: unknown): v is 'off' | 'asking' =>
-  v === 'off' || v === 'asking'
 
 /**
  * A1（2026-09-07 审查）：POST /sessions/:id/model 失败的分流文案。
@@ -316,11 +314,14 @@ export function buildSessionRoutes(
   }
 
   const routes: Record<string, RouteHandler> = {
+    ...buildSkillCreationRoutes(manager, apiToken),
     ...buildApprovalRoutes(manager, apiToken),
     ...buildContinuityRecoveryRoutes(manager, apiToken),
     ...buildGitWorkbenchRoutes(manager, apiToken),
     ...buildGitPrRoutes(manager, apiToken),
     ...buildGitReviewRoutes(manager, apiToken),
+    // 技能 Python 运行时（issue #523）：preview→confirm 两段式 + operationId 落盘。
+    ...buildSkillRuntimeRoutes(manager, apiToken),
     'POST /sessions': withAuth(async (body) => {
       // DEBUG instrumentation (RIVET_DEBUG_RENDER=1): logs createSession latency
       // so we can tell session-creation bottlenecks (loadConfig, worktree setup)
@@ -360,6 +361,8 @@ export function buildSessionRoutes(
       if (archivesCheck.error) {
         return { status: 400, body: { error: archivesCheck.error } }
       }
+      const creation = readCreationRequest(data)
+      if ('error' in creation) return { status: 400, body: { error: creation.error } }
       let prompt = data.prompt
       // 展开技能或附加文档时仍保留用户实际输入。
       const promptText = docsCheck.documents?.length || archivesCheck.archives?.length || prompt?.trim().startsWith('/') ? (prompt ?? '') : undefined
@@ -375,6 +378,7 @@ export function buildSessionRoutes(
       let requiredTools: readonly string[] = []
       let rec: ReturnType<RuntimeSessionManager['createSession']>
       try { rec = manager.createSession({
+        ...creation.input,
         preparePrompt: prepareSessionPrompt(data.prompt, resolved => { prompt = resolved.prompt; requiredTools = resolved.requiredTools ?? []; skillInvoked = resolved.skillInvoked }),
         cwd: data.cwd,
         workspaceRoots,
@@ -999,7 +1003,7 @@ export function buildSessionRoutes(
       // ecosystem 命令翻译成结构化 prompt，自定义命令也走 .rivet/commands/。
       // 未识别 slash → 4xx 友好提示（与 TUI rejectSubmit 行为对齐，避免凭空丢失消息）。
       let skillInvoked: string | undefined
-      let prompt = data.prompt
+      let prompt = creationPrompt(data.prompt, manager.getSession(params!.id!)?.skillCreation)
       const trimmed = prompt.trim()
       if (trimmed.startsWith('/')) {
         const record = manager.getSession(params!.id!)

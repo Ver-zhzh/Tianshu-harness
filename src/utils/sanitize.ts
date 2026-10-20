@@ -115,49 +115,30 @@ export function sanitizeForJsonTransport(input: string): string {
 
 /**
  * Recursively sanitize all string values in an object tree.
- * Returns a new object — does not mutate the input.
+ * Copy-on-write: scans every value, sharing unchanged branches without mutating input.
  */
 export function sanitizeMessageContent<T>(value: T): T {
   if (typeof value === 'string') return sanitizeForJsonTransport(value) as T
-  if (Array.isArray(value)) return value.map(sanitizeMessageContent) as T
-  if (value && typeof value === 'object') {
-    const result: Record<string, unknown> = {}
-    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-      result[key] = sanitizeMessageContent(child)
+  if (Array.isArray(value)) {
+    let result: unknown[] | undefined
+    for (let i = 0; i < value.length; i++) {
+      const child = sanitizeMessageContent(value[i])
+      if (!Object.is(child, value[i])) { result ??= value.slice(); result[i] = child }
     }
-    return result as T
+    return (result ?? value) as T
+  }
+  if (value && typeof value === 'object') {
+    let result: Record<string, unknown> | undefined
+    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+      const sanitized = sanitizeMessageContent(child)
+      if (!Object.is(sanitized, child)) {
+        result ??= { ...(value as Record<string, unknown>) }
+        Object.defineProperty(result, key, { value: sanitized, enumerable: true, writable: true, configurable: true })
+      }
+    }
+    return (result ?? value) as T
   }
   return value
 }
 
-/**
- * 超过这个字符数（≈1–3MB 的 wire 体）就放弃增量清洗、每次请求全量清洗。
- *
- * API client 的增量清洗（只洗上次之后新增的消息）省的是 O(chars)，但它有两个
- * 漏洗窗口：① 历史消息被原地改写（长度不变时无从察觉）；② 同一个 client 实例
- * 被不同数组复用（次数相近时不触发 reset）。漏过的一个控制字符在 wire 上就是
- * `\u00XX` 转义，正是上游按字节截断 body 时被切开的那个东西（见
- * src/api/request-body-guard.ts）。而全量扫描与本次请求必做的 JSON.stringify
- * 同阶——在 1M 字符这个量级，省它已经没有意义，正确性优先。
- */
-export const FULL_SANITIZE_CHARS = 1_000_000
 
-/** 消息数组的正文总字符数（只数 content/tool_calls，用于决定是否全量清洗）。 */
-export function countContentChars(messages: readonly unknown[]): number {
-  let chars = 0
-  for (const m of messages) {
-    if (!m || typeof m !== 'object') continue
-    const rec = m as { content?: unknown; tool_calls?: unknown }
-    if (typeof rec.content === 'string') chars += rec.content.length
-    else if (Array.isArray(rec.content)) {
-      for (const part of rec.content) {
-        if (part && typeof part === 'object' && 'text' in part) {
-          const t = (part as { text?: unknown }).text
-          if (typeof t === 'string') chars += t.length
-        }
-      }
-    }
-    if (Array.isArray(rec.tool_calls)) chars += JSON.stringify(rec.tool_calls)?.length ?? 0
-  }
-  return chars
-}

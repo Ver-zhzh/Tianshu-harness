@@ -8,7 +8,8 @@
  *
  * Resolution priority for the data root:
  *   1. process.env.RIVET_HOME
- *   2. platform default (%LOCALAPPDATA%\.rivet on Windows, ~/.rivet elsewhere)
+ *   2. desktop launcher.json rivetHome
+ *   3. platform default (%LOCALAPPDATA%\.rivet on Windows, ~/.rivet elsewhere)
  *
  * Legacy per-path environment variables still win for their specific scope:
  *   - RIVET_SESSION_DIR
@@ -16,7 +17,7 @@
  *   - RIVET_CONFIG_PATH
  */
 
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
@@ -30,9 +31,91 @@ export function defaultRivetHome(): string {
   return join(homedir(), '.rivet')
 }
 
-/** Active data root. Honors RIVET_HOME then falls back to the platform default. */
+/**
+ * 桌面端 launcher.json 的路径——复刻 Tauri `app_config_dir()` 的跨平台规则。
+ *
+ * 桌面端「设置 → 存储」把用户选的存储位置写在这里，sidecar 由 Rust 侧注入
+ * RIVET_HOME 所以自洽；而**用户手动在终端跑 CLI 时没有那层注入**，读不到
+ * launcher.json 就会落到一个空目录（issue #525：26 个日志落点全部 exists=false）。
+ */
+export function launcherConfigPath(
+  opts: { platform?: NodeJS.Platform; env?: NodeJS.ProcessEnv; home?: string } = {},
+): string {
+  const platform = opts.platform ?? process.platform
+  const env = opts.env ?? process.env
+  const home = opts.home ?? homedir()
+  const identifier = 'app.tianshu.desktop'
+  if (platform === 'win32') {
+    const appData = env.APPDATA || join(home, 'AppData', 'Roaming')
+    return join(appData, identifier, 'launcher.json')
+  }
+  if (platform === 'darwin') {
+    return join(home, 'Library', 'Application Support', identifier, 'launcher.json')
+  }
+  const xdg = env.XDG_CONFIG_HOME || join(home, '.config')
+  return join(xdg, identifier, 'launcher.json')
+}
+
+/**
+ * 读 launcher.json 的 rivetHome。
+ *
+ * 缺失/损坏/类型不对/空白一律 undefined——CLI 不能因为桌面端配置坏了就起不来。
+ * 测试环境（NODE_TEST_CONTEXT）且未显式注入 launcherPath 时跳过：否则开发者
+ * 机器上的桌面端配置会污染测试断言。
+ */
+export function launcherRivetHome(
+  opts: { platform?: NodeJS.Platform; env?: NodeJS.ProcessEnv; home?: string; launcherPath?: string } = {},
+): string | undefined {
+  if (!opts.launcherPath && process.env.NODE_TEST_CONTEXT) return undefined
+  try {
+    const raw = readFileSync(opts.launcherPath ?? launcherConfigPath(opts), 'utf8')
+    const parsed = JSON.parse(raw) as { rivetHome?: unknown }
+    if (typeof parsed.rivetHome === 'string' && parsed.rivetHome.trim()) return parsed.rivetHome
+  } catch { /* 未配置或损坏 = 回落平台默认 */ }
+  return undefined
+}
+
+export type RivetHomeSource = 'RIVET_HOME' | 'launcher.json' | 'platform-default'
+
+function selectRivetHome(env: NodeJS.ProcessEnv, launcherHome: string | undefined, platformDefault: string): { path: string; source: RivetHomeSource } {
+  const fromEnv = env.RIVET_HOME?.trim()
+  if (fromEnv) return { path: fromEnv, source: 'RIVET_HOME' }
+  if (launcherHome) return { path: launcherHome, source: 'launcher.json' }
+  return { path: platformDefault, source: 'platform-default' }
+}
+
+/** CLI 数据根优先级：RIVET_HOME > launcher.json > 平台默认。 */
+export function pickRivetHome(env: NodeJS.ProcessEnv, launcherHome: string | undefined, platformDefault: string): string {
+  return selectRivetHome(env, launcherHome, platformDefault).path
+}
+
+/** rivetHome 是每个路径解析都会走的热路径——launcher.json 只读一次。 */
+let launcherHomeCache: string | null | undefined
+
+/** 清空 launcher 缓存（测试用，同 resetRgResolvedPath 的约定）。 */
+export function resetLauncherHomeCache(): void {
+  launcherHomeCache = undefined
+}
+
+function cachedLauncherRivetHome(): string | undefined {
+  if (launcherHomeCache === undefined) launcherHomeCache = launcherRivetHome() ?? null
+  return launcherHomeCache ?? undefined
+}
+
+/**
+ * Active data root: RIVET_HOME > 桌面端 launcher.json > 平台默认。
+ *
+ * 中间层是 issue #525 的修复：桌面端用户把存储位置改到自定义目录后，终端里
+ * 的 CLI（`/logs`、会话目录、配置路径）必须看到同一个根，否则日志工具会
+ * 静默输出一份全部 exists=false 的清单。
+ */
 export function rivetHome(): string {
-  return process.env.RIVET_HOME || defaultRivetHome()
+  return resolveRivetHome().path
+}
+
+/** Keep diagnostic provenance on the same decision path as the active root. */
+export function resolveRivetHome(): { path: string; source: RivetHomeSource } {
+  return selectRivetHome(process.env, cachedLauncherRivetHome(), defaultRivetHome())
 }
 
 /** User global config file path. */

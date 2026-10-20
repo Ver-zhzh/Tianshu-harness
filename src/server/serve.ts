@@ -56,7 +56,7 @@ import { buildTrustRoutes } from './trust-api.js'
 import { buildCacheRoutes } from './cache-routes.js'
 import { buildStorageAuditRoutes } from './storage-audit-routes.js'
 import { buildTokenLedgerRoutes } from './token-ledger-routes.js'
-import { TokenLedgerService } from '../token-ledger/service.js'
+import { createAccountLedgerService } from '../token-ledger/account-service.js'
 import { buildSpeechRoutes, createSpeechEngineFromEnv, type SpeechEngine } from './speech-routes.js'
 import { CronScheduler, setActiveScheduler, setScheduleWriteGuard, setUnattendedAutomationGate } from './cron-scheduler.js'
 export { installParentWatchdog, probeParentAlive, maxMissesFromGraceEnv, type ParentWatchdogOptions } from './parent-watchdog.js'
@@ -99,7 +99,7 @@ import type { SessionContext } from '../agent/context.js'
 import { buildOpenPathCommand, buildRevealCommand, decideOpenAction, isDirectoryPath, windowsFileHasHandler } from '../tools/open-path.js'
 import { installStallObserver } from '../agent/stall-observer.js'
 import { SessionRegistry } from '../agent/session-registry.js'
-import { StoreLock, isStoreLockAcquired } from './store-lock.js'
+import { StoreLock, isStoreLockAcquired, type StoreLockState } from './store-lock.js'
 import { runPhantomResumeMigration, PHANTOM_RESUME_MIGRATION_VERSION } from './phantom-resume-migration.js'
 import { ProviderHealthTracker } from '../agent/provider-health.js'
 import type { Config, ProviderConfig, ModelConfig } from '../config/schema.js'
@@ -624,6 +624,13 @@ export interface RunServeOptions {
   /** Disable persistence (tests / ephemeral). */
   ephemeral?: boolean
   /**
+   * 运行期丢锁回调（会话库锁被接管/删除）。runServe 内部已先完成收口——撤销写资格
+   * （ownsSessionStore 翻 false → 写请求 503、readiness failed=data-dir-lock-lost）、
+   * 停调度、abort 活动会话——随后调本回调交宿主处置。CLI 入口（serveCommand）借此
+   * 立即非零退出；程序化宿主自定收口，runServe 绝不擅自 process.exit。
+   */
+  onLockLost?: (state: StoreLockState) => void
+  /**
    * R1 — shared cross-session registry (file claims / OwnershipGuard / conflict
    * blocking). Tests inject a pre-built one; production creates it async at boot.
    * When absent, concurrency features stay dormant and behavior is unchanged.
@@ -722,9 +729,30 @@ export async function runServe(opts: RunServeOptions = {}): Promise<RunningServe
   // 这之后全部真实输出（『假续跑』）。拿不到锁的进程**一个字节都不许碰会话库**。
   // acquire 默认 5s 重试窗口，覆盖监管器『杀掉旧进程 → 拉起新进程』的交接窗。
   // opts.ephemeral（测试）跳过：与注册表/持久化同哲学，不得创建/触碰真实锁文件。
-  const storeLock = opts.ephemeral ? undefined : new StoreLock()
-  /** 本进程是否有资格写会话库；ephemeral（无锁）视为有资格——行为不变。 */
+  //
+  // 运行期丢锁（P0-1b）：锁被接管/删除 → onLockLost 同步收口——撤销写资格
+  // （ownsSessionStore 翻 false，route guard 对所有写请求立即 503；initializationError
+  // 置 data-dir-lock-lost，readiness 翻 failed 供桌面壳归因）、abort 活动会话、
+  // 停调度（CronLock 丢锁停 scheduler 的同范式），最后交宿主回调（CLI 据此 exit 2）。
+  /** 本进程是否有资格写会话库；ephemeral（无锁）视为有资格——行为不变。
+   *  丢锁后由下面的 onLockLost 翻回 false（route guard / persistence 闸门实时读它）。 */
   let ownsSessionStore = true
+  const storeLock = opts.ephemeral ? undefined : new StoreLock({
+    onLockLost: (lost) => {
+      if (!ownsSessionStore) return
+      ownsSessionStore = false
+      storeLockDegraded = true
+      initializationError = 'data-dir-lock-lost'
+      serverLogger.error('[serve] 会话库锁已丢失（被接管或删除）——撤销会话库写资格、停调度、停活动会话', {
+        holder: lost.status === 'contended' ? lost.holder : undefined,
+      })
+      // 丢锁后再产生的会话事件本就会被 persistence 闸门丢弃；abort 止住产出源。
+      try { sessions.abortAll() } catch { /* best-effort */ }
+      // CronLock 丢锁停 scheduler 的同范式（cron-wiring.ts）：停事件触发器 + 调度器 + 释放调度锁。
+      try { void wiring?.stop() } catch { /* best-effort */ }
+      try { opts.onLockLost?.(lost) } catch { /* 宿主回调异常不得阻断内部收口 */ }
+    },
+  })
   if (storeLock) {
     const lockState = await storeLock.acquire()
     ownsSessionStore = isStoreLockAcquired(lockState)
@@ -766,7 +794,12 @@ export async function runServe(opts: RunServeOptions = {}): Promise<RunningServe
     ? undefined
     : new FileSessionPersistence(
         opts.sessionDir ?? desktopSessionsDir(),
-        { maxEventsDiskBytes: sessionPool.maxEventsDiskBytes },
+        {
+          maxEventsDiskBytes: sessionPool.maxEventsDiskBytes,
+          // 丢锁即撤销写资格：所有写路径（延迟刷新/flush/修复性重建/删除）提交前
+          // 实时检查这个谓词，丢锁后 fail-closed 丢弃或抛错。
+          canWrite: () => ownsSessionStore,
+        },
       )
 
   // Wave J: sidecar 级 SharedRuntime——providerHealth 跨 session 共享让
@@ -1074,10 +1107,10 @@ export async function runServe(opts: RunServeOptions = {}): Promise<RunningServe
   // 桌面用户的会话不经过 CLI bootstrap——autoSync+endpoint 齐全时在进程内
   // 启动间隔推送，否则桌面端产生的消耗永远等不到一趟自动同步。
   // 台账是旁路观测面：构造失败只意味着本次无自动推送，路由仍懒建兜底。
-  let tokenLedgerService: TokenLedgerService | undefined
+  let tokenLedgerService: ReturnType<typeof createAccountLedgerService> | undefined
   try {
     const tlConfig = loadConfig()
-    tokenLedgerService = new TokenLedgerService(tlConfig)
+    tokenLedgerService = createAccountLedgerService(tlConfig)
     tokenLedgerService.startAutoSync()
   } catch { /* best-effort */ }
   Object.assign(routes, buildTokenLedgerRoutes({ apiToken, service: tokenLedgerService }))
@@ -1183,7 +1216,7 @@ export async function runServe(opts: RunServeOptions = {}): Promise<RunningServe
   const serveConfigured = () => ctx.configured
   const loopLagForHealth = () => loopHealth.snapshot()
   // 账号路由（桌面端 device flow）；主体、代理注入与测试在 account-routes.ts。
-  Object.assign(routes, buildAccountRoutesFor(apiToken, ctx.config))
+  Object.assign(routes, buildAccountRoutesFor(apiToken, ctx.config, () => tokenLedgerService?.accountChanged()))
   Object.assign(routes, buildProfileRoutes(sessions, apiToken))
   Object.assign(routes, buildProfileLibraryRoutes({ rivetHome: profileRivetHome(), apiToken }))
 
@@ -1361,7 +1394,8 @@ export async function runServe(opts: RunServeOptions = {}): Promise<RunningServe
         loopStall.stop()
         // agent-16：会话事件写链（100ms debounce 批次）有界排空——CRITICAL 之外的
         // 滞留行否则随进程退出丢失（flushAllAsync 此前只有测试调用，生产关闭链
-        // 缺这一环）。有界超时，best-effort。
+        // 缺这一环）。有界超时，best-effort。丢锁后 canWrite 闸门把它兜成
+        // 「丢弃滞留行立即返回」，不会向别人的会话库回写。
         try { await persistence?.flushAllAsync(3_000) } catch { /* best-effort */ }
         // P0-1 — 释放会话库独占锁。此刻所有会话库写入方（persistence / 台账 /
         // 定时任务）都已停在上面的关闭链里，释放不会与残留写交错。release 只在锁
@@ -1456,7 +1490,20 @@ export async function serveCommand(args: string[]): Promise<void> {
 
   let server: RunningServer
   try {
-    server = await runServe({ tls: readServeTlsArgs(args), port, ...(host ? { host } : {}), ...(mobileDir ? { mobileDir } : {}) })
+    server = await runServe({
+      tls: readServeTlsArgs(args),
+      port,
+      ...(host ? { host } : {}),
+      ...(mobileDir ? { mobileDir } : {}),
+      // CLI 入口丢锁 = 写者身份失效：立即非零退出，**跳过优雅收尾**——close 链里的
+      // flushAllAsync/面包屑都会向会话库回写，而会话库此刻已不属于本进程
+      // （persistence 的 canWrite 闸门是兜底，这里第一道就不跑）。信号驱动的正常
+      // 退出不受影响（丢锁后的 release 已是 no-op）。
+      onLockLost: () => {
+        console.error('[serve] 会话库锁已丢失（data-dir-lock-lost）——本进程不再是会话库写者，立即退出')
+        process.exit(2)
+      },
+    })
   } catch (err) {
     console.error((err as Error).message)
     process.exit(1)

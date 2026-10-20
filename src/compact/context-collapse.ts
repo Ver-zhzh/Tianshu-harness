@@ -14,6 +14,7 @@ import {
   RUN_TESTS_FAILED_RE,
   RUN_TESTS_PASSED_RE,
 } from '../tools/run-tests.js'
+import { grepOutputStats } from '../utils/grep-output.js'
 
 export interface CollapsedResult {
   toolName: string
@@ -102,19 +103,7 @@ export function collapseGrepResult(toolName: string, content: string, originalTo
     return { toolName, summary, originalTokens, collapsedTokens: Math.ceil(summary.length / CHARS_PER_TOKEN) }
   }
 
-  const lines = content.split('\n').filter(l => l.trim())
-  const fileSet = new Set<string>()
-  let matchCount = 0
-
-  for (const line of lines) {
-    const m = line.match(/^([^\s:]+):/)
-    if (m) {
-      fileSet.add(m[1]!)
-      matchCount++
-    }
-  }
-
-  const files = [...fileSet]
+  const { matches: matchCount, files } = grepOutputStats(content)
   const topFiles = files.slice(0, 8)
   const moreFiles = files.length > 8 ? ` (+${files.length - 8} more)` : ''
 

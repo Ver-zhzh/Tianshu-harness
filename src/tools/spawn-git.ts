@@ -19,6 +19,7 @@ import type { SpawnSyncOptions, SpawnOptions, ExecFileOptions } from 'node:child
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { getResolvedEnv } from './resolved-env.js'
+import { spawnOwnedCommand, type OwnedCommand, type SpawnOwnedCommandDeps } from './process-kill.js'
 
 /** Test/injection hooks for `resolveGitCommand` (production callers omit). */
 export interface ResolveGitCommandDeps {
@@ -139,6 +140,13 @@ export function spawnGit(
   const command = resolveGitCommand(opts?.env)
   const env = sanitizeGitEnv({ ...gitEnv(cwd), ...opts?.env })
   return spawn(command, args, { ...opts, env, windowsHide: true })
+}
+
+export function spawnGitOwned(args: string[], opts: SpawnOptions = {}, deps: SpawnOwnedCommandDeps = {}): OwnedCommand {
+  const cwd = typeof opts.cwd === 'string' ? opts.cwd : undefined
+  const command = resolveGitCommand(opts.env, { platform: deps.platform })
+  const env = sanitizeGitEnv({ ...gitEnv(cwd), ...opts.env })
+  return spawnOwnedCommand(command, args, { ...opts, env, windowsHide: true }, deps)
 }
 
 /**

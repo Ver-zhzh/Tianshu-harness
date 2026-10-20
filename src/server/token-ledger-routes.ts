@@ -61,15 +61,15 @@ export function buildTokenLedgerRoutes(deps: TokenLedgerRoutesDeps): Record<stri
   return {
     'GET /token-ledger/settings': async (body, _params, headers) => {
       if (!authorized(body, headers)) return { status: 401, body: { error: 'Unauthorized' } }
-      try { return { status: 200, body: readTokenLedgerSettings((deps.settingsDeps?.load ?? loadConfig)()) } }
+      try { return { status: 200, body: readTokenLedgerSettings((deps.settingsDeps?.load ?? loadConfig)(),getService().accountConnection().available) } }
       catch { return { status: 500, body: { error: 'Unable to read Token ledger settings' } } }
     },
     'PUT /token-ledger/settings': async (body, _params, headers) => {
       if (!authorized(body, headers)) return { status: 401, body: { error: 'Unauthorized' } }
       try {
-        const config = updateTokenLedgerSettings(body, deps.settingsDeps)
+        const config = updateTokenLedgerSettings(body, {...deps.settingsDeps,accountAvailable:getService().accountConnection().available})
         getService().reconfigure(config)
-        return { status: 200, body: readTokenLedgerSettings(config) }
+        return { status: 200, body: readTokenLedgerSettings(config,getService().accountConnection().available) }
       } catch { return { status: 400, body: { error: 'Unable to save Token ledger settings. Check fields and sync key.' } } }
     },
     'GET /token-ledger/summary': async (body, params, headers) => {
@@ -123,6 +123,7 @@ export function buildTokenLedgerRoutes(deps: TokenLedgerRoutesDeps): Record<stri
       const svc = getService()
       try {
         const outcome = await svc.syncNow()
+        if (outcome.skipped === 'backoff') return { status: 429, body: { error: 'sync_backoff', retryAt: outcome.retryAt } }
         if (outcome.skipped === 'disabled') {
           return { status: 400, body: { error: 'tokenLedger.enabled is false' } }
         }

@@ -4,6 +4,7 @@ import { SessionTitleCoordinator, titleInput, loadTitleInput, canGenerateTitle, 
 import { legacyReadSkill, legacyWriteSkill, legacyRemoveSkill } from '../skills/skill-management-compat.js'
 import { queueSessionSkillMode } from '../skills/session-skill-policy.js'
 import { sessionSkillSnapshot } from '../skills/session-skill-snapshot.js'
+import { creationSessionInput, creationTargetRecord, assertCreationWorkspace } from './skill-creation-session.js'
 import { isSessionStorageSafetyError } from '../platform/test-session-isolation.js'
 import { disposeSessionFilePreviews } from './file-open-routes.js'
 import { disposeSessionBrowserContexts } from './browser-contexts.js'
@@ -447,6 +448,7 @@ export interface ManagedAgent {
    * lightweight test doubles.
    */
   markSkillInvoked?(name: string): void
+  getRuntimePolicyContext?(): Pick<import('../skills/runtime/policy.js').RuntimePolicyContext, 'deny' | 'overlay' | 'planMode'>
   getSkillSnapshot?(): import('../skills/skill-loader.js').SkillDefinition[]
   setDisabledSkills?(names: Set<string>): void
   /** Estimated token count for the current conversation (including prefix overhead). */
@@ -573,6 +575,8 @@ export interface GoalSnapshot {
 }
 
 export interface CreateSessionInput {
+  initialComposerDraft?: string
+  skillCreation?: import('./protocol.js').SkillCreationContext
   workspaceRoots?: string[]
   cwd?: string
   /**
@@ -925,6 +929,7 @@ interface PendingIntervention {
   toolName?: string
   /** Original (unredacted) tool input for remember handling. */
   toolInput?: Record<string, unknown>
+  runtimeContext?: Parameters<AgentCallbacks['onApprovalRequired']>[3]
 }
 
 /** E4 — pending client tool-landing delegation (mirrors PendingIntervention). */
@@ -2626,6 +2631,7 @@ export class RuntimeSessionManager {
   }
 
   createSession(input: CreateSessionInput = {}): SessionRecord {
+    input = creationSessionInput(input)
     registerStorageRuntime(sessionsDir())
     // P1-1 fork：调用方可以显式指定子会话 id（worktree 分支名由 id 派生，
     // 必须与最终会话 id 一致才能对上）。已存在的 id 一律让位给新生成——重复
@@ -2639,6 +2645,7 @@ export class RuntimeSessionManager {
       requested: input.cwd ?? workspaceRoots?.[0], mode: input.workspaceMode, processCwd: this.defaultCwd,
       sessionId: id, rivetHome: rivetHome(), readConfig: loadConfig })
     let cwd = workspace.path
+    assertCreationWorkspace(input.skillCreation, workspace.source)
     if (workspaceRoots) cwd = workspaceRoots[0]!
     if (input.isolatedWorktree && workspaceRoots && workspaceRoots.length > 1) throw new Error('Isolated Worktree supports a single folder only')
     let worktreeBranch: string | undefined
@@ -2674,6 +2681,8 @@ export class RuntimeSessionManager {
 
     const session: InternalSession = {
       record: {
+        ...(input.initialComposerDraft ? { initialComposerDraft: input.initialComposerDraft } : {}),
+        ...(input.skillCreation ? { skillCreation: input.skillCreation } : {}),
         id,
         status: 'idle',
         createdAt: ts,
@@ -2808,6 +2817,8 @@ export class RuntimeSessionManager {
   ): boolean {
     const session = this.sessions.get(id)
     if (this.updateRestartPreparing || !session || session.running) return false
+    if (session.record.skillCreation) session.record.skillCreation.started = true
+    session.record.initialComposerDraft = undefined
     // 阶段 2 — 逻辑 runId：恢复台账用它把多次尝试归到同一逻辑运行。
     let runId = receipt?.runId ?? randomUUID()
     const attemptId = receipt?.attemptId ?? randomUUID()
@@ -3310,6 +3321,7 @@ export class RuntimeSessionManager {
     if (this.updateRestartPreparing) return { ok: false, reason: 'limit' }
     const session = this.sessions.get(id)
     if (!session) return { ok: false, reason: 'not_found' }
+    if (session.record.skillCreation) return { ok: false, reason: 'unsupported' }
     const objective = input.objective?.trim()
     if (!objective) return { ok: false, reason: 'invalid' }
     const agent = await this.ensureAgentAsync(session)
@@ -3362,6 +3374,16 @@ export class RuntimeSessionManager {
     if (!controller) return false
     controller.abort()
     return true
+  }
+
+  updateSkillCreation(id: string, value: unknown): SessionRecord {
+    const session = this.sessions.get(id)
+    if (!session?.record.skillCreation || session.running || session.record.skillCreation.started) throw new Error('Creation target can only change before the first message')
+    if (this.agentBuilds.has(id)) throw new Error('Session is preparing; retry shortly')
+    Object.assign(session.record, creationTargetRecord(session.record, value))
+    session.agent?.abort(); session.agent = null
+    this.touch(session)
+    return session.record
   }
 
   private ensureAgent(session: InternalSession): ManagedAgent | Promise<ManagedAgent> {
@@ -6283,6 +6305,7 @@ export class RuntimeSessionManager {
         }
         const eventData = {
           ...(evidence?.generatedImageId ? { generatedImageId: evidence.generatedImageId } : {}),
+          ...(evidence?.skillDraft ? { skillDraft: evidence.skillDraft } : {}),
           ...(evidence?.command ? { commandText: redactText(evidence.command) } : {}),
           ...(outputId ? { outputId } : {}),
           outputTruncated: (evidence?.outputTruncated ?? (!!evidence?.lossiness && evidence.lossiness !== 'lossless')) || (!outputId && display.length > 2000),
@@ -6485,7 +6508,7 @@ export class RuntimeSessionManager {
           severity: shift.severity ?? 'info',
         })
       },
-      onApprovalRequired: async (toolId, name, input) => {
+      onApprovalRequired: async (toolId, name, input, context) => {
         // 陈旧 run 的审批请求直接拒绝，不进 requestApproval——它会挂 pending 并起
         // 审批超时定时器，而没有任何 run 会来消费（陈旧审批 = 泄漏的 pending +
         // 孤儿定时器）。这里返回 deny 而不是抛错：requestApproval 在生命周期被吊销时
@@ -6493,7 +6516,7 @@ export class RuntimeSessionManager {
         // 抛错只会把 Error 灌进一个已经收尾的 agent 循环，换回一个没人读的 error 事件。
         if (!isLiveAttempt()) return { approved: false }
         setActivityPhase(session.record.id, 'approval')
-        try { return await this.requestApproval(session, lifecycleGeneration, toolId, name, input) }
+        try { return await this.requestApproval(session, lifecycleGeneration, toolId, name, input, context) }
         finally { setActivityPhase(session.record.id, 'running') }
       },
       // E4 — client landing delegation (mirrors onApprovalRequired injection).
@@ -6545,6 +6568,7 @@ export class RuntimeSessionManager {
     toolId: string,
     name: string,
     input: Record<string, unknown>,
+    context?: Parameters<AgentCallbacks['onApprovalRequired']>[3],
   ): Promise<ApprovalResult> {
     if (!this.ownsSessionLifecycle(session, lifecycleGeneration)) {
       return Promise.resolve({ approved: false })
@@ -6586,6 +6610,7 @@ export class RuntimeSessionManager {
         resolve: resolve as (v: ApprovalResult | boolean) => void,
         toolName: name,
         toolInput: input,
+        runtimeContext: context,
       }
       if (this.approvalTimeoutMs > 0) {
         pend.timer = setTimeout(() => {
@@ -6613,6 +6638,7 @@ export class RuntimeSessionManager {
         requestId,
         toolName: name,
         input: redactValue(input),
+        ...(context ? { runtimeContext: redactValue(context) } : {}),
         ...(pathGrant ? { pathGrant } : {}),
         ...(claimConflict ? { claimConflict } : {}),
       })

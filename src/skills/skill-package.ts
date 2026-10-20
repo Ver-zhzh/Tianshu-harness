@@ -3,6 +3,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep, win32 } fr
 import { createHash } from 'node:crypto'
 import { parseSkillMarkdown, type SkillDefinition } from './skill-loader.js'
 import { parseSkillYaml, skillMetadata } from './skill-metadata.js'
+import { checkRuntimeDeclarationPaths, parseRuntimeDeclaration } from './runtime/declaration.js'
 import { isFilesystemMetadata } from '../utils/file-metadata.js'
 import { isRebuildableSkillResource } from './skill-resource-policy.js'
 
@@ -103,6 +104,15 @@ export function readPackage(path: string): SkillPackage {
   if (metadata) {
     const external = skillMetadata({}, parseSkillYaml(metadata))
     definition.metadata = { ...external, unsupported: definition.metadata?.unsupported ?? [], defaultMode: definition.metadata?.defaultMode === 'manual' ? 'manual' : external.defaultMode }
+  }
+  // runtime.yaml（issue #523）已在 files 里——fingerprint 天然覆盖声明变更；
+  // 这里把声明解析进 metadata。包读取路径无符号链接（上方已拒），但仍走
+  // realpath 校验防 in-place 目录逃逸；失败不阻断读包，记入 metadata。
+  const runtimeSource = text('runtime.yaml')
+  if (runtimeSource !== undefined) {
+    const parsed = parseRuntimeDeclaration(runtimeSource)
+    const checked = parsed.ok ? checkRuntimeDeclarationPaths(root, parsed.declaration) : parsed
+    definition.metadata = { ...definition.metadata!, runtime: checked.ok ? { declaration: checked.declaration } : { error: checked.message } }
   }
   return { definition, files, fingerprint: fingerprint(files), subpath: '' }
 }

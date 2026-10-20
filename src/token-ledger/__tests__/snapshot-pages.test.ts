@@ -48,17 +48,17 @@ test('a configuration change fences off all following pages and never acknowledg
   service=f.create(async(url:string,init:any)=>{calls.push(JSON.parse(init.body));service.reconfigure(configSchema.parse({...f.config,tokenLedger:{...f.config.tokenLedger,forum:{...f.config.tokenLedger.forum,apiKey:'new-synthetic-key'}}}));return {status:200,text:async()=>'{"ok":true,"stale":false}'}})
   assert.equal((await service.syncNow()).ok,false);assert.equal(calls.length,1);assert.equal(service.status().pending,true)
 })
-test('default auto-sync interval is one minute while explicit preferences and opt-out are preserved',async()=>{
+test('default auto-sync interval is two minutes while explicit preferences and opt-out are preserved',async()=>{
   const f=fixture(1),calls:any[]=[];const service=f.create(async()=>{calls.push(1);return {status:200,text:async()=>'{"ok":true,"stale":false}'}})
-  assert.equal(readTokenLedgerSettings(f.config).forum.intervalMinutes,1)
+  assert.equal(readTokenLedgerSettings(f.config).forum.intervalMinutes,2)
   const explicit=configSchema.parse({...f.config,tokenLedger:{...f.config.tokenLedger,forum:{...f.config.tokenLedger.forum,intervalMinutes:45}}})
   assert.equal(readTokenLedgerSettings(explicit).forum.intervalMinutes,45);assert.equal(service.startAutoSync(),false);await service.shutdownFlush();assert.equal(calls.length,0)
 })
-test('unknown accepted response retries the same counters with a fresh monotonic timestamp',async()=>{
+test('unknown accepted response retries the exact immutable page without changing its timestamp',async()=>{
   const f=fixture(1),calls:any[]=[]
   const service=f.create(async(_url:string,init:any)=>{calls.push(JSON.parse(init.body));if(calls.length===1)throw new Error('synthetic response lost');return {status:200,text:async()=>'{"ok":true,"stale":false}'}})
   assert.equal((await service.syncNow()).ok,true);assert.equal(calls.length,2)
-  assert.deepEqual(calls[0].hours,calls[1].hours);assert(Date.parse(calls[1].sentAt)>Date.parse(calls[0].sentAt));assert.equal(service.status().pending,false)
+  assert.deepEqual(calls[0],calls[1]);assert.equal(service.status().pending,false)
 })
 test('active fixed batches complete under continuous local consumption and keep newer usage pending',async()=>{
   const f=fixture(),calls:any[]=[];let service:TokenLedgerService
@@ -75,4 +75,29 @@ test('failed batches resume confirmed progress despite newly accumulated usage',
 test('newest hours are prioritized even when the input is oldest first',async()=>{
   const split=await pages(),value=snapshot(6001);value.hours.reverse();const result=split(value)
   assert.equal(result[0]?.hours?.[0]?.hour,'2026-10-14T01:00:00.000Z')
+})
+
+test('server pacing confirms one page at a time and preserves remaining history across restart',async()=>{
+  const context=fixture(),calls:unknown[]=[]
+  let now=time+1000
+  const create=()=>new TokenLedgerService(context.config,{
+    sessionsRoot:join(context.root,'sessions'),statePath:join(context.root,'ledger.json'),now:()=>now,
+    fetchImpl:async(_url,init)=>{calls.push(JSON.parse(init!.body!));return {status:200,headers:new Headers({'x-ledger-upload-after':'120'}),text:async()=>' {"ok":true,"stale":false}'}},
+  })
+  const first=create()
+  assert.equal((await first.syncNow()).skipped,'backoff')
+  assert.equal(calls.length,1)
+  assert.equal(first.status().syncProgress?.nextPage,1)
+  assert.equal(first.status().syncProgress?.pageCount,2)
+  assert.equal(first.status().pending,true)
+  assert.equal((await first.syncNow()).skipped,'backoff')
+  assert.equal(calls.length,1)
+  now+=120_000
+  const restored=create()
+  assert.equal((await restored.syncNow()).ok,true)
+  assert.equal(calls.length,2)
+  assert.equal(restored.status().pending,false)
+  assert.equal(restored.status().syncProgress,null)
+  const payloads=calls as {hours:unknown[]}[]
+  assert.equal(payloads.reduce((total,payload)=>total+payload.hours.length,0),3001)
 })

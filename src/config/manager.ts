@@ -890,6 +890,8 @@ export interface ShellConfigSnapshot {
   gitBashPath: string
   /** Configured custom git executable path, or empty string when unset. */
   gitPath: string
+  /** Configured custom Python interpreter path（skill runtime，issue #523），或空串。 */
+  pythonPath: string
 }
 
 /** Snapshot of the shell block (Git Bash / git override) for the desktop settings UI. */
@@ -898,6 +900,7 @@ export function getShellConfig(): ShellConfigSnapshot {
   return {
     gitBashPath: env.gitBashPath ?? '',
     gitPath: env.gitPath ?? '',
+    pythonPath: env.pythonPath ?? '',
   }
 }
 
@@ -907,7 +910,7 @@ export function getShellConfig(): ShellConfigSnapshot {
  * sidecar/session start (seeded into RIVET_GIT_BASH_PATH via
  * applyConfiguredGitBashPath). Only meaningful on Windows.
  */
-export function setShellConfig(input: { gitBashPath?: unknown; gitPath?: unknown }): ShellConfigSnapshot {
+export function setShellConfig(input: { gitBashPath?: unknown; gitPath?: unknown; pythonPath?: unknown }): ShellConfigSnapshot {
   const cfg = loadConfig()
   const merged: Record<string, unknown> = { ...cfg.env }
   if (input.gitBashPath !== undefined) {
@@ -920,11 +923,17 @@ export function setShellConfig(input: { gitBashPath?: unknown; gitPath?: unknown
     if (raw) merged.gitPath = raw
     else delete merged.gitPath
   }
+  if (input.pythonPath !== undefined) {
+    const raw = String(input.pythonPath).trim()
+    if (raw) merged.pythonPath = raw
+    else delete merged.pythonPath
+  }
   cfg.env = envSchema.parse(merged)
   saveConfig(cfg)
   return {
     gitBashPath: cfg.env.gitBashPath ?? '',
     gitPath: cfg.env.gitPath ?? '',
+    pythonPath: cfg.env.pythonPath ?? '',
   }
 }
 
@@ -1704,16 +1713,22 @@ function isCompatibleVisionProvider(
 
 /**
  * 校验 provider 在 provider.providers 里存在、且该 provider 下有指定 model。
- * 与 setDefaultModelConfig 的内联校验同构，抽出复用给 vision 主桥/fallback。
+ * 与 setDefaultModelConfig 的校验同构（assertDefaultModelRef 也走 contractModels），
+ * 抽出复用给 vision 主桥/fallback。
  * 不校验 key 是否可解出（key 解析留到运行时 resolveApiKey——与 defaultModel 一致，
  * defaultModel 也只校验 provider/model 存在）。
+ *
+ * 模型存在性必须查 contractModels 契约并集（keys 池是事实源），不能查顶层
+ * provider.models 迁移快照——key 级增删不回写顶层，只在 key 池里的模型会被误判
+ * 不存在，桌面端「看图片」下拉（GET /config/providers 下发契约并集）里明明能选，
+ * 保存却报「没有模型」（2026-10-20 workbuddy2api 多 key 实测）。
  */
 function assertProviderModelExists(cfg: Config, providerName: string, modelId: string, label: string): void {
   const provider = cfg.provider.providers[providerName]
   if (!provider) {
     throw new Error(`${label}：provider "${providerName}" 不在已配置的 provider 列表里（先用 rivet config setup ${providerName} 添加）`)
   }
-  if (!provider.models.some(m => m.id === modelId)) {
+  if (!contractModels(provider).some(m => m.id === modelId)) {
     throw new Error(`${label}：provider "${providerName}" 下没有模型 "${modelId}"（检查拼写或用 rivet config add-model 添加）`)
   }
 }

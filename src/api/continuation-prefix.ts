@@ -9,6 +9,8 @@ export interface ContinuationPrefixProof {
   version: 1 | 2
   cacheGenerationId?: string
   generationReason?: string
+  /** Diagnostic provenance only; never changes binding or generation policy. */
+  wireTransformVersion?: string
   credentialScope?: string
   options?: Record<string, unknown>
   provider: string
@@ -70,17 +72,24 @@ export interface RequestDiagnostics {
 
 export class LocalWorkerPolicyError extends Error {
   readonly code: string = 'LOCAL_WORKER_POLICY'
-  constructor(message: string) { super(message); this.name = 'LocalWorkerPolicyError' }
+  constructor(message: string, public continuityEvidence?: ContinuityDiagnosticEvidence) { super(message); this.name = 'LocalWorkerPolicyError' }
 }
 
 export class ContinuationPrefixError extends LocalWorkerPolicyError {
-  constructor(readonly changed: string | number, readonly previous: ContinuationPrefixProof, readonly next: ContinuationPrefixProof) {
-    super(`worker continuation prefix diverged at ${changed}; request not sent`)
+  constructor(readonly changed: string | number, readonly previous: ContinuationPrefixProof, readonly next: ContinuationPrefixProof, evidence?: ContinuityDiagnosticEvidence) {
+    super(`worker continuation prefix diverged at ${changed}; request not sent`, evidence)
     this.name = 'ContinuationPrefixError'
   }
 }
 
-export interface ContinuityFailureDetails {
+export type PrefixComparison = 'same' | 'changed' | 'unknown'
+export interface ContinuityDiagnosticEvidence {
+  stage?: 'source' | 'render' | 'transport' | 'binding' | 'unknown'
+  sourcePrefix?: PrefixComparison
+  renderPrefix?: PrefixComparison
+  normalization?: import('./wire-normalization.js').WireNormalizationSummary
+}
+export interface ContinuityFailureDetails extends ContinuityDiagnosticEvidence {
   kind: 'source_history' | 'projection' | 'tools' | 'options' | 'binding' | 'anchor_missing' | 'anchor_mismatch' | 'snapshot_stale' | 'persistence'
   changed?: string | number
   beforeChars?: number
@@ -95,13 +104,18 @@ export function continuityFailureDetails(error: unknown): ContinuityFailureDetai
     const index = typeof error.changed === 'number' ? error.changed : -1
     const beforeChars = error.previous.messages[index]?.chars, afterChars = error.next.messages[index]?.chars
     return { kind, changed: error.changed, beforeChars, afterChars,
+      stage: kind === 'projection' || kind === 'source_history' ? 'unknown' : 'binding',
+      sourcePrefix: 'unknown', renderPrefix: 'unknown', ...error.continuityEvidence,
       ...(beforeChars !== undefined && afterChars !== undefined ? { deltaChars: afterChars - beforeChars } : {}),
       recovery: kind === 'projection' ? 'preview' : 'blocked' }
   }
   if (!(error instanceof Error)) return undefined
   const kind = /已发布锚点缺失/.test(error.message) ? 'anchor_missing' : /已发布锚点与冻结投影/.test(error.message) ? 'anchor_mismatch'
     : /冻结构建已过期/.test(error.message) ? 'snapshot_stale' : /耐久提交失败/.test(error.message) ? 'persistence' : undefined
-  return kind ? { kind, recovery: kind === 'anchor_missing' || kind === 'anchor_mismatch' ? 'preview' : 'blocked' } : undefined
+  return kind ? { kind, stage: kind === 'anchor_missing' || kind === 'anchor_mismatch' ? 'render' : 'unknown',
+    sourcePrefix: 'unknown', renderPrefix: 'unknown',
+    ...(error instanceof LocalWorkerPolicyError ? error.continuityEvidence : {}),
+    recovery: kind === 'anchor_missing' || kind === 'anchor_mismatch' ? 'preview' : 'blocked' } : undefined
 }
 
 /** resume 证据门（session-persist）专用：历史请求的模型/凭据/选项证据缺失或不完整。
@@ -139,6 +153,7 @@ export function isCompleteExecutionSnapshot(value: unknown): value is Continuati
   if (!value || typeof value !== 'object') return false
   const p = value as ContinuationPrefixProof
   return p.version === 2 && typeof p.cacheGenerationId === 'string' && typeof p.credentialScope === 'string'
+    && (p.wireTransformVersion === undefined || (typeof p.wireTransformVersion === 'string' && p.wireTransformVersion.length > 0))
     && typeof p.endpointHash === 'string' && typeof p.provider === 'string' && typeof p.model === 'string'
     && typeof p.requestId === 'string' && typeof p.toolsHash === 'string' && typeof p.optionsHash === 'string'
     && !!p.options && !Array.isArray(p.options) && hash(p.options) === p.optionsHash

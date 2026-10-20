@@ -1,7 +1,8 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { classifyWorkerError, workerFailureResult } from '../coordinator.js'
-import type { WorkOrder } from '../work-order.js'
+import { workerResultSchema, WORKER_RESULT_SUBMIT_SCHEMA, type WorkOrder } from '../work-order.js'
+import { ModelBindingUnavailable, type ModelUnavailableReason } from '../../model/model-binding.js'
 
 // 正则来源：coordinator.ts classifyWorkerError 分支，每例对应该分支一条（行号随提交漂移，不写死）。
 describe('classifyWorkerError — coordinator 兜底失败归类', () => {
@@ -38,6 +39,21 @@ describe('classifyWorkerError — coordinator 兜底失败归类', () => {
 
 describe('workerFailureResult — 默认兜底接线', () => {
   const order = { id: 'wo_test' } as WorkOrder
+
+  for (const reason of ['provider_deleted', 'model_deleted', 'route_deleted', 'missing_credentials', 'oauth_not_authenticated'] satisfies ModelUnavailableReason[]) {
+    it(`binding ${reason} survives both result schemas without becoming unknown`, () => {
+      const error = new ModelBindingUnavailable(reason)
+      assert.equal(classifyWorkerError(error), 'binding')
+      const result = workerFailureResult(order, error)
+      for (const schema of [workerResultSchema, WORKER_RESULT_SUBMIT_SCHEMA]) {
+        const parsed = schema.parse(result)
+        assert.equal(parsed.failureReason, 'binding')
+        assert.equal(parsed.failureStage, 'binding')
+        assert.equal(parsed.terminalFailure, true)
+        assert.equal(parsed.status, 'blocked')
+      }
+    })
+  }
 
   it('不传 opts 时按错误消息走推断（接线钉住）', () => {
     const r = workerFailureResult(order, new Error('worker process killed by signal 9'))

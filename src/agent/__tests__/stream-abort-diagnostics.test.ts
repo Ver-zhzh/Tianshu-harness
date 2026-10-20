@@ -13,6 +13,8 @@ import { wrapSystemReminder } from '../../prompt/system-reminder.js'
 import { TurnCacheObservability } from '../cache-log-observability.js'
 import { SessionContext } from '../context.js'
 import { createTurnStreamController } from '../loop-factory.js'
+import { sessionFailureFields } from '../../server/session-failure-fields.js'
+import { errorRecoveryGuidance } from '../../api/error-classifier.js'
 import type { AgentLoop } from '../loop.js'
 
 const projection = '<cognitive-mirror>fixture projection</cognitive-mirror>'
@@ -66,10 +68,11 @@ async function createFixture(context: TestContext, persistenceError?: string) {
   })
   engine.setCognitiveProjection(projection)
   engine.setToolContext(toolContext)
-  const client: StreamClient = withExecutionContinuity(new OpenAIClient({
+  const transport = new OpenAIClient({
     apiKey: 'fixture', baseUrl: 'https://fixture.test/v1', providerName: 'fixture',
     model: 'fixture-model', maxTokens: 4096,
-  }), { provider: 'fixture', model: 'fixture-model', singleAttempt: true })
+  })
+  const client: StreamClient = withExecutionContinuity(transport, { provider: 'fixture', model: 'fixture-model', singleAttempt: true })
   const self = {
     cwd: root, session,
     config: { sessionId: 'fixture-session', client, promptEngine: engine, providerName: 'fixture', contextWindow: 200_000 },
@@ -90,8 +93,38 @@ async function createFixture(context: TestContext, persistenceError?: string) {
   assert.ok(success)
   assert.equal(success.status, 'complete')
   assert.equal(sentBodies.length, 1)
-  return { self, session, engine, controller, request, logPath, sentBodies, success }
+  return { self, session, engine, controller, request, logPath, sentBodies, success, transport }
 }
+
+test('actual transport drift carries source/render evidence into abort logs, server events and TUI guidance', async context => {
+  const fixture = await createFixture(context)
+  const request = fixture.engine.buildOaiRequest(fixture.session.getMessages())
+  assert.deepEqual(request.continuityEvidence, { sourcePrefix: 'same', renderPrefix: 'same' })
+  type Prepared = { messages: import('../../api/oai-types.js').OaiMessage[]; normalization: import('../../api/wire-normalization.js').WireNormalizationSummary }
+  const transport = fixture.transport as unknown as { prepareWireMessages(messages: import('../../api/oai-types.js').OaiMessage[], opts?: unknown): Prepared }
+  const original = transport.prepareWireMessages.bind(transport)
+  context.mock.method(transport, 'prepareWireMessages', (...args: Parameters<typeof original>) => {
+    const prepared = original(...args)
+    prepared.messages[1] = { ...prepared.messages[1]!, content: String(prepared.messages[1]!.content) + 'x'.repeat(50) } as import('../../api/oai-types.js').OaiMessage
+    return prepared
+  })
+  const result = await fixture.controller.streamTurn({ request, turn: 9, lastTurnTextFingerprint: 'ok', callbacks })
+  assert.ok(result.streamError instanceof ContinuationPrefixError)
+  assert.equal(fixture.sentBodies.length, 1)
+  const rows = await readRows(fixture.logPath, 2)
+  const failed = rows.find(row => row.event === 'stream_attempt_aborted')!
+  const fields = sessionFailureFields(result.streamError)
+  assert.equal(fields.continuity?.stage, 'transport')
+  assert.equal(fields.continuity?.sourcePrefix, 'same')
+  assert.equal(fields.continuity?.renderPrefix, 'same')
+  assert.equal(fields.continuity?.normalization?.version, 'openai-chat-canonical-v1')
+  assert.equal(fields.continuity?.deltaChars, 50)
+  assert.deepEqual(failed.continuityFailure, fields.continuity)
+  assert.match(errorRecoveryGuidance(result.streamError), /发送层/)
+  assert.doesNotMatch(JSON.stringify(failed), /initial fixture goal|fixture projection|fixture tool context/)
+  assert.equal((fixture.success.continuity as { wireTransformVersion: string }).wireTransformVersion, 'openai-chat-canonical-v1')
+  assert.equal((fixture.success.wireNormalization as { changedMessages: number }).changedMessages, 0)
+})
 
 async function rejectFork(fixture: Awaited<ReturnType<typeof createFixture>>, turn: number) {
   const result = await fixture.controller.streamTurn({

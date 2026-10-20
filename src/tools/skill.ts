@@ -29,6 +29,10 @@ skill 是可复用的工作流 playbook。available-skills 区块列出了每个
       properties: {
         name: { type: 'string', description: '要加载或标记完成的 skill 的确切名称（见 available-skills 区块）。' },
         complete: { type: 'boolean', description: '为 true 时，将该 skill 标记为已完成而不是加载它。该 skill 的指令将不再被重新注入上下文。' },
+        action: { type: 'string', enum: ['load', 'save_draft'], description: '默认 load；save_draft 将 content 保存为待用户审核的草稿，不能发布。' },
+        scope: { type: 'string', enum: ['personal', 'project'], description: '用户选定的草稿范围。' },
+        content: { type: 'string', description: '含 name、description 的完整 Markdown。save_draft 必填。' },
+        expectedVersion: { type: ['string', 'null'], description: '更新传已审阅版本；新建传 null。' },
       },
       required: ['name'],
     },
@@ -40,6 +44,17 @@ skill 是可复用的工作流 playbook。available-skills 区块列出了每个
       return { content: '错误：name 必填', isError: true }
     }
     const name = raw.trim()
+    if (params.input.action === 'save_draft') {
+      if (!params.saveSkillDraft) return { content: 'Draft saving is unavailable in this host. No draft was saved.', isError: true }
+      const { scope, content, expectedVersion } = params.input
+      if (params.input.complete || (scope !== 'personal' && scope !== 'project') || typeof content !== 'string'
+        || (expectedVersion !== undefined && expectedVersion !== null && typeof expectedVersion !== 'string')) return { content: 'Invalid draft input', isError: true }
+      try {
+        const skillDraft = await params.saveSkillDraft({ name, scope, content, expectedVersion: expectedVersion as string | null | undefined })
+        return { content: JSON.stringify({ draft: true, ...skillDraft }), uiContent: `待审核草稿：${skillDraft.name}`, skillDraft }
+      } catch (error) { return { content: error instanceof Error ? error.message : String(error), isError: true } }
+    }
+    if (params.input.action !== undefined && params.input.action !== 'load') return { content: 'Unknown skill action', isError: true }
     const registry = params.skillRegistry ?? skillRegistry
 
     const skill = registry.get(name) ?? registry.list().find(s => s.name.toLowerCase() === name.toLowerCase())
@@ -95,7 +110,7 @@ skill 是可复用的工作流 playbook。available-skills 区块列出了每个
     }
   },
 
-  requiresApproval: () => false,
-  isConcurrencySafe: () => true,
+  requiresApproval: params => params.input?.action === 'save_draft',
+  isConcurrencySafe: () => false,
   isEnabled: () => true,
 }

@@ -6,6 +6,7 @@ import { estimateBudgetInput, type RequestBudgetPolicy } from '../context/reques
 import { buildSummaryRequests, summaryRequestFits } from './budget-summary-request.js'
 import { createHash, randomUUID } from 'node:crypto'
 import { stableStringify } from '../api/stable-json.js'
+import { groupIntoRoundsOai } from '../context/rounds.js'
 
 export interface BudgetCompactionDeps {
   client: StreamClient
@@ -23,8 +24,8 @@ export interface BudgetCompactionDeps {
   archiveRejectedReport?: (text: string, reason: string) => Promise<string | undefined>
 }
 
-/** Keep the latest user request and the last complete tool group verbatim.
- * Unknown/unmatched tool results make the cut move backwards, never delete more. */
+/** Keep affordable recent groups verbatim; only complete groups may enter the archived summary.
+ * Ambiguous tool results never authorize extending the cut. */
 export function budgetCompactionSplit(messages: OaiMessage[], recentBudget?: number): number {
   let split = Math.max(0, messages.length - 4)
   if (recentBudget !== undefined) {
@@ -36,6 +37,23 @@ export function budgetCompactionSplit(messages: OaiMessage[], recentBudget?: num
     }
   }
   while (split > 0 && messages[split]?.role === 'tool') split--
+  if (recentBudget !== undefined) {
+    let tokens = estimateBudgetInput(messages.slice(split)).inputTokens
+    if (tokens > recentBudget) {
+      for (const round of groupIntoRoundsOai(messages)) {
+        if (round.endMessageIndex <= split) continue
+        if (round.apiInvariant !== 'ok') break
+        const group = messages.slice(round.startMessageIndex, round.endMessageIndex)
+        const calls = group[0]?.role === 'assistant' ? group[0].tool_calls ?? [] : []
+        const results = group.filter(message => message.role === 'tool')
+        if (new Set(calls.map(call => call.id)).size !== calls.length || calls.length !== results.length
+          || new Set(results.map(message => message.tool_call_id)).size !== results.length) break
+        tokens -= estimateBudgetInput(group).inputTokens
+        split = round.endMessageIndex
+        if (tokens <= recentBudget) break
+      }
+    }
+  }
   return split
 }
 
@@ -89,10 +107,10 @@ async function compactBudgetHistoryImpl(messages: OaiMessage[], deps: BudgetComp
   deps.signal?.throwIfAborted()
   const old = messages.slice(0, split)
   const recent = messages.slice(split)
-  const latestUser = [...messages].reverse().find(m => m.role === 'user' && !isSystemReminder(m.content))
+  const latestUser = [...messages].reverse().find(m => m.role === 'user' && (m.origin === 'human' || !isSystemReminder(m.content)))
   // Human instructions and legacy user data survive verbatim; a model summary
   // cannot prove it preserved every requirement or pending approval.
-  const protectedUsers = new Set([...old.filter(m => m.role === 'user' && (!m.origin || m.origin === 'human' || m.origin === 'legacy_unknown') && !isSystemReminder(m.content)), latestUser, deps.protectedUser].filter((m): m is OaiMessage => !!m))
+  const protectedUsers = new Set([...old.filter(m => m.role === 'user' && (!m.origin || m.origin === 'human' || m.origin === 'legacy_unknown') && (m.origin === 'human' || !isSystemReminder(m.content))), latestUser, deps.protectedUser].filter((m): m is OaiMessage => !!m))
   const protectedUser = old.filter(m => protectedUsers.has(m))
   const parts = summaryParts(old.map((message, index) => ({ message, index })).filter(({ message }) => !protectedUsers.has(message)))
   const requests = buildSummaryRequests(parts, deps.model, deps.client, deps.summaryPolicy, deps.summaryMaxTokens)

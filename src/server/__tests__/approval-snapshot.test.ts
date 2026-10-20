@@ -81,3 +81,16 @@ test('explicit timeout still denies without default automatic approval', async (
     assert.equal(manager.getSession(session.id)!.pendingApprovals, 0)
   } finally { manager.abort(session.id) }
 })
+
+test('skill runtime preview survives authoritative approval snapshot recovery', async () => {
+  const { manager, session, cb } = setup()
+  const context: NonNullable<Parameters<AgentCallbacks['onApprovalRequired']>[3]> = { previewDigest: 'a'.repeat(64), runtimePreview: { skill: { scope: 'project', name: 'calc', skillId: 'fixture' }, packageRef: 'b'.repeat(64), interpreter: { path: '/python', realPath: '/python', version: '3.12.4' }, requirements: null, source: { indexUrl: 'https://pypi.org/simple' }, envDir: '/env', buildPolicy: 'wheel' } }
+  try {
+    const pending = cb.onApprovalRequired('runtime', 'skill_runtime', { action: 'prepare', name: 'calc' }, context)
+    assert.deepEqual(manager.getApprovalSnapshot(session.id)?.approvals[0]?.runtimeContext, context)
+    const event = manager.getEvents(session.id)?.events.find(event => event.type === 'approval_required')
+    assert.deepEqual(event?.data.runtimeContext, context)
+    manager.answerIntervention(session.id, 'runtime', 'reject')
+    await pending
+  } finally { manager.abort(session.id) }
+})

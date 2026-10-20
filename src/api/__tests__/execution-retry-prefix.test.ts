@@ -111,6 +111,7 @@ test('a blocked history rewrite keeps both baselines intact and records the actu
     assert.equal(aborted[0]!.usage!.observation!.wire!.comparison, 'fork')
     assert.deepEqual(aborted[0]!.usage!.observation!.continuity, {
       cacheGenerationId: saved.cacheGenerationId, generationReason: saved.generationReason,
+      wireTransformVersion: saved.wireTransformVersion,
       optionsHash: saved.optionsHash, toolsHash: saved.toolsHash, credentialScope: saved.credentialScope,
     })
     assert.deepEqual(aborted[0]!.usage!.observation!.fields, {})

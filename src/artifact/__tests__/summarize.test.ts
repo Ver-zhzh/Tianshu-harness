@@ -135,12 +135,21 @@ describe('summarizeGrepResult', () => {
       'C:\\proj\\a.ts:1:Foo\r\nC:\\proj\\b.ts:2:Foo\r\nC:\\proj\\a.ts-3-context',
       'Foo',
     )
-    assert.ok(result.summary.includes('3 matches'))
+    assert.ok(result.summary.includes('2 matches'))
     assert.ok(result.summary.includes('2 files'), `expected 2 files, got: ${result.summary}`)
     assert.ok(result.summary.includes('C:\\proj\\a.ts'))
     assert.ok(result.summary.includes('C:\\proj\\b.ts'))
     // The drive letter must not become its own "file" entry.
     assert.ok(!/Files:[^\n]*\bC\b(?!:)/.test(result.summary), 'drive letter must not be a separate file')
+  })
+
+  it('excludes truncation and edit metadata from grep match and file counts', () => {
+    const result = summarizeGrepResult([
+      'src/a.ts:1:needle', 'src/a.ts:>   3│ needle', 'src/a.ts:    4│ context',
+      '[truncated: showing 2 matches — result was cut short]', 'hash_edit 锚点（src/a.ts）：', '  L1:abcdef',
+    ].join('\n'), 'needle')
+    assert.match(result.summary, /2 matches in 1 files\. Files: src\/a.ts$/)
+    assert.match(summarizeGrepResult('1-before\n2:needle\n3-after', 'needle').summary, /1 matches in 1 files/)
   })
 })
 

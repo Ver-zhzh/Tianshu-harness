@@ -730,17 +730,18 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
           ...cfg,
           exists: cfg.gitBashPath ? existsSync(cfg.gitBashPath) : null,
           gitExists: cfg.gitPath ? existsSync(cfg.gitPath) : null,
+          pythonExists: cfg.pythonPath ? existsSync(cfg.pythonPath) : null,
         },
       }
     }, apiToken),
 
     'PUT /config/shell': withAuth((body) => {
-      const { gitBashPath, gitPath } = (body ?? {}) as { gitBashPath?: unknown; gitPath?: unknown }
-      if (gitBashPath === undefined && gitPath === undefined) {
-        return { status: 400, body: { error: 'gitBashPath or gitPath is required' } }
+      const { gitBashPath, gitPath, pythonPath } = (body ?? {}) as { gitBashPath?: unknown; gitPath?: unknown; pythonPath?: unknown }
+      if (gitBashPath === undefined && gitPath === undefined && pythonPath === undefined) {
+        return { status: 400, body: { error: 'gitBashPath, gitPath or pythonPath is required' } }
       }
       try {
-        const next = setShellConfig({ gitBashPath, gitPath })
+        const next = setShellConfig({ gitBashPath, gitPath, pythonPath })
         return {
           status: 200,
           body: {
@@ -748,6 +749,7 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
             ...next,
             exists: next.gitBashPath ? existsSync(next.gitBashPath) : null,
             gitExists: next.gitPath ? existsSync(next.gitPath) : null,
+            pythonExists: next.pythonPath ? existsSync(next.pythonPath) : null,
           },
         }
       } catch (err) {

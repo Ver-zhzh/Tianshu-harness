@@ -1,3 +1,5 @@
+import { readPackage } from '../../skills/skill-package.js'
+import { SKILL_RUNTIME_TOOL } from '../../tools/skill-runtime.js'
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs'
@@ -19,6 +21,7 @@ import { rivetHome } from '../../config/paths.js'
 import { executeWithCourseProgress } from '../course-file-progress.js'
 import { EvidenceTracker } from '../evidence.js'
 import { READ_FILE_TOOL } from '../../tools/read-file.js'
+import { SKILL_TOOL } from '../../tools/skill.js'
 import { recordConvergenceInput, replayConvergenceInput } from '../convergence-replay.js'
 import { SessionRegistry } from '../session-registry.js'
 import { resolveBetterSqlite3 } from '../../repo/native-resolver.js'
@@ -108,6 +111,87 @@ describe('executeToolUse', () => {
       ...overrides,
     }
   }
+
+  it('skill runtime: real approval pipeline preserves policy, preview and execution plan', async () => {
+    const cwd = mkdtempSync(join(testTmp(), 'runtime-policy-'))
+    const previousTrust = process.env.RIVET_TRUST_PROJECT
+    process.env.RIVET_TRUST_PROJECT = '1'
+    try {
+      mkdirSync(join(cwd, 'scripts'))
+      writeFileSync(join(cwd, 'SKILL.md'), '---\nname: calc\ndescription: fixture\n---\nbody\n')
+      writeFileSync(join(cwd, 'runtime.yaml'), 'version: 1\npython:\n  entries:\n    run:\n      script: scripts/run.py\n')
+      writeFileSync(join(cwd, 'scripts/run.py'), 'print(1)\n')
+      const skill = { ...readPackage(cwd).definition, skillDir: cwd, source: 'rivet' }
+      const registry = { get: () => skill, list: () => [skill] }
+      for (const [mode, policy, expected] of [
+        ['manual', 'wheel', 1], ['auto-safe', 'wheel', 1], ['auto-accept', 'wheel', 0],
+        ['dangerously-skip-permissions', 'wheel', 0], ['auto-accept', 'source', 1], ['dangerously-skip-permissions', 'source', 0],
+      ] as const) {
+        const deps = makeDeps({ cwd })
+        deps.config.approvalMode = mode
+        deps.config.permissions = { allow: [{ tool: 'skill_runtime' }], deny: [] }
+        deps.config.promptEngine.getSkillRegistry = () => registry as any
+        deps.config.toolRegistry.get = () => SKILL_RUNTIME_TOOL
+        deps.config.toolRegistry.needsApproval = () => true
+        let calls = 0, received: any
+        deps.config.toolRegistry.execute = async (_name, params) => { received = params.runtimeExecutionPlan; return { content: 'ok' } }
+        await executeToolUse({ id: `runtime-${mode}-${policy}`, name: 'skill_runtime', input: { action: 'prepare', name: 'calc', buildPolicy: policy } }, deps, {
+          ...noopCallbacks,
+          onApprovalRequired: async (_id: string, _name: string, input: Record<string, unknown>, context: any) => {
+            calls++
+            assert.equal(input.runtimePreview, undefined)
+            assert.match(context.runtimePreview.packageRef, /^[a-f0-9]{64}$/)
+            assert.match(context.previewDigest, /^[a-f0-9]{64}$/)
+            return true
+          },
+        } as any, 1, false)
+        assert.equal(calls, expected, `${mode}/${policy}`)
+        assert.ok(received?.files?.length, `${mode}/${policy} must reach final consumer with captured bytes`)
+      }
+      for (const kind of ['deny', 'overlay', 'untrusted'] as const) {
+        const deps = makeDeps({ cwd })
+        deps.config.approvalMode = 'dangerously-skip-permissions'
+        deps.config.promptEngine.getSkillRegistry = () => registry as any
+        deps.config.toolRegistry.get = () => SKILL_RUNTIME_TOOL
+        deps.config.toolRegistry.needsApproval = () => true
+        deps.config.permissions = { allow: [], deny: kind === 'deny' ? [{ tool: 'skill_runtime' }] : [] }
+        if (kind === 'overlay') deps.config.permissionsOverlay = { allow: [], deny: [{ tool: 'skill_runtime' }], bashAllow: [], bashDeny: [] }
+        if (kind === 'untrusted') process.env.RIVET_TRUST_PROJECT = '0'
+        let ran = false
+        deps.config.toolRegistry.execute = async () => { ran = true; return { content: 'bad' } }
+        const result = await executeToolUse({ id: `runtime-block-${kind}`, name: 'skill_runtime', input: { action: 'prepare', name: 'calc' } }, deps, noopCallbacks as any, 1, false)
+        assert.equal(ran, false, kind)
+        assert.equal((result.toolResult as any).is_error, true, kind)
+      }
+    } finally {
+      if (previousTrust === undefined) delete process.env.RIVET_TRUST_PROJECT; else process.env.RIVET_TRUST_PROJECT = previousTrust
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('enforces creation-session tool restrictions at execution, including aliases', async () => {
+    const deps = makeDeps()
+    let executed = false
+    deps.config.executionToolAllowlist = ['skill', 'ask_user_question']
+    deps.config.toolRegistry.execute = async () => { executed = true; return { content: 'unexpected' } }
+    deps.config.toolRegistry.resolveName = () => 'bash'
+    const result = await executeToolUse({ id: 'restricted', name: 'shell', input: { command: 'publish' } }, deps, noopCallbacks as any, 1, false)
+    assert.equal(executed, false)
+    assert.equal((result.toolResult as any).is_error, true)
+    assert.match((result.toolResult as any).content, /restricted creation session/)
+  })
+
+  it('passes the draft writer to the actual skill tool and delivers the structured receipt', async () => {
+    const deps = makeDeps()
+    const receipt = { name: 'weekly', scope: 'personal' as const, version: 'a'.repeat(64) }
+    let received: unknown, delivered: unknown
+    deps.config.saveSkillDraft = async input => { received = input; return receipt }
+    deps.config.toolRegistry.execute = async (_name, params) => SKILL_TOOL.execute(params)
+    await executeToolUse({ id: 'save-draft', name: 'skill', input: { action: 'save_draft', name: 'weekly', scope: 'personal', content: 'fixture', expectedVersion: null } }, deps,
+      { ...noopCallbacks, onToolResult: (_id: string, _name: string, _result: string, _error: boolean, _path: string, _ui: string, evidence: any) => { delivered = evidence?.skillDraft } } as any, 1, false)
+    assert.deepEqual(received, { name: 'weekly', scope: 'personal', content: 'fixture', expectedVersion: null })
+    assert.deepEqual(delivered, receipt)
+  })
 
   it('bounds a thrown 306KB failure before callback and history delivery', async () => {
     const deps = makeDeps()

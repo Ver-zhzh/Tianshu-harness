@@ -3,6 +3,7 @@ title: Token 消耗台账 · 论坛同步接口与接入交接
 type: reference
 status: active
 date: 2026-10-12
+updated: 2026-10-17
 tags: [token-ledger, forum, sync, api, integration]
 ---
 
@@ -34,7 +35,7 @@ POST {token-server}/v1/token-usage ── Bearer 用户同步密钥（论坛签�
 
 ## 2. 用户侧配置（如何开启同步）
 
-CLI 使用 `/usage` 查看全设备本地累计，`/usage connect` 在原生终端的遮蔽输入框配置论坛个人同步密钥；`/usage sync` 立即同步，`/usage auto on` 明确开启每 30 分钟上传，`/usage auto off` 关闭自动上传，`/usage disconnect` 清除密钥。远控兼容终端提供查询和同步命令，密钥需通过原生终端或 VS Code 的安全入口配置，不要粘贴到普通命令行。
+CLI 使用 `/usage` 查看全设备本地累计，`/usage connect` 在原生终端的遮蔽输入框配置论坛个人同步密钥；`/usage sync` 请求同步，`/usage auto on` 明确开启默认每 2 分钟上传，`/usage auto off` 关闭自动上传，`/usage disconnect` 清除密钥。账号所有设备共享服务端窗口，手动同步也不能绕过冷却。远控兼容终端提供查询和同步命令，密钥需通过原生终端或 VS Code 的安全入口配置，不要粘贴到普通命令行。
 
 VS Code 在设置抽屉的「Token 账本」中查看累计、设置个人同步密钥、开关自动同步及立即同步。密码输入在 VS Code 宿主中完成，网页界面只接收「已配置」状态。默认只记录本地数据；配置密钥不会自动开启上传。上传端点、密钥与自动上传开关只接受用户配置，仓库项目配置不能自行启用或改变上传目标。
 
@@ -52,7 +53,7 @@ VS Code 在设置抽屉的「Token 账本」中查看累计、设置个人同步
       "endpoint": "https://tianshuharness.com/token/v1/token-usage",
       "apiKey": "tsu_论坛签发的密钥",
       "autoSync": true,
-      "intervalMinutes": 30
+      "intervalMinutes": 2
     }
   }
 }
@@ -64,7 +65,7 @@ VS Code 在设置抽屉的「Token 账本」中查看累计、设置个人同步
 | `deviceName` | 缺省 `os.hostname()`；展示用 |
 | `forum.endpoint` | 配置个人同步密钥后缺省使用 `https://tianshuharness.com/token/v1/token-usage`；没有密钥不上传。完整 POST URL，仅接受 HTTPS 或本机 loopback HTTP，不含用户名、密码、查询或片段 |
 | `forum.apiKey` | 上传必须配置；只写入，不回显。清除密钥会关闭自动上传并取消进行中的请求 |
-| `forum.autoSync` | 默认 `false`；`true` 且密钥与安全端点齐备时，会话内每 `intervalMinutes`（默认 30）推一趟，退出时冲刷最后一趟（3s 有界）。桌面端由 sidecar 进程承担间隔推送 |
+| `forum.autoSync` | 默认 `false`；`true` 且密钥与安全端点齐备时，会话内每 `intervalMinutes`（默认 2）请求推送，仍尊重账号共享的服务端冷却；退出时冲刷最后一趟（3s 有界）。桌面端由 sidecar 进程承担间隔推送 |
 
 退出时始终在默认 3 秒内等待本地保存与已在进行的手动同步；到期取消请求和旧同步队列。未选择自动上传时，退出不会新发上传。账本跨进程锁等待预算保持 5 秒，超时保留数据并拒绝提交。
 

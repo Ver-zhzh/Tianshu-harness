@@ -32,6 +32,7 @@ import { execFileSync } from 'node:child_process'
 import { assertNativeBinary } from '../src/platform/native-binary.ts'
 import { resolveTargetPlatform } from './runtime-platform-filter.js'
 import { packedSqlitePath } from './native-pack-paths.js'
+import { packJobLauncher } from './pack-job-launcher.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 // 脚本在 scripts/，仓库根在上一级
@@ -253,6 +254,7 @@ function packAxObserver() {
   console.log(`✅ Packed ax-observer (${sizeKb}KB) → ${target}`)
 }
 packAxObserver()
+packJobLauncher(repoRoot, PLATFORM)
 
 if (!existsSync(SOURCE)) {
   console.error('⚠ pack-native: better-sqlite3 native binary not found at %s — skipping', SOURCE)

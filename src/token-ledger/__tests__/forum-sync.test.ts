@@ -108,13 +108,13 @@ test('超时（AbortError/TimeoutError）归类为 timeout', async () => {
   if (!res.ok) assert.equal(res.code, 'timeout')
 })
 
-test('429 属瞬态：重试后成功', async () => {
+test('429 is returned to the scheduler without an immediate retry', async () => {
   const { fetchImpl, calls } = stubFetch([{ status: 429 }, { status: 200 }])
   const res = await pushTokenUsageSnapshot(SNAPSHOT, {
     endpoint: 'https://forum.example.com/x', fetchImpl, backoffMs: 1,
   })
-  assert.deepEqual(res, { ok: true, status: 200 })
-  assert.equal(calls.length, 2)
+  assert.deepEqual(res, { ok: false, code: 'http_5xx', status: 429 })
+  assert.equal(calls.length, 1)
 })
 
 
@@ -150,4 +150,23 @@ test('rejects insecure non-loopback endpoints before sending a key', async () =>
   })
   assert.equal(result.ok, false)
   assert.equal(calls, 0)
+})
+
+test('official uploads retry only a timeout once and preserve the exact serialized payload', async () => {
+  const timeout = Object.assign(new Error('fixture timeout'), { name: 'TimeoutError' })
+  for (const failure of [{status:503}, {throw:new Error('fixture network')}, {throw:timeout}]) {
+    const transport = stubFetch([failure, {status:200}])
+    const result = await pushTokenUsageSnapshot(SNAPSHOT, {endpoint:'https://tianshuharness.com/token/v1/token-usage',fetchImpl:transport.fetchImpl,retries:10,backoffMs:0})
+    assert.equal(transport.calls.length, failure.throw === timeout ? 2 : 1)
+    assert.equal(result.ok, failure.throw === timeout)
+    if (transport.calls.length === 2) assert.equal(transport.calls[0]?.init?.body,transport.calls[1]?.init?.body)
+  }
+})
+
+test('successful upload receipts expose pacing without confusing it with failure backoff', async () => {
+  const result = await pushTokenUsageSnapshot(SNAPSHOT, {
+    endpoint:'https://tianshuharness.com/token/v1/token-usage',
+    fetchImpl:async()=>({status:200,headers:new Headers({'x-ledger-upload-after':'120'}),text:async()=>' {"ok":true,"stale":false}'}),
+  })
+  assert.deepEqual(result,{ok:true,status:200,nextUploadAfterMs:120_000})
 })

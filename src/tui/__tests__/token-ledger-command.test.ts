@@ -45,7 +45,7 @@ test('TUI connection keeps uploads off until explicit manual sync or auto on; di
     assert.equal(fx.uploaded(), 1)
     assert.equal(fx.service.status().pending, false)
     await app.tryDispatchSlash('/token-ledger auto on')
-    assert.equal(fx.persisted().tokenLedger.forum?.intervalMinutes, 30)
+    assert.equal(fx.persisted().tokenLedger.forum?.intervalMinutes, 2)
     assert.equal(fx.service.status().autoSync, true)
     await app.tryDispatchSlash('/token-ledger disconnect')
     assert.equal(fx.persisted().tokenLedger.forum?.apiKey, undefined)
@@ -93,4 +93,15 @@ test('ledger cost display does not assign a currency to mixed model pricing', as
     assert.doesNotMatch(output.join('\n'), /[$¥]/)
     assert.match(output.join('\n'), /model pricing units may differ/)
   } finally { fx.close() }
+})
+
+test('automatic upload toggles preserve an explicitly configured interval',async()=>{
+  const context=fixture()
+  try{
+    context.ctx.config=context.settings({forum:{apiKey:'synthetic-key',intervalMinutes:45}})
+    for(const action of ['on','off']){
+      await handleTokenLedgerCommand(context.ctx,['/usage','auto',action],()=>{}, {updateSettings:context.settings})
+      assert.equal(context.persisted().tokenLedger.forum?.intervalMinutes,45)
+    }
+  }finally{context.close()}
 })

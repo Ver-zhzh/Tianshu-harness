@@ -19,6 +19,12 @@ function defaultRunTaskkill(args: string[]): void {
 
 export type ProcessCleanupResult = 'exited' | 'failed' | 'unknown'
 
+export interface ProcessCleanupDeps {
+  platform?: NodeJS.Platform
+  runTaskkill?: (args: string[]) => Promise<ProcessCleanupResult>
+  kill?: KillFn
+}
+
 function runTaskkillAsync(args: string[]): Promise<ProcessCleanupResult> {
   return new Promise(resolve => {
     let done = false
@@ -39,15 +45,17 @@ function runTaskkillAsync(args: string[]): Promise<ProcessCleanupResult> {
 }
 
 /** Only the caller-owned child is eligible; never terminate by executable name. */
-export async function killProcessTreeAsync(child: ChildProcess, signal: NodeJS.Signals = 'SIGTERM'): Promise<ProcessCleanupResult> {
-  if (!child.pid || child.exitCode !== null || child.signalCode !== null) return 'exited'
-  if (process.platform === 'win32') return runTaskkillAsync(taskkillArgs(child.pid))
+export async function killProcessTreeAsync(child: ChildProcess, signal: NodeJS.Signals = 'SIGTERM', deps: ProcessCleanupDeps = {}): Promise<ProcessCleanupResult> {
+  const platform = deps.platform ?? process.platform
+  if (!child.pid) return 'exited'
+  if (child.exitCode !== null || child.signalCode !== null) return platform === 'win32' ? 'unknown' : 'exited'
+  if (platform === 'win32') return (deps.runTaskkill ?? runTaskkillAsync)(taskkillArgs(child.pid))
   return new Promise(resolve => {
     const timer = setTimeout(() => { child.removeListener('exit', exited); resolve('unknown') }, 5000)
-    const force = setTimeout(() => killProcessTree(child, 'SIGKILL'), 3000)
+    const force = setTimeout(() => killProcessTree(child, 'SIGKILL', deps.kill, platform), 3000)
     const exited = () => { clearTimeout(timer); clearTimeout(force); resolve('exited') }
     child.once('exit', exited)
-    killProcessTree(child, signal)
+    killProcessTree(child, signal, deps.kill, platform)
   })
 }
 
@@ -126,6 +134,8 @@ const HERE = dirname(fileURLToPath(import.meta.url))
  *
  * 查找顺序：`RIVET_JOB_LAUNCHER` 覆盖 → 从本模块所在目录**逐级上溯**（≤5 跳），每级先看
  * `<dir>/native/` 再看 `<dir>/dist/native/`（同级 native/ 优先）。
+ * Git 的 owned command 路径在缺少 helper 时仍直接运行；父进程已退出但管道未闭合时，
+ * 无法确认逃逸 MSYS 父链的后代已清理，返回 unknown，而不是禁用 Git 或按可能复用的 PID 再杀进程。
  *
  * 为什么不能是固定 `../../`：那个写法只在源码布局（`src/tools/*.ts`）恰好命中仓根。产物态下
  * `dist/main.js` / `dist/chunk-*.js` / `dist/cli/entry.js` 的 `import.meta.url` 都在 `dist/` 下，
@@ -242,4 +252,50 @@ export function spawnShell(
   if (!launcher) return spawnFn(shell.cmd, [...shell.args, command], options)
   const cwd = typeof options.cwd === 'string' ? options.cwd : process.cwd()
   return spawnFn(launcher, jobLaunchArgv(shell, command, cwd), options)
+}
+
+export interface SpawnOwnedCommandDeps extends ProcessCleanupDeps {
+  launcher?: string | null
+  spawnFn?: typeof spawn
+}
+
+export interface OwnedCommand {
+  child: ChildProcess
+  ownership: 'job' | 'group' | 'process'
+  cleanup: (signal?: NodeJS.Signals) => Promise<ProcessCleanupResult>
+}
+
+export function spawnOwnedCommand(command: string, args: string[], options: SpawnOptions, deps: SpawnOwnedCommandDeps = {}): OwnedCommand {
+  const platform = deps.platform ?? process.platform
+  const launcher = platform === 'win32'
+    ? deps.launcher === undefined ? resolveJobLauncher({ platform }) : deps.launcher
+    : null
+  const cwd = typeof options.cwd === 'string' ? options.cwd : options.cwd ? fileURLToPath(options.cwd) : process.cwd()
+  const child = (deps.spawnFn ?? spawn)(launcher ?? command, launcher
+    ? ['--cwd', cwd, '--parent-pid', String(process.pid), '--', command, ...args]
+    : args, {
+    ...options,
+    shell: false,
+    windowsVerbatimArguments: false,
+    windowsHide: true,
+    detached: platform !== 'win32',
+  })
+  const ownership: OwnedCommand['ownership'] = launcher ? 'job' : platform === 'win32' ? 'process' : 'group'
+  let closed = false
+  let cleanupPromise: Promise<ProcessCleanupResult> | undefined
+  child.once('close', () => { closed = true })
+  return {
+    child,
+    ownership,
+    cleanup: (signal = 'SIGTERM') => {
+      if (closed) return Promise.resolve('exited')
+      if (cleanupPromise) return cleanupPromise
+      if (child.exitCode !== null || child.signalCode !== null) {
+        if (ownership === 'job') return Promise.resolve('exited')
+        if (ownership === 'group') killProcessTree(child, 'SIGKILL', deps.kill, platform)
+      }
+      cleanupPromise = killProcessTreeAsync(child, signal, deps)
+      return cleanupPromise
+    },
+  }
 }

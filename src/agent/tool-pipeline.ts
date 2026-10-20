@@ -1,3 +1,5 @@
+import { assertRuntimeAccess } from '../skills/runtime/policy.js'
+import { prepareSkillRuntimeCall } from '../tools/skill-runtime.js'
 import { createVerificationRecorder, beginCourseToolExecution, type CourseExecutionCallbacks } from './course-verification-execution.js'
 import type { AgentConfig, AgentCallbacks } from './loop-types.js'
 import type { TurnBudget } from './turn-budget.js'
@@ -682,6 +684,11 @@ async function executeToolUseInner(
   if (canonicalToolName !== tu.name) {
     tu = { ...tu, name: canonicalToolName }
   }
+  if (deps.config.executionToolAllowlist && !deps.config.executionToolAllowlist.includes(tu.name)) {
+    const message = `Tool ${tu.name} is unavailable in this restricted creation session.`
+    callbacks.onToolResult(tu.id, tu.name, message, true)
+    return { toolResult: { type: 'tool_result', tool_use_id: tu.id, content: message, is_error: true }, traceStore, importGraph, lastConflictCheckCount, checkpointCreated, latestRisk }
+  }
 
   let recordVerification = createVerificationRecorder(deps)
   const params: ToolCallParams = {
@@ -717,6 +724,7 @@ async function executeToolUseInner(
     exitPlanMode: deps.exitPlanMode,
     getVerificationEvidence: deps.getVerificationEvidence,
     skillRegistry: deps.config.promptEngine.getSkillRegistry?.(),
+    saveSkillDraft: deps.config.saveSkillDraft,
     onSkillInvoked: deps.onSkillInvoked,
     onSkillCompleted: deps.onSkillCompleted,
     sessionModifiedFiles: [...deps.evidence.getState().filesModified],
@@ -948,6 +956,7 @@ async function executeToolUseInner(
       targetFilePath: writePath,
       activePlanFilePath: deps.config.activePlanFilePath,
       delegatesWriteCapableProfile,
+      toolInput: tu.input,
     })
     if (!planModeResult.allowed) {
       const planMsg = planModeResult.reason ?? 'Plan Mode: write operations blocked'
@@ -1026,6 +1035,9 @@ async function executeToolUseInner(
       return { toolResult: { type: 'tool_result', tool_use_id: tu.id, content: reason, is_error: true }, traceStore, importGraph, lastConflictCheckCount, checkpointCreated, latestRisk }
     }
 
+    if (tu.name === 'skill_runtime' && (tu.input.action === 'prepare' || tu.input.action === 'run')) {
+      params.runtimeExecutionPlan = await prepareSkillRuntimeCall(params, { cwd: deps.cwd, origin: 'model', sessionId: deps.sessionId, planMode: deps.config.planModeState, deny: denyRules, overlay: deps.config.permissionsOverlay })
+    }
     const allowlisted = isToolAllowed(tu.name, tu.input, allowRules)
     const bashAllowlisted = tu.name === 'bash' && typeof tu.input.command === 'string'
       ? isBashCommandAllowlisted(tu.input.command, bashAllowPrefixes)
@@ -1089,6 +1101,7 @@ async function executeToolUseInner(
     // 必须弹审批，permissions.allow 与 sensorium 都不能豁免（豁免只有两条：
     // 应用级 grant 让 needsApproval=false，或用户显式选 YOLO）。auto-accept
     // 保持历史语义（所有工具整体免审），不在本轮收窄。
+    const runtimeApprovalGate = tu.name === 'skill_runtime' && needsApproval && (approvalMode === 'manual' || approvalMode === 'auto-safe')
     const computerUsePerAppGate = tu.name === 'computer_use'
       && needsApproval
       && (approvalMode === 'manual' || approvalMode === 'auto-safe')
@@ -1103,7 +1116,7 @@ async function executeToolUseInner(
             ? true
             : bashWriteRequiresApproval
               ? true
-              : computerUsePerAppGate
+              : runtimeApprovalGate || computerUsePerAppGate
                 ? true
                 : allowlisted
                   ? false
@@ -1149,7 +1162,7 @@ async function executeToolUseInner(
 
     if (shouldAsk) {
       touchActivity(activityKey, `tool:${tu.name}:await-approval`)
-      const approvalResult = await callbacks.onApprovalRequired(tu.id, tu.name, tu.input)
+      const approvalResult = await callbacks.onApprovalRequired(tu.id, tu.name, tu.input, params.runtimeExecutionPlan ? { runtimePreview: params.runtimeExecutionPlan.preview, previewDigest: params.runtimeExecutionPlan.digest, rebuild: params.runtimeExecutionPlan.request.rebuild } : undefined)
       const resolved: ApprovalResult = typeof approvalResult === 'boolean'
         ? { approved: approvalResult }
         : approvalResult
@@ -1500,6 +1513,12 @@ async function executeToolUseInner(
           // Claim approvals and durable intent writes can await while runtime
           // policy changes. Recheck immediately before dispatch, without asking again.
           latestRisk = assertApprovedInputBoundary(tu.name, tu.input, deps, params)
+          if (params.runtimeExecutionPlan) {
+            const current = params.skillRegistry?.get(String(tu.input.name)) ?? params.skillRegistry?.list().find(skill => skill.name.toLowerCase() === String(tu.input.name).toLowerCase())
+            assertRuntimeAccess({ cwd: deps.cwd, origin: 'model', sessionId: deps.sessionId, planMode: deps.config.planModeState, deny: deps.config.permissions?.deny, overlay: deps.config.permissionsOverlay }, tu.input.action as 'prepare' | 'run', current, tu.input)
+            const approved = params.runtimeExecutionPlan.request
+            if (tu.input.action !== approved.action || String(tu.input.name).toLowerCase() !== params.runtimeExecutionPlan.resolved.skill.name.toLowerCase() || (tu.input.rebuild === true) !== approved.rebuild || (tu.input.buildPolicy !== undefined && tu.input.buildPolicy !== approved.buildPolicy) || (approved.action === 'run' && (tu.input.entry !== approved.entry || JSON.stringify(tu.input.args ?? []) !== JSON.stringify(approved.args) || (tu.input.stdin ?? '') !== approved.stdin || (tu.input.timeoutSeconds !== undefined && tu.input.timeoutSeconds !== approved.timeoutSeconds)))) throw new Error('preview_mismatch: 审批后参数已变化，请重新预览并审批')
+          }
           composedSignal.throwIfAborted()
           // Zen 相位下未注册工具（幻觉调用）不晋升，但把 registry 的裸
           // Unknown tool 报错变成可行动的 zen_unlock 指引，避免死路重试。
@@ -1776,7 +1795,7 @@ async function executeToolUseInner(
     // DEBUG: unconditional trace for TUI rendering-loss investigation.
     // Log file: ~/.rivet/sessions/<project-slug>/<sessionId>/tool-result-trace.jsonl
     void emitToolResultTrace({ cwd: deps.cwd, sessionId: deps.sessionId, id: tu.id, name: tu.name, isError: harnessResult.isError, contentLen: finalContent.length, source: 'pipeline', errorKind: rawToolResult?.errorKind ?? harnessResult.errorClass })
-    callbacks.onToolResult(tu.id, tu.name, finalContent, harnessResult.isError ?? false, rawToolResult?.rawPath, rawToolResult?.uiContent, { command: rawToolResult?.command, outputText: rawToolResult?.displayOutput ?? rawToolResult?.uiContent ?? rawToolResult?.content, outputTruncated: rawToolResult?.displayOutputTruncated, images: rawToolResult?.images, exitCode: rawToolResult?.exitCode, lossiness: rawToolResult?.lossiness, ...(rawToolResult?.generatedImageId ? { generatedImageId: rawToolResult.generatedImageId } : {}) })
+    callbacks.onToolResult(tu.id, tu.name, finalContent, harnessResult.isError ?? false, rawToolResult?.rawPath, rawToolResult?.uiContent, { command: rawToolResult?.command, outputText: rawToolResult?.displayOutput ?? rawToolResult?.uiContent ?? rawToolResult?.content, outputTruncated: rawToolResult?.displayOutputTruncated, images: rawToolResult?.images, exitCode: rawToolResult?.exitCode, lossiness: rawToolResult?.lossiness, ...(rawToolResult?.generatedImageId ? { generatedImageId: rawToolResult.generatedImageId } : {}), ...(rawToolResult?.skillDraft ? { skillDraft: rawToolResult.skillDraft } : {}) })
 
     deps.recordToolHistory(tu.name, tu.input, harnessResult.isError, harnessResult.content, rawToolResult?.errorClass, rawToolResult?.errorKind)
 

@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -14,7 +14,7 @@ function fixture(t: import('node:test').TestContext, target: { os: string; arch:
   const root = mkdtempSync(join(tmpdir(), 'tianshu-pack-isolation-'))
   t.after(() => rmSync(root, { recursive: true, force: true }))
   mkdirSync(join(root, 'scripts')); mkdirSync(join(root, 'src', 'platform'), { recursive: true })
-  for (const name of ['pack-native.js', 'native-pack-paths.js', 'runtime-platform-filter.js']) cpSync(join(repo, 'scripts', name), join(root, 'scripts', name))
+  for (const name of ['pack-native.js', 'pack-job-launcher.js', 'native-pack-paths.js', 'runtime-platform-filter.js']) cpSync(join(repo, 'scripts', name), join(root, 'scripts', name))
   cpSync(join(repo, 'src', 'platform', 'native-binary.ts'), join(root, 'src', 'platform', 'native-binary.ts'))
   writeFileSync(join(root, 'scripts', 'fetch-node-runtime.js'), 'export const DEFAULT_NODE_VERSION = "24.18.0"')
   writeFileSync(join(root, 'package.json'), '{"type":"module"}')
@@ -79,4 +79,19 @@ test('post-pack self-check rejects a host file changed during download', t => {
   const result = pack(f.root, target)
   assert.notEqual(result.status, 0)
   assert.match(result.stderr, /宿主原生件被改写/)
+})
+
+test('cross Windows helper staging runs even when the optional SQLite source is absent', { skip: process.platform === 'win32' }, t => {
+  const target = { os: 'win32', arch: 'x64' }
+  const f = fixture(t, target)
+  const sourceDir = join(f.root, 'native', 'win32-x64')
+  mkdirSync(sourceDir, { recursive: true })
+  const bytes = nativeHeader('win32', 'x64')
+  writeFileSync(join(sourceDir, 'job-launch.exe'), bytes)
+  rmSync(f.hostModule)
+  const result = pack(f.root, target)
+  assert.equal(result.status, 0, result.stdout + result.stderr)
+  const staged = join(f.root, 'dist', 'native', 'win32-x64', 'job-launch.exe')
+  assert.equal(existsSync(staged), true, 'pack-native must stage the required helper before its optional SQLite early return')
+  assert.deepEqual(readFileSync(staged), bytes)
 })

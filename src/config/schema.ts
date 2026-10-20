@@ -762,13 +762,17 @@ export const skillsSchema = z.object({
 
 export const mirrorsSchema = z.object({
   /** Master switch for domestic mirror injection. When enabled, bash tool
-   *  executions automatically receive mirror registry env vars and GitHub
-   *  clone URLs are rewritten to the chosen mirror. */
+   *  executions automatically receive mirror registry env vars; git
+   *  clone/fetch go through the mirror via url.<mirror>.insteadOf env
+   *  injection while push keeps the original github.com, and command text /
+   *  .git/config are never rewritten (issue #524). */
   enabled: z.boolean().default(false),
   /** Preset selector: 'default' = no mirrors, 'china' = domestic mirrors. */
   preset: z.enum(['default', 'china']).default('default'),
-  /** GitHub mirror override. 'default' falls back to the preset default. */
-  github: z.enum(['default', 'gitcode', 'kkgithub', 'fastgit']).default('default'),
+  /** GitHub mirror override. 'default' falls back to the preset default.
+   *  kkgithub/fastgit are legacy DEAD mirrors kept only for persisted-config
+   *  compatibility — they resolve to no mirror (direct github, issue #524). */
+  github: z.enum(['default', 'ghproxy', 'gitcode', 'kkgithub', 'fastgit']).default('default'),
   /** npm/yarn/pnpm registry override. */
   npm: z.enum(['default', 'taobao', 'tencent', 'huawei']).default('default'),
   /** PyPI pip index override. */
@@ -829,6 +833,11 @@ export const envSchema = z.object({
    *  var of the same name always wins (explicit override). Empty/unset falls
    *  back to the normal probe chain (PATH → common install dirs → bundled git). */
   gitPath: z.string().optional(),
+  /** Absolute path to a custom Python interpreter (issue #523). Consumed by the
+   *  skill runtime probe (skills/runtime/interpreter.ts) — doctor 诊断与环境
+   *  准备优先用它，缺省回退平台探测链（python3 → python；win32 加 py）。
+   *  同名 OS 环境变量 RIVET_PYTHON_PATH 恒优先（同 RIVET_GIT_PATH 惯例）。 */
+  pythonPath: z.string().optional(),
 }).default({})
 
 export const uiSchema = z.object({
@@ -1007,7 +1016,7 @@ export const tokenLedgerSchema = z.object({
     apiKey: z.string().optional(),
     /** 会话内定时自动同步，默认 false（opt-in）。 */
     autoSync: z.boolean().optional(),
-    /** 自动同步间隔（分钟），默认 30。 */
+    /** 自动同步间隔（分钟），默认 2。 */
     intervalMinutes: z.number().int().positive().optional(),
   }).strict().optional(),
 }).default({})

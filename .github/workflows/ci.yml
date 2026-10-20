@@ -134,3 +134,34 @@ jobs:
         run: >-
           node --input-type=module -e
           "import { execFileSync } from 'node:child_process'; import { join } from 'node:path'; for (const option of ['--help', '--version']) process.stdout.write(execFileSync(process.execPath, [join(process.env.FRONTEND_BUILD, 'cli', 'entry.js'), option], { encoding: 'utf8', windowsHide: true }));"
+
+  skill-runtime:
+    name: Skill Python runtime (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: npm ci
+      - name: Runtime declarations, pip, process trees, leases and public entrypoints
+        run: >-
+          node --import tsx scripts/run-node-tests.ts
+          src/skills/runtime/
+          src/tools/__tests__/process-exec.test.ts
+          src/tools/__tests__/skill-runtime.test.ts
+          src/cli/__tests__/skills-runtime-cli.test.ts
+          src/server/__tests__/skill-runtime-routes.test.ts
+          src/server/__tests__/skill-runtime-closure.test.ts
+          src/agent/__tests__/plan-mode-skill-runtime.test.ts
+      - name: Actual approval pipeline
+        run: node --import tsx --test --test-name-pattern="skill runtime: real approval" src/agent/__tests__/tool-pipeline.test.ts

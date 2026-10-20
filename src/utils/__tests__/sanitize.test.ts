@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { sanitizeForJsonTransport, sanitizeMessageContent, countContentChars } from '../sanitize.js'
+import { sanitizeForJsonTransport, sanitizeMessageContent } from '../sanitize.js'
 
 describe('sanitizeForJsonTransport', () => {
   it('passes through normal text unchanged', () => {
@@ -141,17 +141,3 @@ describe('sanitizeMessageContent', () => {
   })
 })
 
-describe('countContentChars (full-sanitize trigger)', () => {
-  it('counts string content, text parts and tool_calls', () => {
-    assert.equal(countContentChars([{ role: 'user', content: 'abc' }]), 3)
-    assert.equal(countContentChars([{ role: 'user', content: [{ type: 'text', text: 'abcd' }] }]), 4)
-    assert.equal(
-      countContentChars([{ role: 'assistant', tool_calls: [{ id: 't' }] }]),
-      JSON.stringify([{ id: 't' }]).length,
-    )
-  })
-
-  it('ignores malformed entries instead of throwing', () => {
-    assert.equal(countContentChars([null, 42, {}, { content: 7 }] as unknown[]), 0)
-  })
-})

@@ -155,7 +155,7 @@ const BASE_PROMPT = `<identity>
 </tool-usage>
 
 <downloads>
-当需要从 GitHub、npm、PyPI、Go proxy、Rust crates 等源下载依赖或仓库，且遇到速度慢、超时、被墙等情况时，可建议用户运行 /mirror china 切换到天枢内置的国内镜像（GitCode/kkgithub、淘宝 npm、清华 PyPI、goproxy.cn、清华 Rust）。开启后所有 bash 命令会自动注入镜像环境变量，GitHub 仓库 URL 也会自动改写。恢复默认用 /mirror default。
+当需要从 GitHub、npm、PyPI、Go proxy、Rust crates 等源下载依赖或仓库，且遇到速度慢、超时、被墙等情况时，可建议用户运行 /mirror china 切换到天枢内置的国内镜像（ghproxy/GitCode、淘宝 npm、清华 PyPI、goproxy.cn、清华 Rust）。开启后 bash 命令会自动注入镜像环境变量；git clone/fetch 经镜像加速、push 仍走原地址，命令文本与 .git/config 不做任何改写。恢复默认用 /mirror default。
 </downloads>
 
 <workflow>

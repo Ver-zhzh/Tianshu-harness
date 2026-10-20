@@ -38,7 +38,7 @@ function setup(name: string, tokenLedger?: Record<string, unknown>) {
   }) + '\n')
   return {
     logFile,
-    makeService: (over: { fetchImpl?: FetchLike } = {}) => new TokenLedgerService(makeConfig(tokenLedger), {
+    makeService: (over: { fetchImpl?: FetchLike; now?: () => number } = {}) => new TokenLedgerService(makeConfig(tokenLedger), {
       statePath: join(base, 'ledger.json'),
       sessionsRoot,
       now: () => T0 + 86_400_000,
@@ -112,11 +112,12 @@ test('无变更不重复推送；新增行后再次推送', async () => {
 test('推送失败：不钉摘要、pending 保持、下次重推（幂等累计快照）', async () => {
   const fx = setup('push-fail', { forum: { endpoint: 'https://forum.example.com/x', apiKey: 'fixture' } })
   let failing = true
+  let now = T0 + 86_400_000
   const fetchImpl: FetchLike = async () => ({
     status: failing ? 500 : 200,
     text: async () => '{"ok":true,"stale":false}',
   })
-  const svc = fx.makeService({ fetchImpl })
+  const svc = fx.makeService({ fetchImpl, now: () => now })
 
   // 客户端自带一次重试，整趟（含重试）持续 500 才算本趟失败
   const first = await svc.syncNow()
@@ -125,6 +126,8 @@ test('推送失败：不钉摘要、pending 保持、下次重推（幂等累计
   assert.equal(svc.status().lastPushResult?.ok, false)
 
   failing = false
+  assert.equal((await svc.syncNow()).skipped, 'backoff')
+  now += 60_000
   const second = await svc.syncNow()
   assert.equal(second.ok, true)
   assert.equal(svc.status().pending, false)

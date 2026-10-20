@@ -61,7 +61,7 @@ describe('skill tool', () => {
     assert.ok(!SKILL_TOOL.definition.description.includes('jumbo'))
     assert.ok(!SKILL_TOOL.definition.description.includes('small'))
     assert.equal(SKILL_TOOL.requiresApproval({} as ToolCallParams), false)
-    assert.equal(SKILL_TOOL.isConcurrencySafe(), true)
+    assert.equal(SKILL_TOOL.isConcurrencySafe(), false, 'draft writes serialize with other tool calls')
   })
 
   it('handles skill with empty body gracefully', async () => {

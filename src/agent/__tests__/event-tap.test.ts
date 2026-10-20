@@ -367,3 +367,12 @@ test('event tap forwards display evidence unchanged without logging image payloa
   assert.equal(received, evidence)
   assert.ok(!JSON.stringify(rec.events).includes('aGVsbG8='))
 })
+
+test('skill runtime approval metadata reaches the real inner callback and event', async () => {
+  const context: NonNullable<Parameters<AgentCallbacks['onApprovalRequired']>[3]> = { previewDigest: 'a'.repeat(64), runtimePreview: { skill: { scope: 'project', name: 'calc', skillId: 'fixture' }, packageRef: 'b'.repeat(64), interpreter: { path: '/python', realPath: '/python', version: '3.12.4' }, requirements: null, source: { indexUrl: 'https://pypi.org/simple' }, envDir: '/env', buildPolicy: 'wheel' } }
+  let actual: unknown
+  const { tap, rec } = harness({ onApprovalRequired: async (_id, _name, input, metadata) => { assert.equal(input.runtimePreview, undefined); actual = metadata; return true } })
+  await tap.onApprovalRequired('runtime', 'skill_runtime', { action: 'prepare', name: 'calc' }, context)
+  assert.deepEqual(actual, context)
+  assert.deepEqual(rec.events.find(event => event.type === 'approval_required')?.data.runtimeContext, context)
+})

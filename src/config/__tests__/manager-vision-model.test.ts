@@ -1,9 +1,10 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { loadConfig, getVisionModelConfig, registerVisionModelConfig, setVisionModelConfig } from '../manager.js'
+import { writeProviderKeysFile } from '../provider-keys-store.js'
 
 describe('vision model config', () => {
   let dir = ''
@@ -154,6 +155,39 @@ describe('vision model config', () => {
     )
     // 校验失败时整体不写盘（主桥也没进 config）
     assert.equal(loadConfig().agent.visionModel, undefined)
+  })
+
+  // 多 key provider 的模型事实源是 keys 池并集（contractModels），顶层 models
+  // 只是迁移时快照、key 级增删不回写。桌面「看图片」下拉下发契约并集——能选
+  // 只在 key 池里的模型；保存若只查顶层快照就误判「没有模型」（2026-10-20
+  // workbuddy2api 实测：kimi 在快照里能存，后加的 minimax 存不进）。
+  it('accepts a vision model that lives only in the key pool (contract union)', () => {
+    writeFileSync(process.env.RIVET_CONFIG_PATH!, JSON.stringify({
+      provider: { providers: { workbuddy2api: {
+        name: 'workbuddy2api', baseUrl: 'https://api.workbuddy.example/v1', protocol: 'openai',
+        capabilities: {}, thinking: 'enabled', maxTokens: 128000,
+        models: [{ id: 'cn:kimi-k3-1', maxTokens: 8192 }], unsupported: [], userSaved: true,
+      } } },
+    }))
+    writeProviderKeysFile({ version: 1, providers: { workbuddy2api: [{ id: 'default', models: [
+      { id: 'cn:kimi-k3-1', contextWindow: 128000, maxTokens: 8192 },
+      { id: 'cn:minimax-m3.1-flash', contextWindow: 128000, maxTokens: 8192, supportsVision: true },
+    ] }] } })
+
+    const saved = setVisionModelConfig({ provider: 'workbuddy2api', model: 'cn:minimax-m3.1-flash' })
+    assert.equal(saved?.model, 'cn:minimax-m3.1-flash')
+    assert.equal(loadConfig().agent.visionModel?.model, 'cn:minimax-m3.1-flash')
+    // 备用桥同判据：只存在于 key 池的模型也可作 fallback
+    const withFallback = setVisionModelConfig({
+      provider: 'workbuddy2api', model: 'cn:kimi-k3-1',
+      fallback: { provider: 'workbuddy2api', model: 'cn:minimax-m3.1-flash' },
+    })
+    assert.equal(withFallback?.fallback?.model, 'cn:minimax-m3.1-flash')
+    // 反向守卫仍在：key 池里也没有的模型照拒
+    assert.throws(
+      () => setVisionModelConfig({ provider: 'workbuddy2api', model: 'cn:ghost' }),
+      /没有模型 "cn:ghost"/,
+    )
   })
 
   it('accepts alias as a valid model reference', () => {

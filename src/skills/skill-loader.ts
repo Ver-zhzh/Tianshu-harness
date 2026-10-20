@@ -25,6 +25,7 @@ import { projectSurfaceAllowed } from '../config/project-trust.js'
 import { serverLogger } from '../server/logger.js'
 import { parseSkillYaml, skillMetadata, type SkillMetadata, type SkillMode } from './skill-metadata.js'
 import { isSafeFileName } from '../utils/safe-path.js'
+import { readRuntimeDeclaration } from './runtime/declaration.js'
 
 export type SkillSource = 'rivet' | 'global-rivet' | 'project-claude' | 'global-claude' | 'builtin' | 'plugin' | 'global-agents' | 'project-agents'
 
@@ -154,6 +155,9 @@ export class SkillRegistry {
           if (existsSync(displayMetadata)) {
             def.metadata = { ...def.metadata!, ...skillMetadata(parseSkillYaml(normalizeFrontmatterSource(readFileSync(skillFile, 'utf8')).match(FRONTMATTER_RE)![1]!), parseSkillYaml(readFileSync(displayMetadata, 'utf8'))) }
           }
+          // runtime.yaml（issue #523）：解析失败不阻断加载，错误记入 metadata 由 doctor 展示。
+          const runtime = readRuntimeDeclaration(def.skillDir)
+          if (runtime) def.metadata = { ...def.metadata!, runtime }
           this.skills.set(def.name, def)
           loaded.push(def.name)
         }
@@ -382,6 +386,56 @@ export const skillRegistry = new SkillRegistry()
  * leave-ritual 暂不随包：离开仪式仍由 `leave_mark` 工具提供，不放进发现层。
  */
 export const BUILTIN_SKILLS: SkillDefinition[] = [
+  {
+    name: 'skill-creator',
+    description: 'Create a reusable skill through conversation (创建技能). Clarify its goal, when to use it, inputs, outputs, boundaries and personal/project scope; save a draft for review before publication.',
+    triggers: [
+      /(?:create|write|build|make)\s+(?:a\s+|an\s+)?(?:\S+\s+){0,4}skill\b/i,
+      /(?:创建|新建|编写|制作|生成|写).{0,20}(?:技能|skill)/i,
+      /\bskill-creator\b/i,
+    ],
+    builtIn: true,
+    body: [
+      "# Conversational skill creation",
+      "",
+      "Help the user create one reusable, single-file skill. Speak the user's language. Do not require them to know YAML or filesystem conventions.",
+      "",
+      "## Understand and confirm",
+      "",
+      "Read the user's request first; do not ask again for information already supplied. Clarify only missing details: goal, trigger scenarios (when to use and when not to use), inputs, expected outputs and boundaries. Ask concise questions and summarize the agreed workflow before writing it.",
+      "",
+      "Confirm personal or project scope in conversation. Explain that personal skills can be used across projects, while project skills belong to the selected project. For project scope, confirm the absolute project directory. Do not silently choose a scope or invent a project path.",
+      "",
+      "## Write the draft",
+      "",
+      "Choose a concise skill name with the user and produce UTF-8 Markdown with YAML frontmatter containing name and a non-empty description, followed by non-empty instructions. Explain that description tells the model WHEN to select the skill; include concrete trigger scenarios rather than only a title. Quote YAML values when necessary.",
+      "",
+      "Include: when to use / exclusions, inputs and outputs, ordered steps, acceptance criteria, one concrete example, dependencies and limitations. Keep the scope to the user's agreed task. Do not add evaluations, benchmarks or resource bundles unless separately requested. Do not claim the workflow or its dependencies were tested when only the document was checked.",
+      "",
+      "## Save for review",
+      "",
+      "Use the existing draft workflow, never write directly into an active skills directory or use skills add to publish the generated content.",
+      "In a dedicated creation session, save with skill(action=\"save_draft\", name=<draft name>, scope=<selected scope>, content=<full Markdown>, expectedVersion=null). To revise, pass the version returned by the previous save. The host shows the saved draft in a review card. Only the user can publish through that card; never attempt to bypass the session tool restrictions. This native path needs neither CLI nor authentication credentials.",
+      "",
+      "When the host provides the Rivet CLI, write the complete Markdown to a temporary file outside active skill directories, then run:",
+      "",
+      "rivet skills draft <name> --file <absolute-markdown-path> --scope personal|project [--project <absolute-project-directory>] --json",
+      "",
+      "Choose exactly one scope; replace placeholders and quote arguments for the shell in use. The command parses YAML and checks identity, description and body before saving through SkillDrafts. Inspect existing drafts first; updating requires --version <reviewed version>. Never replace an unrelated draft.",
+      "",
+      "If the host has no draft-writing capability, return the complete Markdown for review and say clearly that it has NOT been saved or installed. Do not fall back to private HTTP, assume rivet is on PATH, search for authentication credentials, or invent an unavailable tool.",
+      "",
+      "Read back the saved draft using rivet skills drafts --scope <scope> [--project <directory>] --json or the host's draft list. Check the selected scope, name, description, steps, example and acceptance criteria. Report that the draft is pending review and distinguish document validation from testing the actual workflow.",
+      "",
+      "## Review and publication",
+      "",
+      "Show the draft and let the user edit, approve or reject it. The model can only save drafts. Never call approve or install a generated skill, even when asked in conversation; publication belongs to the user's review action.",
+      "",
+      "Tell desktop users to click Approve and publish in the review card. For CLI users, show rivet skills approve <name> --scope <scope> [--project <directory>] --version <reviewed version> for them to run themselves; do not execute it. Rejection uses the host review action or a user-run rivet skills reject with the same scope and version. An existing installed skill is not overwritten; offer save as a new draft name.",
+      "",
+      "Drafts remain under _drafts and cannot be invoked. Approved skills become available to NEW sessions; do not promise that an existing pinned session has been refreshed.",
+    ].join('\n'),
+  },
   {
     name: 'skill-management',
     description:

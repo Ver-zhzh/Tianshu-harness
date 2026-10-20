@@ -9,6 +9,8 @@ import { normalizeBaseUrl } from './endpoint-map.js'
 import { proRegistry } from './pro-registry.js'
 
 export interface ExecutionScope {
+  wireTransformVersion?: string
+  normalization?: import('./wire-normalization.js').WireNormalizationSummary
   provider?: string
   singleAttempt: boolean
   sends: number
@@ -238,6 +240,8 @@ export function withExecutionContinuity(client: StreamClient, options: Continuit
           next.model = String(raw.model ?? options.model)
           next.cacheGenerationId = generation
           next.generationReason = generationReason
+          const wireTransformVersion = currentExecutionScope()?.wireTransformVersion
+          if (wireTransformVersion) next.wireTransformVersion = wireTransformVersion
           next.credentialScope = `${options.credentialScope ?? `${options.provider}:default`}${owner ? `:principal:${owner}` : ''}`
           return next
         }
@@ -247,8 +251,8 @@ export function withExecutionContinuity(client: StreamClient, options: Continuit
             throw new LocalWorkerPolicyError('回退授权缺少匹配的历史封印或耐久提交通道；请求未发送')
           }
           request.validateRewindRequest?.(request.messages)
-          request.validateSourceHistory?.()
           const next = makePrefix(url, raw, owner)
+          request.validateSourceHistory?.(next)
           attemptPrefix = next
           const baseline = requestPrefix?.cacheGenerationId === generation ? requestPrefix : proof ?? rewindBaseline
           comparison = baseline ? 'equal' : generationReason === 'initial' ? 'baseline_missing' : 'generation_changed'
@@ -284,13 +288,16 @@ export function withExecutionContinuity(client: StreamClient, options: Continuit
                 ? isProvenNativeContinuation(baseline, next, normalizedBody(raw), mapping) : undefined
               if (nativeContinues === false) throw new ContinuationPrefixError(at === -1 ? 'native_evidence' : at, baseline, next)
               const lastUserAt = baseline.messages.reduce((last, message, index) => message.role === 'user' ? index : last, -1)
+              // An unchanged source AND render cannot justify a resume/abort rewrite.
+              // Old mixed-normalization baselines require the explicit repair transaction.
+              const stableProjection = request.continuityEvidence?.sourcePrefix === 'same' && request.continuityEvidence.renderPrefix === 'same'
               // model switch 优先于 prefix drift：换模型即换缓存命名空间（前缀逐字节相同也全
               // 失效），是更强的原因信号——「换模型 + 消息同时漂移」不该被记成纯 prefix drift，
               // 否则按 generationReason 筛「换过模型」的会话会漏。到达此处的 modelDrift 必为：
               // 主会话 + resume 首请求 + 切到当前配置模型（其余组合上方已抛）。
               const driftReason = modelDrift ? 'resume_model_switch'
                 : at !== -1 && nativeContinues !== true
-                  ? restoredFirstRequest ? 'resume_prefix_drift'
+                  ? stableProjection ? undefined : restoredFirstRequest ? 'resume_prefix_drift'
                     : abortedContinuation && lastUserAt !== -1 && at >= lastUserAt ? 'abort_tail_rebuild'
                     : undefined
                   : undefined
@@ -307,6 +314,14 @@ export function withExecutionContinuity(client: StreamClient, options: Continuit
             }
           } catch (error) {
             comparison = 'fork'
+            if (error instanceof LocalWorkerPolicyError) {
+              const history = request.continuityEvidence
+              const stage = error instanceof ContinuationPrefixError && typeof error.changed === 'number'
+                ? history?.renderPrefix === 'changed' ? 'render'
+                  : history?.sourcePrefix === 'same' && history.renderPrefix === 'same' ? 'transport' : 'unknown'
+                : undefined
+              error.continuityEvidence = { ...history, normalization: scope.normalization, ...(stage ? { stage } : {}), ...error.continuityEvidence }
+            }
             rejectedContinuity = continuityFailureDetails(error)
             throw error
           }
@@ -354,7 +369,7 @@ export function withExecutionContinuity(client: StreamClient, options: Continuit
               baseline: previousMainRequestId || request.diagnostics?.priorPrefix || (rejected && proof) ? 'present' : usage.observation?.wire?.baseline ?? 'baseline_missing',
               comparison: rejected ? 'not_checked' : comparison,
               previousMainRequestId: (rejected ? proof?.requestId : previousMainRequestId) ?? request.diagnostics?.previousMainRequestId },
-            continuity: { cacheGenerationId: generation, generationReason, optionsHash: attempted.optionsHash,
+            continuity: { cacheGenerationId: generation, generationReason, ...(attempted.wireTransformVersion ? { wireTransformVersion: attempted.wireTransformVersion } : {}), optionsHash: attempted.optionsHash,
               toolsHash: attempted.toolsHash, credentialScope: attempted.credentialScope },
           } }
         }

@@ -1,3 +1,4 @@
+import { createSkillDraftWriter, SKILL_CREATION_TOOLS } from '../skills/skill-creation.js'
 import { previewContinuityRecovery, applyContinuityRecovery, withContinuityAvailable } from '../agent/continuity-recovery.js'
 /**
  * Heavy agent assembly for `rivet serve` — loaded via dynamic import after the
@@ -575,6 +576,11 @@ function assembleAgentLoop(
     // Per-session 工具白名单（蒸馏回放等自动化场景）。
     allowedTools,
   })
+  const creation = shared?.sessions?.getSession(sessionId)?.skillCreation
+  if (creation) {
+    agent.config.executionToolAllowlist = [...SKILL_CREATION_TOOLS]
+    agent.config.saveSkillDraft = createSkillDraftWriter(() => shared?.sessions?.getSession(sessionId)?.skillCreation)
+  }
   stores.deepRecallAgentRef!.current = agent
   // 记忆回填（opt-in：RIVET_MEMORY_BACKFILL=1）：sidecar 场景桌面端常驻、更适合
   // 闲时补采；与 TUI bootstrap 同门（30s debounce + ledger 幂等 + 每轮 ≤5 会话）。
@@ -829,6 +835,7 @@ export function buildManagedAgent(
     restoreAutoResolvedDomain: (domain) => agent.restoreAutoResolvedDomain(domain),
     getSessionDomain: () => agent.getSessionDomain(),
     markSkillInvoked: (name) => agent.markSkillInvoked(name),
+    getRuntimePolicyContext: () => ({ deny: agent.config.permissions?.deny, overlay: agent.config.permissionsOverlay, planMode: agent.getPlanModeState() }),
     getSkillSnapshot: () => agent.config.promptEngine.getSkillRegistry().list(),
     setDisabledSkills: (names) => agent.setDisabledSkills(names),
     // PlusMenu — model hot-switch (rebuild on the same SessionContext).

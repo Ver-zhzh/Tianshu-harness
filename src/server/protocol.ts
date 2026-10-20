@@ -56,6 +56,19 @@ export type SessionStatus = 'idle' | 'running' | 'completed' | 'failed' | 'abort
  * it from src/agent/loop-types.ts.
  */
 export interface ApprovalRequest {
+  runtimeContext?: {
+    runtimePreview: {
+      skill: { scope: string; name: string; skillId: string }
+      packageRef: string
+      interpreter: { path: string; realPath: string; version: string; abi?: string }
+      requirements: { normalized: string; files: Record<string, string>; constraints: Record<string, string>; requirements: Array<{ name: string; hashes: string[]; unpinned: boolean }> } | null
+      source: { indexUrl: string; trustedHost?: string }
+      envDir: string
+      buildPolicy: 'wheel' | 'source'
+    }
+    previewDigest: string
+    rebuild?: boolean
+  }
   requestId: string
   toolName: string
   input: Record<string, unknown>
@@ -280,7 +293,21 @@ export interface GoalRolloverView {
   error?: string
 }
 
+export interface SkillCreationContext {
+  scope: 'personal' | 'project'
+  cwd?: string
+  initialInput: string
+  started?: boolean
+}
+export interface SkillDraftReference {
+  name: string
+  scope: 'personal' | 'project'
+  cwd?: string
+  version: string
+}
 export interface SessionRecord {
+  initialComposerDraft?: string
+  skillCreation?: SkillCreationContext
   workspaceRoots?: string[]
   goalRollover?: GoalRolloverView
   goalInputs?: { imageIds: string[]; documents: Array<{ id: string; name: string; bytes: number; mime: string }> }

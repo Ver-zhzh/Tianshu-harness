@@ -275,6 +275,7 @@ export type WorkerFailureReason =
   | 'worker_crash'
   | 'worker_blocked'
   | 'policy_short_circuit'
+  | 'binding'
   | 'unknown'
 
 export const workerResultSchema = z.object({
@@ -311,7 +312,7 @@ export const workerResultSchema = z.object({
   usageKnown: z.boolean().optional(),
   terminalFailure: z.boolean().optional(),
   failureStage: z.enum(['binding', 'transport', 'report', 'budget', 'process', 'verification', 'continuity', 'dispatch']).optional(),
-  failureReason: z.enum(['caller_aborted', 'circuit_open', 'claim_conflict', 'timeout', 'max_turns', 'stalled', 'json_parse', 'schema_mismatch', 'worker_crash', 'worker_blocked', 'policy_short_circuit', 'unknown']).optional(),
+  failureReason: z.enum(['caller_aborted', 'circuit_open', 'claim_conflict', 'timeout', 'max_turns', 'stalled', 'json_parse', 'schema_mismatch', 'worker_crash', 'worker_blocked', 'policy_short_circuit', 'binding', 'unknown']).optional(),
   /** Runtime metadata: 派发时的 objective，由 coordinator 盖章。
    *
    *  刻意**不进** `workerResultIngestSchema`——那份是 worker 自报的入口，zod 会
@@ -403,7 +404,7 @@ const workerResultIngestSchema = z.object({
   usageKnown: z.boolean().optional(),
   terminalFailure: z.boolean().optional(),
   failureStage: z.enum(['binding', 'transport', 'report', 'budget', 'process', 'verification', 'continuity', 'dispatch']).optional(),
-  failureReason: z.enum(['caller_aborted', 'circuit_open', 'claim_conflict', 'timeout', 'max_turns', 'stalled', 'json_parse', 'schema_mismatch', 'worker_crash', 'worker_blocked', 'policy_short_circuit', 'unknown']).optional(),
+  failureReason: z.enum(['caller_aborted', 'circuit_open', 'claim_conflict', 'timeout', 'max_turns', 'stalled', 'json_parse', 'schema_mismatch', 'worker_crash', 'worker_blocked', 'policy_short_circuit', 'binding', 'unknown']).optional(),
   /** D 度量细分，同 failureReason 的内部往返纪律（见 workerResultSchema 同名注释）。 */
   parseErrorKind: z.enum(['no_json', 'json_syntax', 'schema_field', 'truncated']).optional(),
 })

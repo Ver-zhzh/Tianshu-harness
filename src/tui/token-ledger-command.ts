@@ -56,9 +56,10 @@ export async function handleTokenLedgerCommand(
       return true
     }
     if (action === 'auto' && ['on', 'off'].includes(argument ?? '') && !extra.length) {
-      if (argument === 'on' && !readTokenLedgerSettings(ctx.config).forum.apiKeyConfigured) { say(CONNECT_HINT); return true }
-      update({ forum: { autoSync: argument === 'on', intervalMinutes: 30 } })
-      say(argument === 'on' ? 'Automatic Token ledger upload enabled every 30 min.' : 'Automatic Token ledger upload disabled. Local recording continues.')
+      const settings = readTokenLedgerSettings(ctx.config)
+      if (argument === 'on' && !settings.forum.apiKeyConfigured) { say(CONNECT_HINT); return true }
+      update({ forum: { autoSync: argument === 'on', intervalMinutes: settings.forum.intervalMinutes } })
+      say(argument === 'on' ? `Automatic Token ledger upload enabled every ${settings.forum.intervalMinutes} min.` : 'Automatic Token ledger upload disabled. Local recording continues.')
       return true
     }
     if (!['status', 'sync'].includes(action) || argument) { say(USAGE); return true }

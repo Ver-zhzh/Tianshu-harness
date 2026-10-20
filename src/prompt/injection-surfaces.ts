@@ -438,6 +438,12 @@ export const APPENDIX_SURFACES: readonly InjectionSurface[] = [
  */
 export const CHANNEL_SURFACES: readonly InjectionSurface[] = [
   {
+    id: 'trailer.domain-task-boundary', channel: 'trailer-frozen', cost: 'boundary-rebuild', volatility: 'session-constant',
+    producer: 'DOMAIN_TASK_BOUNDARY',
+    anchor: { file: 'src/prompt/volatile.ts', symbol: '${DOMAIN_TASK_BOUNDARY}' },
+    note: '内置/自定义星域共用职责边界，随 activeDomain 装入主控及 worker 的 frozen trailer。仅静态条件规则；当前任务/工单与授权仍走原通道，不捕获逐轮任务状态、不增加权限。已有冻结历史不重写。',
+  },
+  {
     id: 'trailer.user-instructions', channel: 'trailer-frozen', cost: 'boundary-rebuild', volatility: 'session-constant',
     producer: 'renderUserInstructions()',
     anchor: { file: 'src/prompt/volatile.ts', symbol: 'renderUserInstructions(ctx.userInstructions, ctx.userInstructionsRevoked)' },

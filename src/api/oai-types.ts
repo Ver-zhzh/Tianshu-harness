@@ -207,9 +207,11 @@ export interface OaiToolDefinition {
 
 /** Request body for OpenAI-compatible Chat Completions APIs. */
 export interface OaiChatRequest {
+  /** Local source/render evidence, never serialized as a provider field. */
+  continuityEvidence?: import('./continuation-prefix.js').ContinuityDiagnosticEvidence
   onExecutionSnapshot?: (proof: import('./continuation-prefix.js').ContinuationPrefixProof) => void | Promise<void>
   validateRewindRequest?: (messages: OaiMessage[]) => void
-  validateSourceHistory?: () => void
+  validateSourceHistory?: (proof: import('./continuation-prefix.js').ContinuationPrefixProof) => void
   rewindAuthorizationId?: string
   /** Internal accounting, never serialized as a provider field. */
   contextBudget?: import('../server/protocol.js').ContextBudgetSnapshot

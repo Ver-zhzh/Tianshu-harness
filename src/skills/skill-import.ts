@@ -7,10 +7,13 @@ import { cloneGitSource } from '../plugins/git-source.js'
 import { execFileGit } from '../tools/spawn-git.js'
 import { inside, readPackage, scanPackages, skillPackagePath, validateResourcePath, type SkillPackage } from './skill-package.js'
 import { SkillManagement, type SkillContext, type SkillOrigin } from './skill-management.js'
+import type { SkillRuntimeMetadata } from './runtime/declaration.js'
 
 export type ImportSource = { kind: 'local'; path: string } | { kind: 'git'; url: string; ref?: string; subpath?: string }
   | { kind: 'zip'; path?: string; base64?: string } | { kind: 'text'; text: string }
-export interface ImportCandidate { candidateId: string; name: string; description: string; files: string[]; metadata: SkillPackage['definition']['metadata']; version: string; subpath: string }
+export interface ImportCandidate { candidateId: string; name: string; description: string; files: string[]; metadata: SkillPackage['definition']['metadata']; version: string; subpath: string
+  /** 只读运行时声明摘要（issue #523）：声明内容或声明错误；无 runtime.yaml 为 null。 */
+  runtime: SkillRuntimeMetadata | null }
 interface Preview { packages: SkillPackage[]; origin: Omit<SkillOrigin, 'fingerprint'>; expires: number }
 export class SkillImports {
   private previews = new Map<string, Preview>()
@@ -69,6 +72,7 @@ export class SkillImports {
       return { previewId, origin, errors: scanned.errors, candidates: scanned.packages.map((pkg, index): ImportCandidate => ({
         candidateId: String(index), name: pkg.definition.name, description: pkg.definition.description,
         files: pkg.files.map(f => f.path), metadata: pkg.definition.metadata, version: pkg.fingerprint, subpath: pkg.subpath,
+        runtime: pkg.definition.metadata?.runtime ?? null,
       })) }
     } finally { cleanup() }
   }

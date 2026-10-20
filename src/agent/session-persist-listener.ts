@@ -9,6 +9,7 @@ import { proveRewindHistory, LocalWorkerPolicyError, type ContinuationPrefixProo
 import { invalidateSessionReadDedup } from '../tools/read-file.js'
 import { matchesCompactionHistory } from '../prompt/compaction-recovery.js'
 import { validateExecutionHistory } from '../api/execution-continuity.js'
+import { MAX_SESSION_MESSAGE_JSON_CHARS } from '../compact/constants.js'
 
 const compactionFailures = new WeakMap<SessionContext, { error: unknown; recover: () => Promise<void> }>()
 
@@ -63,7 +64,17 @@ export async function commitCompactedHistory(agent: AgentLoop, expected: OaiMess
     client.authorizeCacheGeneration?.(reason)
     engine.authorizeCacheGeneration()
   } else if (prior) {
-    if (JSON.stringify(persist.loadOai()) !== source) throw new LocalWorkerPolicyError('压缩前的持久化历史不完整；禁止提交')
+    if (JSON.stringify(persist.loadOai()) !== source) {
+      if (!known || !persist.matchesOaiSessionProjection(expected, MAX_SESSION_MESSAGE_JSON_CHARS)) {
+        throw new LocalWorkerPolicyError('压缩前的持久化历史不完整；禁止提交')
+      }
+      await agent.commitBudgetHistory(expected, expected)
+      expected = agent.session.getMessages().slice()
+      checkHistory(source)
+      if (!persist.matchesOaiSessionProjection(expected) || JSON.stringify(persist.loadOai()) !== source) {
+        throw new LocalWorkerPolicyError('修复后的持久化历史不完整；禁止提交')
+      }
+    }
     const authorization: RewindGenerationAuthorization = {
       version: 1, reason, cacheGenerationId: randomUUID(), model: engine.getModel(),
       history: unpublishedTail ? targetProof.slice(0, -1) : targetProof, prior: structuredClone(prior),

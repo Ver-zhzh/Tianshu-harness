@@ -1,4 +1,5 @@
 import type { ArtifactSection } from './types.js'
+import { grepOutputStats } from '../utils/grep-output.js'
 
 export interface SummarizeResult {
   summary: string
@@ -362,22 +363,11 @@ function findMarkdownSectionEnd(lines: string[], startIdx: number, level: number
 // Grep / Bash summarizers (unchanged except bash test pattern fix)
 // ---------------------------------------------------------------------------
 
-/** Extract the file path from a ripgrep `--line-number` line. Match lines are
- *  `path:line:content`, context lines `path-line-content`. Anchor on the line
- *  number so Windows absolute paths keep their drive-letter colon
- *  (C:\foo.ts:42:… → C:\foo.ts, not "C"). Match (`:`) form is tried first so a
- *  hyphenated directory name isn't mistaken for the context separator. */
-function grepLineFile(line: string): string {
-  const m = line.match(/^(.+?):\d+:/) ?? line.match(/^(.+?)-\d+-/)
-  return (m ? m[1]! : line.split(':')[0] ?? '').trim()
-}
-
 /** Summarize grep output. */
 export function summarizeGrepResult(content: string, pattern: string): SummarizeResult {
-  const lines = content.split(/\r?\n/).filter(l => l.trim())
-  const files = new Set(lines.map(grepLineFile).filter(Boolean))
+  const { matches, files } = grepOutputStats(content)
   return {
-    summary: `grep "${pattern}": ${lines.length} matches in ${files.size} files. Files: ${[...files].slice(0, 5).join(', ')}${files.size > 5 ? ` (+${files.size - 5})` : ''}`,
+    summary: `grep "${pattern}": ${matches} matches in ${files.length} files. Files: ${files.slice(0, 5).join(', ')}${files.length > 5 ? ` (+${files.length - 5})` : ''}`,
     sections: [],
   }
 }

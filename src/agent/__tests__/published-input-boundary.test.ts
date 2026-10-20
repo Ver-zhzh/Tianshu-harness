@@ -9,9 +9,11 @@ import { providerSchema } from '../../config/schema.js'
 import type { OaiMessage } from '../../api/oai-types.js'
 import { PromptEngine } from '../../prompt/engine.js'
 import { parseFrozenSnapshotData } from '../../prompt/frozen-snapshot.js'
+import { proveRewindHistory } from '../../api/continuation-prefix.js'
 import { ToolRegistry } from '../../tools/registry.js'
 import { SessionContext } from '../context.js'
 import { AgentLoop } from '../loop.js'
+import { SessionPersist } from '../session-persist.js'
 import { recordInterruption } from '../interrupt-marker.js'
 import { recordHumanInput, applyHumanInputBoundary, rollbackActiveUserInput, getCompactionTaskContract, getCompactionGoalAnchor } from '../human-input-boundary.js'
 
@@ -47,10 +49,15 @@ function fixture(context: TestContext) {
   const provider = providerSchema.parse({ name: 'third-party', protocol: 'openai', baseUrl: 'https://published.fixture.test/v1',
     maxTokens: 4096, maxRetries: 0, models: [{ id: 'fixture-model', contextWindow: 1_000_000, maxTokens: 4096 }] })
   const engineConfig = { model: 'fixture-model', maxTokens: 4096, staticCtx: { tools: [] }, volatileCtx: { cwd: root, gitStatus: '' } }
-  function create(session = new SessionContext(), engine = new PromptEngine(engineConfig)) {
+  function create(session = new SessionContext(), engine = new PromptEngine(engineConfig), persist?: SessionPersist) {
+    if (persist) {
+      engine.setOnFrozenSnapshotChanged(() => persist.queueFrozenSnapshot(engine.exportFrozenSnapshot()))
+      engine.setOnFrozenSnapshotCommit(() => persist.queueFrozenSnapshot(engine.exportFrozenSnapshot()))
+    }
     const client = createProviderClient(provider, resolveCapabilities(provider.name), { apiKey: 'fixture', model: 'fixture-model', maxTokens: 4096 })
     const agent = new AgentLoop({ client, promptEngine: engine, providerName: provider.name, toolRegistry: new ToolRegistry(),
       headless: true, maxTurns: 2, contextWindow: 1_000_000, compact: { enabled: false, model: 'fixture-model' }, fsWatcherEnabled: false,
+      ...(persist ? { sessionId: 'published-source-fixture', sessionPersist: persist } : {}),
     }, session, root)
     const pending = engine.getRewindAuthorization()
     if (pending) client.restoreRewindAuthorization!(pending)
@@ -62,6 +69,225 @@ function fixture(context: TestContext) {
 }
 
 const callbacks = { onTextDelta() {}, onThinkingDelta() {}, onContentBlock() {}, onStopReason() {}, onError(error: Error) { throw error } }
+
+for (const repair of ['missing result', 'late result', 'empty calls'] as const) {
+  for (const restart of [false, true]) {
+    test(`preflight ${repair} keeps the published source usable ${restart ? 'after restart' : 'on repeated continuation'}`, async context => {
+      const setup = fixture(context)
+      let active = setup
+      setup.session.addUserMessage('inspect main.js')
+      await setup.client.stream(setup.engine.buildOaiRequest(setup.session.getMessages()), callbacks)
+      const generation = setup.client.getMainPrefixProof!()!.cacheGenerationId
+      setup.session.replaceMessages([...setup.session.getMessages(), {
+        role: 'assistant', content: repair === 'empty calls' ? null : 'reading',
+        tool_calls: repair === 'empty calls' ? [] : [{ id: 'read-main', type: 'function',
+          function: { name: 'read_file', arguments: '{"path":"main.js"}' } }],
+      }])
+      setup.session.addUserMessage('continue the previous task')
+      if (repair === 'late result') {
+        setup.session.replaceMessages([...setup.session.getMessages(), {
+          role: 'tool', tool_call_id: 'read-main', content: 'original file content',
+        }])
+      }
+      let repairs = 0
+      const request = setup.engine.buildOaiRequest(setup.session.getMessages(), undefined, undefined, {
+        onOrphanRepair(messages) { repairs++; setup.session.replaceMessages(messages) },
+      })
+      await setup.client.stream(request, callbacks)
+      assert.deepEqual(setup.engine.exportFrozenSnapshot().publishedHistory, proveRewindHistory(setup.session.getMessages()),
+        'the first repaired request must publish the repaired source without relying on legacy recovery next turn')
+      if (restart) {
+        const frozen = parseFrozenSnapshotData(JSON.parse(JSON.stringify(setup.engine.exportFrozenSnapshot())))!
+        const session = new SessionContext()
+        session.replaceMessages(JSON.parse(JSON.stringify(setup.session.getMessages())))
+        active = { ...setup, ...setup.create(session, new PromptEngine({ ...setup.engineConfig, inheritFrozenFrom: frozen })) }
+      }
+      for (let attempt = 0; attempt < 2; attempt++) {
+        active.session.addUserMessage('continue the previous task')
+        await assert.doesNotReject(active.client.stream(active.engine.buildOaiRequest(active.session.getMessages(), undefined, undefined, {
+          onOrphanRepair(messages) { repairs++; active.session.replaceMessages(messages) },
+        }), callbacks))
+      }
+      assert.equal(repairs, 1, 'every canonical repair must be written back exactly once, including repairs without synthetic results')
+      assert.deepEqual(active.engine.exportFrozenSnapshot().publishedHistory, proveRewindHistory(active.session.getMessages()))
+      assert.equal(active.client.getMainPrefixProof!()!.cacheGenerationId, generation, 'recovery must not silently cold-start')
+      assert.equal(setup.bodies.length, 4)
+      if (repair === 'late result') {
+        const results = setup.bodies[1]!.messages.filter(message => message.role === 'tool')
+        assert.deepEqual(results.map(message => message.content), ['original file content'])
+      }
+    })
+  }
+}
+
+test('a request-only preflight repair does not seal a source writeback that never happened', async context => {
+  const setup = fixture(context)
+  setup.session.replaceMessages([
+    { role: 'user', content: 'inspect main.js' },
+    { role: 'assistant', content: null, tool_calls: [{ id: 'read-main', type: 'function',
+      function: { name: 'read_file', arguments: '{"path":"main.js"}' } }] },
+  ])
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await setup.client.stream(setup.engine.buildOaiRequest(setup.session.getMessages()), callbacks)
+    assert.deepEqual(setup.engine.exportFrozenSnapshot().publishedHistory, proveRewindHistory(setup.session.getMessages()))
+    assert.equal(setup.session.getMessages().filter(message => message.role === 'tool').length, 0)
+  }
+  assert.equal(setup.bodies.length, 3)
+})
+
+for (const invalid of ['changed source', 'published repair'] as const) {
+  test(`preflight cannot bless ${invalid} by writing repaired messages back`, async context => {
+    const setup = fixture(context)
+    setup.session.replaceMessages([
+      { role: 'user', content: 'inspect main.js' },
+      ...(invalid === 'published repair' ? [{ role: 'assistant' as const, content: null,
+        tool_calls: [{ id: 'read-main', type: 'function' as const, function: { name: 'read_file', arguments: '{}' } }] },
+      { role: 'user' as const, content: 'already published continuation' }] : []),
+    ])
+    await setup.client.stream(setup.engine.buildOaiRequest(setup.session.getMessages()), callbacks)
+    const baseline = setup.engine.exportFrozenSnapshot()
+    if (invalid === 'changed source') {
+      setup.session.replaceMessages([
+        { role: 'user', content: 'rewritten published task' },
+        { role: 'assistant', content: null, tool_calls: [{ id: 'read-main', type: 'function',
+          function: { name: 'read_file', arguments: '{}' } }] },
+      ])
+    }
+    let repairs = 0
+    const history = structuredClone(setup.session.getMessages())
+    assert.throws(() => setup.engine.buildOaiRequest(setup.session.getMessages(), undefined, undefined, {
+      onOrphanRepair(messages) { repairs++; setup.session.replaceMessages(messages) },
+    }), /prefix diverged at source/)
+    assert.equal(repairs, 0)
+    assert.deepEqual(setup.session.getMessages(), history)
+    assert.deepEqual(setup.engine.exportFrozenSnapshot().publishedHistory, baseline.publishedHistory)
+    assert.deepEqual(setup.client.getMainPrefixProof!(), baseline.executionSnapshot)
+    assert.equal(setup.bodies.length, 1)
+  })
+}
+
+test('preparing repaired history does not publish it before HTTP or through a side path', async context => {
+  const setup = fixture(context)
+  setup.session.addUserMessage('published task')
+  await setup.client.stream(setup.engine.buildOaiRequest(setup.session.getMessages()), callbacks)
+  const baseline = structuredClone(setup.engine.exportFrozenSnapshot().publishedHistory)
+  setup.session.replaceMessages([...setup.session.getMessages(), {
+    role: 'assistant', content: null, tool_calls: [{ id: 'read-main', type: 'function',
+      function: { name: 'read_file', arguments: '{}' } }],
+  }])
+  let repairs = 0
+  const options = { onOrphanRepair(messages: OaiMessage[]) { repairs++; setup.session.replaceMessages(messages) } }
+  const request = setup.engine.buildOaiRequest(setup.session.getMessages(), undefined, undefined, options)
+  assert.equal(repairs, 1)
+  assert.deepEqual(setup.engine.exportFrozenSnapshot().publishedHistory, baseline)
+  await setup.client.stream(setup.engine.buildOaiRequest([
+    { role: 'assistant', content: null, tool_calls: [] }, { role: 'user', content: 'unrelated summary' },
+  ], undefined, undefined, { ...options, sidePath: true }), callbacks)
+  assert.equal(repairs, 1)
+  assert.deepEqual(setup.engine.exportFrozenSnapshot().publishedHistory, baseline)
+  await setup.client.stream(request, callbacks)
+  assert.deepEqual(setup.engine.exportFrozenSnapshot().publishedHistory, proveRewindHistory(setup.session.getMessages()))
+  assert.equal(setup.bodies.length, 3)
+})
+
+test('the actual agent repair persists a matching source seal and continues from disk without restarting its generation', async context => {
+  const setup = fixture(context)
+  const cwd = setup.engineConfig.volatileCtx.cwd
+  const persist = new SessionPersist('published-source-fixture', cwd)
+  const active = setup.create(new SessionContext(), new PromptEngine(setup.engineConfig), persist)
+  const errors: Error[] = []
+  const runCallbacks = { onTextDelta() {}, onThinkingDelta() {}, onToolUse() {}, onToolResult() {}, onTurnComplete() {}, onAbort() {},
+    onError(error: Error) { errors.push(error) }, onApprovalRequired: async () => assert.fail('no live tools in this fixture') }
+  await active.agent.run('inspect main.js', runCallbacks)
+  assert.deepEqual(errors, [])
+  const generation = active.client.getMainPrefixProof!()!.cacheGenerationId
+  active.session.addAssistantBlocks([{ type: 'tool_use', id: 'read-main', name: 'read_file', input: { path: 'main.js' } }])
+  await active.agent.run('continue the previous task', runCallbacks)
+  assert.deepEqual(errors, [])
+  await active.agent.drainPersistWrites()
+  const disk = new SessionPersist('published-source-fixture', cwd)
+  const snapshot = disk.readFrozenSnapshot()!
+  const history = disk.loadOai()
+  assert.ok(snapshot.publishedHistory)
+  assert.deepEqual(snapshot.publishedHistory, proveRewindHistory(history.slice(0, snapshot.publishedHistory.length)))
+  const restoredSession = new SessionContext()
+  restoredSession.replaceMessages(history)
+  const restored = setup.create(restoredSession, new PromptEngine({ ...setup.engineConfig, inheritFrozenFrom: snapshot }), disk)
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const sent = setup.bodies.length
+    await restored.agent.run('continue the previous task', runCallbacks)
+    assert.ok(setup.bodies.length > sent, 'each continuation must actually reach HTTP')
+  }
+  assert.deepEqual(errors, [], 'the production preflight callback must not poison later continuation')
+  assert.equal(restored.client.getMainPrefixProof!()!.cacheGenerationId, generation)
+})
+
+for (const changed of ['none', 'source', 'provenance', 'wire', 'empty wire', 'short wire', 'short wire changed request', 'extra wire', 'wire role', 'native proof', 'request wire', 'synthetic result', 'provider', 'model', 'credential', 'endpoint', 'options', 'tools', 'generation'] as const) {
+  test(`legacy preflight seal recovery requires exact old source and wire evidence (${changed})`, async context => {
+    const setup = fixture(context)
+    setup.session.replaceMessages([
+      { role: 'user', content: 'inspect main.js' },
+      { role: 'assistant', content: null, tool_calls: [{ id: 'read-main', type: 'function',
+        function: { name: 'read_file', arguments: '{"path":"main.js"}' } }] },
+      { role: 'user', content: 'continue the previous task' },
+    ])
+    const legacySource = proveRewindHistory(setup.session.getMessages())
+    await setup.client.stream(setup.engine.buildOaiRequest(setup.session.getMessages(), undefined, undefined, {
+      onOrphanRepair(messages) { setup.session.replaceMessages(messages) },
+    }), callbacks)
+    const frozen = JSON.parse(JSON.stringify(setup.engine.exportFrozenSnapshot()))
+    frozen.publishedHistory = legacySource
+    if (changed === 'wire') frozen.executionSnapshot.messages[1].hash = '0'.repeat(64)
+    if (changed === 'empty wire') frozen.executionSnapshot.messages = []
+    if (changed === 'short wire' || changed === 'short wire changed request') frozen.executionSnapshot.messages = frozen.executionSnapshot.messages.slice(0, 1)
+    if (changed === 'extra wire') frozen.executionSnapshot.messages.push({ ...frozen.executionSnapshot.messages.at(-1) })
+    if (changed === 'wire role') frozen.executionSnapshot.messages[1].role = 'assistant'
+    if (changed === 'native proof') frozen.executionSnapshot.canonicalSource = frozen.executionSnapshot.messages.map((message: { hash: string }) => message.hash)
+    if (changed === 'provider') frozen.executionSnapshot.provider = 'another-provider'
+    if (changed === 'model') frozen.executionSnapshot.model = 'different-model'
+    if (changed === 'credential') frozen.executionSnapshot.credentialScope = 'different-principal'
+    if (changed === 'endpoint') frozen.executionSnapshot.endpointHash = '0'.repeat(64)
+    if (changed === 'tools') frozen.executionSnapshot.toolsHash = '0'.repeat(64)
+    const session = new SessionContext()
+    session.replaceMessages(structuredClone(setup.session.getMessages()))
+    if (changed === 'source') session.getMessages()[0]!.content = 'rewritten task'
+    if (changed === 'provenance') {
+      const first = session.getMessages()[0]!
+      if (first.role === 'user') first.origin = 'hook'
+    }
+    if (changed === 'synthetic result') session.getMessages()[2]!.content = 'invented tool success'
+    const restored = setup.create(session, new PromptEngine({ ...setup.engineConfig, inheritFrozenFrom: frozen }))
+    session.addUserMessage('continue the previous task')
+    let request: ReturnType<PromptEngine['buildOaiRequest']>
+    try { request = restored.engine.buildOaiRequest(session.getMessages()) }
+    catch (error) {
+      assert.ok(['source', 'provenance', 'synthetic result'].includes(changed), 'only invalid source evidence may reject earlier while building')
+      assert.match(String(error), /prefix diverged at source/)
+      assert.equal(setup.bodies.length, 1)
+      assert.deepEqual(restored.engine.exportFrozenSnapshot().publishedHistory, legacySource)
+      assert.deepEqual(restored.client.getMainPrefixProof!(), frozen.executionSnapshot)
+      return
+    }
+    if (changed === 'request wire') request.messages[0]!.content = 'unverified system rewrite'
+    if (changed === 'options') request.max_tokens = 2_048
+    if (changed === 'short wire changed request') request.messages[1]!.content = 'unverified historical task rewrite'
+    if (changed === 'generation') restored.client.authorizeCacheGeneration!('explicit_user_effort')
+    const previousProof = structuredClone(restored.client.getMainPrefixProof!())
+    if (changed !== 'none') {
+      await assert.rejects(restored.client.stream(request, callbacks), /prefix diverged at source/)
+      assert.equal(setup.bodies.length, 1)
+      assert.deepEqual(restored.engine.exportFrozenSnapshot().publishedHistory, legacySource)
+      assert.deepEqual(restored.client.getMainPrefixProof!(), previousProof)
+      return
+    }
+    await assert.doesNotReject(restored.client.stream(request, callbacks))
+    assert.deepEqual(restored.engine.exportFrozenSnapshot().publishedHistory, proveRewindHistory(session.getMessages()))
+    assert.equal(restored.client.getMainPrefixProof!()!.cacheGenerationId, frozen.executionSnapshot.cacheGenerationId)
+    session.addUserMessage('continue once more')
+    await restored.client.stream(restored.engine.buildOaiRequest(session.getMessages()), callbacks)
+    assert.equal(setup.bodies.length, 3)
+  })
+}
 
 function cancel(session: SessionContext) {
   recordInterruption({

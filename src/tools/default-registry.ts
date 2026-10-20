@@ -16,6 +16,7 @@ import { EXPORT_FILE_TOOL } from './export-file.js'
 import { OPEN_PATH_TOOL } from './open-path.js'
 import { REQUEST_PATH_ACCESS_TOOL } from './request-path-access.js'
 import { SKILL_TOOL } from './skill.js'
+import { SKILL_RUNTIME_TOOL } from './skill-runtime.js'
 import { BROWSER_TOOL } from './browser.js'
 import { createComputerUseStubTool } from './computer-use/stub.js'
 import { computerUseModulePresent } from './computer-use/bridge.js'
@@ -184,6 +185,9 @@ export function createDefaultToolRegistry(extraTools: Tool[] = [], options: Defa
   if (preset !== 'taiyi') registry.register(ASK_IMAGE_TOOL)
   // skill — 技能加载。taiyi 评测档排除（评测任务不依赖技能系统）。
   if (preset !== 'taiyi') registry.register(SKILL_TOOL)
+  // skill_runtime — 技能 Python 运行时（doctor/prepare/run；issue #523）。
+  // taiyi 守卫同 skill（评测档排除）。
+  if (preset !== 'taiyi') registry.register(SKILL_RUNTIME_TOOL)
   // leave_mark — 星图里程碑。preset full 含；RIVET_LEAVE_MARK=1 强制开启。
   if (presetIncludes(preset, 'leave_mark') || process.env.RIVET_LEAVE_MARK === '1') {
     registry.register(LEAVE_MARK_TOOL)

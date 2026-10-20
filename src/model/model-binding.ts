@@ -19,6 +19,25 @@ export class ModelBindingUnavailable extends Error {
   constructor(readonly reason: ModelUnavailableReason) { super(reason); this.name = 'ModelBindingUnavailable' }
 }
 
+export function sessionProviderKey(providers: Record<string, ProviderConfig>, provider: ProviderConfig): string {
+  const entries = Object.entries(providers)
+  const identities = entries.filter(([, configured]) => configured === provider)
+  const sameCredentials = (left: Pick<ProviderConfig, 'keyRef' | 'apiKey' | 'apiKeyEnv'>, right: Pick<ProviderConfig, 'keyRef' | 'apiKey' | 'apiKeyEnv'>) =>
+    left.keyRef === right.keyRef && left.apiKey === right.apiKey && left.apiKeyEnv === right.apiKeyEnv
+  const sameAuth = (left: ProviderConfig['auth'], right: ProviderConfig['auth']) => left?.type === right?.type
+    && (left?.type === 'oauth' ? right?.type === 'oauth' && left.provider === right.provider
+      : left?.type === 'api-key' ? right?.type === 'api-key' && left.keyEnv === right.keyEnv : true)
+  const candidates = identities.length ? identities : entries.filter(([, configured]) =>
+    configured.name === provider.name && configured.baseUrl === provider.baseUrl && configured.protocol === provider.protocol
+    && sameAuth(configured.auth, provider.auth)
+    && (provider.keys?.length
+      ? provider.keys.every(selected => configured.keys?.some(key => key.id === selected.id && sameCredentials(key, selected)
+        && ((selected.keyRef || selected.apiKey || selected.apiKeyEnv) ? true : sameCredentials(configured, provider))))
+      : sameCredentials(configured, provider)))
+  if (candidates.length !== 1) throw new ModelBindingUnavailable('provider_deleted')
+  return candidates[0]![0]
+}
+
 /** Exact lookup, with the same model-owner and credential rules as main sessions. */
 export function resolveModelBinding(providers: Record<string, ProviderConfig>, target: ModelBindingRef, network?: ProviderNetwork) {
   const configured = providers[target.provider]
@@ -57,7 +76,7 @@ export function modelBindingAvailability(providers: Record<string, ProviderConfi
 }
 
 /** Identify the key already used by the root user session, including duplicate model IDs. */
-export function snapshotSessionBinding(provider: ProviderConfig, model: string, apiKey: string): ModelBindingRef {
+export function snapshotSessionBinding(provider: ProviderConfig, model: string, apiKey: string, providerKey = provider.name): ModelBindingRef {
   const owner = provider.keys?.find(key => {
     if (!findModelInKey(provider, key.id, model)) return false
     try {
@@ -67,5 +86,5 @@ export function snapshotSessionBinding(provider: ProviderConfig, model: string, 
     } catch { return false }
   })
   if (provider.auth?.type !== 'oauth' && provider.keys?.length && !owner) throw new ModelBindingUnavailable('missing_credentials')
-  return { provider: provider.name, model, ...(owner ? { keyId: owner.id } : {}), baseUrl: provider.baseUrl }
+  return { provider: providerKey, model, ...(owner ? { keyId: owner.id } : {}), baseUrl: provider.baseUrl }
 }

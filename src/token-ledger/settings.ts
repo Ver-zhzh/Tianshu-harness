@@ -4,12 +4,13 @@ import { loadConfig, saveConfig } from '../config/manager.js'
 import type { Config } from '../config/schema.js'
 
 export const DEFAULT_FORUM_ENDPOINT = 'https://tianshuharness.com/token/v1/token-usage'
+export const DEFAULT_SYNC_INTERVAL_MINUTES = 2
 
 /** Credentials are accepted only over an authenticated write channel. */
 export interface TokenLedgerSettings {
   enabled: boolean
   deviceName: string
-  forum: { endpoint: string; apiKeyConfigured: boolean; apiKeySource: 'environment' | 'saved' | 'none'; autoSync: boolean; intervalMinutes: number }
+  forum: { endpoint: string; apiKeyConfigured: boolean; apiKeySource: 'environment' | 'saved' | 'account' | 'none'; autoSync: boolean; intervalMinutes: number }
 }
 
 export function isSafeLedgerEndpoint(value: string): boolean {
@@ -20,7 +21,7 @@ export function isSafeLedgerEndpoint(value: string): boolean {
   } catch { return false }
 }
 
-export function readTokenLedgerSettings(config: Config): TokenLedgerSettings {
+export function readTokenLedgerSettings(config: Config, accountAvailable = false): TokenLedgerSettings {
   const forum = config.tokenLedger.forum
   const candidateEndpoint = process.env.RIVET_FORUM_API || forum?.endpoint
   const environmentKey = process.env.RIVET_FORUM_TOKEN
@@ -31,10 +32,10 @@ export function readTokenLedgerSettings(config: Config): TokenLedgerSettings {
     deviceName: config.tokenLedger.deviceName || hostname(),
     forum: {
       endpoint: candidateEndpoint && isSafeLedgerEndpoint(candidateEndpoint) ? candidateEndpoint : DEFAULT_FORUM_ENDPOINT,
-      apiKeyConfigured,
-      apiKeySource: apiKeyConfigured ? (environmentKey ? 'environment' : 'saved') : 'none',
+      apiKeyConfigured: apiKeyConfigured || accountAvailable,
+      apiKeySource: apiKeyConfigured ? (environmentKey ? 'environment' : 'saved') : accountAvailable ? 'account' : 'none',
       autoSync: forum?.autoSync === true,
-      intervalMinutes: forum?.intervalMinutes ?? 1,
+      intervalMinutes: forum?.intervalMinutes ?? DEFAULT_SYNC_INTERVAL_MINUTES,
     },
   }
 }
@@ -52,7 +53,7 @@ const patchSchema = z.object({
 
 export function updateTokenLedgerSettings(
   patch: unknown,
-  deps: { load?: () => Config; save?: (config: Config) => void } = {},
+  deps: { load?: () => Config; save?: (config: Config) => void; accountAvailable?: boolean } = {},
 ): Config {
   const parsed = patchSchema.safeParse(patch)
   // Zod diagnostics may embed the submitted credential. Keep errors controlled.
@@ -63,7 +64,7 @@ export function updateTokenLedgerSettings(
   if (input.forum?.apiKey === '') { delete forum.apiKey; forum.autoSync = false }
   if (input.forum && !forum.endpoint) forum.endpoint = DEFAULT_FORUM_ENDPOINT
   if (input.forum && forum.autoSync === undefined) forum.autoSync = false
-  if (forum.autoSync && !(process.env.RIVET_FORUM_TOKEN || forum.apiKey)?.trim()) {
+  if (forum.autoSync && !(process.env.RIVET_FORUM_TOKEN || forum.apiKey)?.trim() && !deps.accountAvailable) {
     throw new Error('Configure a sync key before enabling automatic sync')
   }
   config.tokenLedger = { ...config.tokenLedger, ...input, ...(input.forum ? { forum } : {}) }

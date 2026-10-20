@@ -12,7 +12,7 @@
  * fetch 可注入——sidecar 进程没有全局代理 dispatcher（见 account.ts 注释），
  * 测试也经此打桩。
  */
-import { isSafeLedgerEndpoint } from './settings.js'
+import { DEFAULT_FORUM_ENDPOINT, isSafeLedgerEndpoint } from './settings.js'
 import type { TokenUsageSnapshot } from './types.js'
 
 export type FetchLike = (
@@ -24,13 +24,13 @@ export type FetchLike = (
     signal?: AbortSignal
     redirect?: 'error'
   },
-) => Promise<{ status: number; text(): Promise<string> }>
+) => Promise<{ status: number; headers?: { get(name: string): string | null }; text(): Promise<string> }>
 
 export type ForumPushCode = 'no_endpoint' | 'timeout' | 'network' | 'http_4xx' | 'http_5xx' | 'invalid_endpoint' | 'invalid_receipt' | 'stale_receipt'
 
 export type ForumPushResult =
-  | { ok: true; status: number }
-  | { ok: false; code: ForumPushCode; status?: number; error?: string }
+  | { ok: true; status: number; nextUploadAfterMs?: number }
+  | { ok: false; code: ForumPushCode; status?: number; error?: string; retryAfterMs?: number }
 
 export interface ForumPushOptions {
   /** 完整推送 URL；缺省 = 未配置，返回 no_endpoint */
@@ -48,6 +48,12 @@ export interface ForumPushOptions {
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
+function retryDelay(value: string | null | undefined): number | undefined {
+  if (!value) return undefined
+  const seconds = /^\d+(?:\.\d+)?$/.test(value.trim()) ? Number(value) : (Date.parse(value) - Date.now()) / 1000
+  return Number.isFinite(seconds) && seconds >= 0 ? Math.min(86_400_000, Math.max(1_000, Math.ceil(seconds * 1000))) : undefined
+}
+
 export async function pushTokenUsageSnapshot(
   snapshot: TokenUsageSnapshot,
   options: ForumPushOptions,
@@ -58,7 +64,8 @@ export async function pushTokenUsageSnapshot(
 
   const fetchImpl = options.fetchImpl ?? (fetch as unknown as FetchLike)
   const timeoutMs = options.timeoutMs ?? 10_000
-  const retries = options.retries ?? 1
+  const retries = Math.min(1, Math.max(0, Math.floor(options.retries ?? 1)))
+  const timeoutOnly = endpoint === DEFAULT_FORUM_ENDPOINT || endpoint === DEFAULT_FORUM_ENDPOINT.replace('/v1/', '/v2/')
   const backoffMs = options.backoffMs ?? 1_000
 
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
@@ -80,6 +87,7 @@ export async function pushTokenUsageSnapshot(
         signal: options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs),
       })
       const responseBody = await res.text()
+      const retryAfterMs = retryDelay(res.headers?.get('retry-after'))
       if (res.status >= 200 && res.status < 300) {
         let receipt: unknown
         try { receipt = JSON.parse(responseBody) } catch { return { ok: false, code: 'invalid_receipt', status: res.status } }
@@ -89,17 +97,20 @@ export async function pushTokenUsageSnapshot(
         if ((receipt as { stale?: unknown }).stale !== false) {
           return { ok: false, code: 'stale_receipt', status: res.status }
         }
-        return { ok: true, status: res.status }
+        const nextUploadAfterMs = retryDelay(res.headers?.get('x-ledger-upload-after'))
+        return { ok: true, status: res.status, ...(nextUploadAfterMs ? { nextUploadAfterMs } : {}) }
       }
       // 4xx（除 429）是载荷/鉴权问题，重试同一载荷无意义——往少做侧失效。
       if (res.status >= 400 && res.status < 500 && res.status !== 429) {
         return { ok: false, code: 'http_4xx', status: res.status }
       }
-      lastTransient = { ok: false, code: 'http_5xx', status: res.status }
+      lastTransient = { ok: false, code: 'http_5xx', status: res.status, ...(retryAfterMs ? { retryAfterMs } : {}) }
+      if (res.status === 429 || retryAfterMs || timeoutOnly) return lastTransient
     } catch (err) {
       const name = (err as Error)?.name
       const code: ForumPushCode = name === 'TimeoutError' || name === 'AbortError' ? 'timeout' : 'network'
       lastTransient = { ok: false, code }
+      if (timeoutOnly && code !== 'timeout') return lastTransient
     }
   }
   return lastTransient

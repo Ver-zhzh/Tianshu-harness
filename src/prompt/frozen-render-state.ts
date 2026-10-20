@@ -43,6 +43,10 @@ export class FrozenRenderState {
     this.committed!.executionSnapshot = snapshot.executionSnapshot
   }
   anchor(key: string) { return this.anchorIndex.get(key) }
+  comparePublishedRender(history: NonNullable<FrozenSnapshotData['renderedHistory']>): import('../api/continuation-prefix.js').PrefixComparison {
+    const prior = this.committed?.renderedHistory
+    return !prior ? 'unknown' : prior.some((entry, index) => history[index]?.hash !== entry.hash) ? 'changed' : 'same'
+  }
   *publishedPrefixes(): IterableIterator<string> {
     for (const anchor of this.committed?.anchors ?? []) yield anchor.prefix
   }

@@ -1,9 +1,10 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { loadConfig } from '../manager.js'
+import { writeProviderKeysFile } from '../provider-keys-store.js'
 import { getImageGenModelConfig, registerImageGenModelConfig, setImageGenModelConfig } from '../image-gen-model.js'
 
 describe('image generation model config (issue #8)', () => {
@@ -234,6 +235,30 @@ describe('image generation model config (issue #8)', () => {
       /不在已配置的 provider 列表里/,
     )
     assert.equal(getImageGenModelConfig(), undefined)
+  })
+
+  // 存在性判据与 vision 同源：必须查 contractModels 契约并集（keys 池是事实源），
+  // 顶层 provider.models 只是迁移时快照——只在 key 池里的模型也要能写进生图槽。
+  it('accepts an image-gen model that lives only in the key pool (contract union)', () => {
+    writeFileSync(process.env.RIVET_CONFIG_PATH!, JSON.stringify({
+      provider: { providers: { workbuddy2api: {
+        name: 'workbuddy2api', baseUrl: 'https://api.workbuddy.example/v1', protocol: 'openai',
+        capabilities: {}, thinking: 'enabled', maxTokens: 128000,
+        models: [{ id: 'cn:kimi-k3-1', maxTokens: 8192 }], unsupported: [], userSaved: true,
+      } } },
+    }))
+    writeProviderKeysFile({ version: 1, providers: { workbuddy2api: [{ id: 'default', models: [
+      { id: 'cn:kimi-k3-1', contextWindow: 128000, maxTokens: 8192 },
+      { id: 'flux-key-only', contextWindow: 128000, maxTokens: 8192, supportsImageGen: true },
+    ] }] } })
+
+    const saved = setImageGenModelConfig({ provider: 'workbuddy2api', model: 'flux-key-only' })
+    assert.equal(saved?.model, 'flux-key-only')
+    assert.equal(loadConfig().agent.imageGenModel?.model, 'flux-key-only')
+    assert.throws(
+      () => setImageGenModelConfig({ provider: 'workbuddy2api', model: 'cn:ghost' }),
+      /没有模型 "cn:ghost"/,
+    )
   })
 
   it('rejects an unknown sizeField value instead of silently dropping it', () => {

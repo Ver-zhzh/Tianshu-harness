@@ -111,7 +111,7 @@ describe('resolveGithubApiUrl', () => {
       throw new Error('should not be called')
     }) as unknown as typeof fetch
     const url = await resolveGithubApiUrl(API_PATH, {
-      config: mirrorConfig({ enabled: true, github: 'kkgithub' }),
+      config: mirrorConfig({ enabled: true, github: 'gitcode' }),
       fetchFn: counting,
     })
     assert.equal(url, `${PROXY0}${GITHUB_API_DIRECT}${API_PATH}`)

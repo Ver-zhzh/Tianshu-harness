@@ -27,6 +27,8 @@ import type { DomainDriftResult } from './domain-drift-detector.js'
 export type ApprovalMode = 'auto-accept' | 'auto-safe' | 'manual' | 'dangerously-skip-permissions'
 
 export interface AgentConfig {
+  saveSkillDraft?: import('../skills/skill-creation.js').SkillDraftWriter
+  executionToolAllowlist?: readonly string[]
   inputOrigin?: import('./input-origin.js').InputOrigin
   client: StreamClient
   budgetSummaryClient?: () => StreamClient
@@ -362,6 +364,7 @@ export interface DomainResolvedPayload {
 }
 
 export interface ToolDisplayEvidence {
+  skillDraft?: import('../server/protocol.js').SkillDraftReference
   generatedImageId?: string
   command?: string
   outputText?: string
@@ -395,7 +398,7 @@ export interface AgentCallbacks {
    *  category/message/nextDelayMs 让 UI 能说清「为什么断、等多久」（429 不再像卡住）。 */
   onModelRetry?: (info: { attempt: number; maxAttempts: number; category?: string; message?: string; nextDelayMs?: number }) => void
   onAbort: (reason?: string) => void
-  onApprovalRequired: (id: string, name: string, input: Record<string, unknown>) => Promise<ApprovalResult | boolean>
+  onApprovalRequired: (id: string, name: string, input: Record<string, unknown>, context?: { runtimePreview: import('../skills/runtime/installer.js').InstallPreview; previewDigest: string; rebuild?: boolean }) => Promise<ApprovalResult | boolean>
   onCheckpoint?: (hash: string) => void
   /**
    * 相位变化。`reason` 是服务端给出的中文文案（CLI 中文优先，与 image-stripped 同约定）；

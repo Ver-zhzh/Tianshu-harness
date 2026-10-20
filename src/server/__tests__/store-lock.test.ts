@@ -6,6 +6,12 @@
  * seq + 100_000 的假标记，desktop 的 event-reducer `ev.seq <= state.lastSeq`
  * 守卫随后丢掉之后所有真实输出（『假续跑』）。修法：会话库单写者独占锁。
  *
+ * 2026-10-20 身份收紧：接管只认两条——持有者进程确认不存在（pid_dead），或
+ * PID 活着但真实创建时间与锁记录的 startedAtMs 不符（pid_reused）。活进程
+ * 心跳过期（mtime 陈旧）只作诊断信息透出（holder.heartbeatStale），不再触发
+ * 接管——事件循环卡顿的进程不该因此丢库。旧格式锁缺 ownerToken/startedAtMs
+ * 一律视为不可核验 → 按占用处理，不自动清理。
+ *
  * 本文件的每条用例都做过「还原缺陷即红」核验：把对应的修复分支撤掉后用例
  * 必须变红（见各 describe 顶部注释）。
  *
@@ -23,8 +29,7 @@ import {
   STORE_LOCK_HEARTBEAT_STALE_MS,
   StoreLock,
   platformDefaultStoreLockPath,
-  readBootTimeMs,
-  readProcessStartMs,
+  probeProcessStartMs,
   storeLockPath,
   type LockInfo,
   type StoreLockState,
@@ -75,8 +80,8 @@ function contended(state: StoreLockState): Extract<StoreLockState, { status: 'co
 }
 
 describe('StoreLock — 争用与有界重试', () => {
-  // 还原缺陷即红：删掉 staleReason 里三条陈旧判据（pid/boot/heartbeat）后，
-  // 下面第一条用例会被误判为可接管（stale_recovered）→ 变红。
+  // 还原缺陷即红：删掉持有者判据（pid_dead/pid_reused）后，下面第一条用例会被
+  // 误判为可接管（stale_recovered）→ 变红。
   beforeEach(() => {
     TEST_DIR = mkdtempSync(join(tmpdir(), 'store-lock-'))
     LOCK_PATH = join(TEST_DIR, 'desktop', 'sidecar.lock')
@@ -94,7 +99,11 @@ describe('StoreLock — 争用与有界重试', () => {
     writeHolder(holder)
     const sessionBefore = statSync(SESSION_FILE)
 
-    const lock = new StoreLock({ lockPath: LOCK_PATH, bootTimeMs: () => undefined })
+    const lock = new StoreLock({
+      lockPath: LOCK_PATH,
+      // 持有者（本进程）的创建时间与记录吻合 → 两条接管判据都不成立
+      processStartMs: async () => Date.now() - 1_000,
+    })
     const startedAt = Date.now()
     const state = await lock.acquire({ retryWindowMs: 240, retryIntervalMs: 60 })
     const elapsed = Date.now() - startedAt
@@ -120,7 +129,7 @@ describe('StoreLock — 争用与有界重试', () => {
   })
 })
 
-describe('StoreLock — 陈旧判定（三条判据）', () => {
+describe('StoreLock — 接管判定（pid_dead / pid_reused 两条判据）', () => {
   beforeEach(() => {
     TEST_DIR = mkdtempSync(join(tmpdir(), 'store-lock-stale-'))
     LOCK_PATH = join(TEST_DIR, 'desktop', 'sidecar.lock')
@@ -133,7 +142,7 @@ describe('StoreLock — 陈旧判定（三条判据）', () => {
   // 还原缺陷即红：撤掉 pid 存活判据 → 本条变红（contended）。
   it('接管「持有者 PID 已死」的锁', async () => {
     writeHolder(holderInfo({ pid: DEAD_PID }))
-    const lock = new StoreLock({ lockPath: LOCK_PATH, bootTimeMs: () => undefined })
+    const lock = new StoreLock({ lockPath: LOCK_PATH })
 
     const state = await lock.acquire({ retryWindowMs: 0 })
 
@@ -145,18 +154,15 @@ describe('StoreLock — 陈旧判定（三条判据）', () => {
     assert.equal(existsSync(LOCK_PATH), false, 'release 必须删掉自己的锁文件')
   })
 
-  // 还原缺陷即红：撤掉 boot-time 判据 → 本条变红（持有者 PID 是活的，会被判 contended）。
-  it('接管「持有者启动时间早于本次开机」的锁（重启后 PID 复用）', async () => {
-    const bootTimeMs = Date.now() - 60 * 60_000
-    writeHolder(
-      holderInfo({
-        // PID 是活的（就是本测试进程），但记录的启动时间早于开机 → 不可能是它
-        pid: process.pid,
-        ownerToken: 'reused-pid-after-reboot',
-        startedAtMs: bootTimeMs - 6 * 60 * 60_000,
-      }),
-    )
-    const lock = new StoreLock({ lockPath: LOCK_PATH, bootTimeMs: () => bootTimeMs })
+  // 还原缺陷即红：撤掉 pid_reused 判据（processStartMs 比对）→ 持有者活着、
+  // 心跳新鲜 → contended → 红。
+  it('接管「PID 活着但创建时间与记录不符」的锁（PID 已被复用）', async () => {
+    const recordedStart = Date.now() - 3_600_000
+    writeHolder(holderInfo({ pid: process.pid, ownerToken: 'reused-pid', startedAtMs: recordedStart }))
+    const lock = new StoreLock({
+      lockPath: LOCK_PATH,
+      processStartMs: async () => Date.now(), // 实测创建时间≈现在，与一小时前的记录对不上
+    })
 
     const state = await lock.acquire({ retryWindowMs: 0 })
 
@@ -166,25 +172,68 @@ describe('StoreLock — 陈旧判定（三条判据）', () => {
     lock.release()
   })
 
-  // 还原缺陷即红：撤掉心跳判据 → 本条变红（持有者 PID 活、启动时间新 → contended）。
-  it('接管「心跳超过 10 分钟未刷新」的锁', async () => {
-    writeHolder(holderInfo({ pid: process.pid, ownerToken: 'silent-sidecar', startedAtMs: Date.now() - 5_000 }))
+  // 还原缺陷即红：把「心跳过期」重新加回可回收判据 → 本条变 stale_recovered → 红。
+  it('活进程心跳过期 → 仍判占用，不接管不动锁（mtime 只作诊断）', async () => {
+    const holder = holderInfo({ pid: process.pid, ownerToken: 'silent-sidecar', startedAtMs: Date.now() - 5_000 })
+    writeHolder(holder)
     const staleAt = new Date(Date.now() - STORE_LOCK_HEARTBEAT_STALE_MS - 60_000)
     utimesSync(LOCK_PATH, staleAt, staleAt)
 
-    const lock = new StoreLock({ lockPath: LOCK_PATH, bootTimeMs: () => undefined })
+    const lock = new StoreLock({ lockPath: LOCK_PATH, processStartMs: async () => holder.startedAtMs! })
     const state = await lock.acquire({ retryWindowMs: 0 })
 
-    assert.equal(state.status, 'stale_recovered', JSON.stringify(state))
-    assert.equal(readHolder().pid, process.pid)
-    lock.release()
+    const c = contended(state)
+    assert.equal(c.reason, 'pid_alive')
+    assert.equal(c.holder.heartbeatStale, true, '心跳过期必须作为诊断信息透出（不再触发接管）')
+    assert.equal(readHolder().ownerToken, 'silent-sidecar', '活进程的锁一个字节都不能动')
   })
 
-  // 还原缺陷即红：把 boot 判据改成『心跳过期即接管』（忽略心跳新鲜度）→ 本条变红。
+  // 还原缺陷即红：探测失败（undefined）若被当成「创建时间不符」→ stale_recovered → 红。
+  it('进程创建时间探测失败 → 无法核验按占用（不接管）', async () => {
+    writeHolder(holderInfo({ pid: process.pid, ownerToken: 'unverifiable', startedAtMs: Date.now() - 3_600_000 }))
+    const lock = new StoreLock({ lockPath: LOCK_PATH, processStartMs: async () => undefined })
+
+    const state = await lock.acquire({ retryWindowMs: 0 })
+
+    const c = contended(state)
+    assert.equal(c.reason, 'pid_alive')
+    assert.equal(readHolder().ownerToken, 'unverifiable', '探测失败绝不是接管理由')
+  })
+
+  // 还原缺陷即红：撤掉身份完整性检查 → pid_dead 直接接管旧格式锁 → 红。
+  it('旧格式锁缺身份字段（ownerToken/startedAtMs）→ 不可核验按占用，不删锁', async () => {
+    // 形态一：ownerToken 与 startedAtMs 都没有（收紧前的旧版锁）
+    writeHolder({ pid: DEAD_PID, acquiredAt: new Date().toISOString(), hostname: osHostname() })
+    const first = new StoreLock({ lockPath: LOCK_PATH })
+    const firstState = await first.acquire({ retryWindowMs: 0 })
+    assert.equal(contended(firstState).reason, 'identity_unverifiable')
+    assert.equal(readHolder().pid, DEAD_PID, '旧锁必须原样保留（等人工清理，不自动删）')
+
+    // 形态二：有 ownerToken 但缺 startedAtMs —— 身份同样不完整
+    const partial = holderInfo({ pid: DEAD_PID })
+    delete partial.startedAtMs
+    writeHolder(partial)
+    const second = new StoreLock({ lockPath: LOCK_PATH })
+    const secondState = await second.acquire({ retryWindowMs: 0 })
+    assert.equal(contended(secondState).reason, 'identity_unverifiable')
+    assert.equal(readHolder().pid, DEAD_PID)
+    assert.equal(existsSync(`${LOCK_PATH}.reclaim`), false, '不可核验的锁连 reclaim 都不能发起')
+  })
+
+  it('跨主机的锁 → 判占用（本机 PID 判不了远端进程死活），不删锁', async () => {
+    writeHolder(holderInfo({ pid: DEAD_PID, hostname: 'some-other-host.local' }))
+    const lock = new StoreLock({ lockPath: LOCK_PATH })
+
+    const state = await lock.acquire({ retryWindowMs: 0 })
+
+    assert.equal(contended(state).reason, 'cross_host')
+    assert.equal(readHolder().pid, DEAD_PID, '跨主机锁即使是死 PID 也不得删除')
+  })
+
   it('心跳新鲜且进程存活 → 判为占用，不接管', async () => {
-    writeHolder(holderInfo({ pid: process.pid, ownerToken: 'busy-sidecar', startedAtMs: Date.now() - 5_000 }))
-    const bootTimeMs = Date.now() - 60 * 60_000
-    const lock = new StoreLock({ lockPath: LOCK_PATH, bootTimeMs: () => bootTimeMs, heartbeatStaleMs: 60_000 })
+    const holder = holderInfo({ pid: process.pid, ownerToken: 'busy-sidecar', startedAtMs: Date.now() - 5_000 })
+    writeHolder(holder)
+    const lock = new StoreLock({ lockPath: LOCK_PATH, processStartMs: async () => holder.startedAtMs! })
 
     const state = await lock.acquire({ retryWindowMs: 0 })
 
@@ -194,17 +243,8 @@ describe('StoreLock — 陈旧判定（三条判据）', () => {
     assert.equal(readHolder().ownerToken, 'busy-sidecar', '不能抢走活锁')
   })
 
-  it('boot time 取不到时该判据不生效（不因此误判陈旧）', async () => {
-    writeHolder(holderInfo({ pid: process.pid, ownerToken: 'no-boot-info', startedAtMs: 1 }))
-    const lock = new StoreLock({ lockPath: LOCK_PATH, bootTimeMs: () => undefined })
-
-    const state = await lock.acquire({ retryWindowMs: 0 })
-
-    assert.equal(state.status, 'contended', '取不到 boot time 时必须偏保守（视为占用）')
-  })
-
   it('持有期间按心跳间隔刷新锁文件时间', async () => {
-    const lock = new StoreLock({ lockPath: LOCK_PATH, heartbeatIntervalMs: 25, bootTimeMs: () => undefined })
+    const lock = new StoreLock({ lockPath: LOCK_PATH, heartbeatIntervalMs: 25 })
     const state = await lock.acquire({ retryWindowMs: 0 })
     assert.equal(state.status, 'acquired')
 
@@ -216,28 +256,191 @@ describe('StoreLock — 陈旧判定（三条判据）', () => {
     lock.release()
   })
 
-  it('readBootTimeMs 在本平台给出不晚于现在的开机时间', () => {
-    const bootMs = readBootTimeMs()
-    if (process.platform === 'darwin' || process.platform === 'linux') {
-      assert.equal(typeof bootMs, 'number')
-      assert.ok((bootMs as number) > 0 && (bootMs as number) <= Date.now(), `boot=${bootMs}`)
-    } else {
-      assert.equal(bootMs, undefined, '不支持的平台必须返回 undefined（判据不生效）')
-    }
-  })
-
   it('锁文件损坏时走串行回收，且并发争用只有一个赢家', async () => {
     mkdirSync(dirname(LOCK_PATH), { recursive: true })
     writeFileSync(LOCK_PATH, '{not-json', 'utf-8')
 
     const contenders = Array.from({ length: 6 }, () =>
-      new StoreLock({ lockPath: LOCK_PATH, bootTimeMs: () => undefined }).acquire({ retryWindowMs: 0 }),
+      new StoreLock({ lockPath: LOCK_PATH }).acquire({ retryWindowMs: 0 }),
     )
     const states = await Promise.all(contenders)
     const winners = states.filter(s => s.status === 'acquired' || s.status === 'stale_recovered')
 
     assert.ok(winners.length >= 1, JSON.stringify(states))
     assert.ok(existsSync(LOCK_PATH))
+  })
+})
+
+describe('StoreLock — reclaim 前重读完整锁身份', () => {
+  beforeEach(() => {
+    TEST_DIR = mkdtempSync(join(tmpdir(), 'store-lock-reclaim-'))
+    LOCK_PATH = join(TEST_DIR, 'desktop', 'sidecar.lock')
+  })
+
+  afterEach(() => {
+    rmSync(TEST_DIR, { recursive: true, force: true })
+  })
+
+  // 还原缺陷即红：reclaim 后重读若只比 pid（旧行为）→ 同 pid 不同 ownerToken 的
+  // 接管者锁被删除并被接管 → 本条在 readHolder 断言上变红（旧代码还会因心跳
+  // 过期判 stale，现在身份不符就该直接放弃）。
+  it('reclaim 期间锁主易人（同 pid 不同 ownerToken）→ 放弃回收，不动新锁', async () => {
+    const recordedStart = Date.now() - 3_600_000
+    writeHolder(holderInfo({ pid: process.pid, ownerToken: 'original-owner', startedAtMs: recordedStart }))
+
+    let probed = false
+    const lock = new StoreLock({
+      lockPath: LOCK_PATH,
+      processStartMs: async () => {
+        if (!probed) {
+          probed = true
+          // 第一次探测（判定原锁主 pid_reused）期间，锁被另一进程接管重建：
+          // pid 复用不变、startedAtMs 复用原记录，但 ownerToken 已是别人。
+          // 旧判据只比 pid → 会把这把新锁删掉；完整身份比对必须放弃本轮回收。
+          const hijacker = holderInfo({ pid: process.pid, ownerToken: 'hijacker', startedAtMs: recordedStart })
+          writeHolder(hijacker)
+          const longAgo = new Date(Date.now() - STORE_LOCK_HEARTBEAT_STALE_MS - 60_000)
+          utimesSync(LOCK_PATH, longAgo, longAgo)
+        }
+        return Date.now()
+      },
+    })
+
+    const state = await lock.acquire({ retryWindowMs: 0 })
+
+    assert.equal(state.status, 'contended', JSON.stringify(state))
+    assert.equal(readHolder().ownerToken, 'hijacker', '身份不符即放弃回收——绝不动新锁主的锁')
+    assert.equal(lock.isOwner(), false)
+    assert.equal(existsSync(`${LOCK_PATH}.reclaim`), false, '放弃回收后 reclaim 锁必须释放')
+  })
+})
+
+describe('StoreLock — reclaim 锁复用同一套持有者判据', () => {
+  beforeEach(() => {
+    TEST_DIR = mkdtempSync(join(tmpdir(), 'store-lock-reclaim-criteria-'))
+    LOCK_PATH = join(TEST_DIR, 'desktop', 'sidecar.lock')
+  })
+
+  afterEach(() => {
+    rmSync(TEST_DIR, { recursive: true, force: true })
+  })
+
+  // 还原缺陷即红：reclaim 接管若只判 pid 死（旧判据）→ 活 PID 的 reclaim 锁
+  // 永远抢不动 → 本条 reclaim_in_progress → 红。
+  it('reclaim 锁持有者 PID 被复用（创建时间不符）→ 接管 reclaim 并完成回收', async () => {
+    mkdirSync(dirname(LOCK_PATH), { recursive: true })
+    writeFileSync(LOCK_PATH, '{not-json', 'utf-8')
+    writeFileSync(
+      `${LOCK_PATH}.reclaim`,
+      JSON.stringify(holderInfo({ pid: process.pid, ownerToken: 'crashed-reclaimer', startedAtMs: Date.now() - 3_600_000 }), null, 2),
+      'utf-8',
+    )
+    const lock = new StoreLock({ lockPath: LOCK_PATH, processStartMs: async () => Date.now() })
+
+    const state = await lock.acquire({ retryWindowMs: 0 })
+
+    assert.equal(state.status, 'stale_recovered', JSON.stringify(state))
+    assert.equal(lock.isOwner(), true)
+    lock.release()
+  })
+
+  it('reclaim 锁被身份吻合的活进程持有 → 报 reclaim_in_progress，不抢', async () => {
+    mkdirSync(dirname(LOCK_PATH), { recursive: true })
+    writeFileSync(LOCK_PATH, '{not-json', 'utf-8')
+    const reclaimer = holderInfo({ pid: process.ppid, ownerToken: 'live-reclaimer', startedAtMs: Date.now() - 60_000 })
+    writeFileSync(`${LOCK_PATH}.reclaim`, JSON.stringify(reclaimer, null, 2), 'utf-8')
+    const lock = new StoreLock({ lockPath: LOCK_PATH, processStartMs: async () => reclaimer.startedAtMs! })
+
+    const state = await lock.acquire({ retryWindowMs: 0 })
+
+    const c = contended(state)
+    assert.equal(c.reason, 'reclaim_in_progress')
+    assert.equal(
+      readFileSync(`${LOCK_PATH}.reclaim`, 'utf-8'),
+      JSON.stringify(reclaimer, null, 2),
+      '活进程持有的 reclaim 锁不得被删',
+    )
+  })
+})
+
+describe('StoreLock — 进程创建时间探测（异步、有界）', () => {
+  beforeEach(() => {
+    TEST_DIR = mkdtempSync(join(tmpdir(), 'store-lock-probe-'))
+    LOCK_PATH = join(TEST_DIR, 'desktop', 'sidecar.lock')
+  })
+
+  afterEach(() => {
+    rmSync(TEST_DIR, { recursive: true, force: true })
+  })
+
+  it('probeProcessStartMs 在本平台给出与本进程启动时刻相符的时间', async () => {
+    const startMs = await probeProcessStartMs(process.pid)
+    if (process.platform === 'darwin' || process.platform === 'linux') {
+      assert.equal(typeof startMs, 'number', 'ps -o lstart 解析失败会让 pid_reused 判据整体失效')
+      const expected = Date.now() - process.uptime() * 1000
+      assert.ok(Math.abs((startMs as number) - expected) < 5_000, `ps=${startMs} uptime 推算=${expected}`)
+      assert.equal(await probeProcessStartMs(DEAD_PID), undefined, '不存在的 PID 必须返回 undefined')
+    } else if (process.platform === 'win32') {
+      // win32 走 PowerShell CIM Win32_Process.CreationDate（异步、2s 上限）。
+      // 沙箱 CI 若取不到允许 undefined（调用方按不可核验处理）；取到就必须准。
+      if (startMs !== undefined) {
+        const expected = Date.now() - process.uptime() * 1000
+        assert.ok(Math.abs(startMs - expected) < 30_000, `cim=${startMs} uptime 推算=${expected}`)
+      }
+    } else {
+      assert.equal(startMs, undefined, '不支持的平台必须返回 undefined（判据不生效）')
+    }
+  })
+
+  // 还原缺陷即红：探测若不计入 acquire 窗口（或不 await 探测结果）→ calls 上界
+  // 或 elapsed 上界被击穿 → 红。
+  it('探测耗时计入 acquire 重试窗口预算；探测失败按占用处理', async () => {
+    writeHolder(holderInfo({ pid: process.pid, startedAtMs: Date.now() - 5_000 }))
+    let calls = 0
+    const lock = new StoreLock({
+      lockPath: LOCK_PATH,
+      // 模拟 2s 上限内的慢探测（真实 win32 PowerShell 形态），且最终取不到值
+      processStartMs: async () => { calls++; await sleep(400); return undefined },
+    })
+
+    const t0 = Date.now()
+    const state = await lock.acquire({ retryWindowMs: 1_000, retryIntervalMs: 200 })
+    const elapsed = Date.now() - t0
+
+    contended(state)
+    assert.ok(calls >= 2 && calls <= 3, `慢探测必须吃掉重试窗口（不耗时会有 ~5 次）：calls=${calls}`)
+    assert.ok(elapsed < 1_000 + 400 + 400, `窗口无上界：${elapsed}ms`)
+  })
+})
+
+describe('StoreLock — 丢锁回调与 release 收口', () => {
+  beforeEach(() => {
+    TEST_DIR = mkdtempSync(join(tmpdir(), 'store-lock-lost-'))
+    LOCK_PATH = join(TEST_DIR, 'desktop', 'sidecar.lock')
+  })
+
+  afterEach(() => {
+    rmSync(TEST_DIR, { recursive: true, force: true })
+  })
+
+  // 还原缺陷即红：release 若无条件删锁（不做四元组比对）→ 接管者的锁被删 → 红。
+  it('持锁期间锁被外部接管 → onLockLost 触发；丢锁后 release 不再删除别人的锁', async () => {
+    const lock = new StoreLock({ lockPath: LOCK_PATH, heartbeatIntervalMs: 25 })
+    assert.equal((await lock.acquire({ retryWindowMs: 0 })).status, 'acquired')
+
+    const lost = new Promise<StoreLockState>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('5s 内 onLockLost 未触发')), 5_000)
+      lock.onLockLost((s) => { clearTimeout(timer); resolve(s) })
+    })
+    // 外部接管：另一进程 reclaim 后重建的锁（完整身份、不同 ownerToken、活 pid）
+    writeHolder(holderInfo({ pid: process.ppid, ownerToken: 'takeover', startedAtMs: Date.now() - 2_000 }))
+
+    const lostState = await lost
+    assert.equal(lostState.status, 'contended')
+    assert.equal(lock.isOwner(), false, '丢锁后不得再自认 owner')
+
+    lock.release()
+    assert.equal(readHolder().ownerToken, 'takeover', '丢锁后的 release 必须是 no-op，不能删别人的锁')
   })
 })
 
@@ -271,12 +474,12 @@ describe('StoreLock — 升级过渡期：认出不认识 sidecar.lock 的旧版
   }
 
   /** 真实启动时间与记录对得上（ps 秒级截断 + 进程内 uptime 估算的误差量级）。 */
-  const matchingStart = (pid: number) => (pid === process.ppid ? RECORDED_START_MS + 800 : undefined)
+  const matchingStart = async (pid: number) => (pid === process.ppid ? RECORDED_START_MS + 800 : undefined)
 
   // 还原缺陷即红：撤掉 attemptAcquire 开头的 legacyWriter() → 本条拿到锁（acquired）→ 变红。
   it('定时任务锁被别的活进程持有 → 判为占用，且不创建 sidecar.lock', async () => {
     writeLegacyOwner()
-    const lock = new StoreLock({ lockPath: LOCK_PATH, bootTimeMs: () => undefined, processStartMs: matchingStart })
+    const lock = new StoreLock({ lockPath: LOCK_PATH, processStartMs: matchingStart })
 
     const state = await lock.acquire({ retryWindowMs: 0 })
 
@@ -290,7 +493,7 @@ describe('StoreLock — 升级过渡期：认出不认识 sidecar.lock 的旧版
 
   it('定时任务锁的持有者已死 → 不拦', async () => {
     writeLegacyOwner({ pid: DEAD_PID })
-    const lock = new StoreLock({ lockPath: LOCK_PATH, bootTimeMs: () => undefined, processStartMs: matchingStart })
+    const lock = new StoreLock({ lockPath: LOCK_PATH, processStartMs: matchingStart })
     const state = await lock.acquire({ retryWindowMs: 0 })
     assert.equal(state.status, 'acquired', JSON.stringify(state))
     lock.release()
@@ -298,7 +501,7 @@ describe('StoreLock — 升级过渡期：认出不认识 sidecar.lock 的旧版
 
   it('定时任务锁就是本进程的 → 不拦', async () => {
     writeLegacyOwner({ pid: process.pid })
-    const lock = new StoreLock({ lockPath: LOCK_PATH, bootTimeMs: () => undefined, processStartMs: () => RECORDED_START_MS })
+    const lock = new StoreLock({ lockPath: LOCK_PATH, processStartMs: async () => RECORDED_START_MS })
     const state = await lock.acquire({ retryWindowMs: 0 })
     assert.equal(state.status, 'acquired', JSON.stringify(state))
     lock.release()
@@ -309,31 +512,30 @@ describe('StoreLock — 升级过渡期：认出不认识 sidecar.lock 的旧版
     writeLegacyOwner()
     const lock = new StoreLock({
       lockPath: LOCK_PATH,
-      bootTimeMs: () => undefined,
-      processStartMs: (pid) => (pid === process.ppid ? RECORDED_START_MS + 2 * 3_600_000 : undefined),
+      processStartMs: async (pid) => (pid === process.ppid ? RECORDED_START_MS + 2 * 3_600_000 : undefined),
     })
     const state = await lock.acquire({ retryWindowMs: 0 })
     assert.equal(state.status, 'acquired', JSON.stringify(state))
     lock.release()
   })
 
-  it('取不到真实启动时间 / 记录里没有启动时间 → 不拦（证据不全退回只看 sidecar.lock）', async () => {
+  it('取不到真实启动时间 / 记录里没有启动时间 → 保留旧版写者占用', async () => {
     writeLegacyOwner()
-    const noPs = new StoreLock({ lockPath: LOCK_PATH, bootTimeMs: () => undefined, processStartMs: () => undefined })
-    assert.equal((await noPs.acquire({ retryWindowMs: 0 })).status, 'acquired')
+    const noPs = new StoreLock({ lockPath: LOCK_PATH, processStartMs: async () => undefined })
+    assert.equal((await noPs.acquire({ retryWindowMs: 0 })).status, 'contended')
     noPs.release()
 
     writeLegacyOwner({ startedAtMs: undefined })
-    const noRecord = new StoreLock({ lockPath: LOCK_PATH, bootTimeMs: () => undefined, processStartMs: matchingStart })
-    assert.equal((await noRecord.acquire({ retryWindowMs: 0 })).status, 'acquired')
+    const noRecord = new StoreLock({ lockPath: LOCK_PATH, processStartMs: matchingStart })
+    assert.equal((await noRecord.acquire({ retryWindowMs: 0 })).status, 'contended')
     noRecord.release()
   })
 
-  it('跨主机的定时任务锁 → 不拦（本机判不了远端进程）', async () => {
+  it('跨主机的定时任务锁 → 保留占用（本机判不了远端进程）', async () => {
     writeLegacyOwner({ hostname: 'some-other-host.local' })
-    const lock = new StoreLock({ lockPath: LOCK_PATH, bootTimeMs: () => undefined, processStartMs: matchingStart })
+    const lock = new StoreLock({ lockPath: LOCK_PATH, processStartMs: matchingStart })
     const state = await lock.acquire({ retryWindowMs: 0 })
-    assert.equal(state.status, 'acquired', JSON.stringify(state))
+    assert.equal(state.status, 'contended', JSON.stringify(state))
     lock.release()
   })
 
@@ -341,24 +543,12 @@ describe('StoreLock — 升级过渡期：认出不认识 sidecar.lock 的旧版
   it('新版锁主同时持有两把锁 → 走常规判据（pid_alive），不误报为旧版写者', async () => {
     writeLegacyOwner()
     writeHolder(holderInfo({ pid: process.ppid, ownerToken: 'new-sidecar', startedAtMs: RECORDED_START_MS }))
-    const lock = new StoreLock({ lockPath: LOCK_PATH, bootTimeMs: () => undefined, processStartMs: matchingStart })
+    const lock = new StoreLock({ lockPath: LOCK_PATH, processStartMs: matchingStart })
 
     const state = await lock.acquire({ retryWindowMs: 0 })
 
     assert.equal(contended(state).reason, 'pid_alive')
     assert.equal(readHolder().ownerToken, 'new-sidecar', '不能抢走活锁')
-  })
-
-  it('readProcessStartMs 在本平台给出与本进程启动时刻相符的时间', () => {
-    const startMs = readProcessStartMs(process.pid)
-    if (process.platform === 'darwin' || process.platform === 'linux') {
-      assert.equal(typeof startMs, 'number', 'ps -o lstart 解析失败会让旧版写者判据整体失效')
-      const expected = Date.now() - process.uptime() * 1000
-      assert.ok(Math.abs((startMs as number) - expected) < 5_000, `ps=${startMs} uptime 推算=${expected}`)
-      assert.equal(readProcessStartMs(DEAD_PID), undefined, '不存在的 PID 必须返回 undefined')
-    } else {
-      assert.equal(startMs, undefined, '不支持的平台必须返回 undefined（判据不生效）')
-    }
   })
 })
 

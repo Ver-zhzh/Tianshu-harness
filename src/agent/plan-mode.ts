@@ -85,6 +85,8 @@ export const PLAN_MODE_ALLOWED_TOOLS: ReadonlySet<string> = new Set([
   'repo_graph', 'web_fetch', 'web_search', 'memory', 'plan',
   'ask_user_question', 'delegate_task', 'delegate_batch',
   'run_tests',
+  // skill_runtime 仅 action=doctor 放行（只读诊断）；prepare/run 走下方 action 门。
+  'skill_runtime',
 ])
 
 export interface PlanModeCheckContext {
@@ -99,6 +101,9 @@ export interface PlanModeCheckContext {
    *  run_tests 的验证型 profile（adversarial_verifier 等——瑶光反证需要计划期复现）；
    *  任何持有真实写/执行工具（bash/edit/git…）的 profile 一律拒。 */
   delegatesWriteCapableProfile?: boolean
+  /** 原始工具入参（action 感知门用——skill_runtime 仅 doctor 放行）。
+   *  由调用方（tool-pipeline）透传 tu.input。 */
+  toolInput?: Record<string, unknown>
 }
 
 /** 委派类工具 —— 规划模式下仅允许其调度只读侦察 worker。 */
@@ -212,7 +217,21 @@ export function checkPlanMode(
     }
   }
 
-  if (PLAN_MODE_ALLOWED_TOOLS.has(toolName)) return { allowed: true }
+  if (PLAN_MODE_ALLOWED_TOOLS.has(toolName)) {
+    // action 感知：skill_runtime 在规划期只放行 doctor（只读诊断）——prepare 建
+    // 环境、run 执行脚本都是执行面动作，等计划批准。
+    if (toolName === 'skill_runtime' && ctx?.toolInput?.action !== 'doctor') {
+      return {
+        allowed: false,
+        reason:
+          'Plan Mode is active — skill_runtime prepare/run are blocked until the plan is approved. ' +
+          'Only action=doctor (read-only diagnostics) is available during planning. ' +
+          'Plan mode exits automatically once the user approves the plan; to abandon planning ' +
+          'and write directly, call plan action=exit_mode.',
+      }
+    }
+    return { allowed: true }
+  }
 
   const planFileHint = ctx?.activePlanFilePath
     ? ` Active plan file (writable): \`${ctx.activePlanFilePath}\`.`

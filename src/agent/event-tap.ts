@@ -123,9 +123,9 @@ export function tapAgentCallbacks(
       emit('status', { status: 'aborted', ...(reason ? { reason } : {}) })
       inner.onAbort(reason)
     },
-    onApprovalRequired: async (id, name, input) => {
-      emit('approval_required', { requestId: id, toolName: name, input: redactValue(input) })
-      const result = await inner.onApprovalRequired(id, name, input)
+    onApprovalRequired: async (id, name, input, context) => {
+      emit('approval_required', { requestId: id, toolName: name, input: redactValue(input), ...(context ? { runtimeContext: redactValue(context) } : {}) })
+      const result = await inner.onApprovalRequired(id, name, input, context)
       const approved = typeof result === 'boolean' ? result : result.approved
       emit('approval_resolved', { requestId: id, decision: approved ? 'approve' : 'reject' })
       return result

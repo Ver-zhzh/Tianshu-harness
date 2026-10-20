@@ -1,4 +1,4 @@
-import { snapshotSessionBinding } from './model/model-binding.js'
+import { sessionProviderKey, snapshotSessionBinding } from './model/model-binding.js'
 import { buildReplacementAgent } from './agent/runtime-rebuild.js'
 import { loadUserInstructions } from './config/user-instructions.js'
 import { parseUserInstructionsSnapshot, type UserInstructionsSnapshot } from './prompt/user-instructions.js'
@@ -1045,9 +1045,10 @@ export function createAgentRuntime(deps: {
     for (const name of Object.keys(workerRouting.providers)) providerHealth.registerProvider(name)
   }
 
+  const rootProviderKey = sessionProviderKey(config.provider.providers, provider)
   const rootSessionBinding = deps.modelKeyId
-    ? { provider: provider.name, model: currentModel.id, keyId: deps.modelKeyId, baseUrl: provider.baseUrl }
-    : snapshotSessionBinding(provider, currentModel.id, apiKey)
+    ? { provider: rootProviderKey, model: currentModel.id, keyId: deps.modelKeyId, baseUrl: provider.baseUrl }
+    : snapshotSessionBinding(provider, currentModel.id, apiKey, rootProviderKey)
   let agentForSignals: AgentLoop | undefined
   const workerRuntime = createWorkerRuntimeFactory(() => {
     const saved = loadLayeredConfig({ cwd })

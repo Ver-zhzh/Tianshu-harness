@@ -18,6 +18,7 @@ import { FROZEN_BLOCK_CAPS, type FrozenBlockCaps, type PromptBlockToggles } from
 import { selectProjectInstructions } from './project-instructions.js'
 import { projectInstructionsAllowed } from '../config/project-trust.js'
 import { renderUserInstructions, type UserInstructionsSnapshot } from './user-instructions.js'
+import { DOMAIN_TASK_BOUNDARY } from './domain-task-boundary.js'
 
 export { FROZEN_BLOCK_CAPS, type FrozenBlockCaps }
 
@@ -1176,9 +1177,9 @@ function buildVolatileBlockInternal(ctx: VolatileContext): string {
     // domain) — lesson text is agent-written store content, so it IS escaped.
     const knowledge = d.knowledgeBlock ? `\n<domain-knowledge>\n${escapeXml(d.knowledgeBlock)}\n</domain-knowledge>` : ''
     // 全星域共享执行纪律（字节恒定，随 star-domain 进 FROZEN 前缀）。
-    // 瑶光域在自己的 systemPromptSuffix 中保留放大版，此处是十域共同的底线。
+    // 职责规则是条件说明，不在 frozen 区捕获当前任务或推定修改许可。
     const sharedDiscipline = '\n执行纪律（全星域共享）：绿非证明，复现即证——宣称已修/已验证前，先用工具复现结论；报告里的每个数字要能指到一条真实验证记录。'
-    parts.push(`<star-domain name="${d.name}" motto="${d.motto}">${d.volatileBlock}${sharedDiscipline}${knowledge}</star-domain>`)
+    parts.push(`<star-domain name="${d.name}" motto="${d.motto}">${d.volatileBlock}\n${DOMAIN_TASK_BOUNDARY}${sharedDiscipline}${knowledge}</star-domain>`)
   }
 
   // NOTE: activeDomain IS rendered here (above, frozen 末尾) — it is a session

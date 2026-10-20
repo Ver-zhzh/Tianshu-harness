@@ -7,7 +7,7 @@
 
 import { ReasoningRepetitionError } from './reasoning-repetition.js'
 import { RequestInvariantError } from './request-invariant.js'
-import { isLocalWorkerPolicyError } from './continuation-prefix.js'
+import { isLocalWorkerPolicyError, continuityFailureDetails } from './continuation-prefix.js'
 import { detectTlsInterception } from '../platform/tls-interception.js'
 
 // ---------------------------------------------------------------------------
@@ -75,6 +75,12 @@ export interface ClassifiedError {
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+/** Only explicit context/input length errors; quota and output limits do not authorize compaction. */
+export function isContextLengthError(message: string): boolean {
+  return /context[_ -](?:length|window)[_ -]exceed(?:ed|s)?|maximum context length|prompt is too long|context(?: window)? (?:exceeded|overflow)/i.test(message)
+    || /input tokens? (?:count )?exceed(?:s|ed)? (?:the )?(?:limit(?:\s*\(request id:[^)]*\))?[.!]?\s*$|maximum (?:supported )?input length[.!]?\s*$)/i.test(message)
+}
 
 /** Extract HTTP status code from various error shapes. */
 function extractStatus(error: unknown): number | null {
@@ -466,7 +472,7 @@ function classifyByPattern(error: unknown): ClassifiedError {
   }
   // Context overflow patterns
   if (
-    /prompt is too long|context_length_exceeded|max.*token|context.*overflow/i.test(message)
+    isContextLengthError(message)
   ) {
     return {
       retryable: false,
@@ -573,7 +579,7 @@ export function classifyApiError(error: unknown): ClassifiedError {
     return { retryable: false, retryDelayMs: 0, shouldReconnect: false,
       category: 'client_error', userMessage: error.message, maxRetries: 0 }
   }
-  if (error instanceof Error && /context_length_exceeded|prompt is too long|maximum context length/i.test(error.message)) {
+  if (error instanceof Error && isContextLengthError(error.message)) {
     return { retryable: false, retryDelayMs: 0, shouldReconnect: false,
       category: 'context_overflow', userMessage: error.message, maxRetries: 0 }
   }
@@ -721,11 +727,31 @@ export function errorCategoryLabel(category: string | undefined): string {
  * 重试进行中的过程文案（"Retrying…"），本函数是重试耗尽后的「下一步」。
  * 返回中文可行动指引（按 category 分流）；无法分类时给通用兜底。
  */
-export function errorRecoveryGuidance(error: unknown): string {
+/**
+ * 终态恢复指引（重试耗尽后的「下一步」）。
+ *
+ * `surface` 决定文案里能出现哪些恢复手段——同一份文案不能同时服务所有入口：
+ * - `tui`（默认）：slash 命令是可输入的命令面，`/repair-prefix` 与 `/logs` 都真实存在；
+ * - `desktop`：sidecar 的 slash 翻译层（`resolveAppPromptInput`）只认工作流/技能/
+ *   `/review`，`/repair-prefix` 与 `/logs` 会被判为未识别命令拦截。桌面端用户看到
+ *   这两个词没有任何可操作入口（issue #525），因此改指桌面端真实存在的诊断路径。
+ *
+ * 新增消费方必须显式声明 surface；默认 `tui` 只为兼容既有调用点。
+ */
+export type GuidanceSurface = 'tui' | 'desktop'
+
+export function errorRecoveryGuidance(error: unknown, surface: GuidanceSurface = 'tui'): string {
   const c = classifyApiError(error)
   switch (c.category) {
-    case 'request_invariant':
-      return '本地连续性校验受阻，重复发送不会修复；请用 /repair-prefix 检查恢复资格，或保留原会话并用 /logs 导出诊断。执行绑定或源历史异常时禁止重建。'
+    case 'request_invariant': {
+      const details = continuityFailureDetails(error)
+      const stage = details?.stage === 'transport' ? '源历史与冻结投影未变，发送层字节发生变化。'
+        : details?.stage === 'render' ? '冻结投影无法与已发布字节核对。' : ''
+      if (surface === 'desktop') {
+        return stage + '本地连续性校验受阻，重复发送不会修复；请到 设置 → 关于与许可 →「检查运行环境」查看运行时状态，或新建会话保留历史。执行绑定或源历史异常时禁止重建。'
+      }
+      return stage + '本地连续性校验受阻，重复发送不会修复；请用 /repair-prefix 检查恢复资格，或保留原会话并用 /logs 导出诊断。执行绑定或源历史异常时禁止重建。'
+    }
     case 'rate_limit':
       return '限流/额度不足：稍等片刻再发，或 /model 切轻量档（如 deepseek-v4-flash）；持续 429 先查余额（桌面端 Insights 面板）'
     case 'overloaded':

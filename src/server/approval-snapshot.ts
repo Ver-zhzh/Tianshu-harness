@@ -1,5 +1,5 @@
 import { dirname } from 'node:path'
-import type { ApprovalSnapshot } from './protocol.js'
+import type { ApprovalSnapshot, ApprovalRequest } from './protocol.js'
 import { redactValue } from './redact.js'
 import { outOfWorkspaceFilePaths } from '../agent/tool-path-access.js'
 
@@ -8,6 +8,7 @@ interface PendingApprovalView {
   kind: string
   toolName?: string
   toolInput?: Record<string, unknown>
+  runtimeContext?: ApprovalRequest['runtimeContext']
 }
 
 export function buildApprovalSnapshot(cwd: string, lastSeq: number, pending: Iterable<PendingApprovalView>): ApprovalSnapshot {
@@ -17,6 +18,7 @@ export function buildApprovalSnapshot(cwd: string, lastSeq: number, pending: Ite
     const input = p.toolInput ?? {}
     const pathGrant = approvalPathGrant(cwd, p.toolName, input)
     approvals.push({ requestId: p.requestId, toolName: p.toolName,
+      ...(p.runtimeContext ? { runtimeContext: redactValue(p.runtimeContext) as ApprovalRequest['runtimeContext'] } : {}),
       input: redactValue(input) as Record<string, unknown>, ...(pathGrant ? { pathGrant } : {}),
     })
   }

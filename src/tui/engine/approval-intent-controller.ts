@@ -7,6 +7,7 @@ export interface PendingApproval {
   id: string
   name: string
   input: Record<string, unknown>
+  runtimeContext?: Parameters<import('../../agent/loop-types.js').AgentCallbacks['onApprovalRequired']>[3]
   resolve: (result: ApprovalResult | boolean) => void
   /** 审批等待起点（Date.now()）。spinner 据此显示「等待审批 Ns」而非冒充思考。 */
   startMs: number

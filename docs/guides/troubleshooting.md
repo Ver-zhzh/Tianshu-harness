@@ -109,6 +109,16 @@ related: [../reference/observability-harness.md, ../user-guide-sandbox-permissio
 
 ## 8. 缓存命中率掉了 / 成本突然升高
 
+### 请求未发送，提示 continuation prefix diverged
+
+这表示本地连续性守卫拒发，不能按普通缓存未命中处理。数字消息索引或 `kind=projection` 本身不证明冻结投影发生变化；先看新增的 `stage`、`sourcePrefix`、`renderPrefix` 与 `normalization` 摘要。`beforeChars/afterChars` 是分叉那条消息的 JSON 字符数，不是整个上下文大小。
+
+修复后的 OpenAI-compatible 路径会在每次重建请求时完整规范化字符，避免首次清洗、后续跳过历史导致 Unicode 字节漂移。旧会话若仍与已发布证明不符，保留会话并执行 `/repair-prefix` 检查资格，再按返回的 recoveryId 显式确认；桌面端使用“检查前缀恢复资格 → 确认重建一次缓存”。确认不发送模型请求，也不重放工具；下一条输入消费授权并重建一次缓存。
+
+源历史、执行绑定或耐久证据异常时禁止修复。请保留 `/logs` 诊断，不手工删除 executionSnapshot、改写历史注入块或重复重发。诊断摘要只包含层次、长度、位置和版本，不包含提示词原文。详细实现与验证见 [发送前缀稳定性设计](../design/2026-10-19-issue500-wire-normalization.md)。
+
+### 请求正常发送，但命中率下降
+
 **现象**：GlanceBar 状态栏上的命中率明显低于平时的 95–99% 稳态区间，或单轮成本异常升高。
 
 **先看**：

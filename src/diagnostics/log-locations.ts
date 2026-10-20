@@ -18,7 +18,7 @@ import { isFilesystemMetadata } from '../utils/file-metadata.js'
 import { existsSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
-import { rivetHome, defaultRivetHome, sessionsDir, desktopDir, desktopSessionsDir, memoryDir, projectSlug } from '../config/paths.js'
+import { resolveRivetHome, defaultRivetHome, sessionsDir, desktopDir, desktopSessionsDir, memoryDir, projectSlug, type RivetHomeSource } from '../config/paths.js'
 
 export type LogKind = 'file' | 'dir'
 
@@ -54,7 +54,7 @@ export interface EnvOverride {
 
 export interface LogLocationReport {
   readonly rivetHome: string
-  readonly homeSource: 'RIVET_HOME' | 'platform-default'
+  readonly homeSource: RivetHomeSource
   readonly platformDefault: string
   readonly cwd: string
   readonly projectSlug: string
@@ -88,7 +88,7 @@ function collectOverrides(): EnvOverride[] {
   const out: EnvOverride[] = []
   for (const [env, effect] of specs) {
     const value = process.env[env]
-    if (value) out.push({ env, value, effect })
+    if (value && (env !== 'RIVET_HOME' || value.trim())) out.push({ env, value, effect })
   }
   return out
 }
@@ -109,7 +109,7 @@ const EVICT = '同 slug 超 50 会话时按 mtime 淘汰最旧的'
  */
 export function resolveLogLocations(input: { cwd: string; sessionId?: string }): LogLocationReport {
   const { cwd, sessionId } = input
-  const home = rivetHome()
+  const { path: home, source: homeSource } = resolveRivetHome()
   const sessionRoot = sessionsDir(cwd)
   const slug = projectSlug(cwd)
   const dtop = desktopDir()
@@ -161,7 +161,7 @@ export function resolveLogLocations(input: { cwd: string; sessionId?: string }):
 
   return {
     rivetHome: home,
-    homeSource: process.env['RIVET_HOME'] ? 'RIVET_HOME' : 'platform-default',
+    homeSource,
     platformDefault: defaultRivetHome(),
     cwd,
     projectSlug: slug,
@@ -253,7 +253,12 @@ export function formatLogLocationReport(
   const lines: string[] = ['日志落点 (/logs)', '═══════════════════════']
 
   lines.push(`数据根: ${report.rivetHome}`)
-  lines.push(`        来源 ${report.homeSource === 'RIVET_HOME' ? 'RIVET_HOME 环境变量' : `平台默认（${report.platformDefault}）`}`)
+  const sourceLabels: Record<RivetHomeSource, string> = {
+    RIVET_HOME: 'RIVET_HOME 环境变量',
+    'launcher.json': '桌面端 launcher.json',
+    'platform-default': `平台默认（${report.platformDefault}）`,
+  }
+  lines.push(`        来源 ${sourceLabels[report.homeSource]}`)
   lines.push(`项目:   ${report.cwd}`)
   lines.push(`slug:   ${report.projectSlug}`)
   lines.push(`会话:   ${report.sessionId ?? '（未指定——会话专属落点以 <session-id> 占位）'}`)

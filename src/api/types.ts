@@ -75,7 +75,8 @@ export interface Usage {
   cacheCoverage?: { input: number; read: number; observed: number; unknown: number; creationUnknown: number }
   observation?: {
     executionSnapshot?: import('./continuation-prefix.js').ContinuationPrefixProof
-    continuity?: { cacheGenerationId: string; generationReason: string; optionsHash: string; toolsHash: string; credentialScope?: string }
+    continuity?: { cacheGenerationId: string; generationReason: string; wireTransformVersion?: string; optionsHash: string; toolsHash: string; credentialScope?: string }
+    wireNormalization?: import('./wire-normalization.js').WireNormalizationSummary
     requestId: string
     attemptId: string
     status: 'complete' | 'aborted'

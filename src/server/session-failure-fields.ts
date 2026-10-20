@@ -12,11 +12,12 @@ export function sessionFailureFields(err: unknown): { scope?: 'local' | 'provide
     // resume 证据门（冷启动证据缺失）：不是故障，是待用户抉择——kind 供桌面渲染
     // 「以当前配置继续」动作，guidance 说清代价（缓存全量重建一次）。
     if (isColdStartEvidenceError(err)) return { kind: 'cold_start_evidence', guidance: '可显式开始新会话；或点「以当前配置继续」放弃连续性证明——缓存将全量重建一次，之后恢复正常。' }
-    if (continuityFailureDetails(err)) return { scope: 'local', kind: 'continuity_projection', continuity: continuityFailureDetails(err), guidance: errorRecoveryGuidance(err) }
+    // server 只服务桌面端（sidecar HTTP/SSE）——指引走 desktop 分流，不给 slash 命令。
+    if (continuityFailureDetails(err)) return { scope: 'local', kind: 'continuity_projection', continuity: continuityFailureDetails(err), guidance: errorRecoveryGuidance(err, 'desktop') }
     const f = describeFailure(err)
     const guidance = err instanceof Error && err.name === 'AbortError'
       ? undefined
-      : errorRecoveryGuidance(err)
+      : errorRecoveryGuidance(err, 'desktop')
     return {
       ...(f.category === 'unknown' && f.kind === 'other' ? {} : { scope: f.scope, kind: f.kind }),
       ...(guidance ? { guidance } : {}),

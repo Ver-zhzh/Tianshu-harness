@@ -76,13 +76,13 @@ export function wrapCallbacksWithTuiApp(
       app.callbacks.onAbort(reason)
       original.onAbort?.(reason)
     },
-    onApprovalRequired: async (id, name, input) => {
+    onApprovalRequired: async (id, name, input, context) => {
       // 旧 run 的审批请求 → 自动拒绝，不为已死的 run 弹审批 UI
       if (!live()) return false
       if (original.onApprovalRequired) {
-        return original.onApprovalRequired(id, name, input)
+        return original.onApprovalRequired(id, name, input, context)
       }
-      return app.callbacks.onApprovalRequired(id, name, input)
+      return app.callbacks.onApprovalRequired(id, name, input, context)
     },
     onCheckpoint: (hash) => {
       if (!live()) return

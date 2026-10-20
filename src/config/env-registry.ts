@@ -1,4 +1,4 @@
-/** RIVET_* 环境变量注册表（自动生成于 2026-10-13T02:04:54.524Z，共 241 个变量）。
+/** RIVET_* 环境变量注册表（自动生成于 2026-10-20T05:23:59.077Z，共 244 个变量）。
  * name/defaultHint/files 由 scripts/gen-env-registry.ts 生成；description 人工维护，重生成时按 name 保留。
  * 默认值提示来自源码 ??/||；引用路径相对 src/；assembly-audit.test.ts 双向校验完整性。
  */
@@ -44,7 +44,7 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
   {
     name: 'RIVET_ALLOW_COLD_START',
     defaultHint: '',
-    files: ['agent/session-persist.ts'],
+    files: ['agent/session-persist.ts', 'agent/__tests__/worker-fixed-execution.integration.test.ts'],
     description: 'resume 证据门绕行：证据缺失/不完整时不再 fail-closed，放弃连续性证据全新装配（CLI/TUI 逃生通道；桌面端走 meta.coldStartConsentAt 标记）。首请求开新缓存代次。',
   },
   {
@@ -218,7 +218,7 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
   {
     name: 'RIVET_CONFIG_PATH',
     defaultHint: '',
-    files: ['tui/__tests__/connect-apply.test.ts', 'tui/__tests__/settings-persist.test.ts', 'tui/__tests__/slash-commands.test.ts', 'tools/__tests__/generate-image.test.ts', 'tools/__tests__/tool-preset.test.ts', 'server/__tests__/account-device-network.test.ts', 'server/__tests__/config-routes.test.ts', 'server/__tests__/image-gen-model-routes.test.ts', 'server/__tests__/image-generation-routes.test.ts', 'server/__tests__/pr353-adoption.test.ts', 'server/__tests__/session-manager.test.ts', 'server/__tests__/vision-model-onboarding-routes.test.ts', 'plugins/__tests__/integration/git-source-mirror-fallback.test.ts', 'config/paths.ts', 'config/__tests__/config-cli.test.ts', 'config/__tests__/config-load-error.test.ts', 'config/__tests__/config-schema-integration.test.ts', 'config/__tests__/config-watcher.test.ts', 'config/__tests__/deepseek-key-pool-retirement.test.ts', 'config/__tests__/example-config-keys.test.ts', 'config/__tests__/image-gen-model.test.ts', 'config/__tests__/layered-config.test.ts', 'config/__tests__/manager-bash-permissions.test.ts', 'config/__tests__/manager-clear-api-key.test.ts', 'config/__tests__/manager-deepseek-v4-flash-retirement.test.ts', 'config/__tests__/manager-deepseek-vision-exp-retirement.test.ts', 'config/__tests__/manager-editor.test.ts', 'config/__tests__/manager-fetch-search.test.ts', 'config/__tests__/manager-invalid-worker-tier-recovery.test.ts', 'config/__tests__/manager-permission-dirs.test.ts', 'config/__tests__/manager-profile-persist.test.ts', 'config/__tests__/manager-provider.test.ts', 'config/__tests__/manager-routing.test.ts', 'config/__tests__/manager-shell.test.ts', 'config/__tests__/manager-ui.test.ts', 'config/__tests__/manager-vision-model.test.ts', 'config/__tests__/model-save-semantics.test.ts', 'config/__tests__/preset-model-backfill.test.ts', 'config/__tests__/provider-advanced.test.ts', 'config/__tests__/provider-cli.test.ts', 'config/__tests__/provider-keys-file-migration.test.ts', 'config/__tests__/provider-keys-store.test.ts', 'config/__tests__/provider-keys.test.ts', 'config/__tests__/provider-model-pools.test.ts', 'config/__tests__/provider-model-sync-matrix.test.ts', 'config/__tests__/provider-onboarding-e2e.test.ts', 'config/__tests__/retirement-dangling-ref.test.ts', 'config/__tests__/runtime-lean-aspect.test.ts', 'config/__tests__/runtime-lean.test.ts', 'config/__tests__/secrets-store.test.ts', 'config/__tests__/setup-provider-key-models.test.ts', 'agent/__tests__/config-watcher-release.test.ts', 'agent/__tests__/worker-model-policy.test.ts', '__tests__/bootstrap.test.ts'],
+    files: ['tui/__tests__/connect-apply.test.ts', 'tui/__tests__/settings-persist.test.ts', 'tui/__tests__/slash-commands.test.ts', 'tools/__tests__/generate-image.test.ts', 'tools/__tests__/tool-preset.test.ts', 'server/__tests__/account-device-network.test.ts', 'server/__tests__/config-routes.test.ts', 'server/__tests__/endpoint-network-policy.test.ts', 'server/__tests__/image-gen-model-routes.test.ts', 'server/__tests__/image-generation-routes.test.ts', 'server/__tests__/pr353-adoption.test.ts', 'server/__tests__/session-manager.test.ts', 'server/__tests__/user-instructions.test.ts', 'server/__tests__/vision-model-onboarding-routes.test.ts', 'plugins/__tests__/integration/git-source-mirror-fallback.test.ts', 'config/paths.ts', 'config/__tests__/config-cli.test.ts', 'config/__tests__/config-load-error.test.ts', 'config/__tests__/config-schema-integration.test.ts', 'config/__tests__/config-watcher.test.ts', 'config/__tests__/deepseek-key-pool-retirement.test.ts', 'config/__tests__/example-config-keys.test.ts', 'config/__tests__/image-gen-model.test.ts', 'config/__tests__/layered-config.test.ts', 'config/__tests__/manager-bash-permissions.test.ts', 'config/__tests__/manager-clear-api-key.test.ts', 'config/__tests__/manager-deepseek-v4-flash-retirement.test.ts', 'config/__tests__/manager-deepseek-vision-exp-retirement.test.ts', 'config/__tests__/manager-editor.test.ts', 'config/__tests__/manager-fetch-search.test.ts', 'config/__tests__/manager-invalid-worker-tier-recovery.test.ts', 'config/__tests__/manager-permission-dirs.test.ts', 'config/__tests__/manager-profile-persist.test.ts', 'config/__tests__/manager-provider.test.ts', 'config/__tests__/manager-routing.test.ts', 'config/__tests__/manager-shell.test.ts', 'config/__tests__/manager-ui.test.ts', 'config/__tests__/manager-vision-model.test.ts', 'config/__tests__/model-save-semantics.test.ts', 'config/__tests__/preset-model-backfill.test.ts', 'config/__tests__/provider-advanced.test.ts', 'config/__tests__/provider-cli.test.ts', 'config/__tests__/provider-keys-file-migration.test.ts', 'config/__tests__/provider-keys-store.test.ts', 'config/__tests__/provider-keys.test.ts', 'config/__tests__/provider-model-pools.test.ts', 'config/__tests__/provider-model-sync-matrix.test.ts', 'config/__tests__/provider-onboarding-e2e.test.ts', 'config/__tests__/retirement-dangling-ref.test.ts', 'config/__tests__/runtime-lean-aspect.test.ts', 'config/__tests__/runtime-lean.test.ts', 'config/__tests__/secrets-store.test.ts', 'config/__tests__/setup-provider-key-models.test.ts', 'config/__tests__/user-instructions.test.ts', 'agent/__tests__/config-watcher-release.test.ts', 'agent/__tests__/user-instructions-integration.test.ts', 'agent/__tests__/worker-model-policy.test.ts', '__tests__/bootstrap.test.ts'],
     description: '',
   },
   {
@@ -410,19 +410,19 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
   {
     name: 'RIVET_DESKTOP',
     defaultHint: '',
-    files: ['pro/__tests__/register-gate.test.ts', 'config/pro-license.ts', 'config/__tests__/pro-license.test.ts'],
+    files: ['pro/spark/__tests__/effort.test.ts', 'pro/__tests__/register-gate.test.ts', 'pro/__tests__/spark-authorization.test.ts', 'config/pro-license.ts', 'config/__tests__/pro-license.test.ts', 'agent/__tests__/anchors-wiring.test.ts'],
     description: '由桌面端 Tauri 注入（CLI 无此变量），Pro 授权判定的分流开关：置位走桌面硬 gate（只认同样由 Rust 注入的 RIVET_PRO），缺席走 CLI 软 gate（config > env > file 三路径）',
   },
   {
     name: 'RIVET_DESKTOP_DIR',
     defaultHint: 'join(rivetHome(',
-    files: ['server/__tests__/store-lock.test.ts', 'diagnostics/__tests__/log-locations.test.ts', 'config/paths.ts'],
+    files: ['storage/__tests__/session-maintenance.test.ts', 'server/__tests__/store-lock.test.ts', 'diagnostics/__tests__/log-locations.test.ts', 'config/paths.ts'],
     description: '',
   },
   {
     name: 'RIVET_DESKTOP_SESSION_DIR',
     defaultHint: 'join(desktopDir(',
-    files: ['config/paths.ts'],
+    files: ['storage/__tests__/session-maintenance.test.ts', 'config/paths.ts'],
     description: '',
   },
   {
@@ -500,7 +500,7 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
   {
     name: 'RIVET_FETCH_PIN',
     defaultHint: '',
-    files: ['tools/net/http-fetch.ts', 'tools/net/__tests__/http-fetch-fakeip.test.ts', 'tools/net/__tests__/http-fetch.test.ts', 'mcp/oauth/__tests__/request-security.test.ts'],
+    files: ['tools/net/http-fetch.ts', 'tools/net/__tests__/endpoint-request.test.ts', 'tools/net/__tests__/http-fetch-fakeip.test.ts', 'tools/net/__tests__/http-fetch.test.ts', 'mcp/oauth/__tests__/request-security.test.ts'],
     description: '',
   },
   {
@@ -530,7 +530,7 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
   {
     name: 'RIVET_FORUM_TOKEN',
     defaultHint: '',
-    files: ['token-ledger/service.ts', 'token-ledger/settings.ts'],
+    files: ['token-ledger/service.ts', 'token-ledger/settings.ts', 'token-ledger/__tests__/settings.test.ts', 'server/__tests__/token-ledger-routes.test.ts'],
     description: '论坛同步 Bearer token，覆盖 config tokenLedger.forum.apiKey',
   },
   {
@@ -590,7 +590,7 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
   {
     name: 'RIVET_HOME',
     defaultHint: 'os.tmpdir(',
-    files: ['tui/history-source.ts', 'tui/engine/__tests__/connect-draft-engine.test.ts', 'tui/engine/__tests__/connect-wizard-list.test.ts', 'tui/engine/__tests__/native-scrollback.test.ts', 'tui/engine/__tests__/overlay-deactivate-regression.test.ts', 'tui/engine/__tests__/session-disclosure.test.ts', 'tui/__tests__/account-status.test.ts', 'tui/__tests__/history-async.test.ts', 'tui/__tests__/ui-history-concurrent.test.ts', 'tui/__tests__/updater.test.ts', 'tui/__tests__/worker-detail.test.ts', 'tui/__tests__/zen-command.test.ts', 'tools/browser-debug/__tests__/tool.test.ts', 'tools/__tests__/tool-preset.test.ts', 'server/__tests__/account-credential.test.ts', 'server/__tests__/account-device-network.test.ts', 'server/__tests__/config-routes-keys.test.ts', 'server/__tests__/config-routes-oauth.test.ts', 'server/__tests__/config-routes-provider-hot-reload.test.ts', 'server/__tests__/config-routes-put-model-probe.test.ts', 'server/__tests__/config-routes-zen.test.ts', 'server/__tests__/config-routes.test.ts', 'server/__tests__/git-pr-workbench.test.ts', 'server/__tests__/git-review-jobs.test.ts', 'server/__tests__/mcp-hot-add.test.ts', 'server/__tests__/mcp-inject-tools.test.ts', 'server/__tests__/mcp-oauth-routes.test.ts', 'server/__tests__/mcp-presets.test.ts', 'server/__tests__/mcp-server-config.test.ts', 'server/__tests__/path-grants-routes.test.ts', 'server/__tests__/plugin-api.test.ts', 'server/__tests__/plugin-session-cache.test.ts', 'server/__tests__/pr353-adoption.test.ts', 'server/__tests__/project-docs-routes.test.ts', 'server/__tests__/recordings-distill-route.test.ts', 'server/__tests__/runtime-lean-routes.test.ts', 'server/__tests__/scratch-route.test.ts', 'server/__tests__/serve-frozen-lifecycle.test.ts', 'server/__tests__/serve-model-spec.test.ts', 'server/__tests__/serve-switch-model.test.ts', 'server/__tests__/server-info.test.ts', 'server/__tests__/session-manager.test.ts', 'server/__tests__/session-routes.test.ts', 'server/__tests__/trust-api.test.ts', 'server/__tests__/worker-log-route.test.ts', 'prompt/__tests__/block-policy.test.ts', 'prompt/__tests__/engine.test.ts', 'prompt/__tests__/volatile-cache.test.ts', 'prompt/__tests__/volatile-snapshot.test.ts', 'pro/computer-use/__tests__/tool.test.ts', 'pro/__tests__/isolated-backend.test.ts', 'pro/__tests__/register-gate.test.ts', 'plugins/__tests__/design-plugin-lib.test.ts', 'plugins/__tests__/plugin-command-metadata.test.ts', 'plugins/__tests__/plugin-installer.test.ts', 'plugins/__tests__/plugin-loader.test.ts', 'mcp/oauth/__tests__/connector.test.ts', 'mcp/oauth/__tests__/request-security.test.ts', 'mcp/__tests__/manager.test.ts', 'mcp/__tests__/tool-inventory.test.ts', 'diagnostics/log-locations.ts', 'diagnostics/__tests__/log-locations.test.ts', 'diagnostics/__tests__/logs-cli.test.ts', 'config/paths.ts', 'config/__tests__/config-cli.test.ts', 'config/__tests__/config-watcher.test.ts', 'config/__tests__/manager-profile-persist.test.ts', 'config/__tests__/pro-license.test.ts', 'config/__tests__/profile.test.ts', 'config/__tests__/project-trust.test.ts', 'config/__tests__/remove-model.test.ts', 'config/__tests__/workspace-config.test.ts', 'cli/__tests__/prompt-version-warning.test.ts', 'auth/__tests__/login-flow.test.ts', 'api/__tests__/call-audit.test.ts', 'api/__tests__/deepseek-platform.test.ts', 'api/__tests__/execution-continuity.test.ts', 'agent/__tests__/batch-side-table-isolation.test.ts', 'agent/__tests__/cache-worker-hardening.test.ts', 'agent/__tests__/config-watcher-release.test.ts', 'agent/__tests__/coordinator-resume.test.ts', 'agent/__tests__/coordinator-session-resume.test.ts', 'agent/__tests__/coordinator.test.ts', 'agent/__tests__/delivery-evidence-p1.test.ts', 'agent/__tests__/delivery-recovery-regressions.test.ts', 'agent/__tests__/loop.test.ts', 'agent/__tests__/plan-templates.test.ts', 'agent/__tests__/session-cd-rebuild-stores.test.ts', 'agent/__tests__/session-cd.test.ts', 'agent/__tests__/task-state-persist.test.ts', 'agent/__tests__/worker-fixed-execution.integration.test.ts', 'agent/__tests__/worker-meta-finalize.test.ts', 'agent/__tests__/worker-session.test.ts', 'agent/__tests__/helpers/verification-pipeline-fixture.ts'],
+    files: ['tui/history-source.ts', 'tui/engine/__tests__/connect-draft-engine.test.ts', 'tui/engine/__tests__/connect-wizard-list.test.ts', 'tui/engine/__tests__/native-scrollback.test.ts', 'tui/engine/__tests__/overlay-deactivate-regression.test.ts', 'tui/engine/__tests__/session-disclosure.test.ts', 'tui/__tests__/account-status.test.ts', 'tui/__tests__/history-async.test.ts', 'tui/__tests__/ui-history-concurrent.test.ts', 'tui/__tests__/updater.test.ts', 'tui/__tests__/worker-detail.test.ts', 'tui/__tests__/zen-command.test.ts', 'tools/browser-debug/__tests__/tool.test.ts', 'tools/__tests__/execution-feedback.test.ts', 'tools/__tests__/tool-preset.test.ts', 'storage/__tests__/session-maintenance.test.ts', 'skills/__tests__/session-skill-storage.test.ts', 'server/__tests__/account-credential.test.ts', 'server/__tests__/account-device-network.test.ts', 'server/__tests__/config-routes-keys.test.ts', 'server/__tests__/config-routes-oauth.test.ts', 'server/__tests__/config-routes-provider-hot-reload.test.ts', 'server/__tests__/config-routes-put-model-probe.test.ts', 'server/__tests__/config-routes-zen.test.ts', 'server/__tests__/config-routes.test.ts', 'server/__tests__/git-pr-workbench.test.ts', 'server/__tests__/git-review-jobs.test.ts', 'server/__tests__/mcp-hot-add.test.ts', 'server/__tests__/mcp-inject-tools.test.ts', 'server/__tests__/mcp-oauth-routes.test.ts', 'server/__tests__/mcp-presets.test.ts', 'server/__tests__/mcp-server-config.test.ts', 'server/__tests__/path-grants-routes.test.ts', 'server/__tests__/plugin-api.test.ts', 'server/__tests__/plugin-session-cache.test.ts', 'server/__tests__/pr353-adoption.test.ts', 'server/__tests__/project-docs-routes.test.ts', 'server/__tests__/recordings-distill-route.test.ts', 'server/__tests__/rewind-restart-continuity.test.ts', 'server/__tests__/runtime-lean-routes.test.ts', 'server/__tests__/scratch-route.test.ts', 'server/__tests__/serve-frozen-lifecycle.test.ts', 'server/__tests__/serve-model-spec.test.ts', 'server/__tests__/serve-switch-model.test.ts', 'server/__tests__/server-info.test.ts', 'server/__tests__/session-manager.test.ts', 'server/__tests__/session-routes.test.ts', 'server/__tests__/skill-creation-session.test.ts', 'server/__tests__/trust-api.test.ts', 'server/__tests__/user-instructions.test.ts', 'server/__tests__/worker-log-route.test.ts', 'prompt/__tests__/block-policy.test.ts', 'prompt/__tests__/engine.test.ts', 'prompt/__tests__/volatile-cache.test.ts', 'prompt/__tests__/volatile-snapshot.test.ts', 'pro/spark/__tests__/effort.test.ts', 'pro/computer-use/__tests__/tool.test.ts', 'pro/__tests__/isolated-authorization.test.ts', 'pro/__tests__/isolated-backend.test.ts', 'pro/__tests__/register-gate.test.ts', 'pro/__tests__/spark-authorization.test.ts', 'plugins/__tests__/design-plugin-lib.test.ts', 'plugins/__tests__/plugin-command-metadata.test.ts', 'plugins/__tests__/plugin-installer.test.ts', 'plugins/__tests__/plugin-loader.test.ts', 'platform/test-session-isolation.ts', 'mcp/oauth/__tests__/connector.test.ts', 'mcp/oauth/__tests__/request-security.test.ts', 'mcp/__tests__/manager.test.ts', 'mcp/__tests__/tool-inventory.test.ts', 'diagnostics/log-locations.ts', 'diagnostics/__tests__/log-locations.test.ts', 'diagnostics/__tests__/logs-cli.test.ts', 'config/paths.ts', 'config/__tests__/config-cli.test.ts', 'config/__tests__/config-watcher.test.ts', 'config/__tests__/manager-profile-persist.test.ts', 'config/__tests__/pro-license.test.ts', 'config/__tests__/profile.test.ts', 'config/__tests__/project-trust.test.ts', 'config/__tests__/remove-model.test.ts', 'config/__tests__/user-instructions.test.ts', 'config/__tests__/workspace-config.test.ts', 'cli/__tests__/prompt-version-warning.test.ts', 'auth/__tests__/login-flow.test.ts', 'api/__tests__/anthropic-continuation-recovery.test.ts', 'api/__tests__/call-audit.test.ts', 'api/__tests__/deepseek-platform.test.ts', 'api/__tests__/execution-continuity.test.ts', 'agent/__tests__/anchors-wiring.test.ts', 'agent/__tests__/batch-side-table-isolation.test.ts', 'agent/__tests__/cache-worker-hardening.test.ts', 'agent/__tests__/config-watcher-release.test.ts', 'agent/__tests__/continuation-compaction-recovery.test.ts', 'agent/__tests__/continuation-error-recovery.test.ts', 'agent/__tests__/continuity-projection-fixture.ts', 'agent/__tests__/coordinator-resume.test.ts', 'agent/__tests__/coordinator-session-resume.test.ts', 'agent/__tests__/coordinator.test.ts', 'agent/__tests__/deepseek-context-recovery.test.ts', 'agent/__tests__/delivery-evidence-p1.test.ts', 'agent/__tests__/delivery-recovery-regressions.test.ts', 'agent/__tests__/domain-task-boundary-integration.test.ts', 'agent/__tests__/loop.test.ts', 'agent/__tests__/plan-templates.test.ts', 'agent/__tests__/published-input-boundary.test.ts', 'agent/__tests__/session-cd-rebuild-stores.test.ts', 'agent/__tests__/session-cd.test.ts', 'agent/__tests__/stream-abort-diagnostics.test.ts', 'agent/__tests__/stream-rule-transport.test.ts', 'agent/__tests__/task-state-persist.test.ts', 'agent/__tests__/user-instructions-integration.test.ts', 'agent/__tests__/worker-fixed-execution.integration.test.ts', 'agent/__tests__/worker-meta-finalize.test.ts', 'agent/__tests__/worker-resume-prefix-e2e.test.ts', 'agent/__tests__/worker-session.test.ts', 'agent/__tests__/helpers/verification-pipeline-fixture.ts'],
     description: '',
   },
   {
@@ -644,7 +644,7 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
   {
     name: 'RIVET_INSTANCE_ID',
     defaultHint: '',
-    files: ['server/health-route.ts'],
+    files: ['utils/runtime-diagnostics.ts'],
     description: '',
   },
   {
@@ -680,7 +680,7 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
   {
     name: 'RIVET_JOB_LAUNCHER',
     defaultHint: '',
-    files: ['tools/__tests__/job-store.test.ts', 'tools/__tests__/process-kill.test.ts', 'tools/__tests__/windows-job-launcher-fixture.ts', 'tools/process-kill.ts'],
+    files: ['tools/process-kill.ts', 'tools/__tests__/job-store.test.ts', 'tools/__tests__/process-kill.test.ts', 'tools/__tests__/windows-job-launcher-fixture.ts'],
     description: '',
   },
   {
@@ -848,7 +848,7 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
   {
     name: 'RIVET_NO_SYSTEM_PROXY',
     defaultHint: '',
-    files: ['tui/__tests__/updater.test.ts', 'tools/net/proxy-resolver.ts', 'tools/net/__tests__/http-fetch-fakeip.test.ts', 'server/__tests__/account-device-network.test.ts', 'mcp/oauth/__tests__/request-security.test.ts', 'api/__tests__/image-gen-network.test.ts'],
+    files: ['tui/__tests__/updater.test.ts', 'tools/net/proxy-resolver.ts', 'tools/net/__tests__/http-fetch-fakeip.test.ts', 'server/__tests__/account-device-network.test.ts', 'server/__tests__/endpoint-network-policy.test.ts', 'mcp/oauth/__tests__/request-security.test.ts', 'auth/__tests__/codex-routing-regressions.test.ts', 'api/__tests__/codex-proxy-routing.test.ts', 'api/__tests__/image-gen-network.test.ts'],
     description: '',
   },
   {
@@ -950,19 +950,19 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
   {
     name: 'RIVET_PRO',
     defaultHint: '',
-    files: ['server/__tests__/recordings-distill-route.test.ts', 'pro/__tests__/register-gate.test.ts', 'config/pro-license.ts', 'config/__tests__/pro-license.test.ts'],
+    files: ['server/__tests__/recordings-distill-route.test.ts', 'pro/__tests__/register-gate.test.ts', 'pro/__tests__/spark-authorization.test.ts', 'config/pro-license.ts', 'config/__tests__/pro-license.test.ts'],
     description: '【仅 CLI 软 gate】开源版三路径之一（config > env > file）。桌面端（RIVET_DESKTOP=1）自 v3.21.1 起不再读取该变量——桌面端只认 shell 注入的签名凭证 RIVET_PRO_GRANT，裸 env/config/文件三条后门全部封死。',
   },
   {
     name: 'RIVET_PRO_DEVICE_ID',
     defaultHint: '',
-    files: ['config/pro-license.ts', 'config/__tests__/pro-license.test.ts', 'auth/account-device.ts'],
+    files: ['pro/spark/__tests__/effort.test.ts', 'pro/__tests__/spark-authorization.test.ts', 'config/pro-license.ts', 'config/__tests__/pro-license.test.ts', 'auth/account-device.ts', 'agent/__tests__/anchors-wiring.test.ts'],
     description: 'Tauri shell 注入的本机设备指纹（与 machine_uid 同源），用于与凭证 payload.deviceId 强比对。纵深防御：设备绑定的主判定在 Rust read_status（device_mismatch），此处只做交叉校验。',
   },
   {
     name: 'RIVET_PRO_GRANT',
     defaultHint: '',
-    files: ['pro/__tests__/register-gate.test.ts', 'config/pro-license.ts', 'config/__tests__/pro-license.test.ts'],
+    files: ['pro/spark/__tests__/effort.test.ts', 'pro/__tests__/register-gate.test.ts', 'pro/__tests__/spark-authorization.test.ts', 'config/pro-license.ts', 'config/__tests__/pro-license.test.ts', 'agent/__tests__/anchors-wiring.test.ts'],
     description: '桌面端 Pro 凭证：license-server 以 Ed25519 签名的许可证 token（base64url(payload).base64url(sig)），由 Tauri shell 在「验签 + 运行时完整性校验 + is_pro()」全通过后注入；sidecar 用编译进包的公钥验签并校验产品/时间窗/设备。伪造需要签发私钥，故 env 注入类攻击（命令行直启、Frida hook CreateProcessW、父进程继承）失效。',
   },
   {
@@ -993,6 +993,12 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
     name: 'RIVET_PROMPT_TOOL_DESC',
     defaultHint: 'toolDescriptions',
     files: ['prompt/block-policy.ts'],
+    description: '',
+  },
+  {
+    name: 'RIVET_PYTHON_PATH',
+    defaultHint: '',
+    files: ['skills/runtime/__tests__/interpreter.test.ts'],
     description: '',
   },
   {
@@ -1064,13 +1070,13 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
   {
     name: 'RIVET_RIPGREP_PATH',
     defaultHint: '',
-    files: ['workers/__tests__/cpu-grep-scan.test.ts', 'tools/grep.ts'],
+    files: ['workers/__tests__/cpu-grep-scan.test.ts', 'tools/grep.ts', 'tools/__tests__/grep-reporting.test.ts'],
     description: '',
   },
   {
     name: 'RIVET_RTK',
     defaultHint: '',
-    files: ['tools/bash.ts', 'tools/__tests__/bash.test.ts'],
+    files: ['tools/bash.ts', 'tools/__tests__/bash.test.ts', 'tools/__tests__/execution-feedback.test.ts'],
     description: '',
   },
   {
@@ -1172,7 +1178,7 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
   {
     name: 'RIVET_SESSION_DIR',
     defaultHint: 'join(options.rivetHome',
-    files: ['tools/__tests__/verification-run-evidence.test.ts', 'skills/__tests__/skill-management.test.ts', 'server/profile-library-routes.ts', 'server/__tests__/cache-routes.test.ts', 'server/__tests__/fork.test.ts', 'server/__tests__/handoff-route.test.ts', 'server/__tests__/insights-route.test.ts', 'server/__tests__/serve-frozen-lifecycle.test.ts', 'server/__tests__/serve-restore-history.test.ts', 'server/__tests__/session-delete-cleanup.test.ts', 'server/__tests__/session-routes.test.ts', 'server/__tests__/snapshot.test.ts', 'prompt/__tests__/frozen-lifecycle.test.ts', 'prompt/__tests__/frozen-snapshot-persist.test.ts', 'diagnostics/__tests__/log-locations.test.ts', 'config/paths.ts', 'api/__tests__/gemini-signature-durability.test.ts', 'agent/__tests__/appendix-trace.test.ts', 'agent/__tests__/cache-worker-hardening.test.ts', 'agent/__tests__/handoff-persist.test.ts', 'agent/__tests__/loop-factory.test.ts', 'agent/__tests__/persist-integration.test.ts', 'agent/__tests__/session-cd-rebuild-stores.test.ts', 'agent/__tests__/session-cd.test.ts', 'agent/__tests__/session-persist-codec.test.ts', 'agent/__tests__/session-persist-listener.test.ts', 'agent/__tests__/session-persist-orphan-structured.test.ts', 'agent/__tests__/session-persist.test.ts', 'agent/__tests__/speculation-stats-meta.test.ts', 'agent/__tests__/tool-pipeline.test.ts', 'agent/__tests__/ttsr-retry-cap.test.ts', 'agent/__tests__/turn-orchestrator-b1-window.test.ts', 'agent/__tests__/turn-orchestrator-b2-mode.test.ts', 'agent/__tests__/verification-completion.test.ts', 'agent/__tests__/verification-integration-proof.test.ts', 'agent/__tests__/worker-fixed-execution.integration.test.ts', 'agent/__tests__/worker-model-policy.test.ts', 'agent/__tests__/worker-session.test.ts', '__tests__/bootstrap.test.ts', '__tests__/cli-process-fixture.ts', '__tests__/fresh-session.test.ts', '__tests__/switch-agent-session.test.ts'],
+    files: ['tools/__tests__/execution-feedback.test.ts', 'tools/__tests__/verification-run-evidence.test.ts', 'storage/__tests__/session-maintenance.test.ts', 'skills/__tests__/session-skill-storage.test.ts', 'skills/__tests__/skill-management.test.ts', 'server/profile-library-routes.ts', 'server/__tests__/cache-routes.test.ts', 'server/__tests__/cold-start-consent-route.test.ts', 'server/__tests__/fork.test.ts', 'server/__tests__/handoff-route.test.ts', 'server/__tests__/insights-route.test.ts', 'server/__tests__/rewind-restart-continuity.test.ts', 'server/__tests__/serve-frozen-lifecycle.test.ts', 'server/__tests__/serve-restore-history.test.ts', 'server/__tests__/session-delete-cleanup.test.ts', 'server/__tests__/session-routes.test.ts', 'server/__tests__/skill-creation-session.test.ts', 'server/__tests__/snapshot.test.ts', 'server/__tests__/user-instructions.test.ts', 'prompt/__tests__/frozen-lifecycle.test.ts', 'prompt/__tests__/frozen-snapshot-persist.test.ts', 'platform/__tests__/test-session-isolation.test.ts', 'diagnostics/__tests__/log-locations.test.ts', 'config/paths.ts', 'api/__tests__/anthropic-continuation-recovery.test.ts', 'api/__tests__/gemini-signature-durability.test.ts', 'agent/__tests__/appendix-trace.test.ts', 'agent/__tests__/cache-worker-hardening.test.ts', 'agent/__tests__/continuation-compaction-recovery.test.ts', 'agent/__tests__/continuation-error-recovery.test.ts', 'agent/__tests__/continuity-projection-fixture.ts', 'agent/__tests__/deepseek-context-recovery.test.ts', 'agent/__tests__/domain-task-boundary-integration.test.ts', 'agent/__tests__/handoff-persist.test.ts', 'agent/__tests__/loop-factory.test.ts', 'agent/__tests__/persist-integration.test.ts', 'agent/__tests__/published-input-boundary.test.ts', 'agent/__tests__/session-cd-rebuild-stores.test.ts', 'agent/__tests__/session-cd.test.ts', 'agent/__tests__/session-persist-codec.test.ts', 'agent/__tests__/session-persist-listener.test.ts', 'agent/__tests__/session-persist-orphan-structured.test.ts', 'agent/__tests__/session-persist.test.ts', 'agent/__tests__/speculation-stats-meta.test.ts', 'agent/__tests__/stream-abort-diagnostics.test.ts', 'agent/__tests__/stream-rule-transport.test.ts', 'agent/__tests__/tool-pipeline.test.ts', 'agent/__tests__/ttsr-retry-cap.test.ts', 'agent/__tests__/turn-orchestrator-b1-window.test.ts', 'agent/__tests__/turn-orchestrator-b2-mode.test.ts', 'agent/__tests__/user-instructions-integration.test.ts', 'agent/__tests__/verification-completion.test.ts', 'agent/__tests__/verification-integration-proof.test.ts', 'agent/__tests__/worker-fixed-execution.integration.test.ts', 'agent/__tests__/worker-model-policy.test.ts', 'agent/__tests__/worker-resume-prefix-e2e.test.ts', 'agent/__tests__/worker-session.test.ts', '__tests__/bootstrap.test.ts', '__tests__/cli-process-fixture.ts', '__tests__/fresh-session.test.ts', '__tests__/switch-agent-session.test.ts'],
     description: '',
   },
   {
@@ -1260,9 +1266,15 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
     description: '',
   },
   {
+    name: 'RIVET_TEST_UNSET_KEY',
+    defaultHint: '',
+    files: ['server/__tests__/account-credential.test.ts'],
+    description: '',
+  },
+  {
     name: 'RIVET_TOKEN_STORE',
     defaultHint: '',
-    files: ['server/__tests__/account-routes.test.ts', 'config/__tests__/secrets-concurrent.test.ts', 'config/__tests__/secrets-lock-takeover.test.ts', 'config/__tests__/secrets-store.test.ts', 'auth/secure-store.ts', 'auth/__tests__/account-model-credentials.test.ts', 'auth/__tests__/secure-store.test.ts'],
+    files: ['server/__tests__/account-routes.test.ts', 'config/__tests__/secrets-concurrent.test.ts', 'config/__tests__/secrets-lock-takeover.test.ts', 'config/__tests__/secrets-store.test.ts', 'auth/secure-store.ts', 'auth/__tests__/account-model-credentials.test.ts', 'auth/__tests__/secure-store.test.ts', 'agent/__tests__/continuation-compaction-recovery.test.ts'],
     description: '凭据落盘加密的数据密钥托管后端：keychain(macOS 默认) / dpapi(Windows 默认) / local-key(Linux 默认，仅混淆不是安全边界) / plaintext(显式关闭加密，仅排障)。密钥库不可用时自动降级到 local-key 并打 warn。',
   },
   {
@@ -1274,7 +1286,7 @@ export const ENV_REGISTRY: EnvRegistryEntry[] = [
   {
     name: 'RIVET_TRUST_PROJECT',
     defaultHint: '',
-    files: ['main.ts', 'tui/__tests__/slash-commands.test.ts', 'tools/__tests__/monitor-tool.test.ts', 'tools/__tests__/run-tests-declared.test.ts', 'skills/__tests__/skill-loader.test.ts', 'skills/__tests__/skill-management.test.ts', 'server/__tests__/hooks-route.test.ts', 'server/__tests__/mcp-server-config.test.ts', 'server/__tests__/pr353-adoption.test.ts', 'server/__tests__/serve-agent-config-merge.test.ts', 'server/__tests__/session-manager.test.ts', 'server/__tests__/session-routes.test.ts', 'server/__tests__/trust-api.test.ts', 'server/__tests__/welcome-skill-first-run.test.ts', 'prompt/__tests__/engine.test.ts', 'prompt/__tests__/project-instructions.test.ts', 'prompt/__tests__/volatile-snapshot-policy.test.ts', 'prompt/__tests__/volatile-snapshot.test.ts', 'prompt/__tests__/volatile.test.ts', 'memory/__tests__/knowledge-index.test.ts', 'memory/__tests__/memory-recall-untrusted.test.ts', 'memory/__tests__/memory-tool-embedding.test.ts', 'memory/__tests__/unified-memory.test.ts', 'hooks/__tests__/user-hooks-runner.test.ts', 'context/__tests__/filesystem-metadata.test.ts', 'context/__tests__/project-memory-writer.test.ts', 'context/__tests__/rules-loader.test.ts', 'config/__tests__/layered-config.test.ts', 'config/__tests__/project-trust-surface-gates.test.ts', 'config/__tests__/project-trust.test.ts', 'config/__tests__/verify-config.test.ts', 'agent/__tests__/companion-presence.test.ts', 'agent/__tests__/contract-transmission.test.ts', 'agent/__tests__/domain-capsule.test.ts', 'agent/__tests__/plan-constraints.test.ts', 'agent/__tests__/seed-capsule-store.test.ts', 'agent/__tests__/typecheck-gate.test.ts', 'agent/__tests__/user-hooks-bridge.test.ts', '__tests__/commands-loader.test.ts'],
+    files: ['main.ts', 'tui/__tests__/slash-commands.test.ts', 'tools/__tests__/monitor-tool.test.ts', 'tools/__tests__/run-tests-declared.test.ts', 'storage/__tests__/session-maintenance.test.ts', 'skills/__tests__/session-skill-storage.test.ts', 'skills/__tests__/skill-loader.test.ts', 'skills/__tests__/skill-management.test.ts', 'server/__tests__/endpoint-network-policy.test.ts', 'server/__tests__/hooks-route.test.ts', 'server/__tests__/mcp-server-config.test.ts', 'server/__tests__/pr353-adoption.test.ts', 'server/__tests__/serve-agent-config-merge.test.ts', 'server/__tests__/session-manager.test.ts', 'server/__tests__/session-routes.test.ts', 'server/__tests__/skill-creation-session.test.ts', 'server/__tests__/trust-api.test.ts', 'server/__tests__/welcome-skill-first-run.test.ts', 'prompt/__tests__/engine.test.ts', 'prompt/__tests__/project-instructions.test.ts', 'prompt/__tests__/volatile-snapshot-policy.test.ts', 'prompt/__tests__/volatile-snapshot.test.ts', 'prompt/__tests__/volatile.test.ts', 'memory/__tests__/knowledge-index.test.ts', 'memory/__tests__/memory-recall-untrusted.test.ts', 'memory/__tests__/memory-tool-embedding.test.ts', 'memory/__tests__/unified-memory.test.ts', 'hooks/__tests__/user-hooks-runner.test.ts', 'context/__tests__/filesystem-metadata.test.ts', 'context/__tests__/project-memory-writer.test.ts', 'context/__tests__/rules-loader.test.ts', 'config/__tests__/layered-config.test.ts', 'config/__tests__/project-trust-surface-gates.test.ts', 'config/__tests__/project-trust.test.ts', 'config/__tests__/verify-config.test.ts', 'agent/__tests__/cognitive-capsule-router.test.ts', 'agent/__tests__/companion-presence.test.ts', 'agent/__tests__/contract-transmission.test.ts', 'agent/__tests__/domain-capsule.test.ts', 'agent/__tests__/plan-constraints.test.ts', 'agent/__tests__/seed-capsule-store.test.ts', 'agent/__tests__/typecheck-gate.test.ts', 'agent/__tests__/user-hooks-bridge.test.ts', '__tests__/commands-loader.test.ts'],
     description: '',
   },
   {

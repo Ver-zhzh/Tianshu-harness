@@ -18,7 +18,7 @@ import type { DomainKnowledgeStore } from './domain-knowledge-store.js'
 import { deriveWorkerSessionId } from './work-order.js'
 import { buildModelCards } from '../model/capability.js'
 import { workerModelPolicy, type WorkerModelPolicy } from './worker-model-policy.js'
-import { resolveModelBinding, snapshotSessionBinding, ModelBindingUnavailable, type ModelBindingRef, type ModelUnavailableReason } from '../model/model-binding.js'
+import { resolveModelBinding, sessionProviderKey, snapshotSessionBinding, ModelBindingUnavailable, type ModelBindingRef, type ModelUnavailableReason } from '../model/model-binding.js'
 
 export interface WorkerRuntimeDeps {
   getUserInstructions: () => import('../prompt/user-instructions.js').UserInstructionsSnapshot
@@ -54,7 +54,7 @@ interface PreparedModel {
 function prepareModel(deps: WorkerRuntimeDeps, order: WorkOrder): PreparedModel {
   const userInstructions = parseUserInstructionsSnapshot(deps.getUserInstructions())
   const policy = workerModelPolicy(deps.config, order)
-  const root = deps.rootSessionBinding ?? snapshotSessionBinding(deps.provider, deps.currentModelId, deps.apiKey)
+  const root = deps.rootSessionBinding ?? snapshotSessionBinding(deps.provider, deps.currentModelId, deps.apiKey, sessionProviderKey(deps.config.provider.providers, deps.provider))
   if ('strategy' in policy.target && policy.target.strategy === 'auto') return { deps, policy, root, userInstructions }
   let binding: Binding
   if ('provider' in policy.target) {
@@ -122,6 +122,7 @@ function assembleWorkerRuntime(prepared: PreparedModel, _order: WorkOrder, card:
     runtimeDecision: {
       ...selectionMetadata,
       expectedPrincipal,
+      providerKey: binding.ref.provider,
       providerName: workerProvider.name,
       model: workerModel,
       maxTokens: workerMaxTokens,

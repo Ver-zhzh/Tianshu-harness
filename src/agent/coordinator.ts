@@ -5,6 +5,7 @@ import { auditWorkerStage, persistWorkerDispatch, persistWorkerNonExecution, wor
 import { enforceWorkerCapabilities } from './worker-capabilities.js'
 import type { ContinuationPrefixProof } from '../api/continuation-prefix.js'
 import { isLocalWorkerPolicyError, LocalWorkerPolicyError } from '../api/continuation-prefix.js'
+import { ModelBindingUnavailable } from '../model/model-binding.js'
 import type { WorkerSessionRecord } from './worker-session-persist.js'
 import type { ModelCapabilityCard, CapabilityTask } from '../model/capability.js'
 import { recommendModelForTask } from '../model/capability.js'
@@ -508,6 +509,7 @@ export function shouldDelegateObjective(objective: string, scope: WorkOrderScope
 }
 
 export function classifyWorkerError(error: unknown): WorkerFailureReason {
+  if (error instanceof ModelBindingUnavailable) return 'binding'
   if (error instanceof Error && error.name === 'UserInstructionsError') return 'policy_short_circuit'
   if (isLocalWorkerPolicyError(error)) return 'policy_short_circuit'
   const msg = error instanceof Error ? error.message : String(error)
@@ -544,7 +546,7 @@ export function workerFailureResult(order: WorkOrder, error: unknown, opts?: { n
     nextActions,
     evidenceStatus: 'blocked',
     terminalFailure: true,
-    failureStage: isLocalWorkerPolicyError(error) ? 'continuity' : (error instanceof Error && error.name === 'ModelBindingUnavailable') ? 'binding' : 'dispatch',
+    failureStage: isLocalWorkerPolicyError(error) ? 'continuity' : error instanceof ModelBindingUnavailable ? 'binding' : 'dispatch',
     failureReason,
   }
 }

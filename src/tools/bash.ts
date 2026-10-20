@@ -51,7 +51,7 @@ import { summarizeBashOutput } from '../artifact/summarize.js'
 import { getToolArtifactThreshold } from './artifact-threshold.js'
 import { debugLog } from '../utils/debug.js'
 import { loadConfig } from '../config/manager.js'
-import { buildMirrorEnv, rewriteGitHubUrls, gitCloneEarlyFailEnv } from './mirror-env.js'
+import { buildMirrorEnv, buildGitMirrorEnv, mirrorFailureHint, gitCloneEarlyFailEnv } from './mirror-env.js'
 import { buildNotFoundHint, extractMissingCommand } from './env-check.js'
 import { getResolvedEnv } from './resolved-env.js'
 import { OutputStreamBudget } from './output-stream-budget.js'
@@ -465,7 +465,7 @@ async function executeBashOnce(params: ToolCallParams): Promise<BashExecResult> 
   const rawCommand = params.input.command as string
   const rewritten = rtkRewrite(rawCommand, params.toolUseId)
   const mirrorConfig = loadConfig({ cwd: params.cwd }).mirrors
-  const rewrittenWithMirrors = rewriteGitHubUrls(rewritten, mirrorConfig)
+  const rewrittenWithMirrors = rewritten // issue #524: no blind URL text rewrite — git mirrors now flow through insteadOf env (buildGitMirrorEnv), so echo/remote-add/push keep original URLs
   let sandbox = wrapSandboxCommand(rewrittenWithMirrors, params.cwd)
   let command = sandbox.command
   const timeout = resolveCallerTimeoutBudget(rawCommand, Number(params.input.timeout), 120_000) // 非正数/NaN → 默认（#187）；typecheck 形态按闸门预算只抬不压
@@ -486,7 +486,7 @@ async function executeBashOnce(params: ToolCallParams): Promise<BashExecResult> 
   if (wantBackground && params.jobs) {
     const verificationRun = await prepareBackgroundVerification(rewrittenWithMirrors, params)
     if (verificationRun.preparationError) { verificationRun.dispose(); return completionPreparationBlocked(rawCommand, verificationRun.preparationError) }
-    const mirrorEnv = buildMirrorEnv(mirrorConfig)
+    const mirrorEnv = { ...buildMirrorEnv(mirrorConfig), ...buildGitMirrorEnv(mirrorConfig) }
     const earlyFailEnv = gitCloneEarlyFailEnv(rawCommand, mirrorConfig)
     const env = { ...sanitizeEnv(getResolvedEnv(params.cwd)), ...mirrorEnv, ...earlyFailEnv, ...verificationRun.env }
     // 后台 tsc 尽力串行，退出时放锁，await 的 10min 兜底。
@@ -545,7 +545,7 @@ async function executeBashOnce(params: ToolCallParams): Promise<BashExecResult> 
       commandToRun = command
     }
 
-    const mirrorEnv = buildMirrorEnv(mirrorConfig)
+    const mirrorEnv = { ...buildMirrorEnv(mirrorConfig), ...buildGitMirrorEnv(mirrorConfig) }
     const earlyFailEnv = gitCloneEarlyFailEnv(rawCommand, mirrorConfig)
     debugLog(`[bash-spawn] kind=${shell.kind} shell=${shell.cmd} args=${JSON.stringify(shell.args)} cwd=${params.cwd ?? process.cwd()}`)
     const child = track(spawnShell(shell, commandToRun, {
@@ -734,6 +734,9 @@ async function executeBashOnce(params: ToolCallParams): Promise<BashExecResult> 
         filtered += buildNotFoundHint(extractMissingCommand(filtered, rawCommand), process.platform)
       }
       const rereadWarn = checkBashReread(rawCommand, params.toolUseId)
+      // issue #524 遗留污染：git 失败且 stderr 含已废弃的 gh_mirror 地址时，
+      // 给出精确的 remote 还原命令（旧版文本改写曾把它持久化进 .git/config）。
+      const mirrorHint = exitCode !== 0 ? mirrorFailureHint(stderr) : undefined
 
       // Empty stdout on success must NOT be back-filled with a synthetic
       // "Exit code: 0" body. Doing so rendered as "lines=1 — output complete\n
@@ -761,6 +764,7 @@ async function executeBashOnce(params: ToolCallParams): Promise<BashExecResult> 
         modelBody = filtered || (isTimeout ? (isTypecheckCommand(rawCommand) ? TYPECHECK_TIMEOUT_HINT : '命令超时。') : code === 0 ? '' : `退出码：${code}`)
       }
       if (sandboxDenial) modelBody = buildSandboxDenialHint(sandboxDenial) + '\n\n' + modelBody
+      if (mirrorHint) modelBody = mirrorHint + '\n\n' + modelBody
 
       // Use ArtifactStore if available (preferred); otherwise fall back to output-store.
       // Skip persistRawOutput in artifact mode — ArtifactStore owns raw persistence,

@@ -87,6 +87,7 @@ export interface AccountApi {
 }
 
 export interface AccountRoutesDeps {
+  onSessionChanged?: () => void
   /** 共享 Bearer token；缺省即 fail-closed（全 401）。 */
   apiToken?: string
   /** 账号凭据落盘根目录（与 CLI/TUI 同一个 RIVET_HOME）。 */
@@ -285,6 +286,7 @@ export function buildAccountRoutes(deps: AccountRoutesDeps): Record<string, Rout
     const store = api.accountStore(deps.rivetHome)
     try {
       const saved = api.saveAccountToken(store, poll)
+      try { deps.onSessionChanged?.() } catch {}
       void refreshAccount(store, saved.accessToken, true)
     } catch {
       return { status: 500, body: { error: 'could not save account login' } }
@@ -447,6 +449,7 @@ export function buildAccountRoutes(deps: AccountRoutesDeps): Record<string, Rout
       const store = api.accountStore(deps.rivetHome)
       const credential = store.load()?.accessToken
       store.clear()
+      try { deps.onSessionChanged?.() } catch {}
       await cancelRemote()
       let remoteRevoked = !credential
       try { if (credential) remoteRevoked = await api.revokeAccountSession?.(credential, { fetchImpl }) ?? false } catch {}
@@ -468,6 +471,7 @@ export function buildAccountRoutes(deps: AccountRoutesDeps): Record<string, Rout
 export function buildAccountRoutesFor(
   apiToken: string | undefined,
   config: { network?: { proxy?: string; noProxy?: string } },
+  onSessionChanged?: () => void,
 ): Record<string, RouteHandler> {
   return buildAccountRoutes({
     apiToken,
@@ -475,5 +479,6 @@ export function buildAccountRoutesFor(
     proxyUrl: config.network?.proxy,
     noProxy: config.network?.noProxy,
     getNetwork: getNetworkConfig,
+    onSessionChanged,
   })
 }

@@ -22,7 +22,7 @@ import { isOfficialDeepSeek, deepSeekBudgetPolicy, buildContextBudget, assertCon
 import type { ContextBudgetSnapshot } from '../server/protocol.js'
 import { classifyApiError } from './error-classifier.js'
 import { normalizeBaseUrl } from './endpoint-map.js'
-import { sanitizeMessageContent, countContentChars, FULL_SANITIZE_CHARS } from '../utils/sanitize.js'
+import { normalizeWireMessages, OPENAI_WIRE_TRANSFORM_VERSION, type WireNormalizationSummary } from './wire-normalization.js'
 import { parseOpenAIError } from './error-hints.js'
 import { createBodyGuardNotifyState, enforceRequestBodyLimit, notifyBodyGuard } from './request-body-guard.js'
 import { stableStringify } from './stable-json.js'
@@ -448,7 +448,6 @@ export class OpenAIClient implements StreamClient {
     this.systemSuffix = Boolean(config.preservedThinkingProtocol) && config.thinking === 'enabled'
       ? '\n\n请在内部思考链中使用中文进行推理。不要在回复中输出你的推理过程，只输出最终答案或工具调用。'
       : ''
-    this._sanitizedCount = 0
     this.proxyDispatcher = config.proxy ? new ProxyAgent(config.proxy) : undefined
   }
 
@@ -461,14 +460,6 @@ export class OpenAIClient implements StreamClient {
     })
   }
 
-  // ── Incremental sanitize ─────────────────────────────────────
-  // Historical messages are already sanitized at entry points
-  // (addUserMessage/addAssistantBlocks/addToolResults). Re-sanitizing
-  // the full message array every turn is O(history) overhead that grows
-  // linearly with conversation length — particularly wasteful at 1M
-  // context windows. We track the sanitized count and only apply the
-  // safety-net sanitize to newly appended messages.
-  private _sanitizedCount: number
   /** body 护栏上报节律（跨请求保持；去重语义见 notifyBodyGuard）。 */
   private readonly bodyGuardNotify = createBodyGuardNotifyState()
 
@@ -543,11 +534,19 @@ export class OpenAIClient implements StreamClient {
     }).map(normalizeOaiMessage)
   }
 
+  private prepareWireMessages(messages: OaiMessage[], opts?: Parameters<OpenAIClient['mapWireMessages']>[1]) {
+    const mapped = this.mapWireMessages(messages, opts)
+    const index = this.systemSuffix ? mapped.findIndex(message => message.role === 'system') : -1
+    const system = mapped[index]
+    if (system && typeof system.content === 'string') mapped[index] = { ...system, content: system.content + this.systemSuffix }
+    return normalizeWireMessages(mapped)
+  }
+
   previewContextRequest(request: OaiChatRequest): OaiChatRequest {
     const model = request.model || this.config.model
     return { ...request, model, max_tokens: this.capOutputTokens(request.max_tokens ?? this.config.maxTokens),
-      messages: this.mapWireMessages(request.messages, { toolsPresent: !!request.tools?.length,
-        suppressStickyPreserve: this.requestInvariant.hasObserved(request) }) }
+      messages: this.prepareWireMessages(request.messages, { toolsPresent: !!request.tools?.length,
+        suppressStickyPreserve: this.requestInvariant.hasObserved(request) }).messages }
   }
 
   /** 单次输出封顶到「现实预留」——与预算侧 outputReserve 共用 `capOutputReserve`（必须同源，
@@ -569,7 +568,7 @@ export class OpenAIClient implements StreamClient {
     // 判断必须早于 observe()（observe 会登记本次派发，之后恒真）。
     assertCompleteAttachments(request.messages)
     const reentrantDispatch = this.requestInvariant.hasObserved(request)
-    const messages = this.mapWireMessages(request.messages, {
+    const prepared = this.prepareWireMessages(request.messages, {
       toolsPresent: !!request.tools?.length,
       suppressStickyPreserve: reentrantDispatch,
     })
@@ -578,7 +577,7 @@ export class OpenAIClient implements StreamClient {
       // 空 model 回退到 client 绑定值——侧路调用（essence-gate / vision bridge）
       // 传 model: '' 期望"client already binds the model"；不回退会被 provider 400。
       model: request.model || this.config.model,
-      messages,
+      messages: prepared.messages,
       stream: true,
     }
 
@@ -678,45 +677,7 @@ export class OpenAIClient implements StreamClient {
       else delete body.reasoning_effort
     }
 
-    // Apply stable system suffix (Chinese thinking instruction) — computed once
-    // at construction. Copy-on-write, NEVER `content +=`: the system message
-    // object is shared by reference with the caller's request.messages, and the
-    // same request object can re-enter stream() (llm-speculation reuses the main
-    // request's messages; FallbackStreamClient replays the request on failover).
-    // In-place mutation double-appended the suffix on re-entry → system bytes
-    // changed mid-session → full prefix-cache miss for that request (2026-07-06
-    // wireDiverged idx 0 incident).
-    if (this.systemSuffix) {
-      const wireMessages = body.messages as Record<string, unknown>[]
-      const sysIdx = wireMessages.findIndex(m => m.role === 'system')
-      const sysMsg = sysIdx >= 0 ? wireMessages[sysIdx]! : undefined
-      if (sysMsg && typeof sysMsg.content === 'string') {
-        wireMessages[sysIdx] = { ...sysMsg, content: sysMsg.content + this.systemSuffix }
-      }
-    }
-
-    // Incremental sanitize: only re-sanitize messages appended since last
-    // request. Historical messages were already sanitized at entry points
-    // (addUserMessage/addAssistantBlocks/addToolResults). This avoids O(n)
-    // overhead that grows linearly with conversation length.
-    //
-    // 大体积请求（>FULL_SANITIZE_CHARS）一律全量清洗：增量路径会漏掉「历史段被原地
-    // 改写」与「client 实例跨数组复用」两处窗口，而漏过的一个控制字符在 wire 上就是
-    // `\u00XX` 转义——正是上游按字节截断 body 时的切口（maxBodyBytes 护栏只是兜底且默认关闭，源头也得
-    // 干净）。全量扫描与本次必做的 JSON.stringify 同阶，1M 字符以上已可忽略。
-    const msgArray = body.messages as Array<Record<string, unknown>>
-    if (msgArray.length <= this._sanitizedCount || countContentChars(msgArray) > FULL_SANITIZE_CHARS) {
-      // Compaction / message replacement / 大体积请求: reset and full sanitize
-      this._sanitizedCount = 0
-    }
-    const newMessages = msgArray.slice(this._sanitizedCount)
-    if (newMessages.length > 0) {
-      const sanitizedNew = sanitizeMessageContent(newMessages)
-      for (let i = 0; i < sanitizedNew.length; i++) {
-        msgArray[this._sanitizedCount + i] = sanitizedNew[i]!
-      }
-      this._sanitizedCount = msgArray.length
-    }
+    const msgArray = prepared.messages
 
     // Wire-level prefix probe (2026-07-06 cache investigation): fingerprint the
     // FINAL messages — everything above (reasoning-strip, system-suffix,
@@ -733,7 +694,7 @@ export class OpenAIClient implements StreamClient {
     this.requestInvariant.observe(request, msgArray, body.tools as unknown[] | undefined)
 
 
-    await this.sendStream(body, callbacks, signal, request.messages, request.contextBudget, request.prefixProbe, request.diagnostics)
+    await this.sendStream(body, callbacks, signal, request.messages, request.contextBudget, request.prefixProbe, request.diagnostics, prepared.normalization)
   }
 
   /** Compare this request's final wire bytes with the previous main-turn
@@ -771,6 +732,7 @@ export class OpenAIClient implements StreamClient {
     preparedBudget?: ContextBudgetSnapshot,
     prefixProbe = false,
     diagnostics?: RequestDiagnostics,
+    normalization?: WireNormalizationSummary,
   ): Promise<void> {
     // reasoningRef survives retry attempts within this sendStream call.
     // When a mid-stream failure occurs (e.g. idle timeout, connection reset),
@@ -841,28 +803,28 @@ export class OpenAIClient implements StreamClient {
       // image_url part 摘掉。只改本次请求体，绝不 in-place 改 body——会话历史与
       // 后续轮次仍保图（用户下一句「这张图里…」还能对上）。stripOaiImageParts
       // 是纯函数，无图可剥时返回原引用，下面按引用比较走原路径。
+      let attemptNormalization = normalization
       let wireMessages = body.messages as OaiMessage[]
       // 已剥图的重试：每次 attempt 都从原始 body 重建，必须幂等重放剥离，否则后续
       // 因别的原因重试（500 等）会把毒图又发出去（pinned by image_strip recovery 测试）。
-      if (imagesStripped) wireMessages = stripOaiImageParts(wireMessages).messages
       // 保留思考内容重发（上一次失败被判 reasoning_echo）：从**原始** request.messages
       // 重建（body.messages 已经是剥离后的历史，剥掉的信息回不来）。与剥图同理，
       // 只改本次 attempt 的 wire 副本，不动 request.messages / body。
-      if (preserveReasoningRequested && !preserveReasoningApplied && sourceMessages) {
-        wireMessages = this.mapWireMessages(sourceMessages, { preserveReasoning: true, toolsPresent: Array.isArray(body.tools) && body.tools.length > 0 })
-        preserveReasoningApplied = true
+      if (preserveReasoningRequested && sourceMessages) {
+        const preserved = this.prepareWireMessages(sourceMessages, { preserveReasoning: true, toolsPresent: Array.isArray(body.tools) && body.tools.length > 0 })
+        wireMessages = preserved.messages
+        attemptNormalization = preserved.normalization
         // wire 形态被改了（历史里多出 reasoning_content，前缀字节随之变化）——
         // 静默改形态是本仓最贵的 bug 形状，必须让调用方有机会说出来。
-        callbacks.onReasoningEchoRecovered?.()
+        if (!preserveReasoningApplied) { preserveReasoningApplied = true; callbacks.onReasoningEchoRecovered?.() }
       }
-      if (stripRequested && !imagesStripped) {
+      if (stripRequested || imagesStripped) {
         const stripped = stripOaiImageParts(wireMessages)
         if (stripped.removedCount > 0) {
           wireMessages = stripped.messages
-          imagesStripped = true
           // 模型这一轮再也看不到这些图了——必须让调用方有机会告诉用户，
           // 否则「模型没理我的截图」会被当成模型变笨。
-          callbacks.onImageStripped?.({ removedCount: stripped.removedCount, uniqueUrlCount: stripped.uniqueUrlCount })
+          if (!imagesStripped) { imagesStripped = true; callbacks.onImageStripped?.({ removedCount: stripped.removedCount, uniqueUrlCount: stripped.uniqueUrlCount }) }
         }
       }
 
@@ -890,6 +852,14 @@ export class OpenAIClient implements StreamClient {
       } else if (wireMessages !== body.messages) {
         effectiveBody = { ...body, messages: wireMessages }
       }
+
+      if (effectiveBody.messages !== body.messages) {
+        const normalized = normalizeWireMessages(effectiveBody.messages as OaiMessage[])
+        effectiveBody = { ...effectiveBody, messages: normalized.messages }
+        if (normalized.normalization.changedMessages) attemptNormalization = normalized.normalization
+      }
+      const scope = currentExecutionScope()
+      if (scope) { scope.wireTransformVersion = OPENAI_WIRE_TRANSFORM_VERSION; scope.normalization = attemptNormalization }
 
       // Resolve auth headers: AuthProvider takes precedence over static apiKey
       const authHeaders = this.config.auth
@@ -944,6 +914,8 @@ export class OpenAIClient implements StreamClient {
       // 客户端限速（未配置 rateLimit 时零开销）：同 provider 的所有 client 实例共享一只桶。
       await acquireRateLimitSlot(this.config.providerName ?? this.config.baseUrl, this.config.retry?.rateLimit, lifecycle.signal)
       const proof = proveWirePrefix(guard.body, this.config.providerName ?? 'openai', requestId, normalizeBaseUrl(this.config.baseUrl))
+      proof.wireTransformVersion = OPENAI_WIRE_TRANSFORM_VERSION
+      identity.wireNormalization = attemptNormalization
       const previousProof = this.mainPrefixProof
       const previousSignatures = this.prevWireSignatures
       const previousToolsSignature = this.prevWireToolsSig

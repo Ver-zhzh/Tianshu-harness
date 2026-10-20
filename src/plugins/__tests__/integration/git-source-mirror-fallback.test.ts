@@ -81,14 +81,18 @@ before(() => {
 
   // Monkey-patch gitcode mirror to point at the local repo.
   // GITHUB_MIRRORS is a mutable `export const` object — direct prop assignment
-  // works. We restore the original in after().
-  savedTemplate = GITHUB_MIRRORS.gitcode.template
-  GITHUB_MIRRORS.gitcode.template = pathToFileURL(originRepo).href
+  // works. We restore the original in after(). (Partial table post-#524:
+  // guard for undefined defensively, though gitcode is verified-alive.)
+  const gitcodeMirror = GITHUB_MIRRORS.gitcode
+  if (!gitcodeMirror) throw new Error('gitcode mirror entry missing')
+  savedTemplate = gitcodeMirror.template
+  gitcodeMirror.template = pathToFileURL(originRepo).href
 })
 
 after(() => {
   // Strict restore — failure here would pollute other test suites.
-  GITHUB_MIRRORS.gitcode.template = savedTemplate
+  const gitcodeMirror = GITHUB_MIRRORS.gitcode
+  if (gitcodeMirror) gitcodeMirror.template = savedTemplate
   for (const name of Object.keys(process.env)) {
     if (name.toUpperCase().startsWith('GIT_')) delete process.env[name]
   }
@@ -110,6 +114,16 @@ afterEach(() => {
 
 // ── tests ──────────────────────────────────────────────────────────
 
+/** Post-#524 mirror table order: ghproxy (prefix proxy) first, gitcode second.
+ *  This test monkey-patches gitcode to a local repo; ghproxy is NOT patched,
+ *  so the auto-fallback chain observed at the trace is:
+ *  direct (fails) → ghproxy (real network attempt, fails offline/404) → gitcode (local, succeeds).
+ *  The ghproxy hop is environment-dependent, so assertions use suffix matching. */
+function expectedChainWithGhproxyHop(): string[] {
+  const ghproxyTemplate = GITHUB_MIRRORS.ghproxy!.template.replace('{repo}', 'test/repo')
+  return [originalUrl, ghproxyTemplate, GITHUB_MIRRORS.gitcode!.template]
+}
+
 describe('cloneGitSource mirror fallback (real git clone, offline)', () => {
   test('direct github.com fails → gitcode (local) succeeds, files present', async () => {
     // The missing local direct source fails deterministically; allow real local
@@ -122,7 +136,12 @@ describe('cloneGitSource mirror fallback (real git clone, offline)', () => {
     })
     try {
       const result = await cloneGitSource(originalUrl)
-      assert.deepEqual(cloneUrls(), [originalUrl, GITHUB_MIRRORS.gitcode.template])
+      const expected = expectedChainWithGhproxyHop()
+      const actual = cloneUrls()
+      // Suffix-match: the trace must END with [..., direct-fail, (maybe ghproxy), gitcode-local]
+      assert.deepEqual(actual.slice(0, 1), expected.slice(0, 1), 'direct attempt first')
+      assert.equal(actual[actual.length - 1], expected[expected.length - 1], 'final success via patched gitcode')
+      assert.ok(actual.length >= 2 && actual.length <= expected.length, `chain length plausible: ${actual.join(' -> ')}`)
       assert.ok(result.sourcePath, 'sourcePath returned')
       // Real clone happened — the local repo's files are present.
       assert.ok(existsSync(join(result.sourcePath, 'package.json')), 'package.json in clone')
@@ -149,14 +168,16 @@ describe('cloneGitSource mirror fallback (real git clone, offline)', () => {
       const r1 = await cloneGitSource(originalUrl)
       r1.cleanup()
 
-      assert.deepEqual(cloneUrls(), [originalUrl, GITHUB_MIRRORS.gitcode.template])
+      const firstChain = cloneUrls()
+      assert.equal(firstChain[0], originalUrl, 'direct attempt first')
+      assert.equal(firstChain[firstChain.length - 1], GITHUB_MIRRORS.gitcode!.template, 'ends at patched gitcode')
 
       // Measure real attempts: a cached mirror must omit the direct URL even
       // when the local filesystem takes longer than the former 2s assertion.
       writeFileSync(tracePath, '')
       const r2 = await cloneGitSource(originalUrl)
       r2.cleanup()
-      assert.deepEqual(cloneUrls(), [GITHUB_MIRRORS.gitcode.template])
+      assert.deepEqual(cloneUrls(), [GITHUB_MIRRORS.gitcode!.template])
     } finally {
       restoreConfig()
     }

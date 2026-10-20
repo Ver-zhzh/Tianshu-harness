@@ -10,19 +10,19 @@
 #
 # 国内分流有三条源（catalog 的 sources）：github / oss / atomgit。
 #   - github：始终在列（发布链路自带）
-#   - oss   ：由 1/4 步（upload-update-to-oss.sh）提供，但 catalog 里恒为 verified:false，
+#   - oss   ：由 1/4 步（upload-update-to-oss.sh）提供，catalog 里恒为 verified:false，
 #             只作「手动备份」——auto 模式不会自动选它（见 update_routing.rs 的 sources()）
-#   - atomgit：需显式 --with-atomgit，且要求 tag 已镜像、凭据可用；未过 --acceptance 验收
-#             时恒为 disabled（auto 不选）。所以不加 --with-atomgit 时会被显式告警。
+#   - atomgit：默认步骤（2026-10-19 起与 OSS 同级的普通上传，无资格验证链）；
+#             要求 tag 已镜像、凭据可用。--skip-atomgit 可跳过。
 #
 # 用法：
 #   bash scripts/releases/publish-release-catalog.sh            # 默认 dry run：只做前置检查（纯读，无写/对外动作）
 #   bash scripts/releases/publish-release-catalog.sh --publish  # 真发布（对外、不可逆：OSS 覆盖 + release --clobber）
 #
 # 选项：
-#   --publish              执行对外发布（upload-to-oss + [atomgit] + publish-routing --publish + 线上验证）
-#   --with-atomgit         把 AtomGit 上传阶段并进来（需 AtomGit 已镜像 v<ver> tag + 写凭据）
+#   --publish              执行对外发布（upload-to-oss + atomgit + publish-routing --publish + 线上验证）
 #   --skip-oss             跳过 upload-update-to-oss.sh（OSS 二进制/legacy manifest 已单独传过）
+#   --skip-atomgit         跳过 AtomGit 上传（tag 未镜像或凭据不可用时）
 #   --no-commit            generate-catalog 后不自动提交 release-catalog.json
 #   --website DIR          覆盖 website checkout 路径（默认 ../tianshu-website）
 #
@@ -37,13 +37,13 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-PUBLISH=0; SKIP_OSS=0; NO_COMMIT=0; WITH_ATOMGIT=0; WEBSITE="../tianshu-website"
+PUBLISH=0; SKIP_OSS=0; SKIP_ATOMGIT=0; NO_COMMIT=0; WEBSITE="../tianshu-website"
 while [ $# -gt 0 ]; do
   case "$1" in
     --publish)              PUBLISH=1; shift ;;
     --skip-oss)             SKIP_OSS=1; shift ;;
+    --skip-atomgit)         SKIP_ATOMGIT=1; shift ;;
     --no-commit)            NO_COMMIT=1; shift ;;
-    --with-atomgit)         WITH_ATOMGIT=1; shift ;;
     --website)              WEBSITE="${2:-}"; shift 2 ;;
     --website=*)            WEBSITE="${1#*=}"; shift ;;
     *) echo "未知参数：$1" >&2; exit 2 ;;
@@ -60,7 +60,7 @@ VER="$(node -p "require('./latest.json').version" 2>/dev/null || true)"
 echo "发布版本：v$VER"
 
 PTOTAL=4
-if [ "$WITH_ATOMGIT" = 1 ]; then PTOTAL=5; fi
+if [ "$SKIP_ATOMGIT" != 1 ]; then PTOTAL=5; fi
 
 step "前置检查 1/${PTOTAL}：发布说明摘要"
 SUM="docs/releases/summaries/${VER}.json"
@@ -93,11 +93,15 @@ step "前置检查 4/${PTOTAL}：website checkout"
 [ -d "$WEBSITE" ] || fail "website checkout 不存在：${WEBSITE}（publish-routing --website 需要）。用 --website 指定。"
 echo "    $WEBSITE ✓"
 
-if [ "$WITH_ATOMGIT" = 1 ]; then
+if [ "$SKIP_ATOMGIT" != 1 ]; then
   step "前置检查 5/${PTOTAL}：AtomGit 已镜像 v$VER tag"
   HIT="$(GIT_TERMINAL_PROMPT=0 git ls-remote --tags "$ATOMGIT_GIT" "refs/tags/v$VER" 2>/dev/null || true)"
-  [ -n "$HIT" ] || fail "AtomGit 仓库没有 v$VER tag——publish-atomgit 会拒绝（'Version tag must be mirrored to AtomGit before publishing attachments'）。先把 v$VER tag 镜像到 AtomGit 再重跑。"
-  echo "    v$VER ✓"
+  if [ -z "$HIT" ]; then
+    echo "    ⚠ AtomGit 仓库没有 v$VER tag——跳过 AtomGit 上传（tag 由其侧镜像，稍后可补 --skip-oss 单独跑）"
+    SKIP_ATOMGIT=1
+  else
+    echo "    v$VER ✓"
+  fi
 fi
 
 # dry run 纯读：不写任何文件、不上传 OSS、不提交、不发布。写/对外动作全部留到 --publish。
@@ -106,53 +110,49 @@ if [ "$PUBLISH" != 1 ]; then
   echo "DRY RUN：前置检查全部通过，未执行任何写操作或对外请求。加 --publish 将依次执行："
   echo "    ① 同步二进制到 OSS 并刷新 legacy latest.json"
   echo "    ② 生成 release-catalog.json"
-  if [ "$WITH_ATOMGIT" = 1 ]; then
-    echo "    ③ AtomGit 上传 + 匿名回读校验（tag 已镜像）"
+  if [ "$SKIP_ATOMGIT" != 1 ]; then
+    echo "    ③ AtomGit 上传（逐平台，tag 已镜像）"
     echo "    ④ 提交 release-catalog.json"
     echo "    ⑤ 推送 catalog 到 GitHub release + OSS，并验证两条 URL"
   else
     echo "    ③ 提交 release-catalog.json"
     echo "    ④ 推送 catalog 到 GitHub release + OSS，并验证两条 URL"
     echo ""
-    echo "    ⚠ AtomGit 源未纳入本轮 catalog（未加 --with-atomgit）——auto 模式不会分流到 AtomGit。"
+    echo "    ⚠ AtomGit 上传被跳过——auto 模式不会分流到 AtomGit。"
   fi
   echo ""
   echo "确认后加 --publish 执行对外发布（不可逆）。"
   exit 0
 fi
 
-step "1/4 OSS 二进制 + legacy latest.json"
+step "1/5 OSS 二进制 + legacy latest.json"
 if [ "$SKIP_OSS" = 1 ]; then
   echo "    跳过（--skip-oss）"
 else
   OSS_ASSET_DIR=release bash scripts/upload-update-to-oss.sh
 fi
 
-step "2/4 生成 release-catalog.json"
+step "2/5 生成 release-catalog.json"
 node scripts/releases/generate-catalog.mjs
 
-if [ "$WITH_ATOMGIT" = 1 ]; then
-  step "AtomGit 上传 + 匿名回读校验（逐平台）"
-  # publish-atomgit 一次只处理一个 platform/purpose；README 要求逐平台覆盖，最后一次不带
-  # --assets-only。只跑 updater 用得到的 purpose=update（install 是网站手动下载用的）。
-  # 全部平台都用 --assets-only：publish-atomgit 的 metadata 步会以 uploadImmutable 上传
-  # `latest.json`，而它的内容随「已上传平台的 atomgit 条目」增多而变——一旦先跑过单平台，
-  # 旧字节已在 AtomGit 上，重跑必撞 "Package SHA-256 or size mismatch"（2026-10-08 实测）。
-  # 分流只依赖 release-catalog（Rust routed_update_check 读它），不依赖这个 legacy manifest。
+if [ "$SKIP_ATOMGIT" != 1 ]; then
+  step "3/5 AtomGit 上传（逐平台）"
+  # publish-atomgit 一次只处理一个 platform/purpose；全平台用 --assets-only（metadata 由
+  # 4/5 的 publish-routing 统一收口，避免逐平台 latest.json 字节漂移）。只跑 purpose=update
+  # （install 是网站手动下载用的，AtomGit 不承载 DMG 分发）。
   PLATFORMS="$(node -e "console.log(Object.keys(require('./latest.json').platforms).join(' '))")"
   for p in $PLATFORMS; do
     echo "    → ${p}"
     node scripts/releases/publish-atomgit.mjs --publish --platform "$p" --purpose update --assets-only
   done
-  if [ -z "$ACC_PLATFORM" ]; then
-    echo "    ⚠ 没有匹配的 --atomgit-acceptance：AtomGit 源仍为 disabled（需真实多网络测量后才启用）。"
-  fi
+  # 上传完成后把 atomgit 源写进 catalog（verified，无资格链）并重新生成
+  node scripts/releases/generate-catalog.mjs --atomgit
 else
   echo ""
-  echo "⚠ AtomGit 源未纳入本轮 catalog（未加 --with-atomgit）——auto 模式不会分流到 AtomGit。"
+  echo "⚠ AtomGit 上传被跳过——auto 模式不会分流到 AtomGit。"
 fi
 
-step "3/4 提交 release-catalog.json"
+step "4/5 提交 release-catalog.json"
 if [ "$NO_COMMIT" = 1 ]; then
   echo "    跳过（--no-commit）"
 elif [ -n "$(git status --porcelain -- release-catalog.json)" ]; then
@@ -161,7 +161,7 @@ else
   echo "    无变化，跳过"
 fi
 
-step "4/4 发布 catalog 到 GitHub release + OSS"
+step "5/5 发布 catalog 到 GitHub release + OSS"
 node scripts/releases/publish-routing.mjs --publish --release-notes-reviewed --website "$WEBSITE"
 
 step "后置验证：两条 catalog URL 应返回 v$VER"

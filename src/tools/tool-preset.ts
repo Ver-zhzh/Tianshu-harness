@@ -16,14 +16,15 @@ import { STAR_DOMAINS } from '../agent/star-domain-data.js'
  *      摘掉（见 src/agent/tool-tiers.ts 的 gateToolDefinitions）。
  * 历史上只写①一个数，于是「文档说你有 N 件、模型实际调不到」反复出现（issue #413 同族）。
  *
- * - **minimal（默认，装配 33 / 主控 30）**：日常开发全能力——读写/检索/bash/git/
+ * - **minimal（默认，装配 34 / 主控 30）**：日常开发全能力——读写/检索/bash/git/
  *   测试/委托/交付/plan/web_search/web_fetch。去掉编排（council/team）、browser 系、
  *   attack_case、semantic_search 等重而冷门的工具。（2026-09-23 起为发版默认档，
  *   取代 frontend——browser_debug 改用 RIVET_BROWSER_DEBUG=1 或显式给档开启。）
- * - **frontend（装配 34 / 主控 31）**：minimal + browser_debug（UI 渲染验证闭环）。
- * - **full（装配 54 / 主控 42）**：全集，含 attack_case/council/team/semantic_search/
+ * - **frontend（装配 35 / 主控 31）**：minimal + browser_debug（UI 渲染验证闭环）。
+ * - **full（装配 55 / 主控 42）**：全集，含 attack_case/council/team/semantic_search/
  *   repo_graph/undo/recall_general/record_general_finding/ast_edit/related_tests/
  *   inspect_project/import_resource/leave_mark/browser_debug/monitor。
+ *   （2026-10-20 +1：skill_runtime 技能 Python 运行时，issue #523。）
  * - **taiyi（装配 14 / 主控 13，评测档）**：太一星域最小工具集——只保留 2026-08-04
  *   会话使用率审计（最近 40 主会话 / 2938 消息 / 23 工具）中的高频核心 + 交付闭环：
  *   bash/read_file/write_file/edit_file/hash_edit/grep/glob/git/todo/

@@ -340,7 +340,7 @@ export interface AgentCallbacks {
    *  不再像「卡住」。可选：不实现 = 不想要该可见性。 */
   onModelRetry?: (info: { attempt: number; maxAttempts: number; category?: string; message?: string; nextDelayMs?: number }) => void
   onAbort: (reason?: string) => void
-  onApprovalRequired: (id: string, name: string, input: Record<string, unknown>) => Promise<ApprovalResult | boolean>
+  onApprovalRequired: (id: string, name: string, input: Record<string, unknown>, context?: Parameters<import('../../agent/loop-types.js').AgentCallbacks['onApprovalRequired']>[3]) => Promise<ApprovalResult | boolean>
   onCheckpoint?: (hash: string) => void
   onPhaseChange?: (phase: string, detail?: { tool?: string; reason?: string; voluntary?: boolean; source?: string }) => void
   onIntentNote?: (intent: IntentPreview) => void
@@ -1231,7 +1231,7 @@ export class TuiApp {
             else if (ctrl.showRememberOption && ctrl.approvalOptionIndex === 4) this.requestRiskExplanation()
             else this.requestRiskExplanation()
           } else if (c === 'v') {
-            this.openTextDetail(`等待审批 · ${ctrl.approvalPending!.name} · 只读全文`, formatApprovalFacts(ctrl.approvalPending!.name, ctrl.approvalPending!.input, this.columns, this.theme).join('\n'))
+            this.openTextDetail(`等待审批 · ${ctrl.approvalPending!.name} · 只读全文`, formatApprovalFacts(ctrl.approvalPending!.name, ctrl.approvalPending!.runtimeContext ? { ...ctrl.approvalPending!.input, runtimePreview: ctrl.approvalPending!.runtimeContext } : ctrl.approvalPending!.input, this.columns, this.theme).join('\n'))
           } else if (c === 'y') this.resolveApproval({ approved: true })
           else if (key.name === 'escape' || c === 'n') this.resolveApproval(false)
           else if (key.name === 'ctrl_e') this.requestRiskExplanation()
@@ -1612,7 +1612,7 @@ export class TuiApp {
       },
       onError: (error) => { this.mainTaskFailed = true; this.mainTaskEnded = Date.now(); this.frontend.flushText(); this.frontend.record({ kind: 'error', text: error.message, isError: true }); this.handleError(error) },
       onAbort: (reason) => this.handleAbort(reason),
-      onApprovalRequired: async (id, name, input) => { this.frontend.flushText(); this.frontend.record({ kind: 'approval', toolId: id, name, input, text: `等待审批 · ${name}` }); return this.handleApprovalRequired(id, name, input) },
+      onApprovalRequired: async (id, name, input, context) => { this.frontend.flushText(); this.frontend.record({ kind: 'approval', toolId: id, name, input, text: `等待审批 · ${name}` }); return this.handleApprovalRequired(id, name, input, context) },
       onCheckpoint: (hash) => this.handleCheckpoint(hash),
       onPhaseChange: (phase, detail) => {
         // stop-reason: surface guard-forced stops (max-turns / wedged-loop /
@@ -6639,7 +6639,7 @@ export class TuiApp {
       } else {
         const prompt = formatApprovalPromptLayout({
           toolName: p.name,
-          input: p.input,
+          input: p.runtimeContext ? { ...p.input, runtimePreview: p.runtimeContext } : p.input,
           columns: cols,
           selectedIndex: this.approvalIntentController.approvalOptionIndex,
           risk: this.approvalIntentController.riskExplanation,
@@ -7137,10 +7137,10 @@ export class TuiApp {
   }
 
   /** 审批处理器 — 交互式 y/n/e/r */
-  private handleApprovalRequired(id: string, name: string, input: Record<string, unknown>): Promise<ApprovalResult | boolean> {
+  private handleApprovalRequired(id: string, name: string, input: Record<string, unknown>, context?: Parameters<import('../../agent/loop-types.js').AgentCallbacks['onApprovalRequired']>[3]): Promise<ApprovalResult | boolean> {
     return new Promise((resolve) => {
       const first = this.approvalIntentController.approvalCount === 0
-      this.approvalIntentController.enqueue({ id, name, input, resolve, startMs: Date.now() })
+      this.approvalIntentController.enqueue({ id, name, input, runtimeContext: context, resolve, startMs: Date.now() })
       if (first) {
         // Approval must be answerable even when an ordinary panel owns the screen.
         this.detailReturn = undefined

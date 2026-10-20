@@ -96,6 +96,9 @@ export const EXTENDED_TOOLS = [
   'related_tests',   // run_tests/grep/repo_map 覆盖；低频
   'file_info',       // bash(stat/ls/wc) 或 read_file 头部覆盖；低频
   'leave_mark',      // 会话结束留痕，消费方 constellation 默认关(opt-in)
+  // skill_runtime（issue #523）：技能 Python 运行时（prepare/run 重审批、
+  // 低频执行面）——worker 经域白名单可用，主控 /tools enable 挂回。
+  'skill_runtime',
   // desktop tools (create_document, create_spreadsheet, etc.)
   'create_document',
   'create_spreadsheet',

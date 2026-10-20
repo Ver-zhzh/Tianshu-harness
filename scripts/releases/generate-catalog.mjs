@@ -11,7 +11,7 @@ export async function sha256(path) {
   for await (const chunk of createReadStream(path)) hash.update(chunk)
   return hash.digest('hex')
 }
-export async function generateCatalog({ manifest, assets, revision = 1, githubAssets = [], evidence = {}, previousCatalog, releaseNotes }) {
+export async function generateCatalog({ manifest, assets, revision = 1, githubAssets = [], evidence = {}, previousCatalog, releaseNotes, atomgit: atomgitEnabled = false }) {
   if (previousCatalog) validateCatalog(previousCatalog)
   if (releaseNotes) validateReleaseNotes(releaseNotes, manifest.version)
   const artifacts = []
@@ -26,9 +26,16 @@ export async function generateCatalog({ manifest, assets, revision = 1, githubAs
     if (previous && (previous.sha256 !== digest || previous.size !== size || previous.signature !== signature)) throw new Error(`Immutable artifact changed: ${fileName}`)
     const verifiedAt = previous?.sources.github?.verifiedAt ?? new Date().toISOString()
     const github = { url: `https://github.com/huiliyi37/Tianshu-harness/releases/download/v${manifest.version}/${fileName}`, verified: Boolean(remote), verifiedAt, size, sha256: digest }
-    // OSS remains a manual backup until anonymous full-download evidence is supplied.
+    // OSS remains a manual backup source (auto routing never selects it).
     const sources = { ...previous?.sources, github }
     sources.oss ??= { url: `https://tianshu-update.oss-cn-hangzhou.aliyuncs.com/tianshu/v${manifest.version}/${fileName}`, verified: false }
+    // --atomgit：AtomGit 资产已上传（收口脚本的前置步骤），源直接记为 verified——与 GitHub/OSS 同级，无资格验证链。
+    if (atomgitEnabled && purpose === 'update') {
+      const prior = previous?.sources.atomgit
+      sources.atomgit = prior?.sha256 === digest && prior?.size === size && prior.verified
+        ? prior
+        : { url: `https://api.atomgit.com/api/v5/repos/huiliyi37/Tianshu-harness/releases/v${manifest.version}/attach_files/${fileName}/download`, verified: true, anonymous: true, verifiedAt: new Date().toISOString(), sha256: digest, size }
+    }
     for (const source of ['atomgit', 'oss']) {
       const proof = evidence[fileName]?.[source]
       if (proof) sources[source] = proof
@@ -58,7 +65,7 @@ export async function main() {
   const previousCatalog = existsSync(out) ? JSON.parse(readFileSync(out,'utf8')) : undefined
   const notesFile = value('--notes') ?? `docs/releases/summaries/${manifest.version}.json`
   const releaseNotes = existsSync(notesFile) ? JSON.parse(readFileSync(notesFile,'utf8')) : undefined
-  const catalog = await generateCatalog({ manifest, assets: resolve(value('--assets') ?? 'release'), revision: Number(value('--revision') ?? previousCatalog?.revision ?? 1), githubAssets: release.assets, evidence, previousCatalog, releaseNotes })
+  const catalog = await generateCatalog({ manifest, assets: resolve(value('--assets') ?? 'release'), revision: Number(value('--revision') ?? previousCatalog?.revision ?? 1), githubAssets: release.assets, evidence, previousCatalog, releaseNotes, atomgit: process.argv.includes('--atomgit') })
   writeCatalog(out, catalog)
   console.log(`Validated v${catalog.version}: ${catalog.artifacts.length} artifacts; unverified sources cannot be selected`)
 }

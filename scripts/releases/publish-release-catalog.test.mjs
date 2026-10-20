@@ -104,12 +104,12 @@ test('前置全过时停在 DRY RUN 且不触发任何写/对外步骤', () => {
   } finally { s.cleanup() }
 })
 
-// 不加 --with-atomgit 时必须显式告警——否则 atomgit 这条国内分流会被静默排除（本轮真踩过）。
-test('默认不加 --with-atomgit 时显式告警 AtomGit 未纳入', () => {
+// AtomGit 是默认步骤；显式 --skip-atomgit 时必须显式告警——否则这条国内分流会被静默排除。
+test('显式 --skip-atomgit 时告警 AtomGit 未纳入', () => {
   const s = withStubGh(stubGh('false'))
   try {
-    const r = run(['--website', s.website], s.env)
+    const r = run(['--website', s.website, '--skip-atomgit'], s.env)
     assert.equal(r.status, 0, r.stderr)
-    assert.match(r.stdout, /AtomGit 源未纳入/)
+    assert.match(r.stdout, /AtomGit 上传被跳过/)
   } finally { s.cleanup() }
 })

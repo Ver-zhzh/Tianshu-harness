@@ -275,7 +275,9 @@ test('CronLock and StoreLock recover and release directory locks', async () => {
   try {
     await noLinks('EPERM', async () => {
       for (const name of ['cron.lock', 'sidecar.lock']) {
-        assert.equal(createLockFileExclusive(join(root, name), { ...info, pid: 999999999 }).ok, true)
+        // StoreLock 收紧后（2026-10-20）：身份不完整（缺 ownerToken/startedAtMs）的锁
+        // 不可核验、按占用处理——回收目录锁的前置是「死 PID + 完整身份」。
+        assert.equal(createLockFileExclusive(join(root, name), { ...info, pid: 999999999, ownerToken: 'dead-owner', startedAtMs: Date.now() - 60_000 }).ok, true)
       }
       assert.equal(cron.acquire().status, 'stale_recovered')
       assert.equal((await store.acquire({ retryWindowMs: 0 })).status, 'stale_recovered')

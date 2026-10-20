@@ -75,6 +75,7 @@ export interface WorkerRuntimeDecision {
   rootSessionId?: string
   expectedPrincipal?: string
   rootSessionBinding?: import('../model/model-binding.js').ModelBindingRef
+  providerKey?: string
   providerName: string
   model: string
   maxTokens: number

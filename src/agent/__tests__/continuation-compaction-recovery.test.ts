@@ -9,7 +9,7 @@ import { currentExecutionScope, withExecutionContinuity } from '../../api/execut
 import { ContinuationPrefixError, proveRewindHistory } from '../../api/continuation-prefix.js'
 import { resolveCapabilities } from '../../api/provider.js'
 import type { OaiMessage } from '../../api/oai-types.js'
-import { CACHE_ANCHOR_MESSAGES } from '../../compact/constants.js'
+import { CACHE_ANCHOR_MESSAGES, MAX_SESSION_MESSAGE_JSON_CHARS } from '../../compact/constants.js'
 import { estimateOaiTokens } from '../../compact/micro.js'
 import { providerSchema } from '../../config/schema.js'
 import { PromptEngine } from '../../prompt/engine.js'
@@ -17,12 +17,14 @@ import type { FrozenSnapshotData } from '../../prompt/frozen-snapshot.js'
 import { ToolRegistry } from '../../tools/registry.js'
 import { SessionContext } from '../context.js'
 import { AgentLoop, type AgentCallbacks } from '../loop.js'
-import { SessionPersist } from '../session-persist.js'
+import { SessionPersist, serializeOaiSessionMessage } from '../session-persist.js'
+import { appendChecksum } from '../checksum.js'
+import { encodeBatch } from '../session-transcript-codec.js'
 import { buildContextBudget, genericBudgetPolicy } from '../../context/request-budget.js'
 import { createBudgetedCompactionHistory, createCompactionPressureInput, isSnapshotDirectoryCollision } from './compaction-pressure-fixture.js'
 
 async function verifyCompactionRecovery(context: TestContext, entry: 'automatic' | 'public' | 'official' | 'official-auto' | 'unknown' | 'persisted-unknown' | 'binding' | 'credential' | 'conflict' | 'object-conflict' | 'worker' | 'native-writer',
-  persistence: 'none' | 'resume' | 'pending-old' | 'pending-new' | 'pending-other' | 'pending-old-append' | 'pending-new-append' | 'intent-append' | 'commit-append' | 'snapshot-failure' | 'snapshot-retry' | 'final-auth-failure' | 'serialized-mismatch' | 'cancel-tail' | 'consume-race' | 'consume-effort' | 'consume-native' | 'abort-intent' = 'none'): Promise<void> {
+  persistence: 'none' | 'resume' | 'pending-old' | 'pending-new' | 'pending-other' | 'pending-old-append' | 'pending-new-append' | 'intent-append' | 'commit-append' | 'snapshot-failure' | 'snapshot-retry' | 'final-auth-failure' | 'serialized-mismatch' | 'cancel-tail' | 'consume-race' | 'consume-effort' | 'consume-native' | 'abort-intent' | 'legacy-projection' | 'legacy-corruption' | 'legacy-invalid-row' | 'legacy-unproven' | 'legacy-cold-resume' | 'legacy-readback' | 'legacy-readback-invalid-row' | 'legacy-live-change' | 'legacy-torn-frame' | 'legacy-readback-torn-frame' = 'none'): Promise<void> {
   const root = mkdtempSync(join(realpathSync.native(tmpdir()), 'continuation-compaction-recovery-'))
   const previousEnvironment = {
     RIVET_HOME: process.env.RIVET_HOME,
@@ -125,6 +127,7 @@ async function verifyCompactionRecovery(context: TestContext, entry: 'automatic'
       requestId: 'fixture-seed-calibration', revision: 0,
     })
   }))
+  if (persistence.startsWith('legacy-')) session.getMessages()[3]!.content = 'published source. '.repeat(12_000)
   let engine = new PromptEngine(engineConfig)
   let persist = persistence === 'none' ? undefined : new SessionPersist('compaction-fixture', root)
   const snapshotPath = persist ? join(dirname(persist.getFilePath()), 'compaction-fixture.frozen.json') : undefined
@@ -172,6 +175,76 @@ async function verifyCompactionRecovery(context: TestContext, entry: 'automatic'
   const before = structuredClone(session.getMessages())
   const baselineSnapshot = persist?.readFrozenSnapshot()
   const occupancy = session.getEstimatedTokens()
+  if (persistence.startsWith('legacy-')) {
+    const projected = before.map(message => JSON.parse(serializeOaiSessionMessage(message, MAX_SESSION_MESSAGE_JSON_CHARS)) as OaiMessage)
+    assert.ok(JSON.stringify(projected) !== JSON.stringify(before), 'the legacy projection must actually lose published source bytes')
+    if (persistence === 'legacy-corruption') projected[3]!.content += '\nUNRELATED_CORRUPTION'
+    const lines = projected.map(message => appendChecksum(JSON.stringify(message)))
+    if (persistence === 'legacy-invalid-row') lines.push('{"role":"assistant","content":"hidden corruption"}|0000000000000000')
+    writeFileSync(persist!.getFilePath(), encodeBatch(lines.join('\n') + '\n'))
+    if (persistence === 'legacy-torn-frame') {
+      writeFileSync(persist!.getFilePath(), Buffer.concat([readFileSync(persist!.getFilePath()), encodeBatch('unexplained tail\n').subarray(0, 7)]))
+    }
+    if (persistence === 'legacy-unproven') {
+      engine = new PromptEngine({ ...engineConfig, inheritFrozenFrom: { ...baselineSnapshot!, publishedHistory: undefined } })
+      agent.config.promptEngine = engine
+      assert.equal(engine.assertPublishedHistory(before), false)
+    }
+    if (persistence === 'legacy-cold-resume') {
+      engine = new PromptEngine({ ...engineConfig, inheritFrozenFrom: baselineSnapshot! })
+      session = new SessionContext()
+      session.replaceMessages(persist!.loadOai())
+      agent = makeAgent()
+      agents.push(agent)
+    }
+    let repairBoundaryReached = false
+    if (persistence === 'legacy-readback' || persistence === 'legacy-readback-invalid-row' || persistence === 'legacy-live-change' || persistence === 'legacy-readback-torn-frame') {
+      const rewrite = persist!.compactOaiAsync.bind(persist)
+      context.mock.method(persist!, 'compactOaiAsync', async (messages: OaiMessage[], durable?: boolean) => {
+        await rewrite(messages, durable)
+        if (!repairBoundaryReached) {
+          repairBoundaryReached = true
+          if (persistence === 'legacy-live-change') session.getMessages()[3]!.content = 'A concurrent change to published source.'
+          else if (persistence === 'legacy-readback-torn-frame') {
+            writeFileSync(persist!.getFilePath(), Buffer.concat([readFileSync(persist!.getFilePath()), encodeBatch('unexplained tail\n').subarray(0, 7)]))
+          }
+          else if (persistence === 'legacy-readback-invalid-row') {
+            const repairedLines = messages.map(message => appendChecksum(serializeOaiSessionMessage(message)))
+            repairedLines.push('{"role":"assistant","content":"hidden corruption"}|0000000000000000')
+            writeFileSync(persist!.getFilePath(), encodeBatch(repairedLines.join('\n') + '\n'))
+          }
+          else {
+            const corrupted = structuredClone(messages)
+            corrupted[3]!.content = 'Corrupted readback after the repair transaction.'
+            await rewrite(corrupted, durable)
+          }
+        }
+      })
+    }
+    if (persistence !== 'legacy-projection') {
+      const original = readFileSync(persist!.getFilePath())
+      await assert.rejects(agent.compaction.maybeCompact({ loopTurn: 0, failures: agent.compactFailures }), /历史.*变化|持久化历史不完整|prefix diverged/)
+      assert.deepEqual(client.getMainPrefixProof!(), published)
+      assert.equal(engine.getRewindAuthorization(), undefined)
+      assert.equal(persist!.readFrozenSnapshot()!.pendingCompaction, undefined)
+      assert.equal(bodies.length, 1)
+      if (persistence === 'legacy-readback' || persistence === 'legacy-readback-invalid-row' || persistence === 'legacy-live-change' || persistence === 'legacy-readback-torn-frame') assert.equal(repairBoundaryReached, true)
+      else assert.deepEqual(readFileSync(persist!.getFilePath()), original)
+      return
+    }
+    const commit = agent.commitBudgetHistory.bind(agent)
+    let repairs = 0
+    context.mock.method(agent, 'commitBudgetHistory', async (source: OaiMessage[], target: OaiMessage[]) => {
+      await commit(source, target)
+      if (JSON.stringify(source) === JSON.stringify(target)) {
+        repairs++
+        assert.ok(JSON.stringify(persist!.loadOai()) === JSON.stringify(before), 'the existing transaction must durably restore the exact complete live history')
+        assert.deepEqual(client.getMainPrefixProof!(), published)
+        assert.equal(persist!.readFrozenSnapshot()!.rewindAuthorization, undefined)
+      }
+    })
+    context.after(() => assert.equal(repairs, 1, 'the legacy projection must be repaired once before ordinary compaction'))
+  }
   if (persistence === 'abort-intent') {
     const commit = persist!.commitFrozenSnapshot.bind(persist)
     let interrupted = false
@@ -416,6 +489,14 @@ async function verifyCompactionRecovery(context: TestContext, entry: 'automatic'
       return
     }
     if (persistence === 'serialized-mismatch') {
+      const rewrite = persist!.compactOaiAsync.bind(persist)
+      context.mock.method(persist!, 'compactOaiAsync', async (messages: OaiMessage[], durable?: boolean) => {
+        const corrupted = structuredClone(messages)
+        const target = corrupted.find(message => typeof message.content === 'string')
+        assert.ok(target && typeof target.content === 'string')
+        target.content += '\nCORRUPTED_TRANSCRIPT_FIXTURE'
+        await rewrite(corrupted, durable)
+      })
       await assert.rejects(agent.compaction.maybeCompact({ loopTurn: 0, failures: agent.compactFailures }), /持久化历史不完整/)
       const frozenPath = join(dirname(persist!.getFilePath()), 'compaction-fixture.frozen.json')
       const journal = JSON.parse(readFileSync(frozenPath, 'utf8'))
@@ -729,6 +810,14 @@ test('official request-budget intent preserves a late human input across recover
 
 test('durably stored unknown history cannot be laundered by compaction',
   context => verifyCompactionRecovery(context, 'persisted-unknown', 'resume'))
+
+test('an exact legacy truncation projection is repaired from proven complete live history before compaction',
+  context => verifyCompactionRecovery(context, 'public', 'legacy-projection'))
+
+for (const mode of ['legacy-corruption', 'legacy-invalid-row', 'legacy-unproven', 'legacy-cold-resume', 'legacy-readback', 'legacy-readback-invalid-row', 'legacy-live-change', 'legacy-torn-frame', 'legacy-readback-torn-frame'] as const) {
+  test(`legacy truncation repair fails closed for ${mode}`,
+    context => verifyCompactionRecovery(context, 'public', mode))
+}
 
 test('a failed final authorization keeps the pending journal through ordinary prompt builds',
   context => verifyCompactionRecovery(context, 'public', 'final-auth-failure'))

@@ -63,6 +63,10 @@ export interface SandboxContext {
   /** Override for tests. Probes Landlock launcher enforcement on this host
    *  (default: lazy-load the optional dep + real `--probe`, cached). */
   landlockUsable?: () => boolean
+  /** Per-call extra writable roots（issue #523）：与会话 grants 并集、不持久化，
+   *  仅本次 wrap 生效——技能运行时装备环境目录/运行临时目录用，不授整个
+   *  skill-runtimes 根长期写。 */
+  extraWritableRoots?: readonly string[]
 }
 
 export interface SandboxDecision {
@@ -527,6 +531,50 @@ export function _setSandboxBackendForTest(kind: SandboxBackendKind): void {
   _cachedActiveBackend = kind
 }
 
+export interface ArgvSandboxDecision {
+  /** 包装后的 argv（无沙箱时原样返回）。 */
+  argv: string[]
+  sandboxed: boolean
+  backend: SandboxBackendKind
+  note?: string
+}
+
+/**
+ * argv 形态的沙箱包装（issue #523 技能运行时）——不经 shell，直接在 exec
+ * 目标前面加沙箱启动器。与 wrapSandboxCommand 共享 backend 选择与写根计算
+ * （含 per-call extraWritableRoots），区别只在产物是 argv 数组而非 shell
+ * 字符串。seatbelt 的 `-p profile` 后直接跟 argv；bwrap/firejail/landlock
+ * 同理（`--` 分隔）。沙箱未请求（RIVET_SANDBOX 未开）时原样返回。
+ */
+export function wrapArgvSandbox(argv: string[], ctx: SandboxContext): ArgvSandboxDecision {
+  const env = ctx.env ?? process.env
+  if (!sandboxRequested(env)) return { argv, sandboxed: false, backend: 'none' }
+  const backend = selectSandboxBackend(ctx)
+  if (backend === 'none') {
+    return { argv, sandboxed: false, backend, note: 'no sandbox backend available — running without a kernel write boundary' }
+  }
+  const writableRoots = [...defaultWritableRoots({ cwd: ctx.cwd, env, platform: ctx.platform }), ...(ctx.extraWritableRoots ?? [])]
+  switch (backend) {
+    case 'seatbelt':
+      return { argv: ['sandbox-exec', '-p', buildSeatbeltProfile(writableRoots), ...argv], sandboxed: true, backend, note: 'macOS Seatbelt (writes confined to workspace + caches + granted roots)' }
+    case 'bwrap': {
+      const binds = writableRoots.filter(p => { try { return existsSync(p) } catch { return false } })
+        .flatMap(root => ['--bind', root, root])
+      return { argv: ['bwrap', '--ro-bind', '/', '/', '--dev-bind', '/dev', '/dev', ...binds, '--', ...argv], sandboxed: true, backend, note: 'bwrap (read-only root)' }
+    }
+    case 'firejail': {
+      const writes = writableRoots.map(root => `--read-write=${root}`)
+      return { argv: ['firejail', '--quiet', '--noprofile', '--read-only=/', ...writes, '--', ...argv], sandboxed: true, backend, note: 'firejail (read-only root)' }
+    }
+    case 'landlock': {
+      const valid = writableRoots.filter(p => { try { return existsSync(p) } catch { return false } })
+      return { argv: [defaultLandlockLauncherPath(), '--ro', '/', ...valid.flatMap(r => ['--rw', r]), '--rw', '/dev/null', '--', ...argv], sandboxed: true, backend, note: 'Landlock (kernel-native allow-list)' }
+    }
+    default:
+      return { argv, sandboxed: false, backend: 'none' }
+  }
+}
+
 /**
  * Wrap a shell command in a workspace-scoped sandbox. Default-OFF.
  * Enable with RIVET_SANDBOX=1 (production/deployment hardening).
@@ -553,7 +601,7 @@ export function wrapSandboxCommand(command: string, ctx: SandboxContext): Sandbo
   }
 
   const backend = selectSandboxBackend(ctx)
-  const writableRoots = defaultWritableRoots({ cwd: ctx.cwd, env, platform: ctx.platform })
+  const writableRoots = [...defaultWritableRoots({ cwd: ctx.cwd, env, platform: ctx.platform }), ...(ctx.extraWritableRoots ?? [])]
 
   switch (backend) {
     case 'seatbelt':

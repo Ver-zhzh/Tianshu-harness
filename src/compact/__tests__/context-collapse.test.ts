@@ -24,6 +24,18 @@ describe('collapseToolResult', () => {
     assert.ok(result!.collapsedTokens < result!.originalTokens)
   })
 
+  it('counts only grep match records, excluding context, truncation and edit hints', () => {
+    const matches = Array.from({ length: 20 }, (_, i) => `src/a.ts:${i + 1}: needle`)
+    const result = collapseToolResult('grep', [
+      ...matches, 'src/a.ts-21-context',
+      '[truncated: showing 20 matches — result was cut short, use max_results to see more]',
+      'hash_edit 锚点（src/a.ts）：', '  L1:abcdef',
+    ].join('\n'), 5, 200_000)!
+    assert.match(result.summary, /20 matches in 1 files: src\/a.ts/)
+    assert.doesNotMatch(result.summary, /\[truncated|hash_edit|context/)
+    assert.match(collapseToolResult('grep', 'src/a.ts:>   3│ needle\n' + 'x'.repeat(200), 5, 200_000)!.summary, /1 matches in 1 files/)
+  })
+
   // ── 台账 F4：静默子集化（2026-09-14）────────────────────────────
   // 工具层对超大结果返回「head/tail 截断正文 + 全量统计 + artifact 引用」；
   // 折叠层若用截断后的正文重算行数，会把 head 的 8 行包装成「8 matches in

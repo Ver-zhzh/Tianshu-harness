@@ -1,4 +1,4 @@
-import { resolveModelBinding } from '../../model/model-binding.js'
+import { ModelBindingUnavailable, resolveModelBinding } from '../../model/model-binding.js'
 import { isLocalWorkerPolicyError } from '../../api/continuation-prefix.js'
 import { withWorkspaceRoots } from '../../tools/workspace-context.js'
 /**
@@ -32,7 +32,7 @@ import { applyDescriptionMode } from '../../tools/description-compact.js'
 import { createInteractiveToolRegistry, type RuntimeRefs } from '../../bootstrap.js'
 import { filterToolRegistry } from '../../tools/registry.js'
 import { TodoStore } from '../../tools/todo-store.js'
-import { DelegationCoordinator } from '../coordinator.js'
+import { DelegationCoordinator, workerFailureResult } from '../coordinator.js'
 import { buildModelCards } from '../headless-coordinator.js'
 import { buildWorkerRuntime, createWorkerRuntimeFactory } from '../worker-runtime.js'
 import { parseUserInstructionsSnapshot } from '../../prompt/user-instructions.js'
@@ -209,7 +209,8 @@ async function bootAndRunInWorkspace(
     const workerRegistry = filterToolRegistry(registry, presentTools)
 
     // 4) client/promptEngine 按 runtimeDecision 忠实重建（不重跑路由）。
-    const actual = resolveModelBinding(config.provider.providers, { provider: decision.providerName, model: decision.model, keyId: decision.keyId, baseUrl: decision.baseUrl }, config.network)
+    const providerKey = decision.providerKey ?? decision.providerName
+    const actual = resolveModelBinding(config.provider.providers, { provider: providerKey, model: decision.model, keyId: decision.keyId, baseUrl: decision.baseUrl }, config.network)
     const providerForDecision = actual.provider
     const modelSpec = actual.spec
     const capabilities = resolveCapabilities(decision.providerName, providerForDecision.capabilities, modelSpec?.capabilities)
@@ -217,7 +218,7 @@ async function bootAndRunInWorkspace(
     const client = createProviderClient(providerForDecision, capabilities, {
       network: config.network,
       singleAttempt: true,
-      credentialScope: `${decision.providerName}:${decision.keyId ?? 'default'}`,
+      credentialScope: `${providerKey}:${decision.keyId ?? 'default'}`,
       expectedPrincipal: decision.expectedPrincipal,
       apiKey: actual.apiKey,
       model: decision.model,
@@ -305,7 +306,7 @@ async function bootAndRunInWorkspace(
     writeFrame({
       t: 'result',
       run: {
-        result: {
+        result: err instanceof ModelBindingUnavailable ? workerFailureResult(init.config.order, err) : {
           workOrderId: init.config.order.id,
           status: isLocalWorkerPolicyError(err) ? 'blocked' : 'failed',
           summary: `worker child crashed: ${err instanceof Error ? err.message : String(err)}`,

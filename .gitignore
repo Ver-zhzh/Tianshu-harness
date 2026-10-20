@@ -181,5 +181,13 @@ src/**/__tests__/.undo-test-backup/
 # 平台构建互斥锁目录
 .rivet/build.lock.d/
 
+# 根目录临时实验目录（前序会话的评测/探针产出，如 tmp/2026-10-20-*）。
+# 只锚根目录：仓库内 0 个被跟踪文件，整目录纯本地产物。
+/tmp/
+
+# pnpm 误生成的锁文件（本仓用 npm，package-lock.json 是唯一事实源；
+# CI 与脚本零引用 pnpm——grep 过 .github/、package.json、scripts/）
+pnpm-lock.yaml
+
 # 公开仓：禁止 knowledge 回灌（私有仓策略不同；仅保留 .rivet/SELF）
 .rivet/knowledge/
