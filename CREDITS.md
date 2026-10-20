@@ -487,3 +487,9 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 - #509 feat(prompt): 新增用户级全局常驻指令位点（agent.userInstructions）（OPEN）
 - #527 docs(readme): 重新设计中文 README 版式与配图（OPEN）
 - #518 fix(context): 补齐 #511 原模型恢复与无损会话落盘（OPEN）
+
+## @xxy757
+
+署名：xxy757 <96516909+xxy757@users.noreply.github.com>
+
+- #522 fix(api): 修复增量清洗导致的续跑前缀分歧 (#521)（CLOSED）
