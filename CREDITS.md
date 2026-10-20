@@ -485,3 +485,4 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 署名：q0o8o0p <322862300+q0o8o0p@users.noreply.github.com>
 
 - #509 feat(prompt): 新增用户级全局常驻指令位点（agent.userInstructions）（OPEN）
+- #527 docs(readme): 重新设计中文 README 版式与配图（OPEN）
