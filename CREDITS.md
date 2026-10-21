@@ -495,3 +495,4 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 - #522 fix(api): 修复增量清洗导致的续跑前缀分歧 (#521)（CLOSED）
 - #520 fix(tui): 补齐 /repair-prefix 帮助与确认参数（OPEN）
 - #517 feat(skills): 支持对话创建技能并保存待审核草稿（OPEN）
+- #528 fix(tui): 修复指令贴顶与窗口缩放时输入区贴底（CLOSED）
