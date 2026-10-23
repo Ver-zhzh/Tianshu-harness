@@ -243,14 +243,14 @@ test('interrupted directory preparation never publishes a partial owner', () => 
   }
 })
 
-test('directory recovery preserves unknown contents instead of recursively deleting them', () => {
+test('directory recovery preserves unknown contents instead of recursively deleting them', async () => {
   const root = fs.mkdtempSync(join(tmpdir(), 'lock-fs-'))
   const path = join(root, 'cron.lock')
   const lock = new CronLock({ lockPath: path })
   try {
     fs.mkdirSync(path)
     fs.writeFileSync(join(path, 'unrelated'), 'keep')
-    noLinks('EPERM', () => assert.equal(lock.acquire().status, 'contended'))
+    await noLinks('EPERM', async () => assert.equal((await lock.acquire()).status, 'contended'))
     assert.equal(fs.readFileSync(join(path, 'unrelated'), 'utf8'), 'keep')
   } finally { lock.release(); fs.rmSync(root, { recursive: true, force: true }) }
 })
@@ -279,7 +279,7 @@ test('CronLock and StoreLock recover and release directory locks', async () => {
         // 不可核验、按占用处理——回收目录锁的前置是「死 PID + 完整身份」。
         assert.equal(createLockFileExclusive(join(root, name), { ...info, pid: 999999999, ownerToken: 'dead-owner', startedAtMs: Date.now() - 60_000 }).ok, true)
       }
-      assert.equal(cron.acquire().status, 'stale_recovered')
+      assert.equal((await cron.acquire()).status, 'stale_recovered')
       assert.equal((await store.acquire({ retryWindowMs: 0 })).status, 'stale_recovered')
       cron.release()
       store.release()

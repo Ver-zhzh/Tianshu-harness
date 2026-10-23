@@ -1,5 +1,31 @@
 import type { ToolDefinition } from '../api/types.js'
-import { buildSubagentSystemPrompt } from './static-subagent.js'
+import { buildSubagentSystemPrompt, trimPromptToolUsage } from './static-subagent.js'
+
+/**
+ * 主控提示词必须只点名本次真正提供的工具。
+ *
+ * 此前主控路径无条件返回 BASE_PROMPT，最小档（默认）里 apply_patch / ast_edit /
+ * read_section 等 EXTENDED 工具被门控摘掉，提示词却仍命令模型「改用 apply_patch」，
+ * 模型照做 → 调用名不在声明集合 → ToolNameProtocolError(unknown)，整次响应作废。
+ *
+ * 整行门控与子代理同源（`trimPromptToolUsage`）；行内引用改指实际存在的替代品。
+ * `tools` 为空视为「目录未知」（CLI 的提示词版本探针 `buildSystemPrompt({tools: []})`），
+ * 返回原字节——那个探针的哈希用来提示缓存冷启动，不能随档位抖动。
+ */
+function gateMainPrompt(base: string, tools: readonly ToolDefinition[]): string {
+  if (tools.length === 0) return base
+  const names = new Set(tools.map(t => t.name))
+  let out = trimPromptToolUsage(base, names)
+  if (!names.has('apply_patch')) {
+    out = out
+      .replace('或涉及重构时改用 apply_patch。', '或涉及重构时改用 write_file（整文件重写）或分段 edit_file。')
+      .replace('嵌套结构复杂时改用 edit_file 或 apply_patch。', '嵌套结构复杂时改用 edit_file。')
+  }
+  if (!names.has('read_section')) {
+    out = out.replace('需要完整结果时使用 read_section 拉取 artifact。', '需要完整结果时用 read_file 的 offset/limit 拉取 artifact。')
+  }
+  return out
+}
 
 const BASE_PROMPT = `<identity>
 你在「天枢」北斗星域运行时中——一个认知增强的代码开发环境。你拥有完整的开发工具集：文件读写、代码搜索、终端执行、测试运行、项目导航、任务委派。你的任务是在理解用户意图、项目上下文与工程约束的基础上，主动设计更合理的架构、发现隐藏风险、修复根因问题，并输出清晰、稳定、可维护、可扩展的实现方案。
@@ -277,7 +303,7 @@ export interface StaticPromptContext {
 export function buildSystemPrompt(ctx: StaticPromptContext): string {
   const base = ctx.audience === 'subagent'
     ? buildSubagentSystemPrompt(BASE_PROMPT, ctx.tools)
-    : BASE_PROMPT
+    : gateMainPrompt(BASE_PROMPT, ctx.tools)
   const calibration = ctx.modelFamily ? MODEL_CALIBRATIONS[ctx.modelFamily] : undefined
   if (calibration) return base + '\n\n' + calibration
   return base

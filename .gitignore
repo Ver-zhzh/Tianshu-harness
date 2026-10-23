@@ -55,6 +55,7 @@ docs/research/*.md
 .rivet/pheromones.json
 .rivet/debug-400.json
 .rivet/artifacts/
+.rivet/HANDOFF-*.md
 .rivet/sessions/
 .rivet/cache-log.jsonl
 .rivet/cache/

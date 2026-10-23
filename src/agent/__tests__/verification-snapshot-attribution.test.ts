@@ -60,6 +60,17 @@ describe('getEffectiveVerifications — VSW snapshotRef staleness', () => {
     assert.equal(result.staleSnapshotDropped, 0)
   })
 
+  it('requires a matching candidate ref when the delivery is candidate-only', () => {
+    const events = [
+      makeVerificationEvent('npm test', 'passed', 'full', 1000),
+      makeVerificationEvent('run_tests a', 'passed', 'targeted', 1001, { snapshotRef: 'other-ref', targetFiles: ['a.test.ts'] }),
+      makeVerificationEvent('run_tests b', 'passed', 'targeted', 1002, { snapshotRef: 'current-ref', targetFiles: ['b.test.ts'] }),
+    ]
+    const result = getEffectiveVerifications(events, 'current-ref', true)
+    assert.deepEqual(result.effective.map(event => event.command), ['run_tests b'])
+    assert.equal(result.staleSnapshotDropped, 2)
+  })
+
   it('propagates verificationPhase into effective metadata', () => {
     const events = [
       makeVerificationEvent('run_tests a', 'failed', 'targeted', 1000, { verificationPhase: 'integration', targetFiles: ['a.test.ts'], failed: 1, exitCode: 1 }),

@@ -12,7 +12,9 @@ export type { DeliveryVerificationPlan } from '../tools/test-execution-plan.js'
 export function buildDeliveryVerificationPlan(cwd: string, required: readonly string[], uncovered: readonly string[], advisoryCount: number, evidence: readonly TaskLedgerEvent[] = [], currentSnapshotRef?: string, candidateFiles?: readonly string[], candidateRef?: string): DeliveryVerificationPlan {
   const active = [...new Set(required.filter(file => existsSync(resolve(cwd, file))))].sort()
   const pending = [...new Set(uncovered)].sort()
-  const scopes = deliveryScopeProgress(active, evidence, currentSnapshotRef)
+  const boundRef = candidateFiles?.length ? candidateRef ?? currentSnapshotRef : undefined
+  const applicableEvidence = boundRef ? evidence.filter(event => event.meta?.snapshotRef === boundRef && !event.meta?.stale) : evidence
+  const scopes = deliveryScopeProgress(active, applicableEvidence, currentSnapshotRef, Boolean(boundRef))
   const plan = pending.length ? buildTestExecutionPlan(cwd, { files: pending, shard: false }) : undefined
   if (plan && scopes.requiredScopes.length) plan.groups = plan.groups.flatMap(group => {
     const missing = scopes.pendingScopes.filter(s => group.files.includes(s.path))
@@ -25,18 +27,22 @@ export function buildDeliveryVerificationPlan(cwd: string, required: readonly st
     if (blocked) return { path, state: 'unsupported', reason: blocked.reason }
     const missing = scopes.pendingScopes.filter(s => s.path === path)
     if (missing.length) {
-      const failed = evidence.some(e => !e.meta?.stale && readCompletionCoverage(e.meta?.coverage)?.files.some(f => f.path === path && f.outcome === 'failed' && missing.some(s => s.project === f.project)))
+      const failed = applicableEvidence.some(e => !e.meta?.stale && readCompletionCoverage(e.meta?.coverage)?.files.some(f => f.path === path && f.outcome === 'failed' && missing.some(s => s.project === f.project)))
       return { path, state: failed ? 'failed' : 'not_run', reason: '待验证配置项目：' + missing.map(s => s.label || s.project.slice(0, 12)).join(', ') }
     }
-    for (const event of [...evidence].reverse()) {
+    for (const event of [...applicableEvidence].reverse()) {
       const coverage = readCompletionCoverage(event.meta?.coverage)
       const file = coverage?.files.find(file => file.path === path)
       const targets = event.meta?.targetFiles
       if (!file && !(Array.isArray(targets) && targets.includes(path))) continue
-      if (event.meta?.stale || coverage?.workspaceChanged || currentSnapshotRef && event.meta?.snapshotRef && event.meta.snapshotRef !== currentSnapshotRef) return { path, state: 'stale', reason: '运行后工作区或快照变化，需针对当前代码重新验证。' }
+      if (event.meta?.stale || coverage?.workspaceChanged || currentSnapshotRef && event.meta?.snapshotRef !== currentSnapshotRef) return { path, state: 'stale', reason: '验证属于另一候选，或运行后工作区变化；须对当前候选重新采证。' }
       if (file?.outcome === 'failed' || event.status === 'failed') return { path, state: 'failed', reason: '测试失败；先处理失败归因，再执行该批。' }
       return { path, state: 'incomplete', reason: coverage?.filtered ? '存在用例筛选，未证明完整文件。' : '证明缺失、不完整或没有通过用例。' }
     }
+    if (boundRef && evidence.some(event => {
+      const coverage = readCompletionCoverage(event.meta?.coverage)
+      return event.meta?.snapshotRef !== boundRef && (coverage?.files.some(file => file.path === path) || Array.isArray(event.meta?.targetFiles) && event.meta.targetFiles.includes(path))
+    })) return { path, state: 'stale', reason: '已有其他候选或无指纹验证；须对当前候选重新采证。' }
     return { path, state: 'not_run', reason: '尚无该文件的完整执行证明。' }
   })
   return { version: 1, ...(candidateFiles?.length ? { candidateFiles: [...candidateFiles], candidateRef } : {}), ...scopes, required: active, covered: active.filter(file => !pending.includes(file)), pending, advisoryCount,

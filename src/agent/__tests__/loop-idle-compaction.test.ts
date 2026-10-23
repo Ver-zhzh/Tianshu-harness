@@ -153,7 +153,9 @@ describe('AgentLoop manual context compaction for self-hosted models', () => {
 
     assert.equal(await agent.compactContext(), true)
 
-    assert.deepEqual(compact.mock.calls[0]!.arguments, [true])
+    // 4fd7a528d 起 compactContext(summaryFocus?) 会把 focus 透传给预算压缩；
+    // 无 focus 时第二参为 undefined——契约是「强制压缩 + 透传 focus」，不是单参。
+    assert.deepEqual(compact.mock.calls[0]!.arguments, [true, undefined])
     assert.equal(refresh.mock.callCount(), 2)
     assert.deepEqual(order, ['refresh', 'compact', 'refresh'])
     assert.equal(agent.abortController, null, 'manual compaction must release the running state')

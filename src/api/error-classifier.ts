@@ -21,6 +21,7 @@ export type ErrorCategory =
   | 'timeout'
   | 'auth_error'
   | 'client_error'
+  | 'tool_protocol'
   | 'context_overflow'
   | 'request_body_too_large'
   | 'image_strip'
@@ -36,7 +37,7 @@ export type ErrorCategory =
  *  以此为单一真源：字段拼错在 loadConfig 时就报错，而不是静默失效。 */
 export const ERROR_CATEGORIES = [
   'rate_limit', 'overloaded', 'server_error', 'timeout', 'auth_error',
-  'client_error', 'context_overflow', 'request_body_too_large', 'image_strip', 'stream_parse', 'malformed_response',
+  'client_error', 'tool_protocol', 'context_overflow', 'request_body_too_large', 'image_strip', 'stream_parse', 'malformed_response',
   'reasoning_repetition', 'reasoning_echo', 'request_invariant', 'tls_intercept', 'unknown',
 ] as const satisfies readonly ErrorCategory[]
 
@@ -571,11 +572,13 @@ function extractPayloadHadImages(error: unknown): boolean | undefined {
  * Priority: status code → error name → message pattern → fallback.
  */
 export function classifyApiError(error: unknown): ClassifiedError {
+  if (error instanceof Error && error.name === 'ToolNameProtocolError') return {
+    retryable: false, retryDelayMs: 0, shouldReconnect: false, category: 'tool_protocol', userMessage: error.message, maxRetries: 0 }
   if (error instanceof Error && error.name === 'RequestBodyTooLargeError') {
     return { retryable: false, retryDelayMs: 0, shouldReconnect: false,
       category: 'request_body_too_large', userMessage: error.message, maxRetries: 0 }
   }
-  if (error instanceof Error && ['UserInstructionsError', 'ContextPreparationError', 'ImageInputRejectedError', 'RuleTriggeredError', 'ToolNameProtocolError', 'ProAuthorizationError'].includes(error.name)) {
+  if (error instanceof Error && ['UserInstructionsError', 'ContextPreparationError', 'ImageInputRejectedError', 'RuleTriggeredError', 'ProAuthorizationError'].includes(error.name)) {
     return { retryable: false, retryDelayMs: 0, shouldReconnect: false,
       category: 'client_error', userMessage: error.message, maxRetries: 0 }
   }
@@ -709,6 +712,7 @@ export function errorCategoryLabel(category: string | undefined): string {
     case 'timeout': return '网络超时'
     case 'auth_error': return '鉴权失败'
     case 'client_error': return '请求被拒'
+    case 'tool_protocol': return '工具调用协议异常'
     case 'context_overflow': return '上下文超限'
     case 'request_body_too_large': return '请求体超限'
     case 'image_strip': return '图片负载超限'
@@ -723,19 +727,12 @@ export function errorCategoryLabel(category: string | undefined): string {
 }
 
 /**
- * 终态恢复指引（TUI handleError 用）——与 userMessage 的分工：userMessage 是
- * 重试进行中的过程文案（"Retrying…"），本函数是重试耗尽后的「下一步」。
- * 返回中文可行动指引（按 category 分流）；无法分类时给通用兜底。
- */
-/**
  * 终态恢复指引（重试耗尽后的「下一步」）。
- *
  * `surface` 决定文案里能出现哪些恢复手段——同一份文案不能同时服务所有入口：
  * - `tui`（默认）：slash 命令是可输入的命令面，`/repair-prefix` 与 `/logs` 都真实存在；
  * - `desktop`：sidecar 的 slash 翻译层（`resolveAppPromptInput`）只认工作流/技能/
  *   `/review`，`/repair-prefix` 与 `/logs` 会被判为未识别命令拦截。桌面端用户看到
  *   这两个词没有任何可操作入口（issue #525），因此改指桌面端真实存在的诊断路径。
- *
  * 新增消费方必须显式声明 surface；默认 `tui` 只为兼容既有调用点。
  */
 export type GuidanceSurface = 'tui' | 'desktop'
@@ -767,6 +764,9 @@ export function errorRecoveryGuidance(error: unknown, surface: GuidanceSurface =
       return '上下文超限：/compact 压缩，或 /handoff 交接后开新会话'
     case 'client_error':
       return '请求被拒（模型 id 或端点路径错）：/model 确认模型；自定义端点检查 baseUrl 是否缺 /v1'
+    case 'tool_protocol':
+      return surface === 'desktop' ? '模型返回的工具名无法与本次提供的工具唯一对应，工具未执行。请切换模型后重试；持续出现请导出诊断。'
+        : '模型返回的工具名无法与本次提供的工具唯一对应，工具未执行。用 /model 切换模型后重试；持续出现用 /logs 导出诊断。'
     case 'image_strip':
       return '图片负载超限：去掉部分图片后重发'
     case 'reasoning_echo':

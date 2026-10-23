@@ -41,5 +41,6 @@ test('deliver-task.ts 的每个 isError:true 返回必须带 errorKind（issue #
 test('锚点自检：deliver-task.ts 确实存在 isError 返回（防止正则失配导致空扫描假绿）', () => {
   const source = readFileSync(SOURCE, 'utf-8')
   const count = source.split('\n').filter(l => /isError:\s*true/.test(l)).length
-  assert.ok(count >= 15, `扫描到的 isError: true 数量 ${count} 异常偏少——正则或文件结构已漂移，本不变量测试需同步更新`)
+  const helperCalls = source.split('\n').filter(l => /return blockedCommit\(/.test(l)).length
+  assert.ok(count >= 10 && helperCalls >= 10, `扫描到直接错误 ${count} 条、带 errorKind 的停轮助手调用 ${helperCalls} 条；结构可能漂移`)
 })

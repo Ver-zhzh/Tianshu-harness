@@ -189,9 +189,9 @@ export interface DeliveryGateV2 {
   /** Assess delivery readiness, optionally with external verification metadata,
    *  current dirty files, and the current VSW snapshotRef (drops stale snapshot
    *  verifications when provided). */
-  assess(externalVerifications: VerificationMetadata[], currentDirtyFiles?: string[], currentSnapshotRef?: string, moduleCoverage?: ModuleCoverageInput): DeliveryGateResult
+  assess(externalVerifications: VerificationMetadata[], currentDirtyFiles?: string[], currentSnapshotRef?: string, moduleCoverage?: ModuleCoverageInput, requireBoundCandidate?: boolean): DeliveryGateResult
   /** Full structured report suitable for cycle_close deposit */
-  getReport(externalVerifications: VerificationMetadata[], currentDirtyFiles?: string[], currentSnapshotRef?: string, moduleCoverage?: ModuleCoverageInput): DeliveryReport
+  getReport(externalVerifications: VerificationMetadata[], currentDirtyFiles?: string[], currentSnapshotRef?: string, moduleCoverage?: ModuleCoverageInput, requireBoundCandidate?: boolean): DeliveryReport
 }
 
 /**
@@ -310,8 +310,8 @@ export function createDeliveryGateV2(opts: {
     return { ownedFilesForGate, coOwnedFiles, historicalOwnedFiles, externalFiles }
   }
 
-  function assess(externalVerifications: VerificationMetadata[], currentDirtyFiles?: string[], currentSnapshotRef?: string, moduleCoverage?: ModuleCoverageInput): DeliveryGateResult {
-    const result = assessVerification(externalVerifications, currentDirtyFiles, currentSnapshotRef, moduleCoverage)
+  function assess(externalVerifications: VerificationMetadata[], currentDirtyFiles?: string[], currentSnapshotRef?: string, moduleCoverage?: ModuleCoverageInput, requireBoundCandidate = false): DeliveryGateResult {
+    const result = assessVerification(externalVerifications, currentDirtyFiles, currentSnapshotRef, moduleCoverage, requireBoundCandidate)
     if (ownership.isBaselineComplete()) return result
     return {
       ...result,
@@ -320,7 +320,7 @@ export function createDeliveryGateV2(opts: {
     }
   }
 
-  function assessVerification(externalVerifications: VerificationMetadata[], currentDirtyFiles?: string[], currentSnapshotRef?: string, moduleCoverage?: ModuleCoverageInput): DeliveryGateResult {
+  function assessVerification(externalVerifications: VerificationMetadata[], currentDirtyFiles?: string[], currentSnapshotRef?: string, moduleCoverage?: ModuleCoverageInput, requireBoundCandidate = false): DeliveryGateResult {
     const { ownedFilesForGate: ownedFiles, coOwnedFiles, externalFiles } = getGateFiles(currentDirtyFiles)
 
     // Check ownership health for unclassified dirty files
@@ -348,7 +348,7 @@ export function createDeliveryGateV2(opts: {
 
     // Use effective verifications (deduplicated by supersession + VSW staleness)
     const rawVerifications = taskLedger.getVerifications()
-    const { effective: ownedVerifications, supersededFailures, staleSnapshotDropped, staleFingerprintDropped } = getEffectiveVerifications(rawVerifications, currentSnapshotRef)
+    const { effective: ownedVerifications, supersededFailures, staleSnapshotDropped, staleFingerprintDropped } = getEffectiveVerifications(rawVerifications, currentSnapshotRef, requireBoundCandidate)
 
     // Combine owned + external verifications for full picture
     const allVerifications = [
@@ -625,8 +625,8 @@ export function createDeliveryGateV2(opts: {
     }
   }
 
-  function getReport(externalVerifications: VerificationMetadata[], currentDirtyFiles?: string[], currentSnapshotRef?: string, moduleCoverage?: ModuleCoverageInput): DeliveryReport {
-    const result = assess(externalVerifications, currentDirtyFiles, currentSnapshotRef, moduleCoverage)
+  function getReport(externalVerifications: VerificationMetadata[], currentDirtyFiles?: string[], currentSnapshotRef?: string, moduleCoverage?: ModuleCoverageInput, requireBoundCandidate = false): DeliveryReport {
+    const result = assess(externalVerifications, currentDirtyFiles, currentSnapshotRef, moduleCoverage, requireBoundCandidate)
     const { ownedFilesForGate, coOwnedFiles, historicalOwnedFiles, externalFiles } = getGateFiles(currentDirtyFiles)
     return {
       taskId: taskLedger.getTaskId(),

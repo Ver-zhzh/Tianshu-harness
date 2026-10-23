@@ -12,6 +12,7 @@ import { assessImpactedTestCoverage, createVerificationAttribution, getEffective
 import { createPersistentTaskState } from '../task-state-persist.js'
 import { createDeliveryGateV2 } from '../delivery-gate-v2.js'
 import { createDeliverTaskTool } from '../deliver-task.js'
+import { candidateSnapshotRef } from '../candidate-snapshot-ref.js'
 import { runVerification } from './helpers/verification-pipeline-fixture.js'
 import type { VerificationMetadata } from '../../tools/types.js'
 
@@ -192,6 +193,9 @@ it('receipt persists and deduplicates without runId, and commits exactly once on
   const f = fixture(), previous = process.env.RIVET_SESSION_DIR
   process.env.RIVET_SESSION_DIR = join(f.cwd, '.sessions')
   try {
+    f.write('src/missing.test.ts', '')
+    execFileSync('git', ['add', '--', 'src/alpha.test.ts', 'src/beta.test.ts', 'src/missing.test.ts'], { cwd: f.cwd })
+    execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.com', 'commit', '-qm', 'tracked test obligations'], { cwd: f.cwd })
     const baseline = { branch: 'main', head: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: f.cwd, encoding: 'utf8' }).trim(), preExistingDirty: [], preExistingUntracked: [], capturedAt: Date.now() }
     const state = createPersistentTaskState(f.cwd, 'completion-fixture', baseline)
     state.taskLedger.record({ type: 'file_write', path: 'feature.js' })
@@ -202,17 +206,24 @@ it('receipt persists and deduplicates without runId, and commits exactly once on
     assert.equal(getEffectiveVerifications(restored.taskLedger.getVerifications()).effective.length, 1)
     const gate = createDeliveryGateV2({ taskLedger: restored.taskLedger, ownership: restored.ownership, attribution: createVerificationAttribution({ ownership: restored.ownership }) })
     let calls = 0, required = ['src/alpha.test.ts', 'src/beta.test.ts']
-    const tool = createDeliverTaskTool(() => ({ ...restored, gate, getCurrentDirtyFiles: () => ['feature.js'], getImpactedTests: () => required, detectWroteButNeverRead: () => [], commitOwnedFiles: () => { calls++; return { ok: true, output: 'mock commit' } } }))
+    const tool = createDeliverTaskTool(() => ({ ...restored, gate, getCurrentDirtyFiles: () => ['feature.js'], getImpactedTests: () => required, resolveDeliveryImpact: async () => ({ resolved: true, requiredTests: required, advisoryTests: [] }), detectWroteButNeverRead: () => [], commitOwnedFiles: () => { calls++; return { ok: true, output: 'mock commit' } } }))
     const params = { cwd: f.cwd, toolUseId: 'completion-commit', input: { commit: true, message: 'fix: fixture', force: true } }
-    assert.notEqual((await tool.execute(params)).isError, true)
+    assert.equal((await tool.execute(params)).isError, true, 'legacy unbound completion cannot authorize a candidate')
+    assert.equal(calls, 0)
+    const snapshotRef = candidateSnapshotRef(f.cwd, ['feature.js'])
+    assert.ok(snapshotRef)
+    restored.taskLedger.record({ type: 'verification', command: 'node --test', status: 'passed', meta: { ...meta, snapshotRef, candidateFiles: ['feature.js'] } })
+    const delivered = await tool.execute(params)
+    assert.notEqual(delivered.isError, true, delivered.content)
     assert.equal(calls, 1)
-    required = [...required, 'src/missing.test.ts']; f.write('src/missing.test.ts', '')
+    required = [...required, 'src/missing.test.ts']
     assert.equal((await tool.execute(params)).isError, true)
     assert.equal(calls, 1)
     required = ['src/alpha.test.ts']
     const failed = { ...meta.coverage!, runId: 'failed', complete: false, totals: undefined, files: [{ path: 'src/alpha.test.ts', outcome: 'failed' as const, tests: 1, skipped: 0, cancelled: 0 }] }
-    restored.taskLedger.record({ type: 'verification', command: 'node --test src/alpha.test.ts', status: 'failed', meta: { kind: 'test', scope: 'full', exitCode: 1, coverage: failed } })
-    assert.equal((await tool.execute(params)).isError, true)
+    restored.taskLedger.record({ type: 'verification', command: 'node --test src/alpha.test.ts', status: 'failed', meta: { kind: 'test', scope: 'full', exitCode: 1, coverage: failed, snapshotRef } })
+    const failedDelivery = await tool.execute(params)
+    assert.equal(failedDelivery.isError, true, failedDelivery.content)
     assert.equal(calls, 1)
   } finally { if (previous === undefined) delete process.env.RIVET_SESSION_DIR; else process.env.RIVET_SESSION_DIR = previous; f.dispose() }
 })

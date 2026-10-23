@@ -11,8 +11,8 @@ import { createOwnershipLedger } from '../ownership-ledger.js'
 import { createWorktreeBaseline } from '../worktree-baseline.js'
 import { createVerificationAttribution } from '../verification-attribution.js'
 import { createDeliveryGateV2 } from '../delivery-gate-v2.js'
-import { BASH_TOOL } from '../../tools/bash.js'
-import { buildBashVerification } from '../bash-verification.js'
+import { RUN_TESTS_TOOL } from '../../tools/run-tests.js'
+import { openCandidateDeliveryTree } from '../candidate-delivery-tree.js'
 
 it('candidate plan carries deliveryFiles into each batch and omits live-tree shell commands', () => {
   const cwd = mkdtempSync(join(tmpdir(), 'delivery-candidate-plan-'))
@@ -27,14 +27,30 @@ it('candidate plan carries deliveryFiles into each batch and omits live-tree she
   } finally { rmSync(cwd, { recursive: true, force: true }) }
 })
 
+it('candidate pending reason ignores another candidate failure while legacy status remains compatible', () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'delivery-candidate-reason-'))
+  try {
+    writeFileSync(join(cwd, 'package.json'), JSON.stringify({ scripts: { test: 'node --test' } }))
+    writeFileSync(join(cwd, 'feature.test.mjs'), "import { test } from 'node:test'; test('ok', () => {})")
+    const evidence = [{ type: 'verification' as const, timestamp: Date.now(), command: 'node --test feature.test.mjs', status: 'failed' as const,
+      meta: { snapshotRef: 'other-ref', targetFiles: ['feature.test.mjs'] } }]
+    const candidate = buildDeliveryVerificationPlan(cwd, ['feature.test.mjs'], ['feature.test.mjs'], 0, evidence, 'current-ref', ['feature.js'], 'current-ref')
+    assert.equal(candidate.pendingReasons[0]?.state, 'stale')
+    const status = buildDeliveryVerificationPlan(cwd, ['feature.test.mjs'], ['feature.test.mjs'], 0, evidence)
+    assert.equal(status.pendingReasons[0]?.state, 'failed')
+  } finally { rmSync(cwd, { recursive: true, force: true }) }
+})
+
 it('actual delivery returns executable batches; all batches cover obligations and advisory never blocks', { skip: process.platform === 'win32' }, async () => {
   const cwd = mkdtempSync(join(tmpdir(), 'delivery-batches-'))
   try {
     execFileSync('git', ['init', '-q'], { cwd })
-    execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.com', 'commit', '--allow-empty', '-qm', 'base'], { cwd })
     writeFileSync(join(cwd, 'package.json'), JSON.stringify({ type: 'module', scripts: { test: 'node --test' } }))
     const required = Array.from({ length: 24 }, (_, i) => `part-${i}.test.mjs`)
     for (const path of [...required, 'advisory.test.mjs']) writeFileSync(join(cwd, path), "import {test} from 'node:test'; test('proof',()=>{});")
+    writeFileSync(join(cwd, 'feature.js'), 'export const feature = 0;')
+    execFileSync('git', ['add', '--', 'package.json', 'feature.js', ...required, 'advisory.test.mjs'], { cwd })
+    execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.com', 'commit', '-qm', 'base'], { cwd })
     writeFileSync(join(cwd, 'feature.js'), 'export const feature = 1;')
     const ledger = createTaskLedger({ taskId: 'batches' })
     ledger.record({ type: 'file_write', path: 'feature.js' })
@@ -53,14 +69,20 @@ it('actual delivery returns executable batches; all batches cover obligations an
     assert.match(first.content, /required 24，已覆盖 0，剩余 24/)
     assert.ok(first.content.indexOf('run_tests(files=') < first.content.indexOf('part-0.test.mjs: not_run'), 'the first executable batch precedes per-file reasons')
     assert.match(first.content, /其余 16 个文件状态见 verificationPlan.pendingReasons/)
-    const commands = first.verificationPlan!.batches.map(batch => batch.display)
+    const batches = first.verificationPlan!.batches
+    const commands = batches.map(batch => batch.display)
     assert.equal(first.verificationPlan!.pending.length, 24)
     assert.equal(commands.length, 2)
     for (let i = 0; i < commands.length; i++) {
-      const result = await BASH_TOOL.execute({ cwd, toolUseId: `batch-${i}`, input: { command: commands[i]! } })
-      const proof = buildBashVerification(commands[i]!, result, { content: result.content, isError: !!result.isError })
-      assert.equal(proof.coverage?.complete, true)
-      ledger.record({ type: 'verification', command: commands[i]!, status: proof.status, meta: { ...proof } })
+      const tree = await openCandidateDeliveryTree(cwd, ['feature.js'])
+      try {
+        const result = await RUN_TESTS_TOOL.execute({ cwd, toolUseId: `batch-${i}`, input: { files: batches[i]!.files, deliveryFiles: ['feature.js'] },
+          verificationSnapshot: { path: tree.path, repositoryRoot: cwd, snapshotRef: tree.ref, candidateOnly: true } })
+        assert.equal(result.isError, false, result.content)
+        for (const proof of [...(result.verification ? [result.verification] : []), ...(result.extraVerifications ?? [])]) {
+          ledger.record({ type: 'verification', command: proof.command, status: proof.status, meta: { ...proof } })
+        }
+      } finally { tree.destroy() }
       const delivered = await tool.execute(params)
       if (i === 0) { assert.equal(delivered.isError, true); assert.equal(commits, 0); assert.match(delivered.content, /已覆盖 20，剩余 4/) }
       else { assert.notEqual(delivered.isError, true, delivered.content); assert.equal(commits, 1) }

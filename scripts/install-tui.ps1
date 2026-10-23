@@ -9,7 +9,7 @@
 #   powershell -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/huiliyi37/Tianshu-harness/main/scripts/install-tui.ps1 | iex"
 #
 # 说明：
-#   - 官方 npm 包 tianshu-harness，主命令 tianshu（rivet 为兼容别名）；需要 Node.js >= 24（engines 钉死）。
+#   - 官方 npm 包 tianshu-harness，主命令 tianshu（rivet 为兼容别名）；需要已修复的 Node.js 24/26 LTS。
 #   - 默认走 npmmirror 镜像（国内网络加速）；设 NPM_CONFIG_REGISTRY 可覆盖。
 #   - 幂等：重复执行覆盖升级到最新版。
 #   - -NoLaunch 只在 -File 本地跑时从 $args 读取。远程 iex 不带参数，装完即启动。
@@ -25,13 +25,14 @@ $env:npm_config_registry = $Registry
 function Say([string]$Text) { Write-Host "== $Text ==" -ForegroundColor Cyan }
 function Die([string]$Text) { Write-Host "x $Text" -ForegroundColor Red; exit 1 }
 
-# 1. Node.js >= 24
+# 1. Node.js 24.22.1+ 或 26.12.1+
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
-  Die "缺少 Node.js（>= 24）。请先安装：https://nodejs.org/"
+  Die "缺少 Node.js（需要 24.22.1+ 或 26.12.1+）。请先安装：https://nodejs.org/"
 }
-$NodeMajor = [int]((node -p "process.versions.node.split('.')[0]"))
-if ($NodeMajor -lt 24) {
-  Die "Node.js 版本过低（$(node -v)，需要 >= 24）。请升级后重跑。"
+$NodeVersion = [version](& node -p "process.versions.node")
+$NodeSecure = ($NodeVersion.Major -eq 24 -and $NodeVersion -ge [version]"24.22.1") -or ($NodeVersion.Major -eq 26 -and $NodeVersion -ge [version]"26.12.1")
+if (-not $NodeSecure) {
+  Die "当前 Node.js $(node -v) 未包含 2026-10-21 安全修复；需要 24.22.1+ 或 26.12.1+。请升级后重跑。"
 }
 
 # 1.6 npm 全局目录可写性预检。

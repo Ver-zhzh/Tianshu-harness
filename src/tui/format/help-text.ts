@@ -42,7 +42,8 @@ export const HELP_TEXT = `天枢帮助
 /write-plan — Write current plan to file
 /ask — Enter/exit Ask mode (read-only Q&A)
 /interview <topic> — Deep interview before coding
-/goal <objective> [--max N] [--budget M] [--criteria '["..."]'] — Set autonomous goal
+/goal [<目标>|status|pause|resume|clear|criteria|help] — 查看或管理自主目标；原有独立命令仍可用
+/goal <目标> [--max N] [--budget M] [--criteria '["..."]'] — 设置目标（M 为分钟）；/goal -- <目标> 按字面设置
 /goal-status — Show current goal state
 /goal-pause — Pause active goal
 /goal-resume — Resume paused/blocked goal
@@ -86,7 +87,7 @@ export const HELP_TEXT = `天枢帮助
 /leave [symbol] <summary> — Leave your mark in the starmap as you depart
 /queue <text> — 排队一条消息到下轮（无参预览队列）；busy 时也可攒，回车随下条一并发送
 /btw <问题> — 侧问：就当前会话问一句，回答显示在浮层，不进对话历史
-/resume [id|序号] — 继续一个历史会话（无参打开选择器；/sessions 看列表）
+/resume [id|序号|名称] — 继续一个历史会话（支持 --id 与多词标题；无参打开选择器）
 /remember <要记住的事> — 把一句话写进项目长期记忆（跨会话生效，新会话自动携带）；无参查看最近记忆
 /chat — 兼容旧命令（模式已由消息内容自动检测，无需手动切换）
 /task — 任务模式（已废弃：意图自动检测；子代理面板用 /tasks）
@@ -107,7 +108,7 @@ export const HELP_TEXT = `天枢帮助
 
 上下文、诊断与环境
 
-/compact [status|llm] — Micro-compact context (/compact status for stats)
+/compact [status|重点] — 整理当前上下文；重点用于本次摘要，status 查看占用；-- 后按字面指定重点
 /context [pin|claims|antibodies|conflicts|reload|export|import] — Context ledger
 /memory [text|add|search|forget] — Session memory entries
 /debug [prompt|fingerprint|cache|context-payload|mcp] — Debug info

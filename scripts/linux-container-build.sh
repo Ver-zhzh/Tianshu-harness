@@ -17,11 +17,11 @@ apt_get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
   libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev \
   xdg-utils
 
-# Node 24（与 fetch-node-runtime 的 v24.18.0 对齐，容器内 PATH 独立不碰宿主）
+# Node 24（与 fetch-node-runtime 的 v24.22.1 对齐，容器内 PATH 独立不碰宿主）
 UNAME_M="$(uname -m)"
 NODE_ARCH="$([ "$UNAME_M" = x86_64 ] && echo x64 || echo arm64)"
-curl -fsSL "https://nodejs.org/dist/v24.18.0/node-v24.18.0-linux-${NODE_ARCH}.tar.xz" | tar -xJ -C /opt
-export PATH="/opt/node-v24.18.0-linux-${NODE_ARCH}/bin:$PATH"
+curl -fsSL "https://nodejs.org/dist/v24.22.1/node-v24.22.1-linux-${NODE_ARCH}.tar.xz" | tar -xJ -C /opt
+export PATH="/opt/node-v24.22.1-linux-${NODE_ARCH}/bin:$PATH"
 node -v
 
 # Rust stable

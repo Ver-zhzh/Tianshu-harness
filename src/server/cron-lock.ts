@@ -25,9 +25,11 @@ import {
   lstatSync,
   rmdirSync,
 } from 'node:fs'
+import { execFile } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { hostname as osHostname } from 'node:os'
+import { probeLockMachineId } from './lock-machine-id.js'
 import { isMainThread } from 'node:worker_threads'
 import { publishLockDirectoryExclusive } from './lock-filesystem.js'
 
@@ -39,6 +41,13 @@ export interface LockInfo {
   hostname: string
   ownerToken?: string
   startedAtMs?: number
+  /** Hash of a stable hardware identity. Absent from locks written by older versions. */
+  machineId?: string
+}
+
+function sameLockIdentity(a: LockInfo, b: LockInfo): boolean {
+  return a.pid === b.pid && a.hostname === b.hostname && a.ownerToken === b.ownerToken &&
+    a.startedAtMs === b.startedAtMs && a.machineId === b.machineId
 }
 
 export interface CronLockConfig {
@@ -48,6 +57,11 @@ export interface CronLockConfig {
   healthCheckIntervalMs?: number
   /** 锁丢失回调：锁被删除或被其他进程抢占时触发 */
   onLockLost?: (state: LockState) => void
+  /** 僵尸进程探测（issue #530）；默认 probeProcessZombie。测试可注入。 */
+  isProcessZombie?: (pid: number) => Promise<boolean>
+  machineId?: () => Promise<string | undefined>
+  hostname?: () => string
+  allowLegacyHostRecovery?: boolean
 }
 
 export type LockState =
@@ -72,8 +86,10 @@ const PROCESS_STARTED_AT_MS = Math.floor(Date.now() - process.uptime() * 1000)
 // ─── PID Liveness ─────────────────────────────────────────────
 
 /**
- * 检查 PID 是否存活（排除 zombie）。
- * macOS/Linux: ps -p <pid> -o state= | grep -v Z
+ * 检查 PID 是否存活（Linux 排除 zombie）。
+ * ⚠ macOS/BSD 盲区（issue #530）：僵尸进程的 `kill(0)` 照样成功且此函数无法区分
+ * （不 spawn 子进程，见 S-6）——需要「确定已死」语义（锁回收判死）的调用方改用
+ * 异步的 `probeProcessZombie`。EPERM 视为活着（防脑裂）。
  */
 export function isPidAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false
@@ -113,6 +129,67 @@ export function isPidAlive(pid: number): boolean {
 export function isProcStatZombie(statLine: string): boolean {
   const afterComm = statLine.slice(statLine.lastIndexOf(')') + 1).trimStart()
   return afterComm[0] === 'Z'
+}
+
+/** 单次 ps state 探测上限（毫秒）。与 store-lock 的进程探测同一量级。 */
+const ZOMBIE_PROBE_TIMEOUT_MS = 2_000
+
+/**
+ * ps state 输出是否表明僵尸（trim 后首字符 `Z`）。
+ * 空输出/不可解析 → false：探测不可核验时不判死（误判占用可恢复，误判失效=双写）。
+ */
+export function isPsStateZombie(stateOutput: string): boolean {
+  return stateOutput.trim()[0] === 'Z'
+}
+
+/**
+ * 异步判定 PID 是否为**僵尸**进程（issue #530：睡眠唤醒后死进程收不回锁）。
+ *
+ * `kill(pid, 0)` 对僵尸进程照样成功（macOS 上 PID 占位直到被 reap），且僵尸保留真实
+ * lstart——`isPidAlive` + 启动时间比对两条判据全失效，新进程永远收不回锁。
+ * 判定分支：
+ *   - linux：`/proc/<pid>/stat` 同步读（廉价，与 isPidAlive 同一判据）；
+ *   - darwin/bsd：`ps -o state=` ——**异步有界**（execFile + 超时 + unref，绝不
+ *     execFileSync 阻塞事件循环，见 S-6 教训）；
+ *   - win32：恒 false（Windows 无僵尸概念，kill(0) 对已死进程直接抛 ESRCH）。
+ * 探测失败/超时/进程不存在 → false（不判死，按不可核验=占用处理）。
+ */
+export function probeProcessZombie(pid: number): Promise<boolean> {
+  if (!Number.isInteger(pid) || pid <= 0) return Promise.resolve(false)
+  if (process.platform === 'linux') {
+    try {
+      return Promise.resolve(isProcStatZombie(readFileSync(`/proc/${pid}/stat`, 'utf-8')))
+    } catch {
+      return Promise.resolve(false)
+    }
+  }
+  if (process.platform === 'darwin' || process.platform === 'freebsd') {
+    return new Promise((resolve) => {
+      let child
+      try {
+        child = execFile(
+          'ps',
+          ['-o', 'state=', '-p', String(pid)],
+          {
+            encoding: 'utf-8',
+            windowsHide: true,
+            timeout: ZOMBIE_PROBE_TIMEOUT_MS,
+            env: { ...process.env, LC_ALL: 'C' },
+          },
+          (error, stdout) => {
+            if (error) return resolve(false)
+            resolve(isPsStateZombie(stdout))
+          },
+        )
+      } catch {
+        resolve(false)
+        return
+      }
+      // 探测绝不能把进程钉在事件循环里
+      child.unref?.()
+    })
+  }
+  return Promise.resolve(false)
 }
 
 // ─── Lock File Operations ─────────────────────────────────────
@@ -205,6 +282,13 @@ function errorMessage(error: unknown): string {
 export class CronLock {
   private lockPath: string
   private healthCheckIntervalMs: number
+  private readonly isProcessZombie: (pid: number) => Promise<boolean>
+  private readonly machineIdResolver: () => Promise<string | undefined>
+  private readonly hostnameResolver: () => string
+  private readonly ownerHostname: string
+  private readonly allowLegacyHostRecovery: boolean
+  private machineIdPromise: Promise<string | undefined> | null = null
+  private resolvedMachineId: string | undefined
   private state: LockState | null = null
   private healthCheckTimer: ReturnType<typeof setInterval> | null = null
   private lockLostHandlers = new Set<(state: LockState) => void>()
@@ -212,13 +296,26 @@ export class CronLock {
   constructor(config?: CronLockConfig) {
     this.lockPath = config?.lockPath ?? DEFAULT_LOCK_PATH
     this.healthCheckIntervalMs = config?.healthCheckIntervalMs ?? DEFAULT_HEALTH_CHECK_MS
+    this.isProcessZombie = config?.isProcessZombie ?? probeProcessZombie
+    this.machineIdResolver = config?.machineId ?? probeLockMachineId
+    this.hostnameResolver = config?.hostname ?? osHostname
+    this.ownerHostname = this.getHostname()
+    this.allowLegacyHostRecovery = config?.allowLegacyHostRecovery ?? process.env.RIVET_STORE_LOCK_RECOVER_LEGACY_HOST === '1'
     if (config?.onLockLost) {
       this.lockLostHandlers.add(config.onLockLost)
     }
   }
 
+  /** 持有者是否确定消失（进程不存在，或已死成僵尸——issue #530）。探测失败=不可核验=仍占用。 */
+  private async isHolderGone(pid: number): Promise<boolean> {
+    if (!isPidAlive(pid)) return true
+    return this.isProcessZombie(pid)
+  }
+
   /** 尝试获取锁。返回锁状态 */
-  acquire(): LockState {
+  async acquire(): Promise<LockState> {
+    this.machineIdPromise ??= Promise.resolve().then(() => this.machineIdResolver()).catch(() => undefined)
+    this.resolvedMachineId = await this.machineIdPromise
     const info = this.buildLockInfo()
     const created = createLockFileExclusive(this.lockPath, info)
 
@@ -248,14 +345,17 @@ export class CronLock {
       return this.state
     }
 
-    if (owner.hostname !== this.getHostname()) {
+    if (!this.isSameMachine(owner)) {
+      if (this.allowLegacyHostRecovery && !owner.machineId && await this.isHolderGone(owner.pid)) {
+        return this.recoverStaleLock(owner)
+      }
       // 跨主机共享锁不能用本机 PID 判定 owner 死亡；保守视为占用。
       this.state = { status: 'contended', owner }
       return this.state
     }
 
-    if (!isPidAlive(owner.pid)) {
-      // owner 已死 → 陈旧锁回收
+    if (await this.isHolderGone(owner.pid)) {
+      // owner 已死（含僵尸）→ 陈旧锁回收
       return this.recoverStaleLock(owner)
     }
 
@@ -328,36 +428,43 @@ export class CronLock {
   // ─── Internal ──────────────────────────────────────────────
 
   private getHostname(): string {
-    return osHostname() || 'unknown'
+    return this.hostnameResolver() || 'unknown'
+  }
+
+  private isSameMachine(owner: LockInfo): boolean {
+    if (owner.machineId) return owner.machineId === this.resolvedMachineId
+    return owner.hostname === this.getHostname()
   }
 
   private buildLockInfo(): LockInfo {
     return {
       pid: process.pid,
       acquiredAt: new Date().toISOString(),
-      hostname: this.getHostname(),
+      hostname: this.ownerHostname,
       ownerToken: PROCESS_OWNER_TOKEN,
       startedAtMs: PROCESS_STARTED_AT_MS,
+      ...(this.resolvedMachineId ? { machineId: this.resolvedMachineId } : {}),
     }
   }
 
   private isOwnLockInfo(info: LockInfo): boolean {
     return info.pid === process.pid &&
-      info.hostname === this.getHostname() &&
+      info.hostname === this.ownerHostname &&
       info.ownerToken === PROCESS_OWNER_TOKEN &&
-      info.startedAtMs === PROCESS_STARTED_AT_MS
+      info.startedAtMs === PROCESS_STARTED_AT_MS &&
+      info.machineId === this.resolvedMachineId
   }
 
-  private recoverInvalidLock(): LockState {
+  private recoverInvalidLock(): Promise<LockState> {
     return this.recoverLock({ pid: -1, acquiredAt: '', hostname: '' })
   }
 
-  private recoverStaleLock(previousOwner: LockInfo): LockState {
+  private recoverStaleLock(previousOwner: LockInfo): Promise<LockState> {
     return this.recoverLock(previousOwner)
   }
 
-  private recoverLock(previousOwner: LockInfo): LockState {
-    const reclaimLock = this.acquireReclaimLock()
+  private async recoverLock(previousOwner: LockInfo): Promise<LockState> {
+    const reclaimLock = await this.acquireReclaimLock()
     if (!reclaimLock.ok) {
       this.state = {
         status: 'contended',
@@ -368,12 +475,19 @@ export class CronLock {
 
     try {
       const currentOwner = readLockFile(this.lockPath)
-      if (currentOwner && currentOwner.pid !== previousOwner.pid) {
+      if (currentOwner && !sameLockIdentity(currentOwner, previousOwner)) {
         this.state = { status: 'contended', owner: currentOwner }
         return this.state
       }
-      if (currentOwner && isPidAlive(currentOwner.pid)) {
+      if (currentOwner && !(await this.isHolderGone(currentOwner.pid))) {
         this.state = { status: 'contended', owner: currentOwner }
+        return this.state
+      }
+      const latest = readLockFile(this.lockPath)
+      const reclaimer = readLockFile(this.reclaimLockPath())
+      if (!reclaimer || !this.isOwnLockInfo(reclaimer) ||
+          (currentOwner ? !latest || !sameLockIdentity(currentOwner, latest) : latest !== null)) {
+        this.state = { status: 'contended', owner: latest ?? previousOwner }
         return this.state
       }
 
@@ -413,7 +527,7 @@ export class CronLock {
     return `${this.lockPath}.reclaim`
   }
 
-  private acquireReclaimLock(): CreateLockResult {
+  private async acquireReclaimLock(): Promise<CreateLockResult> {
     const path = this.reclaimLockPath()
     const created = createLockFileExclusive(path, this.buildLockInfo())
     if (created.ok) return created
@@ -421,7 +535,9 @@ export class CronLock {
 
     const owner = readLockFile(path)
     if (owner && this.isOwnLockInfo(owner)) return { ok: true }
-    if (owner && !isPidAlive(owner.pid)) {
+    if (owner && (this.isSameMachine(owner) || this.allowLegacyHostRecovery && !owner.machineId) && await this.isHolderGone(owner.pid)) {
+      const latest = readLockFile(path)
+      if (!latest || !sameLockIdentity(owner, latest)) return { ok: false, reason: 'exists' }
       try {
         removeLockFile(path)
       } catch {

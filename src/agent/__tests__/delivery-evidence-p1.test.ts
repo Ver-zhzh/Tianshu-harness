@@ -33,6 +33,8 @@ async function commit(ctx: ReturnType<typeof context>, cwd: string, impactedTest
   const tool = createDeliverTaskTool(() => ({
     taskLedger: ctx.ledger, ownership: ctx.ownership, gate: ctx.deliveryGate,
     getCurrentDirtyFiles: () => ['feature.js'], getImpactedTests: () => impactedTests,
+    prepareCandidateTree: async (_cwd, files) => ({ path: cwd, files: [...files], ref: 'p1-candidate', buildMs: 0, isCurrent: () => true, destroy: () => {} }),
+    resolveDeliveryImpact: async () => ({ resolved: true, requiredTests: impactedTests, advisoryTests: [] }),
     detectWroteButNeverRead: () => [],
     commitOwnedFiles: () => { calls++; return { ok: true, output: 'mock scoped commit' } },
   }))
@@ -150,7 +152,7 @@ for (const path of ['tests/test_consumer.py', 'desktop/scripts/__tests__/consume
       ctx.ledger.record({ type: 'verification', command: 'node --test src/other.test.ts', status: 'passed', meta: { scope: 'targeted', kind: 'test', targetFiles: ['src/other.test.ts'] } })
       const blocked = await commit(ctx, cwd, [path], true)
       assert.equal(blocked.calls, 0)
-      assert.match(blocked.result.content, /impacted tests/)
+      assert.deepEqual(blocked.result.verificationPlan?.pending, [path])
       ctx.ledger.record({ type: 'verification', command: `test ${path}`, status: 'passed', meta: { scope: 'targeted', kind: 'test', targetFiles: [path] } })
       assert.equal((await commit(ctx, cwd, [path])).calls, 0, 'legacy target selection is not completion proof')
     })

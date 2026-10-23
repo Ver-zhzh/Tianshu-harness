@@ -15,8 +15,11 @@ import type { ContentBlock } from '../../api/types.js'
 // These tests lock the prefix-cache setter timing invariants documented in
 // .rivet/plans/loop拆分-交接-W-L5至L8进度与缓存时序缰绳.md §3 so the mechanical
 // move of initializeRun / buildTurnRequest / runPerception cannot drift them:
-//   1. A-class invalidation (invalidateFreshCache) only fires at the user-message
-//      boundary (before the first buildOaiRequest), never between tool turns.
+//   1. A-class invalidation (invalidateFreshCache) never fires between tool turns
+//      — if it fires at all it precedes the first buildOaiRequest, and the
+//      boundary rebuild itself is keyed by cachedFreshForUser inside
+//      buildOaiRequest (domain is now a session constant: setActiveDomain
+//      rebuilds frozenBase without invalidating).
 //   2. refreshGitContextIfNeeded(await) + the harness advisory setter complete
 //      before buildOaiRequest on EVERY turn.
 //   3. Per-message invalidation count does not scale with tool-turn count
@@ -101,7 +104,7 @@ function makeAgent(engine: PromptEngine, client: StreamClient, session: SessionC
 }
 
 describe('turn-step cache setter timing (terminal-wave safety net)', () => {
-  it('A-class invalidation only fires at the user-message boundary, never between tool turns', async () => {
+  it('A-class invalidation never fires between tool turns', async () => {
     const engine = makeEngine()
     const order: string[] = []
     spyOrder(engine, 'invalidateFreshCache', 'invalidate', order)
@@ -113,10 +116,25 @@ describe('turn-step cache setter timing (terminal-wave safety net)', () => {
     const firstBuild = order.indexOf('build')
     const lastInvalidate = order.lastIndexOf('invalidate')
     assert.ok(firstBuild >= 0, 'expected at least one buildOaiRequest call')
-    assert.ok(lastInvalidate >= 0, 'expected at least one invalidateFreshCache call at the boundary')
+    // Not every user message needs an A-class invalidation any more: the domain is
+    // a session constant folded into the frozen prefix (setActiveDomain rebuilds
+    // frozenBase and deliberately does NOT invalidate), and a chat-mode turn never
+    // flips setActionableTurn. The boundary rebuild is keyed by cachedFreshForUser
+    // inside buildOaiRequest instead. So the invariant is conditional — IF anything
+    // clears the fresh cache, it can only be the boundary, i.e. strictly before the
+    // first request of this user message, never between tool turns.
     assert.ok(
-      lastInvalidate < firstBuild,
+      lastInvalidate === -1 || lastInvalidate < firstBuild,
       `fresh cache was invalidated mid tool-loop: last invalidate=${lastInvalidate} >= first build=${firstBuild} (order=${order.join(',')})`,
+    )
+    // Anti-vacuity: the assertion above would pass trivially if the loop never
+    // built a request or never established a fresh cache for this message.
+    assert.equal(order.filter(x => x === 'build').length, 4,
+      `expected 4 builds (3 tool turns + terminal), got ${order.join(',')}`)
+    assert.equal(
+      (engine as unknown as { cachedFreshForUser: string }).cachedFreshForUser,
+      'read the file',
+      `fresh cache was not established for the current user message (order=${order.join(',')})`,
     )
   })
 

@@ -79,7 +79,7 @@
 <tr>
 <td width="50%" valign="top">
 
-**终端 CLI**（Node.js 24+）
+**终端 CLI**（Node.js 24.x ≥ 24.22.1 或 26.x ≥ 26.12.1）
 
 ```bash
 npm install -g tianshu-harness

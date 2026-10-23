@@ -68,6 +68,7 @@ test('candidate batch planning reads the isolated package script, not a peer edi
         verificationSnapshot: { path: tree.path, snapshotRef: tree.ref, repositoryRoot: cwd, candidateOnly: true }, onOutput: text => output.push(text) }, () => 30_000)
       assert.equal(result.isError, false, result.content)
       assert.equal(result.verification?.snapshotRef, tree.ref)
+      assert.ok(result.content.includes(tree.ref))
       assert.match(output.join(''), /提交候选/)
       assert.doesNotMatch(output.join(''), /missing-peer-runner|\.rivet\/vsw/)
       const full = await RUN_TESTS_TOOL.execute({ cwd, toolUseId: 'candidate-full-plan', input: { deliveryFiles: ['feature.mjs'] },
@@ -196,6 +197,7 @@ test('candidate typecheck receipt requires config coverage and a successful loca
       assert.equal(result.verification?.kind, 'typecheck')
       assert.equal(result.verification?.candidateTypecheckComplete, true)
       assert.equal(result.verification?.snapshotRef, tree.ref)
+      assert.ok(result.content.includes(tree.ref))
 
       const uncovered = await RUN_TESTS_TOOL.execute({ cwd, toolUseId: 'candidate-typecheck-blocked', input: { deliveryFiles: ['outside.ts'], check: 'typecheck' },
         verificationSnapshot: { path: tree.path, repositoryRoot: cwd, snapshotRef: tree.ref, candidateOnly: true } })

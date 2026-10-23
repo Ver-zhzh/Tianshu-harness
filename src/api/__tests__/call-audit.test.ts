@@ -36,7 +36,12 @@ it('actual wire, independent probe and non-chat transport have one completed aud
     const main = readCallAudit({ sessionId: 'audit-session' }).calls
     assert.equal(main.length, 1); assert.equal(main[0]?.phase, 'finished'); assert.equal(main[0]?.model, 'flash')
     assert.equal(main[0]?.responseModel, 'flash-actual'); assert.equal(main[0]?.usageKnown, true)
-    const report = await probeProvider({ baseUrl, apiKey: 'test-placeholder', providerName: 'mock-provider', probeModel: 'pro', vision: false })
+    // #456 端点策略默认拒绝私有网络（loopback 需要按 origin 显式授权，见
+    // endpoint-policy/resolveEndpointTarget）。探测走 endpointRequest，因此测试的
+    // 本地 mock 服务必须自带授权——这是测试设置缺口，不是策略误伤：产品侧同样
+    // 要求 connect 流程拿到用户显式同意后才允许 loopback。
+    const report = await probeProvider({ baseUrl, apiKey: 'test-placeholder', providerName: 'mock-provider', probeModel: 'pro', vision: false,
+      endpointNetworkPolicy: { origin: new URL(baseUrl).origin, allowPrivateNetwork: true } })
     assert.equal(report.completionOk, true)
     const probe = readCallAudit({ purpose: 'provider_probe' }).calls
     assert.equal(probe.length, 1); assert.equal(probe[0]?.requestId, report.operationId)

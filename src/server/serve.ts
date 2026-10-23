@@ -748,8 +748,8 @@ export async function runServe(opts: RunServeOptions = {}): Promise<RunningServe
       })
       // 丢锁后再产生的会话事件本就会被 persistence 闸门丢弃；abort 止住产出源。
       try { sessions.abortAll() } catch { /* best-effort */ }
-      // CronLock 丢锁停 scheduler 的同范式（cron-wiring.ts）：停事件触发器 + 调度器 + 释放调度锁。
       try { void wiring?.stop() } catch { /* best-effort */ }
+      storeLock?.release()
       try { opts.onLockLost?.(lost) } catch { /* 宿主回调异常不得阻断内部收口 */ }
     },
   })

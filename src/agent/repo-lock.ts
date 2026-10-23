@@ -11,8 +11,8 @@
  * `withLock(fn)`. It reuses the same hardening — O_EXCL atomic create,
  * PID-lease liveness, and stale-lock recovery — but adds nothing long-lived.
  *
- * Does NOT modify cron-lock; the PID-liveness logic is re-implemented compactly
- * to keep the agent layer free of a dependency on the server layer.
+ * PID-liveness 复用 server/cron-lock.js 的单一实现（历史上曾内联一份副本，
+ * 2026-10-22 issue #530 后收敛——副本漂移是同族盲区的温床）。
  *
  * @module repo-lock
  */
@@ -40,14 +40,15 @@ export interface RepoLockInfo {
 export interface RepoLockConfig {
   /** Lock file path. */
   lockPath: string
-  /** A held lock older than this is considered stale and reclaimable, even if
-   *  its PID looks alive (guards against a process that died mid-section on a
-   *  foreign host where we cannot probe liveness). Default 30s. */
+  /** Only malformed records older than this can be reclaimed. A live owner is
+   *  never displaced solely because an operation took longer. Default 30s. */
   staleMs?: number
   /** Backoff between acquire attempts. Default 25ms. */
   retryMs?: number
   /** Max total time to wait for the lock before giving up. Default 10s. */
   maxWaitMs?: number
+  /** Hostname source for deterministic rename tests. */
+  hostname?: () => string
 }
 
 const DEFAULT_STALE_MS = 30_000
@@ -62,26 +63,11 @@ function errorCode(error: unknown): string | undefined {
   return undefined
 }
 
-/** PID liveness (excludes zombies on Linux). EPERM → alive (foreign owner). */
-export function isPidAlive(pid: number): boolean {
-  if (!Number.isInteger(pid) || pid <= 0) return false
-  try {
-    process.kill(pid, 0)
-  } catch (error) {
-    if (errorCode(error) === 'EPERM') return true
-    return false
-  }
-  if (process.platform === 'linux') {
-    try {
-      const stat = readFileSync(`/proc/${pid}/stat`, 'utf-8')
-      const afterComm = stat.slice(stat.lastIndexOf(')') + 1).trimStart()
-      if (afterComm[0] === 'Z') return false
-    } catch {
-      // /proc unavailable → fall through alive.
-    }
-  }
-  return true
-}
+/** PID liveness — 单一实现复用 server/cron-lock.js。EPERM → alive（foreign owner）。
+ *  本同步锁不能执行 macOS 异步僵尸探测；核验不了时保留占用，避免误抢活锁。
+ *  re-export 保持本模块既有 import 路径不变。 */
+import { isPidAlive } from '../server/cron-lock.js'
+export { isPidAlive }
 
 /** Synchronous sleep without a subprocess (worktree ops are sync/spawnSync). */
 function sleepSync(ms: number): void {
@@ -119,6 +105,8 @@ export class RepoLock {
   private readonly staleMs: number
   private readonly retryMs: number
   private readonly maxWaitMs: number
+  private readonly hostnameResolver: () => string
+  private readonly ownerHostname: string
   /** Per-instance owner token: each RepoLock is a distinct holder, so two
    *  instances (even in one process) mutually exclude, while re-entry on the
    *  same instance is treated as ownership. */
@@ -130,10 +118,12 @@ export class RepoLock {
     this.staleMs = config.staleMs ?? DEFAULT_STALE_MS
     this.retryMs = config.retryMs ?? DEFAULT_RETRY_MS
     this.maxWaitMs = config.maxWaitMs ?? DEFAULT_MAX_WAIT_MS
+    this.hostnameResolver = config.hostname ?? osHostname
+    this.ownerHostname = this.hostname()
   }
 
   private hostname(): string {
-    return osHostname() || 'unknown'
+    return this.hostnameResolver() || 'unknown'
   }
 
   private buildInfo(): RepoLockInfo {
@@ -141,22 +131,19 @@ export class RepoLock {
       pid: process.pid,
       acquiredAt: new Date().toISOString(),
       acquiredAtMs: Date.now(),
-      hostname: this.hostname(),
+      hostname: this.ownerHostname,
       ownerToken: this.ownerToken,
     }
   }
 
   private isOwn(info: RepoLockInfo): boolean {
     return info.pid === process.pid
-      && info.hostname === this.hostname()
+      && info.hostname === this.ownerHostname
       && info.ownerToken === this.ownerToken
   }
 
-  /** True when an existing lock can be reclaimed: dead owner PID (same host) or
-   *  age beyond staleMs. Foreign-host live PIDs are never reclaimed on age=0. */
+  /** Only confirmed-dead same-host owners are reclaimable. Age alone is not proof. */
   private isReclaimable(owner: RepoLockInfo): boolean {
-    const ageMs = Date.now() - (owner.acquiredAtMs ?? 0)
-    if (ageMs >= this.staleMs) return true
     if (owner.hostname === this.hostname() && !isPidAlive(owner.pid)) return true
     return false
   }
@@ -184,6 +171,8 @@ export class RepoLock {
       return true
     }
     if (this.isReclaimable(owner)) {
+      const latest = readLock(this.lockPath)
+      if (!latest || latest.pid !== owner.pid || latest.hostname !== owner.hostname || latest.ownerToken !== owner.ownerToken) return false
       try { unlinkSync(this.lockPath) } catch { /* another reclaimer won */ }
       const retry = createExclusive(this.lockPath, this.buildInfo())
       if (retry.ok) {

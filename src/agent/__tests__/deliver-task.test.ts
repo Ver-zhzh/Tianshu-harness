@@ -20,6 +20,24 @@ import { getReviewHealth, resetReviewHealth } from '../review-health.js'
 import { openCandidateDeliveryTree } from '../candidate-delivery-tree.js'
 import { candidateSnapshotRef } from '../candidate-snapshot-ref.js'
 import { resolveDeliveryImpact } from '../delivery-impact.js'
+import { diagnoseCandidateEvidence } from '../delivery-candidate-diagnostics.js'
+import { deliveryNextAction } from '../delivery-no-progress.js'
+
+it('stops index retries with a Git action rather than asking for another test run', () => {
+  const diagnostic = { currentRef: 'same-ref', onlyInCurrent: [], onlyInPassed: [], excludedCandidateProofs: 0,
+    unboundProofs: 0, nextRun: 'run_tests(files=["a.test.ts"], deliveryFiles=["a.ts"])' }
+  assert.match(deliveryNextAction('git-index-lock', diagnostic), /index.lock/)
+  assert.doesNotMatch(deliveryNextAction('git-index-lock', diagnostic), /run_tests/)
+})
+
+it('does not diagnose a same-candidate failure after its matching scope passes', () => {
+  const ledger = createTaskLedger({ taskId: 'diagnostic-supersession' })
+  const meta = { snapshotRef: 'same-ref', candidateFiles: ['src/a.ts'], targetFiles: ['src/a.test.ts'], kind: 'test' as const, scope: 'targeted' as const }
+  ledger.record({ type: 'verification', command: 'npm test src/a.test.ts', status: 'failed', meta })
+  ledger.record({ type: 'verification', command: 'npm test src/a.test.ts', status: 'passed', meta })
+  const diagnostics = diagnoseCandidateEvidence(ledger.getVerifications(), 'same-ref', ['src/a.ts'])
+  assert.equal(diagnostics.currentFailure, undefined)
+})
 
 function makeContext(opts: {
   taskId: string
@@ -71,7 +89,7 @@ function makeContext(opts: {
   })
   const ledger = createTaskLedger({ taskId: opts.taskId })
   for (const f of opts.ownedFiles) ledger.record({ type: 'file_write', path: f })
-  for (const v of (opts.verifications ?? [])) ledger.record({ type: 'verification', command: v.command, status: v.status, meta: { targetFiles: opts.ownedFiles, ...v.meta } })
+  for (const v of (opts.verifications ?? [])) ledger.record({ type: 'verification', command: v.command, status: v.status, meta: { targetFiles: opts.ownedFiles, snapshotRef: 'snapshotRef' in (v.meta ?? {}) ? undefined : opts.getCurrentSnapshotRefForFiles?.(opts.ownedFiles) ?? 'candidate-ref', ...v.meta } })
   const ownership = createOwnershipLedger({ baseline, taskLedger: ledger })
   ownership.autoOwnFromLedger()
   const attribution = createVerificationAttribution({ ownership })
@@ -1320,19 +1338,20 @@ describe('deliver-task — semantic task delivery tool', () => {
     assert.match(result.content, /git commit failed/)
   })
 
-  it('reports commit=true with no owned files as scoped commit failure', async () => {
+  it('rejects an empty commit candidate before invoking the Git executor', async () => {
+    let invoked = false
     const { tool, params } = makeContext({
       taskId: 't1',
       ownedFiles: [],
       verifications: [{ command: 'npx tsc --noEmit', status: 'passed' }],
-      commitOwnedFiles: () => ({ ok: false, output: 'No owned files to commit.' }),
+      commitOwnedFiles: () => { invoked = true; return { ok: false, output: 'No owned files to commit.' } },
     })
 
     const result = await tool.execute({ ...params, input: { commit: true, message: 'fix: empty' } })
 
     assert.equal(result.isError, true)
-    assert.match(result.content, /Delivery Gate: GREEN/)
-    assert.match(result.content, /No owned files to commit/)
+    assert.match(result.content, /No dirty files in the delivery candidate/)
+    assert.equal(invoked, false)
   })
 
   it('does not require approval for status-only delivery report', () => {
@@ -2483,6 +2502,167 @@ Do not declare a streamed response duplicate in the middle of the stream.
   })
 
   describe('adopt — cross-session takeover', () => {
+    it('keeps the same explicit candidate after a rejected adoption attempt', async () => {
+      const scopes: string[][] = []
+      const ctx = makeContext({
+        taskId: 'adopt-retry-stable', ownedFiles: ['src/mine.ts'],
+        externalFiles: ['src/orphan.ts'], dirtyFiles: ['src/mine.ts', 'src/orphan.ts'],
+        prepareCandidateTree: async (cwd, files) => {
+          scopes.push([...files])
+          return { path: cwd, files: [...files], ref: 'same-candidate', buildMs: 0, isCurrent: () => true, destroy: () => {} }
+        },
+      })
+      const input = { commit: true, message: 'fix: retry adoption', files: ['src/mine.ts'], adopt: ['src/orphan.ts'] }
+      const first = await ctx.tool.execute({ ...ctx.params, input })
+      const second = await ctx.tool.execute({ ...ctx.params, input })
+      assert.equal(first.isError, true)
+      assert.equal(second.isError, true)
+      assert.deepEqual(scopes, [
+        ['src/mine.ts', 'src/orphan.ts'],
+        ['src/mine.ts', 'src/orphan.ts'],
+      ])
+    })
+
+    it('accepts a repeat adoption of a dynamic external file after RED', async () => {
+      const scopes: string[][] = []
+      const ctx = makeContext({
+        taskId: 'adopt-dynamic-retry', ownedFiles: ['src/mine.ts'],
+        dirtyFiles: ['src/mine.ts', 'src/dynamic.ts'],
+        prepareCandidateTree: async (cwd, files) => {
+          scopes.push([...files])
+          return { path: cwd, files: [...files], ref: 'dynamic-candidate', buildMs: 0, isCurrent: () => true, destroy: () => {} }
+        },
+      })
+      const input = { commit: true, message: 'fix: dynamic adoption', files: ['src/mine.ts'], adopt: ['src/dynamic.ts'] }
+      await ctx.tool.execute({ ...ctx.params, input })
+      const second = await ctx.tool.execute({ ...ctx.params, input })
+      assert.doesNotMatch(second.content, /Adopt: file\(s\) not in external or co-owned/)
+      assert.deepEqual(scopes, [
+        ['src/dynamic.ts', 'src/mine.ts'],
+        ['src/dynamic.ts', 'src/mine.ts'],
+      ])
+    })
+
+    it('keeps a co-owned file in the candidate across rejected retries', async () => {
+      const scopes: string[][] = []
+      const ctx = makeContext({
+        taskId: 'adopt-co-owned-retry', ownedFiles: ['src/mine.ts'],
+        externalFiles: ['src/shared.ts'], dirtyFiles: ['src/mine.ts', 'src/shared.ts'],
+        prepareCandidateTree: async (cwd, files) => {
+          scopes.push([...files])
+          return { path: cwd, files: [...files], ref: 'co-owned-candidate', buildMs: 0, isCurrent: () => true, destroy: () => {} }
+        },
+      })
+      ctx.ledger.record({ type: 'file_write', path: 'src/shared.ts' })
+      ctx.ownership.autoOwnFromLedger()
+      const input = { commit: true, files: ['src/mine.ts'], adopt: ['src/shared.ts'], message: 'fix: shared adoption' }
+      await ctx.tool.execute({ ...ctx.params, input })
+      await ctx.tool.execute({ ...ctx.params, input })
+      assert.deepEqual(scopes, [['src/mine.ts', 'src/shared.ts'], ['src/mine.ts', 'src/shared.ts']])
+    })
+
+    it('builds the default commit candidate from owned dirty and adopted files', async () => {
+      const scopes: string[][] = []
+      const ctx = makeContext({
+        taskId: 'adopt-default-candidate', ownedFiles: ['src/mine.ts'],
+        externalFiles: ['src/orphan.ts'], dirtyFiles: ['src/mine.ts', 'src/orphan.ts'],
+        prepareCandidateTree: async (cwd, files) => {
+          scopes.push([...files])
+          return { path: cwd, files: [...files], ref: 'default-candidate', buildMs: 0, isCurrent: () => true, destroy: () => {} }
+        },
+      })
+      const input = { commit: true, message: 'fix: default adoption', adopt: ['src/orphan.ts'] }
+      await ctx.tool.execute({ ...ctx.params, input })
+      await ctx.tool.execute({ ...ctx.params, input })
+      assert.deepEqual(scopes, [
+        ['src/mine.ts', 'src/orphan.ts'],
+        ['src/mine.ts', 'src/orphan.ts'],
+      ])
+    })
+
+    it('does not use an unbound legacy verification to authorize a candidate commit', async () => {
+      let committed = false
+      const ctx = makeContext({
+        taskId: 'legacy-proof-candidate', ownedFiles: ['src/mine.ts'], dirtyFiles: ['src/mine.ts'],
+        verifications: [{ command: 'npm test', status: 'passed', meta: { snapshotRef: undefined } }],
+        commitOwnedFiles: () => { committed = true; return { ok: true, output: 'unexpected commit' } },
+      })
+      const result = await ctx.tool.execute({ ...ctx.params,
+        input: { commit: true, files: ['src/mine.ts'], message: 'fix: require candidate proof' },
+      })
+      assert.equal(committed, false)
+      assert.equal(result.isError, true)
+      assert.match(result.content, /candidate|候选/i)
+    })
+
+    it('explains why a passing 15-file receipt cannot clear a failing 14-file candidate', async () => {
+      const ctx = makeContext({
+        taskId: 'candidate-diff-diagnostic', ownedFiles: ['src/mine.ts'],
+        externalFiles: ['src/api/__tests__/call-audit.test.ts'],
+        dirtyFiles: ['src/mine.ts', 'src/api/__tests__/call-audit.test.ts'],
+        verifications: [
+          { command: 'npm test src/api/__tests__/call-audit.test.ts', status: 'failed', meta: { snapshotRef: 'ref-14', candidateFiles: ['src/mine.ts'], kind: 'test', scope: 'targeted' } },
+          { command: 'npm test src/api/__tests__/call-audit.test.ts', status: 'passed', meta: { snapshotRef: 'ref-15', candidateFiles: ['src/mine.ts', 'src/api/__tests__/call-audit.test.ts'], kind: 'test', scope: 'targeted' } },
+        ],
+        prepareCandidateTree: async (cwd, files) => ({ path: cwd, files: [...files], ref: files.length === 1 ? 'ref-14' : 'ref-15', buildMs: 0, isCurrent: () => true, destroy: () => {} }),
+      })
+      const result = await ctx.tool.execute({ ...ctx.params,
+        input: { commit: true, files: ['src/mine.ts'], message: 'fix: diagnostic' },
+      })
+      assert.equal(result.isError, true)
+      assert.match(result.content, /ref-14/)
+      assert.match(result.content, /ref-15/)
+      assert.match(result.content, /src\/api\/__tests__\/call-audit\.test\.ts/)
+      assert.deepEqual(result.verificationPlan?.candidateDiagnostics?.onlyInPassed, ['src/api/__tests__/call-audit.test.ts'])
+    })
+
+    it('ends the turn on a third unchanged commit blocker and resets when proof changes', async () => {
+      const ctx = makeContext({ taskId: 'candidate-no-progress', ownedFiles: ['src/mine.ts'], dirtyFiles: ['src/mine.ts'] })
+      const input = { commit: true, files: ['src/mine.ts'], message: 'fix: retry' }
+      const first = await ctx.tool.execute({ ...ctx.params, input })
+      const second = await ctx.tool.execute({ ...ctx.params, input })
+      const third = await ctx.tool.execute({ ...ctx.params, input })
+      assert.equal(first.endTurn, undefined)
+      assert.equal(second.endTurn, undefined)
+      assert.equal(third.endTurn, true)
+      assert.match(third.content, /no progress|无进展/i)
+      ctx.ledger.record({ type: 'verification', command: 'npm test', status: 'failed', meta: { snapshotRef: 'candidate-ref' } })
+      const afterEvidence = await ctx.tool.execute({ ...ctx.params, input })
+      assert.equal(afterEvidence.endTurn, undefined)
+    })
+
+    it('classifies an index-only conflict without invalidating candidate tests', async () => {
+      const cwd = mkdtempSync(join(tmpdir(), 'candidate-index-conflict-'))
+      try {
+        const git = (...args: string[]) => {
+          const result = spawnSync('git', args, { cwd, encoding: 'utf8' })
+          assert.equal(result.status, 0, result.stderr)
+        }
+        git('init', '-q'); git('config', 'user.email', 'fixture@example.com'); git('config', 'user.name', 'Fixture')
+        mkdirSync(join(cwd, 'src'))
+        writeFileSync(join(cwd, 'src/mine.ts'), 'export const value = 1\n')
+        git('add', '--', 'src/mine.ts'); git('commit', '-qm', 'base')
+        writeFileSync(join(cwd, 'src/mine.ts'), 'export const value = 2\n')
+        writeFileSync(join(cwd, 'other.txt'), 'peer staged this\n')
+        const ctx = makeContext({
+          taskId: 'index-only-conflict', ownedFiles: ['src/mine.ts'], dirtyFiles: ['src/mine.ts'],
+          verifications: [{ command: 'npm test', status: 'passed' }],
+          prepareCandidateTree: async (root, files) => ({ path: root, files: [...files], ref: 'candidate-ref', buildMs: 0, isCurrent: () => true, destroy: () => {} }),
+          commitOwnedFiles: () => {
+            const add = spawnSync('git', ['add', '--', 'other.txt'], { cwd })
+            assert.equal(add.status, 0, add.stderr?.toString())
+            return { ok: false, output: 'Selected files, HEAD or index changed; refresh the commit preview.' }
+          },
+        })
+        const result = await ctx.tool.execute({ ...ctx.params, cwd,
+          input: { commit: true, files: ['src/mine.ts'], message: 'fix: index conflict' },
+        })
+        assert.equal(result.isError, true)
+        assert.match(result.content, /Git index.*变化/)
+        assert.match(result.content, /无需因此重跑测试/)
+      } finally { rmSync(cwd, { recursive: true, force: true }) }
+    })
+
     it('includes adopted files in an explicit candidate before impact resolution', async () => {
       const impactCalls: string[][] = []
       const committed: string[][] = []
@@ -2733,7 +2913,7 @@ Do not declare a streamed response duplicate in the middle of the stream.
       assert.match(result.content, /Cannot commit/)
     })
 
-    it('pure file rename (R100) bypasses RED gate — only the new path is owned', async () => {
+    it('does not bypass RED for a rename when only the new path is in the candidate', async () => {
       const dir = tmpGitRepoWithTracked('src/old.ts', 'export const x = 1\n')
       spawnSync('git', ['mv', 'src/old.ts', 'src/new.ts'], { cwd: dir }) // byte-identical rename
 
@@ -2750,8 +2930,8 @@ Do not declare a streamed response duplicate in the middle of the stream.
       })
 
       const result = await tool.execute({ ...params, cwd: dir, input: { commit: true, message: 'refactor: rename old to new' } })
-      assert.equal(result.isError, undefined, `Expected rename bypass, got error:\n${result.content}`)
-      assert.match(result.content, /机械式变更.*rename-mechanical/)
+      assert.equal(result.isError, true)
+      assert.match(result.content, /Cannot commit: delivery gate is RED/)
     })
 
     it('owned_failure RED is NEVER bypassed even for docs files', async () => {
@@ -2837,7 +3017,7 @@ Do not declare a streamed response duplicate in the middle of the stream.
         commitOwnedFiles: () => ({ ok: true, output: 'commit abc123' }),
       })
       await new Promise(r => setTimeout(r, 10))
-      ledger.record({ type: 'verification', command: 'npm test', status: 'passed' })
+      ledger.record({ type: 'verification', command: 'npm test', status: 'passed', meta: { snapshotRef: 'candidate-ref' } })
 
       const result = await tool.execute({ ...params, input: { commit: true, message: 'feat: all tests pass' } })
       assert.equal(result.isError ?? false, false)

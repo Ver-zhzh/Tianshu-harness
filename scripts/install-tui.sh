@@ -9,7 +9,7 @@
 #   bash <(curl -fsSL https://raw.githubusercontent.com/huiliyi37/Tianshu-harness/main/scripts/install-tui.sh)
 #
 # 说明：
-#   - 官方 npm 包 tianshu-harness，主命令 tianshu（rivet 为兼容别名）；需要 Node.js >= 24（engines 钉死）。
+#   - 官方 npm 包 tianshu-harness，主命令 tianshu（rivet 为兼容别名）；需要已修复的 Node.js 24/26 LTS。
 #   - 默认走 npmmirror 镜像（国内网络加速）；设 NPM_CONFIG_REGISTRY 可覆盖。
 #   - 幂等：重复执行覆盖升级到最新版。
 set -euo pipefail
@@ -22,13 +22,12 @@ export npm_config_registry="$REGISTRY"
 say() { printf '\033[1;36m== %s ==\033[0m\n' "$*"; }
 die() { printf '\033[1;31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 
-# 1. Node.js >= 24
+# 1. Node.js 24.22.1+ 或 26.12.1+
 if ! command -v node >/dev/null 2>&1; then
-  die "缺少 Node.js（>= 24）。请先安装：https://nodejs.org/（或 nvm install 24 && nvm alias default 24）"
+  die "缺少 Node.js（需要 24.22.1+ 或 26.12.1+）。请先安装：https://nodejs.org/"
 fi
-NODE_MAJOR="$(node -p 'Number(process.versions.node.split(".")[0])')"
-if [ "$NODE_MAJOR" -lt 24 ]; then
-  die "Node.js 版本过低（当前 $(node -v)，需要 >= 24）。请升级后重跑：https://nodejs.org/"
+if ! node -e 'const [major,minor,patch]=process.versions.node.split(".").map(Number); process.exit((major===24&&(minor>22||(minor===22&&patch>=1)))||(major===26&&(minor>12||(minor===12&&patch>=1)))?0:1)'; then
+  die "当前 Node.js $(node -v) 未包含 2026-10-21 安全修复；需要 24.22.1+ 或 26.12.1+。请升级后重跑：https://nodejs.org/"
 fi
 
 # 1.5 Android/Termux：裸 Termux（bionic）缺必需原生依赖（@ast-grep/napi / esbuild）
@@ -39,7 +38,7 @@ if uname -o 2>/dev/null | grep -q '^Android$'; then
 官方支持路径（proot-distro，glibc）：
   pkg install proot-distro && proot-distro install ubuntu && proot-distro login ubuntu
   （容器内）apt update && apt install -y curl ripgrep
-  安装 Node >= 24（nodesource 或 nvm），然后重跑本脚本或 npm i -g tianshu-harness"
+  安装 Node 24.22.1+ 或 26.12.1+（nodesource 或 nvm），然后重跑本脚本或 npm i -g tianshu-harness"
 fi
 
 # 1.6 npm 全局目录可写性预检。

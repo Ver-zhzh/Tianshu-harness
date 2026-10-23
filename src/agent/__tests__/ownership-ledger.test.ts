@@ -463,6 +463,15 @@ describe('ownership-ledger — file ownership tracking', () => {
       assert.equal(ownership.isCoOwned('src/external-dirty.ts'), false)
     })
 
+    it('does not report an adopted baseline file as both owned and external', () => {
+      const baseline = createWorktreeBaseline({ ...baselineSnap, preExistingDirty: ['src/external-dirty.ts'] })
+      const ledger = createTaskLedger({ taskId: 'adopt-external-list' })
+      const ownership = createOwnershipLedger({ baseline, taskLedger: ledger })
+      ownership.adoptFiles(['src/external-dirty.ts'])
+      assert.equal(ownership.getOwnedFiles().includes('src/external-dirty.ts'), true)
+      assert.equal(ownership.getExternalFiles(['src/external-dirty.ts']).includes('src/external-dirty.ts'), false)
+    })
+
     it('adoptFiles does not duplicate files already in owned set', () => {
       const baseline = createWorktreeBaseline({
         branch: 'main',

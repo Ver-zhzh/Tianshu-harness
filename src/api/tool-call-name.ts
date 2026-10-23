@@ -2,7 +2,7 @@ export type ToolNameFailure = 'unknown' | 'ambiguous' | 'incomplete' | 'identity
 
 export class ToolNameProtocolError extends Error {
   constructor(readonly reason: ToolNameFailure) {
-    super(`上游工具调用协议异常（${reason}）：无法唯一确定工具名称或调用归属，已停止本次响应。请重试或检查模型端点。`)
+    super(`上游工具调用协议异常（${reason}）：无法唯一确定工具名称或调用归属，已停止本次响应；本次工具未执行。请切换模型或检查端点的工具调用格式。`)
     this.name = 'ToolNameProtocolError'
   }
 }
@@ -12,12 +12,23 @@ export class ToolNameVocabulary {
   readonly names: ReadonlySet<string>
   readonly prefixes: ReadonlySet<string>
   readonly expandable: ReadonlySet<string>
+  readonly canonical: ReadonlyMap<string, string>
 
   constructor(names: readonly string[]) {
     this.names = new Set(names)
+    const canonical = new Map([...this.names].map(name => [name, name]))
+    // Some OpenAI-compatible gateways expose function calls as
+    // `functions.<declared-name>`. Only this exact wrapper is accepted, and a
+    // real wire declaration always wins if it already uses that spelling.
+    for (const name of this.names) {
+      if (name.startsWith('functions.')) continue
+      const wrapped = `functions.${name}`
+      if (!canonical.has(wrapped)) canonical.set(wrapped, name)
+    }
+    this.canonical = canonical
     const prefixes = new Set<string>()
     const expandable = new Set<string>()
-    for (const name of this.names) {
+    for (const name of canonical.keys()) {
       for (let length = 0; length <= name.length; length++) {
         prefixes.add(name.slice(0, length))
         if (length < name.length) expandable.add(name.slice(0, length))
@@ -58,14 +69,17 @@ export class ToolCallName {
   get candidateCount(): number { return this.candidates.size }
 
   get completeNames(): string[] {
-    return [...this.candidates].filter(name => this.vocabulary.names.has(name))
+    return [...new Set([...this.candidates].flatMap(name => {
+      const canonical = this.vocabulary.canonical.get(name)
+      return canonical ? [canonical] : []
+    }))]
   }
 
   /** Early hints must also exclude incomplete branches and longer tool names. */
   get hintName(): string | undefined {
     const [name] = this.candidates
-    return name && this.candidates.size === 1 && this.vocabulary.names.has(name)
-      && !this.vocabulary.expandable.has(name) ? name : undefined
+    return name && this.candidates.size === 1 && this.vocabulary.canonical.has(name)
+      && !this.vocabulary.expandable.has(name) ? this.vocabulary.canonical.get(name) : undefined
   }
 
   resolve(final: boolean): string | undefined {

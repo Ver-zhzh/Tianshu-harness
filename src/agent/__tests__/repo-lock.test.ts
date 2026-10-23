@@ -97,7 +97,7 @@ describe('RepoLock', () => {
     b.release()
   })
 
-  it('reclaims a stale lock (age beyond staleMs) held by a foreign-looking owner', () => {
+  it('does not use age to reclaim a foreign-host lock', () => {
     const lockPath = join(makeDir(), 'r.lock')
     // Plant a stale lock owned by a clearly-not-us pid, with an old timestamp.
     const stale = {
@@ -109,11 +109,29 @@ describe('RepoLock', () => {
     }
     writeFileSync(lockPath, JSON.stringify(stale))
     const lock = new RepoLock({ lockPath, staleMs: 30_000, maxWaitMs: 500 })
-    lock.acquire()
-    assert.ok(lock.isHeld())
+    assert.throws(() => lock.acquire(), /timeout/)
+    assert.equal(lock.isHeld(), false)
     const owner = JSON.parse(readFileSync(lockPath, 'utf-8'))
-    assert.equal(owner.pid, process.pid)
+    assert.equal(owner.ownerToken, 'foreign-token')
+  })
+
+  it('does not steal an old lock from a live process even after the age threshold', () => {
+    const lockPath = join(makeDir(), 'live-old.lock')
+    writeFileSync(lockPath, JSON.stringify({ pid: process.pid, acquiredAt: new Date(Date.now() - 60_000).toISOString(),
+      acquiredAtMs: Date.now() - 60_000, hostname: hostname() || 'unknown', ownerToken: 'another-live-holder' }))
+    const lock = new RepoLock({ lockPath, staleMs: 10, maxWaitMs: 30, retryMs: 5 })
+    assert.throws(() => lock.acquire(), /timeout/)
+    assert.equal(JSON.parse(readFileSync(lockPath, 'utf8')).ownerToken, 'another-live-holder')
+  })
+
+  it('releases its own lock after the process hostname changes', () => {
+    const lockPath = join(makeDir(), 'renamed-host.lock')
+    let currentHost = 'before.local'
+    const lock = new RepoLock({ lockPath, hostname: () => currentHost })
+    lock.acquire()
+    currentHost = 'after.local'
     lock.release()
+    assert.equal(existsSync(lockPath), false)
   })
 
   it('reclaims a lock whose same-host PID is dead', () => {

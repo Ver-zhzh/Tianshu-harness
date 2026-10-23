@@ -18,6 +18,7 @@ import { distillSkillDraft, persistSkillDraft, listSkillDrafts } from '../../age
 import type { LogEntry } from '../log-state.js'
 import { addPendingReviewFiles, peekPendingReview, __resetPostCommitReviewPending } from '../../agent/post-commit-review-pending.js'
 import { makeTestDir, cleanupTestDir } from './_test-tmp.js'
+import { SessionPersist } from '../../agent/session-persist.js'
 
 function makeCtx(overrides?: Partial<SlashHandlerContext>): SlashHandlerContext {
   return {
@@ -373,6 +374,175 @@ describe('/resume 无参行为（会话选择器）', () => {
     const handled = await handleSlashCommand(ctx)
     assert.equal(handled, true)
     assert.ok(captured.includes('用法'), `应打用法提示: ${captured}`)
+  })
+})
+
+
+describe('/resume 参数检索与恢复 (ID前缀/序号/精确名称/--id)', () => {
+  let tempDir: string
+  const originalSessionDir = process.env.RIVET_SESSION_DIR
+
+  before(async () => {
+    tempDir = makeTestDir('resume-test-')
+    process.env.RIVET_SESSION_DIR = tempDir
+    SessionPersist.invalidateListCache()
+
+    // 预置几个会话
+    // 会话 1: 数字前缀 ID "10243859-0001", 标题 "Fix parser bug" (多词)
+    // 会话 2: ID "abcd2222-0002", 标题 "Feature auth"
+    // 会话 3: ID "abcd3333-0003", 标题 "Feature auth" (重名标题，用于测试非唯一匹配歧义)
+    // 会话 4: ID "wxyz4444-0004", 标题 "Solo Task"
+    const seed = async (id: string, title: string, updatedAt: number) => {
+      const p = new SessionPersist(id, tempDir)
+      await p.appendOaiWithChecksum({ role: 'user', content: title })
+      p.initMetadata({ model: 'deepseek-v4' })
+      await p.flushSessionBuffer()
+      p.writeMetadata({ ...p.loadMetadata()!, title, updatedAt })
+    }
+    await seed('10243859-0001', 'Fix parser bug', 1700000000000)
+    await seed('abcd2222-0002', 'Feature auth', 1700000001000)
+    await seed('abcd3333-0003', 'Feature auth', 1700000002000)
+    await seed('wxyz4444-0004', 'Solo Task', 1700000003000)
+    SessionPersist.invalidateListCache()
+  })
+
+  after(() => {
+    cleanupTestDir(tempDir)
+    if (originalSessionDir !== undefined) {
+      process.env.RIVET_SESSION_DIR = originalSessionDir
+    } else {
+      delete process.env.RIVET_SESSION_DIR
+    }
+    SessionPersist.invalidateListCache()
+  })
+
+  it('精确匹配多词标题切换成功 (/resume Fix parser bug 与引号格式)', async () => {
+    let switchedTo = ''
+    const ctx = makeCtx({
+      parts: ['/resume', 'Fix', 'parser', 'bug'],
+      agent: { ...makeCtx().agent, cwd: tempDir } as any,
+      onSessionSwitch: (id: string) => {
+        switchedTo = id
+        return { ok: true, messageCount: 1 }
+      },
+    })
+    const handled = await handleSlashCommand(ctx)
+    assert.equal(handled, true)
+    assert.equal(switchedTo, '10243859-0001', '多词标题应成功匹配')
+
+    // 带引号的标题
+    switchedTo = ''
+    const ctxQuoted = makeCtx({
+      parts: ['/resume', '"Fix', 'parser', 'bug"'],
+      agent: { ...makeCtx().agent, cwd: tempDir } as any,
+      onSessionSwitch: (id: string) => {
+        switchedTo = id
+        return { ok: true, messageCount: 1 }
+      },
+    })
+    await handleSlashCommand(ctxQuoted)
+    assert.equal(switchedTo, '10243859-0001', '带引号多词标题应成功匹配')
+  })
+
+  it('非唯一标题匹配时明确拒绝并展示候选列表', async () => {
+    let switchedTo = ''
+    let captured = ''
+    const ctx = makeCtx({
+      parts: ['/resume', 'Feature', 'auth'],
+      agent: { ...makeCtx().agent, cwd: tempDir } as any,
+      pushStatic: (entry: LogEntry) => { captured += `${entry.content}\n` },
+      onSessionSwitch: (id: string) => {
+        switchedTo = id
+        return { ok: true }
+      },
+    })
+    const handled = await handleSlashCommand(ctx)
+    assert.equal(handled, true)
+    assert.equal(switchedTo, '', '非唯一标题匹配时不应发生切换')
+    assert.ok(captured.includes('匹配多个会话'), `应提示非唯一匹配: ${captured}`)
+    assert.ok(captured.includes('abcd2222'), `候选列表应包含 abcd2222: ${captured}`)
+    assert.ok(captured.includes('abcd3333'), `候选列表应包含 abcd3333: ${captured}`)
+  })
+
+  it('显式 --id 绕过纯数字序号歧义 (/resume --id 1024)', async () => {
+    let switchedTo = ''
+    const ctx = makeCtx({
+      parts: ['/resume', '--id', '1024'],
+      agent: { ...makeCtx().agent, cwd: tempDir } as any,
+      onSessionSwitch: (id: string) => {
+        switchedTo = id
+        return { ok: true }
+      },
+    })
+    const handled = await handleSlashCommand(ctx)
+    assert.equal(handled, true)
+    assert.equal(switchedTo, '10243859-0001', '--id 1024 应作为 ID 前缀解析')
+  })
+
+  it('原数字序号、前缀与越界/未找到等语义保持不变', async () => {
+    let switchedTo = ''
+    // 序号 1（最新会话是 wxyz4444-0004）
+    const ctx1 = makeCtx({
+      parts: ['/resume', '1'],
+      agent: { ...makeCtx().agent, cwd: tempDir } as any,
+      onSessionSwitch: (id: string) => { switchedTo = id; return { ok: true } },
+    })
+    await handleSlashCommand(ctx1)
+    assert.equal(switchedTo, 'wxyz4444-0004', '序号 1 应匹配最新会话')
+
+    // 序号越界
+    let captured = ''
+    const ctxOver = makeCtx({
+      parts: ['/resume', '999'],
+      agent: { ...makeCtx().agent, cwd: tempDir } as any,
+      pushStatic: (entry: LogEntry) => { captured += `${entry.content}\n` },
+    })
+    await handleSlashCommand(ctxOver)
+    assert.ok(captured.includes('序号超出范围'), `越界应提示超出范围: ${captured}`)
+
+    // 纯数字在无 --id 时当作序号：1024 越界
+    captured = ''
+    const ctxNum = makeCtx({
+      parts: ['/resume', '1024'],
+      agent: { ...makeCtx().agent, cwd: tempDir } as any,
+      pushStatic: (entry: LogEntry) => { captured += `${entry.content}\n` },
+    })
+    await handleSlashCommand(ctxNum)
+    assert.ok(captured.includes('序号超出范围'), `未带 --id 时纯数字应按序号处理: ${captured}`)
+
+    // ID 前缀歧义
+    captured = ''
+    const ctxAmb = makeCtx({
+      parts: ['/resume', 'abcd'],
+      agent: { ...makeCtx().agent, cwd: tempDir } as any,
+      pushStatic: (entry: LogEntry) => { captured += `${entry.content}\n` },
+    })
+    await handleSlashCommand(ctxAmb)
+    assert.ok(captured.includes('匹配多个会话'), `歧义前缀应提示: ${captured}`)
+
+    // 未找到
+    captured = ''
+    const ctxNone = makeCtx({
+      parts: ['/resume', 'nonexistent-xyz'],
+      agent: { ...makeCtx().agent, cwd: tempDir } as any,
+      pushStatic: (entry: LogEntry) => { captured += `${entry.content}\n` },
+    })
+    await handleSlashCommand(ctxNone)
+    assert.ok(captured.includes('未找到匹配会话'), `未找到应提示: ${captured}`)
+  })
+
+  it('切换失败时不破坏当前会话', async () => {
+    let captured = ''
+    const ctx = makeCtx({
+      parts: ['/resume', '1'],
+      currentSessionId: 'current-session-id',
+      agent: { ...makeCtx().agent, cwd: tempDir } as any,
+      pushStatic: (entry: LogEntry) => { captured += `${entry.content}\n` },
+      onSessionSwitch: () => ({ ok: false, error: '磁盘快照已损坏' }),
+    })
+    await handleSlashCommand(ctx)
+    assert.ok(captured.includes('切换失败: 磁盘快照已损坏'), `应输出失败原因: ${captured}`)
+    assert.equal(ctx.currentSessionId, 'current-session-id', '当前会话 ID 不变')
   })
 })
 
@@ -1115,6 +1285,51 @@ describe('/compact 轻量替身容忍（mock 无 config.promptEngine）', () => 
       mock.timers.reset()
     }
   })
+
+  it('forwards free-text focus to budget compaction and explains micro fallback limits', async () => {
+    const entries: string[] = []
+    let focus: string | undefined
+    const session = { getMessages: () => [], replaceMessages: () => {}, recordCompactEvent: () => {}, getTurnCount: () => 0,
+      getCompactEvents: () => [], getContextLedger: () => undefined, getCacheHitRate: () => 0 }
+    const base = makeCtx().agent as any
+    const agent = { ...base,
+      config: { ...base.config, promptEngine: { getRequestBudgetPolicy: () => ({ windowTokens: 128_000 }) } },
+      compactContext: async (value?: string) => { focus = value; return true },
+    }
+    for (const [args, expected] of [
+      [['保留认证复现', '和未完成测试'], '保留认证复现 和未完成测试'],
+      [['llm', 'migration', 'details'], 'llm migration details'],
+      [['status', 'of', 'pending', 'tests'], 'status of pending tests'],
+      [['--', 'status'], 'status'],
+    ] as const) {
+      await handleSlashCommand(makeCtx({ agent, session: session as any, parts: ['/compact', ...args], pushStatic: entry => entries.push(entry.content) }))
+      await new Promise(resolve => setImmediate(resolve))
+      assert.equal(focus, expected)
+    }
+
+    entries.length = 0
+    mock.timers.enable({ apis: ['setTimeout'] })
+    try {
+      await handleSlashCommand(makeCtx({ session: session as any, parts: ['/compact', '保留认证复现'], pushStatic: entry => entries.push(entry.content) }))
+      assert.ok(entries.some(entry => entry.includes('无法应用你指定的摘要重点') && entry.includes('Micro-compacting')),
+        `无预算策略应明确提示重点未应用: ${entries.join(' | ')}`)
+      mock.timers.tick(8000)
+    } finally { mock.timers.reset() }
+  })
+
+  it('/compact status remains read-only', async () => {
+    let calls = 0
+    const entries: string[] = []
+    const base = makeCtx().agent as any
+    const agent = { ...base, config: { ...base.config, promptEngine: { getRequestBudgetPolicy: () => ({ windowTokens: 128_000 }) } },
+      compactContext: async () => { calls++; return true } }
+    const session = { getMessages: () => [{ role: 'user', content: 'keep me' }], getCompactEvents: () => [],
+      getContextLedger: () => undefined }
+    await handleSlashCommand(makeCtx({ agent, session: session as any, parts: ['/compact', 'status'], pushStatic: entry => entries.push(entry.content) }))
+    assert.equal(calls, 0)
+    assert.equal(entries.length, 1)
+    assert.match(entries[0]!, /Compact status/)
+  })
 })
 
 describe('/effort', () => {
@@ -1804,25 +2019,41 @@ describe('/handoff 命令', () => {
 
   it('注入 submitToAgent 时提交交接指令并登记归档任务', async () => {
     let submitted = ''
-    let registered: { src: string; dest: string } | undefined
+    let registered: { sourcePath: string; destinationPath: string } | undefined
     const ctx = makeCtx({
       parts: ['/handoff', '重点记下缓存方案'],
       submitToAgent: (prompt: string) => { submitted = prompt },
-      onHandoffStart: (src: string, dest: string) => { registered = { src, dest } },
+      onHandoffStart: (request) => { registered = request },
       currentSessionId: 'sess-handoff-001',
     })
     const handled = await handleSlashCommand(ctx)
     assert.equal(handled, true)
-    // 交接指令指向项目内 .rivet/HANDOFF.md（工作区内免审批）。
-    // 期望与实现同源构造：实现把 projectPath 归一为正斜杠（跨平台输出恒为 POSIX 形态），
-    // 期望同步归一——Windows 上裸 join 会产出 \cwd\... 形态，不归一即失配（#189 族）。
-    const handoffPath = join('/cwd', '.rivet', 'HANDOFF.md').replaceAll('\\', '/')
-    assert.ok(submitted.includes(handoffPath), `prompt 含项目内路径: ${submitted.slice(0, 200)}`)
+    assert.match(submitted, /\.rivet\/HANDOFF-sess-handoff-001-[0-9a-f-]+\.md/i)
+    assert.match(submitted, /绝不能覆盖/)
     assert.match(submitted, /## 任务目标/)
     assert.match(submitted, /用户补充指示：重点记下缓存方案/)
     // 归档任务：src=项目内文档，dest=会话目录 <id>.handoff.md
-    assert.equal(registered?.src, handoffPath)
-    assert.ok(registered?.dest.includes('sess-handoff-001.handoff.md'), `dest: ${registered?.dest}`)
+    assert.ok(registered?.sourcePath && submitted.includes(registered.sourcePath.replaceAll('\\', '/')))
+    assert.ok(registered?.destinationPath.includes('sess-handoff-001.handoff.md'), `dest: ${registered?.destinationPath}`)
+  })
+
+  it('两个交错会话的 handler 注册不同完整身份源文件', async () => {
+    const requests: Array<{ sourcePath: string; destinationPath: string }> = []
+    for (const sessionId of ['session-full-id-A', 'session-full-id-B']) {
+      await handleSlashCommand(makeCtx({
+        parts: ['/handoff'],
+        submitToAgent: () => {},
+        onHandoffStart: request => requests.push(request),
+        currentSessionId: sessionId,
+      }))
+    }
+    assert.equal(requests.length, 2)
+    assert.notEqual(requests[0]!.sourcePath, requests[1]!.sourcePath)
+    for (const [index, sessionId] of ['session-full-id-A', 'session-full-id-B'].entries()) {
+      assert.ok(requests[index]!.sourcePath.includes(sessionId), `源路径保留完整 sessionId：${requests[index]!.sourcePath}`)
+      assert.match(requests[index]!.sourcePath, /[0-9a-f-]{36}\.md$/i, '请求源文件带 UUID requestId')
+      assert.ok(requests[index]!.destinationPath.endsWith(`${sessionId}.handoff.md`))
+    }
   })
 })
 

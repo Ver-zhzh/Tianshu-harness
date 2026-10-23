@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "version": "3.36.0",
+  "date": "2026-10-22",
+  "fullNotesUrl": "https://github.com/huiliyi37/Tianshu-harness/releases/tag/v3.36.0",
+  "locales": {
+    "zh": {
+      "title": "Node 安全运行时闸门与 2026-10 安全公告修复",
+      "highlights": [
+        "CLI 与桌面 sidecar 新增启动时运行时闸门：Node 低于 24.22.1（或 26.x 低于 26.12.1）直接拒绝启动并给出升级指引——升级前请先切换运行时（nvm use / fnm use）。",
+        "运行时 pin 升级到 24.22.1，修复 2026-10-21 安全公告的 10 个漏洞，含 Brotli 解码器越界写入（远程可达 RCE）、dns.resolve NUL 域名截断、TLS 主机名校验绕过等 4 个高危。",
+        "桌面打包版缺失 bundled Node 时不再回退系统 Node；安装脚本与 Linux/Windows 构建链同步版本闸门，ABI 不变（137），better-sqlite3 无需重编。"
+      ]
+    },
+    "en": {
+      "title": "Node security runtime gate and the 2026-10 security advisory fixes",
+      "highlights": [
+        "The CLI and desktop sidecar now refuse to start on Node older than 24.22.1 (or 26.x older than 26.12.1) with a clear upgrade hint — switch your runtime (nvm use / fnm use) before upgrading.",
+        "Runtime pin raised to 24.22.1, covering all 10 CVEs from the 2026-10-21 Node advisory, including the Brotli decoder out-of-bounds write (remotely reachable RCE), the dns.resolve NUL truncation, and the TLS hostname verification bypasses.",
+        "Packaged desktop builds no longer fall back to a system Node when the bundled runtime is missing; installer scripts and the Linux/Windows build chains enforce the same version gate. ABI is unchanged (137), so better-sqlite3 needs no rebuild."
+      ]
+    }
+  }
+}

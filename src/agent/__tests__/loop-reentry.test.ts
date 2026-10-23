@@ -29,7 +29,16 @@ test('run claims the instance synchronously before awaiting idle compaction', as
     // 晚到注册闸门（3.14alpha 71872ed9f 回流）：run() 在 drain 前还要查
     // toolRegistry 的异步注册清零状态。裸 fake 缺 config，同款「fake 过时」形态
     // （补前的症状一样：cancelCalls 恒为 0）——最小桩即可，与本轮不变量无关。
-    config: { toolRegistry: { awaitExtraRegistrations: async () => {} } },
+    // 用户输入边界（beginUserInstructionsInput）接入：run() 在首个 await 之前
+    // 用 promptEngine 开启本轮 user 输入统计，结束时调返回的收尾函数。config
+    // 里 promptEngine 是必填依赖（AgentConfig，见 loop-types.ts），裸 fake 缺它
+    // → 同款「fake 过时」红：run() 抛出 beginUserInstructionsInput of undefined，
+    // _running 看起来像没被同步置位。桩成「开→关」一次性收尾即可，与本轮
+    // 不变量（守卫先于首个 await 被占）无关。
+    config: {
+      toolRegistry: { awaitExtraRegistrations: async () => {} },
+      promptEngine: { beginUserInstructionsInput: () => () => {} },
+    },
     // 改道卡候选登记迁进 DecisionShiftDelivery（2026-10-10 0c8840f60）：run() 在
     // 首个 await 前 discard 上一轮候选。裸 fake 缺这个字段 → 同款「fake 过时」红
     // （症状与前三次一致：_running 看着像没被同步置位）。最小桩，与本轮不变量无关。

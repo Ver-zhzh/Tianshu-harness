@@ -8,8 +8,9 @@ import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
+import { assertSecureNodeVersion } from '../src/platform/node-security-policy.ts'
 
-export const DEFAULT_NODE_VERSION = '24.18.0'
+export const DEFAULT_NODE_VERSION = '24.22.1'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -20,6 +21,7 @@ export async function fetchNodeRuntime(outputRoot) {
   if (!['darwin', 'linux', 'win32'].includes(platform) || !['arm64', 'x64'].includes(arch)) throw new Error(`Unsupported Node target: ${platform}-${arch}`)
   const version = process.env.NODE_VERSION || DEFAULT_NODE_VERSION
   if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error(`Invalid NODE_VERSION: ${version}`)
+  assertSecureNodeVersion(version, 'bundled CLI runtime')
   const token = platform === 'win32' ? 'win' : platform
   const root = outputRoot || (existsSync(join(repoRoot, 'desktop'))
     ? join(repoRoot, 'desktop', 'src-tauri', 'resources', 'node')

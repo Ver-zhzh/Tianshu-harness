@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { ToolCallName, ToolNameVocabulary, ToolNameProtocolError } from '../tool-call-name.js'
-import { classifyApiError } from '../error-classifier.js'
+import { classifyApiError, errorCategoryLabel, errorRecoveryGuidance } from '../error-classifier.js'
 
 for (const [label, parts, declared, expected] of [
   ['full echoes', ['bash', 'bash', 'bash'], ['bash'], 'bash'],
@@ -12,6 +12,8 @@ for (const [label, parts, declared, expected] of [
   ['empty fragments', ['', 'bash', '', 'bash'], ['bash'], 'bash'],
   ['repeated genuine fragments', ['a', 'a'], ['aa'], 'aa'],
   ['double underscore', ['mcp_', '_repo'], ['mcp__repo'], 'mcp__repo'],
+  ['gateway function namespace', ['functions.', 'apply_patch'], ['apply_patch'], 'apply_patch'],
+  ['gateway full namespace', ['functions.apply_patch'], ['apply_patch'], 'apply_patch'],
 ] as const) {
   test(`tool name: ${label}`, () => {
     const name = new ToolCallName(new ToolNameVocabulary(declared))
@@ -26,6 +28,7 @@ for (const [parts, declared, reason] of [
   [['a', 'a'], ['a', 'aa'], 'ambiguous'],
   [['ba'], ['bash'], 'incomplete'],
   [['read_', '_file'], ['read_file'], 'unknown'],
+  [['functions.unknown'], ['apply_patch'], 'unknown'],
 ] as const) {
   test(`tool name rejects ${parts.join('/')} as ${reason}`, () => {
     const name = new ToolCallName(new ToolNameVocabulary(declared))
@@ -57,6 +60,9 @@ test('name errors do not enter automatic retry or provider failover', () => {
     const classified = classifyApiError(new ToolNameProtocolError(reason))
     assert.equal(classified.retryable, false)
     assert.equal(classified.maxRetries, 0)
-    assert.equal(classified.category, 'client_error')
+    assert.equal(classified.category, 'tool_protocol')
+    assert.equal(errorCategoryLabel(classified.category), '工具调用协议异常')
+    assert.doesNotMatch(errorRecoveryGuidance(new ToolNameProtocolError(reason)), /baseUrl|请求被拒/)
+    assert.match(errorRecoveryGuidance(new ToolNameProtocolError(reason), 'desktop'), /工具未执行/)
   }
 })

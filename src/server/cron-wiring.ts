@@ -96,7 +96,7 @@ export class CronWiring {
   async start(): Promise<CronWiringStatus> {
     if (this.lock) {
       const lock = this.lock
-      lock.acquire()
+      await lock.acquire()
       // issue #290：先接管写门，再暴露任何写入口。非锁主的 scheduler 不得
       // add/remove/update/persist——它没 loadSchedule，内存表恒空，落盘就是
       // 整表覆写锁主的任务定义。

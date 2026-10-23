@@ -21,6 +21,8 @@ import type { ToolDefinition } from '../api/types.js'
 
 interface Section {
   name: string
+  /** Exact separator before this section (the template uses both one and two newlines). */
+  separatorBefore: string
   /** Full text including the enclosing tags. */
   full: string
   /** Inner text, tags excluded. */
@@ -46,12 +48,18 @@ export interface ParsedPrompt {
  */
 export function parsePrompt(src: string): ParsedPrompt {
   const sections: Section[] = []
+  let cursor = 0
   for (const m of src.matchAll(TOP_LEVEL_RE)) {
-    sections.push({ name: m[1]!, full: m[0]!, body: m[2]! })
+    const separatorBefore = src.slice(cursor, m.index)
+    if (sections.length === 0 ? separatorBefore !== '' : !/^\n{1,2}$/.test(separatorBefore)) {
+      throw new Error('[static-subagent] top-level parse is lossy: unexpected text between sections. BASE_PROMPT shape changed.')
+    }
+    sections.push({ name: m[1]!, separatorBefore, full: m[0]!, body: m[2]! })
+    cursor = m.index! + m[0]!.length
   }
-  const rejoined = sections.map(s => s.full).join('\n\n')
-  const trailer = src.slice(rejoined.length)
-  if (rejoined + trailer !== src || !/^\s*$/.test(trailer)) {
+  const rejoined = sections.map(s => s.separatorBefore + s.full).join('')
+  const trailer = src.slice(cursor)
+  if (sections.length === 0 || rejoined + trailer !== src || !/^\s*$/.test(trailer)) {
     throw new Error(
       `[static-subagent] top-level parse is lossy: parsed ${sections.length} sections ` +
       `covering ${rejoined.length} of ${src.length} chars. BASE_PROMPT shape changed.`,
@@ -69,7 +77,7 @@ export function splitTopLevelSections(src: string): Section[] {
 export function splitRules(rulesBody: string): Section[] {
   const out: Section[] = []
   for (const m of rulesBody.matchAll(RULE_RE)) {
-    out.push({ name: m[1]!, full: m[0]!, body: m[2]! })
+    out.push({ name: m[1]!, separatorBefore: '', full: m[0]!, body: m[2]! })
   }
   if (out.length === 0) throw new Error('[static-subagent] no <rule> entries found in <rules>')
   return out
@@ -249,15 +257,37 @@ function assertAnchorsResolve(lines: readonly string[], gates: readonly ToolLine
   }
 }
 
-function trimToolUsage(section: Section, policy: SubagentPromptPolicy): string {
+function trimToolUsage(section: Section, tools: ReadonlySet<string>): string {
   const lines = section.body.split('\n')
   assertAnchorsResolve(lines, TOOL_USAGE_LINE_GATES, section.name)
   const kept = lines.filter(line => {
     const gate = TOOL_USAGE_LINE_GATES.find(g => line.startsWith(g.prefix))
-    return !gate || gate.anyOf.some(t => policy.tools.has(t))
+    return !gate || gate.anyOf.some(t => tools.has(t))
   })
   if (kept.length === lines.length) return section.full
   return `<${section.name}>\n${kept.join('\n')}\n</${section.name}>`
+}
+
+/**
+ * Apply the same `<tool-usage>` line gates to a full prompt (main-controller path).
+ *
+ * 主控提示词此前无条件点名 apply_patch/ast_edit 等 EXTENDED 工具，而主控可见集由
+ * `gateToolDefinitions` 摘掉了它们——模型照着提示词发起调用，解析层只看到「未声明的
+ * 工具名」→ ToolNameProtocolError(unknown)，整次响应作废（真实事故形态）。
+ * 与子代理共用一份门控表，两处不再各写一份漂移。
+ *
+ * 不变时逐字返回入参（前缀缓存只认字节）。
+ */
+export function trimPromptToolUsage(base: string, tools: ReadonlySet<string>): string {
+  const { sections, trailer } = parsePrompt(base)
+  let changed = false
+  const rebuilt = sections.map(section => {
+    if (section.name !== 'tool-usage') return section.separatorBefore + section.full
+    const full = trimToolUsage(section, tools)
+    if (full !== section.full) changed = true
+    return section.separatorBefore + full
+  }).join('')
+  return changed ? rebuilt + trailer : base
 }
 
 function trimIdentity(section: Section): string {
@@ -296,19 +326,19 @@ function composeRules(section: Section, policy: SubagentPromptPolicy): string | 
 export function buildSubagentSystemPrompt(base: string, tools: ToolDefinition[]): string {
   const policy = derivePolicy(tools)
   const { sections, trailer } = parsePrompt(base)
-  const out: string[] = []
+  const out: Array<{ section: Section; text: string }> = []
   for (const section of sections) {
     if (DROP_SECTIONS.has(section.name)) continue
     const gate = TOOL_GATED_SECTIONS.get(section.name)
     if (gate && !gate(policy.tools)) continue
     if (section.name === 'rules') {
       const rules = composeRules(section, policy)
-      if (rules) out.push(rules)
+      if (rules) out.push({ section, text: rules })
       continue
     }
-    if (section.name === 'tool-usage') { out.push(trimToolUsage(section, policy)); continue }
-    if (section.name === 'identity') { out.push(trimIdentity(section)); continue }
-    out.push(section.full)
+    if (section.name === 'tool-usage') { out.push({ section, text: trimToolUsage(section, policy.tools) }); continue }
+    if (section.name === 'identity') { out.push({ section, text: trimIdentity(section) }); continue }
+    out.push({ section, text: section.full })
   }
-  return out.join('\n\n') + trailer
+  return out.map(({ section, text }, index) => (index === 0 ? '' : section.separatorBefore) + text).join('') + trailer
 }

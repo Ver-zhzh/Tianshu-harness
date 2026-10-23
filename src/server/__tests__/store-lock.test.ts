@@ -271,6 +271,103 @@ describe('StoreLock — 接管判定（pid_dead / pid_reused 两条判据）', (
   })
 })
 
+describe('StoreLock — hostname 变化后按稳定机器身份判定（issue #532）', () => {
+  beforeEach(() => {
+    TEST_DIR = mkdtempSync(join(tmpdir(), 'store-lock-hostname-'))
+    LOCK_PATH = join(TEST_DIR, 'desktop', 'sidecar.lock')
+  })
+  afterEach(() => rmSync(TEST_DIR, { recursive: true, force: true }))
+
+  it('同一机器的旧 hostname + 死 PID 可回收', async () => {
+    writeHolder(holderInfo({ pid: DEAD_PID, hostname: 'before.local', machineId: 'machine-A' } as Partial<LockInfo>))
+    const lock = new StoreLock({ lockPath: LOCK_PATH, machineId: async () => 'machine-A', hostname: () => 'after.local' } as ConstructorParameters<typeof StoreLock>[0])
+    const state = await lock.acquire({ retryWindowMs: 0 })
+    assert.equal(state.status, 'stale_recovered', JSON.stringify(state))
+    lock.release()
+  })
+
+  it('不同机器的死 PID 仍视为远端占用，不用本机 PID 推断远端生死', async () => {
+    writeHolder(holderInfo({ pid: DEAD_PID, hostname: 'other.local', machineId: 'machine-B' } as Partial<LockInfo>))
+    const lock = new StoreLock({ lockPath: LOCK_PATH, machineId: async () => 'machine-A', hostname: () => 'here.local' } as ConstructorParameters<typeof StoreLock>[0])
+    const blocked = contended(await lock.acquire({ retryWindowMs: 0 }))
+    assert.equal(blocked.reason, 'cross_host')
+    assert.equal((blocked.holder as typeof blocked.holder & { localPidUnreliable?: boolean }).localPidUnreliable, true)
+    assert.equal(readHolder().ownerToken, 'other-sidecar')
+  })
+
+  it('机器标识不同即使 hostname 相同也不能回收', async () => {
+    writeHolder(holderInfo({ pid: DEAD_PID, hostname: 'shared-name', machineId: 'machine-B' }))
+    const lock = new StoreLock({ lockPath: LOCK_PATH, machineId: async () => 'machine-A', hostname: () => 'shared-name' })
+    assert.equal(contended(await lock.acquire({ retryWindowMs: 0 })).reason, 'cross_host')
+  })
+
+  it('已有机器标识但本机探测失败时不能退回相同 hostname', async () => {
+    writeHolder(holderInfo({ pid: DEAD_PID, hostname: 'shared-name', machineId: 'machine-A' }))
+    const lock = new StoreLock({ lockPath: LOCK_PATH, machineId: async () => undefined, hostname: () => 'shared-name' })
+    const blocked = contended(await lock.acquire({ retryWindowMs: 0 }))
+    assert.equal(blocked.reason, 'cross_host')
+    assert.equal(blocked.holder.localPidUnreliable, true)
+  })
+
+  it('持锁期间 hostname 翻转不误报丢锁，release 仍清理自己的锁', async () => {
+    let host = 'before.local'
+    const lock = new StoreLock({ lockPath: LOCK_PATH, machineId: async () => 'machine-A', hostname: () => host, heartbeatIntervalMs: 20 })
+    assert.equal((await lock.acquire({ retryWindowMs: 0 })).status, 'acquired')
+    host = 'after.local'
+    await sleep(75)
+    assert.equal(lock.isOwner(), true)
+    lock.release()
+    assert.equal(existsSync(LOCK_PATH), false)
+  })
+
+  it('同机死进程留下旧版定时任务锁且 hostname 翻转，不再误报 legacy_writer', async () => {
+    mkdirSync(dirname(LOCK_PATH), { recursive: true })
+    writeFileSync(join(dirname(LOCK_PATH), LEGACY_WRITER_LOCK_FILENAME), JSON.stringify(holderInfo({ pid: DEAD_PID, hostname: 'before.local', machineId: 'machine-A' })), 'utf8')
+    const lock = new StoreLock({ lockPath: LOCK_PATH, machineId: async () => 'machine-A', hostname: () => 'after.local' })
+    assert.equal((await lock.acquire({ retryWindowMs: 0 })).status, 'acquired')
+    lock.release()
+  })
+
+  it('旧调度锁 PID 数字碰巧等于本进程但机器不同，不能当成自己的锁跳过', async () => {
+    mkdirSync(dirname(LOCK_PATH), { recursive: true })
+    writeFileSync(join(dirname(LOCK_PATH), LEGACY_WRITER_LOCK_FILENAME), JSON.stringify(holderInfo({ pid: process.pid, hostname: 'remote.local', machineId: 'machine-B' })), 'utf8')
+    const lock = new StoreLock({ lockPath: LOCK_PATH, machineId: async () => 'machine-A', hostname: () => 'here.local' })
+    assert.equal(contended(await lock.acquire({ retryWindowMs: 0 })).reason, 'legacy_writer')
+    assert.equal(existsSync(LOCK_PATH), false)
+  })
+
+  it('无机器标识的旧锁只在明确确认且 PID 确死时恢复', async () => {
+    writeHolder(holderInfo({ pid: DEAD_PID, hostname: 'before.local', ownerToken: undefined, machineId: undefined }))
+    const options = { lockPath: LOCK_PATH, machineId: async () => 'machine-A', hostname: () => 'after.local' }
+    assert.equal(contended(await new StoreLock(options).acquire({ retryWindowMs: 0 })).reason, 'cross_host')
+    const confirmed = new StoreLock({ ...options, allowLegacyHostRecovery: true })
+    assert.equal((await confirmed.acquire({ retryWindowMs: 0 })).status, 'stale_recovered')
+    confirmed.release()
+  })
+
+  it('一次性环境开关在真实构造入口生效，退出本次测试后恢复环境', async () => {
+    writeHolder(holderInfo({ pid: DEAD_PID, hostname: 'before.local', ownerToken: undefined, machineId: undefined }))
+    const previous = process.env.RIVET_STORE_LOCK_RECOVER_LEGACY_HOST
+    process.env.RIVET_STORE_LOCK_RECOVER_LEGACY_HOST = '1'
+    try {
+      const lock = new StoreLock({ lockPath: LOCK_PATH, machineId: async () => 'machine-A', hostname: () => 'after.local' })
+      assert.equal((await lock.acquire({ retryWindowMs: 0 })).status, 'stale_recovered')
+      lock.release()
+    } finally {
+      if (previous === undefined) delete process.env.RIVET_STORE_LOCK_RECOVER_LEGACY_HOST
+      else process.env.RIVET_STORE_LOCK_RECOVER_LEGACY_HOST = previous
+    }
+  })
+
+  it('明确确认也不抢仍存活的旧锁', async () => {
+    writeHolder(holderInfo({ pid: process.pid, hostname: 'before.local', ownerToken: undefined, machineId: undefined }))
+    const lock = new StoreLock({ lockPath: LOCK_PATH, machineId: async () => 'machine-A', hostname: () => 'after.local', allowLegacyHostRecovery: true,
+      processStartMs: async () => readHolder().startedAtMs })
+    assert.equal(contended(await lock.acquire({ retryWindowMs: 0 })).reason, 'cross_host')
+    assert.equal(readHolder().pid, process.pid)
+  })
+})
+
 describe('StoreLock — reclaim 前重读完整锁身份', () => {
   beforeEach(() => {
     TEST_DIR = mkdtempSync(join(tmpdir(), 'store-lock-reclaim-'))
@@ -664,5 +761,226 @@ describe('health 快照输出锁占用者与初始化错误', () => {
     assert.ok(!('initializationError' in body))
     assert.ok(!('storeLockHolder' in body))
     assert.equal(body.readiness, 'ready')
+  })
+})
+
+// ─── issue #530 — 僵尸持有者：pid_dead/pid_reused 双失效后的第三判据 ─────────
+
+describe('StoreLock — 僵尸持有者可接管（issue #530）', () => {
+  // macOS 上僵尸的 kill(0) 成功（isPidAlive=true）且保留真实 lstart（pid_reused 不命中），
+  // 两条既有判据全失效 → 必须靠 zombie 探测判死，否则新进程永远收不回锁（issue 现场）。
+  const Z_START_MS = Date.now() - 3_600_000
+  const matchingStart = async (pid: number) => (pid === process.ppid ? Z_START_MS + 800 : undefined)
+
+  beforeEach(() => {
+    TEST_DIR = mkdtempSync(join(tmpdir(), 'store-lock-zombie-'))
+    LOCK_PATH = join(TEST_DIR, 'desktop', 'sidecar.lock')
+    mkdirSync(dirname(LOCK_PATH), { recursive: true })
+  })
+
+  afterEach(() => {
+    rmSync(TEST_DIR, { recursive: true, force: true })
+  })
+
+  // 还原缺陷即红：撤掉 holderGoneReason 的 zombie 判死 → 持有者（活 pid + 启动时间匹配）
+  // 被判 pid_alive contended → 变红。
+  it('持有者是僵尸（活 PID + 启动时间匹配）→ stale_recovered', async () => {
+    writeHolder(holderInfo({ pid: process.ppid, ownerToken: 'zombie-owner', startedAtMs: Z_START_MS }))
+    const lock = new StoreLock({
+      lockPath: LOCK_PATH,
+      processStartMs: matchingStart,
+      isProcessZombie: async () => true,
+    })
+
+    const state = await lock.acquire({ retryWindowMs: 0 })
+
+    assert.equal(state.status, 'stale_recovered', JSON.stringify(state))
+    assert.equal(readHolder().ownerToken, lock.getState()?.status === 'stale_recovered' ? readHolder().ownerToken : '', '锁已重建为自己身份')
+  })
+
+  // 探测失败/未知 → 不判死（安全方向：误判占用可恢复，误判失效=双写）
+  it('zombie 探测返回 false/失败 → 保留占用', async () => {
+    writeHolder(holderInfo({ pid: process.ppid, ownerToken: 'live-owner', startedAtMs: Z_START_MS }))
+    const lock = new StoreLock({
+      lockPath: LOCK_PATH,
+      processStartMs: matchingStart,
+      isProcessZombie: async () => false,
+    })
+    const state = await lock.acquire({ retryWindowMs: 0 })
+    assert.equal(contended(state).reason, 'pid_alive')
+    assert.equal(readHolder().ownerToken, 'live-owner', '不得删除占用中的锁')
+  })
+
+  // 还原缺陷即红：撤掉 legacyWriter 的 zombie 判死 → 僵尸 legacy 持有者被判活 → legacy_writer 卡死 → 变红。
+  it('僵尸持有定时任务锁（legacy）→ 不拦（issue 现场的 contended: legacy_writer 卡死）', async () => {
+    const legacyPath = join(TEST_DIR, 'desktop', LEGACY_WRITER_LOCK_FILENAME)
+    writeFileSync(legacyPath, JSON.stringify({
+      pid: process.ppid,
+      acquiredAt: new Date(Z_START_MS).toISOString(),
+      hostname: osHostname(),
+      startedAtMs: Z_START_MS,
+    }, null, 2), 'utf-8')
+
+    const lock = new StoreLock({
+      lockPath: LOCK_PATH,
+      processStartMs: matchingStart,
+      isProcessZombie: async () => true,
+    })
+    const state = await lock.acquire({ retryWindowMs: 0 })
+
+    assert.equal(state.status, 'acquired', JSON.stringify(state))
+    lock.release()
+  })
+
+  // 端到端（不 mock 中间层）：真僵尸 + 真锁文件 + 默认探测链（kill(0) → ps lstart → ps state）
+  it('真僵尸持有锁 → 默认探测链接管（darwin/linux）', {
+    skip: process.platform === 'win32' ? 'Windows 无僵尸概念' : false,
+  }, async () => {
+    const { spawn } = await import('node:child_process')
+    const script = '$| = 1; my $pid = fork(); if ($pid == 0) { exit 0 } else { print "$pid\\n"; sleep 30 }'
+    const child = spawn('perl', ['-e', script])
+    const zombiePid = await new Promise<number>((resolve, reject) => {
+      let out = ''
+      const timer = setTimeout(() => reject(new Error('zombie pid not printed within 5s')), 5_000)
+      child.stdout.on('data', (chunk: Buffer) => {
+        out += chunk.toString()
+        const m = out.match(/(\d+)/)
+        if (m) { clearTimeout(timer); resolve(Number(m[1])) }
+      })
+      child.on('error', (error) => { clearTimeout(timer); reject(error) })
+    })
+
+    try {
+      // 前置断言：kill(0) 对僵尸成功（issue 盲区前提），且拿真实 lstart 做锁记录
+      assert.doesNotThrow(() => process.kill(zombiePid, 0), '僵尸的 kill(0) 应成功')
+      const realStartMs = await probeProcessStartMs(zombiePid)
+      assert.ok(realStartMs !== undefined, '僵尸应有真实启动时间（ps lstart）')
+
+      writeHolder(holderInfo({ pid: zombiePid, ownerToken: 'zombie-e2e', startedAtMs: realStartMs }))
+      const lock = new StoreLock({ lockPath: LOCK_PATH })
+      const state = await lock.acquire({ retryWindowMs: 0 })
+
+      assert.equal(state.status, 'stale_recovered', JSON.stringify(state))
+    } finally {
+      child.kill()
+    }
+  })
+})
+
+// ─── issue #530 — 心跳丢锁容错：读失败 ≠ 被抢 ─────────────────────────────
+
+describe('StoreLock — 心跳读失败容错（issue #530 次根因）', () => {
+  beforeEach(() => {
+    TEST_DIR = mkdtempSync(join(tmpdir(), 'store-lock-hb-'))
+    LOCK_PATH = join(TEST_DIR, 'desktop', 'sidecar.lock')
+    mkdirSync(dirname(LOCK_PATH), { recursive: true })
+  })
+
+  afterEach(() => {
+    rmSync(TEST_DIR, { recursive: true, force: true })
+  })
+
+  // 还原缺陷即红：撤掉「读失败连续 N 次才判丢」容错 → 损坏瞬间（第一次 tick）就
+  // markLockLost → 「1 个周期内不触发」断言变红。60ms 周期，3 次=180ms。
+  it('锁文件损坏（读失败）→ 连续 3 个 tick 才判丢锁，不一次读失败就弃库', async () => {
+    const lock = new StoreLock({ lockPath: LOCK_PATH, heartbeatIntervalMs: 60 })
+    assert.equal((await lock.acquire({ retryWindowMs: 0 })).status, 'acquired')
+
+    let lostCount = 0
+    lock.onLockLost(() => { lostCount++ })
+
+    // 磁盘抖动/半截写模拟：文件还在，但内容不可解析（readLockFile 把 IO/解析异常归 null）
+    writeFileSync(LOCK_PATH, '{corrupted-half-write', 'utf-8')
+
+    await sleep(120) // 2 个 tick 内
+    assert.equal(lostCount, 0, `读失败 1-2 次不得判丢锁（防瞬时磁盘抖动误杀）：lostCount=${lostCount}`)
+
+    await sleep(240) // 到第 5 个 tick
+    assert.ok(lostCount >= 1, `连续读失败 3 次（180ms）后必须判丢锁：lostCount=${lostCount}`)
+  })
+
+  // 还原缺陷即红：删除是「真丢」，必须走快速路径立即判丢——若误并入 N 次容错，
+  // 「2 个周期内触发」的上界断言变红。
+  it('锁文件被删除（真丢）→ 下一 tick 立即判丢锁，不等容错次数', async () => {
+    const lock = new StoreLock({ lockPath: LOCK_PATH, heartbeatIntervalMs: 60 })
+    assert.equal((await lock.acquire({ retryWindowMs: 0 })).status, 'acquired')
+
+    let lostCount = 0
+    lock.onLockLost(() => { lostCount++ })
+
+    rmSync(LOCK_PATH, { force: true })
+
+    await sleep(150) // 2.5 个 tick 内
+    assert.ok(lostCount >= 1, `锁文件删除必须立即判丢：lostCount=${lostCount}`)
+  })
+
+  // 回归护栏：身份不符（真被接管）仍是立即判丢（既有语义不许被容错放宽）。
+  it('锁被外部接管（身份不符）→ 下一 tick 立即判丢锁', async () => {
+    const lock = new StoreLock({ lockPath: LOCK_PATH, heartbeatIntervalMs: 60 })
+    assert.equal((await lock.acquire({ retryWindowMs: 0 })).status, 'acquired')
+
+    let lostCount = 0
+    lock.onLockLost(() => { lostCount++ })
+
+    writeHolder(holderInfo({ pid: process.ppid, ownerToken: 'takeover', startedAtMs: Date.now() - 2_000 }))
+
+    await sleep(150)
+    assert.ok(lostCount >= 1, `被接管必须立即判丢：lostCount=${lostCount}`)
+  })
+})
+
+// ─── issue #530 — 丢锁收口残留清理（防御纵深） ─────────────────────────────
+//
+// 说明（RED 可行性）：缺陷形态是「进程 exit(2) 后锁文件残留」——进程退出即测试终止，
+// 无法在单进程内红灯复现。按测试纪律降级为「收口行为契约用例」：钉住 serve.ts
+// 丢锁收口（onLockLost → storeLock.release()）的行为语义——IO 恢复后仍属本进程的
+// 残留锁必须被清掉；被接管的锁绝不误删（后者由既有用例「丢锁后 release 不再删除
+// 别人的锁」覆盖）。替代验证：serve-store-lock-lost.test.ts 端到端回归。
+
+describe('StoreLock — 丢锁收口清残（issue #530 行为契约）', () => {
+  beforeEach(() => {
+    TEST_DIR = mkdtempSync(join(tmpdir(), 'store-lock-cleanup-'))
+    LOCK_PATH = join(TEST_DIR, 'desktop', 'sidecar.lock')
+    mkdirSync(dirname(LOCK_PATH), { recursive: true })
+  })
+
+  afterEach(() => {
+    rmSync(TEST_DIR, { recursive: true, force: true })
+  })
+
+  it('误判丢锁后锁内容恢复为本进程身份 → 收口 release 清掉残留锁', async () => {
+    const lock = new StoreLock({ lockPath: LOCK_PATH, heartbeatIntervalMs: 60 })
+    assert.equal((await lock.acquire({ retryWindowMs: 0 })).status, 'acquired')
+    // 备份本进程身份 JSON（acquire 时写入的完整四元组）
+    const ownIdentityJson = readFileSync(LOCK_PATH, 'utf-8')
+
+    let lostCount = 0
+    lock.onLockLost(() => { lostCount++ })
+
+    // 磁盘抖动模拟：内容损坏 → 连续读失败累计判丢
+    writeFileSync(LOCK_PATH, '{corrupted', 'utf-8')
+    await sleep(300)
+    assert.ok(lostCount >= 1, `读失败累计应判丢锁：lostCount=${lostCount}`)
+
+    // IO 恢复：磁盘上的锁仍是本进程身份（issue 现场的残留形态）。
+    // serve.ts 丢锁收口在宿主回调/exit(2) 前调 release()——此处模拟该调用点。
+    writeFileSync(LOCK_PATH, ownIdentityJson, 'utf-8')
+    lock.release()
+
+    assert.equal(existsSync(LOCK_PATH), false, '仍属本进程的残留锁必须被清掉，否则新进程永久卡死（issue #530）')
+  })
+
+  it('被接管丢锁后收口 release 不误删接管者的锁（回归护栏）', async () => {
+    const lock = new StoreLock({ lockPath: LOCK_PATH, heartbeatIntervalMs: 60 })
+    assert.equal((await lock.acquire({ retryWindowMs: 0 })).status, 'acquired')
+
+    let lostCount = 0
+    lock.onLockLost(() => { lostCount++ })
+    writeHolder(holderInfo({ pid: process.ppid, ownerToken: 'takeover', startedAtMs: Date.now() - 2_000 }))
+    await sleep(150)
+    assert.ok(lostCount >= 1)
+
+    lock.release()
+    assert.equal(readHolder().ownerToken, 'takeover', '收口 release 必须放过接管者的锁')
   })
 })

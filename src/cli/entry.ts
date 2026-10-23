@@ -24,6 +24,7 @@ import { applyEarlyCliEnv, routeEarlyCli } from './early-routing.js'
 import { HELP_TEXT } from './help-text.js'
 import { currentInstallVersion, formatVersionLine } from './version.js'
 import { rivetHome } from '../config/paths.js'
+import { requireSecureNodeRuntime } from '../platform/node-security-policy.js'
 
 /**
  * 编译缓存目录：<RIVET_HOME>/cli/compile-cache/<安装版本>。Node 只按内容哈希
@@ -78,6 +79,8 @@ if (args.includes('--version') || args.includes('-v')) {
   process.stdout.write(formatVersionLine())
   process.exit(0)
 }
+
+requireSecureNodeRuntime()
 
 // 早期副作用（--profile / --trust / --untrust）必须先于任何配置读取；
 // routeEarlyCli 命中时在这里结束，未命中时 main.ts 会幂等地再执行一次。

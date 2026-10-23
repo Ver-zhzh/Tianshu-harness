@@ -143,6 +143,7 @@ export function withExecutionContinuity(client: StreamClient, options: Continuit
   let terminal: Error | undefined
   let unlocked = !proof
   let restoredFirstRequest = false
+  let restoredWireTransformVersion: string | undefined
   let abortedContinuation = false
   let lastProtectedSignal: AbortSignal | undefined
   let sessionId = options.sessionId
@@ -204,6 +205,7 @@ export function withExecutionContinuity(client: StreamClient, options: Continuit
         // 2026-10-14 起只对 worker（singleAttempt）放宽；2026-10-16 推广到主会话：
         // 打断标记改写已发送消息把会话砖死，resume 也救不回（revit-4213e2/2026101609914b2d8192）。
         restoredFirstRequest = true
+        restoredWireTransformVersion = prior.wireTransformVersion
       }
       if (prop === 'setReasoningEffort' || prop === 'setThinking' || prop === 'restoreExecutionOptions') return (...args: unknown[]) => {
         if (!unlocked) return
@@ -290,7 +292,11 @@ export function withExecutionContinuity(client: StreamClient, options: Continuit
               // history from a stale persisted wire proof. An explicit negative
               // native proof remains a hard rejection (forged tail/layout or a
               // historical rewrite); only absent native evidence can rebase.
-              const restoreRebase = restoredFirstRequest && !validation && at !== -1 && nativeContinues === undefined
+              // 但 transport 基线元数据（wireTransformVersion）缺失的 legacy 证明
+              // 不许 rebase：wire 证明无法归一化重建，必须走显式修复事务
+              // （issue #500 不变量「mismatched transport baseline 不得静默替换」）。
+              const wireBaselineRestorable = restoredWireTransformVersion !== undefined
+              const restoreRebase = restoredFirstRequest && !validation && at !== -1 && nativeContinues === undefined && wireBaselineRestorable
               if (nativeContinues === false) throw new ContinuationPrefixError(at === -1 ? 'native_evidence' : at, baseline, next)
               const lastUserAt = baseline.messages.reduce((last, message, index) => message.role === 'user' ? index : last, -1)
               // An unchanged source AND render cannot justify a resume/abort rewrite.

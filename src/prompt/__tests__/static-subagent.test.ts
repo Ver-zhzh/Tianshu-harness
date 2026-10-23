@@ -107,7 +107,11 @@ import type { ToolDefinition } from '../../api/types.js'
 // 静态前缀有意变更；新提示词可能冷启动缓存，运行中的冻结快照不在此迁移。
 // 2026-10-19: bounded obstacle recovery and neutral attribution intentionally
 // replace the old isolated-green => external-pollution shortcut.
-const MAIN_PROMPT_SHA256 = '2922178915a08e10647fab35db7348cdbf1c4ac99fe6d477df7e8ece938f8b43'
+// 2026-10-22 接管收尾：金哈希对齐当前主提示词输出（bd1b80…）。此前某笔变更了
+// buildSystemPrompt({tools: []}) 的输出但漏更新本守卫（HEAD 上即红，worktree 基线
+// 实测 HEAD sha 已是 bd1b80…）；本次按守卫设计显式确认新基线——代价同前几笔：
+// 所有会话前缀缓存冷启动一次。
+const MAIN_PROMPT_SHA256 = 'bd1b80499336f9c807d5d527e3d06d2bb13da9949a2d841632baef0396a9ad93'
 
 function tool(name: string): ToolDefinition {
   return { name, description: '', input_schema: { type: 'object', properties: {} } } as ToolDefinition
@@ -115,6 +119,12 @@ function tool(name: string): ToolDefinition {
 
 const READ_ONLY_TOOLS = ['read_file', 'grep', 'glob', 'repo_map'].map(tool)
 const WRITE_TOOLS = [...READ_ONLY_TOOLS, ...['edit_file', 'write_file', 'run_tests'].map(tool)]
+/** 提示词里被门控点名的全部工具——齐了才逐字等于 BASE_PROMPT。 */
+const ALL_MENTIONED_TOOLS = [...READ_ONLY_TOOLS, ...[
+  'edit_file', 'write_file', 'hash_edit', 'apply_patch', 'ast_edit', 'bash',
+  'grep', 'ast_grep', 'web_fetch', 'web_search', 'browser_debug', 'computer_use',
+  'request_path_access', 'delegate_task', 'delegate_batch', 'read_section',
+].map(tool)]
 
 function sectionNames(prompt: string): string[] {
   return parsePrompt(prompt).sections.map(s => s.name)
@@ -131,8 +141,8 @@ describe('main-controller prompt is untouched', () => {
     assert.equal(createHash('sha256').update(prompt).digest('hex'), MAIN_PROMPT_SHA256)
   })
 
-  it('buildSystemPrompt without audience returns BASE_PROMPT identically', () => {
-    assert.equal(buildSystemPrompt({ tools: WRITE_TOOLS }), MAIN_BASE_PROMPT)
+  it('buildSystemPrompt without audience returns BASE_PROMPT identically when every mentioned tool exists', () => {
+    assert.equal(buildSystemPrompt({ tools: ALL_MENTIONED_TOOLS }), MAIN_BASE_PROMPT)
   })
 
   it('model calibration still appends to the full prompt', () => {
@@ -142,10 +152,40 @@ describe('main-controller prompt is untouched', () => {
   })
 })
 
+describe('main-controller prompt follows the actual tool catalog', () => {
+  // 事故形态：默认 minimal 档主控没有 apply_patch（EXTENDED 被门控摘掉），
+  // 提示词却仍命令「改用 apply_patch」→ 模型照做 → 未声明工具名 → unknown。
+  const minimalTools = ['read_file', 'write_file', 'edit_file', 'bash', 'grep', 'glob', 'repo_map', 'run_tests', 'todo', 'deliver_task'].map(tool)
+
+  it('never names a tool the session does not provide', () => {
+    const prompt = buildSystemPrompt({ tools: minimalTools })
+    assert.ok(!prompt.includes('apply_patch'), 'apply_patch 未提供时不得再被点名')
+    assert.ok(!prompt.includes('read_section'), 'read_section 未提供时不得再被点名')
+    assert.ok(!prompt.includes('ast_edit'), 'ast_edit 未提供时不得再被点名')
+  })
+
+  it('redirects edit guidance to tools that do exist', () => {
+    const prompt = buildSystemPrompt({ tools: minimalTools })
+    assert.match(prompt, /edit_file/)
+    assert.match(prompt, /write_file（整文件重写）/)
+    assert.match(prompt, /read_file 的 offset\/limit/)
+  })
+
+  it('stays byte-identical when the catalog has every mentioned tool', () => {
+    assert.equal(buildSystemPrompt({ tools: ALL_MENTIONED_TOOLS }), MAIN_BASE_PROMPT)
+  })
+})
+
 describe('prompt parsing is lossless', () => {
   it('sections plus trailer reproduce BASE_PROMPT byte-for-byte', () => {
     const { sections, trailer } = parsePrompt(MAIN_BASE_PROMPT)
-    assert.equal(sections.map(s => s.full).join('\n\n') + trailer, MAIN_BASE_PROMPT)
+    assert.equal(sections.map(s => s.separatorBefore + s.full).join('') + trailer, MAIN_BASE_PROMPT)
+  })
+
+  it('preserves a single-newline top-level boundary', () => {
+    const source = '<a>\nx\n</a>\n<b>\ny\n</b>\n'
+    const { sections, trailer } = parsePrompt(source)
+    assert.equal(sections.map(s => s.separatorBefore + s.full).join('') + trailer, source)
   })
 
   it('throws rather than silently dropping text when the shape is unknown', () => {

@@ -18,6 +18,9 @@ set -euo pipefail
 # 并发构建互斥（2026-10-17 事故：mac/windows 两腿并发共享 desktop/src-tauri/resources/
 # 与 dist/，Windows 安装包收进了 darwin-arm64 运行时）。mkdir 原子、跨平台，无需 flock。
 LOCK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.rivet/build.lock.d"  # 绝对路径：脚本中途 cd 后 trap 仍指对位置
+# .rivet/ 是运行期目录，不保证存在于任意检出/隔离 fixture——父目录先自建，
+# 但锁本身仍用非 -p 的 mkdir 保住原子互斥语义。
+mkdir -p "$(dirname "$LOCK_DIR")"
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
   echo "✗ 另一个平台构建正在进行（$LOCK_DIR 存在）——构建共享 resources/，并发必交叉污染" >&2
   exit 1
@@ -121,9 +124,9 @@ echo "=== 拷贝源码 → 容器卷（排除 .git/target/node_modules/release/o
 # "Error response from daemon: lsetxattr ... com.apple.provenance: no such file or
 # directory" 整次拷贝失败。防御：入向改用容器端 GNU tar 解包（tar 流本身不含
 # macOS xattr，GNU tar 也不会尝试还原），彻底绕开 docker cp 的 xattr 语义。
-COPYFILE_DISABLE=1 tar cf - --exclude=.git \
+COPYFILE_DISABLE=1 tar cf - --no-xattrs --exclude=.git \
   --exclude='src-tauri/target' --exclude='desktop/src-tauri/target' \
-  --exclude='*/node_modules' --exclude=release --exclude=out \
+  --exclude='./node_modules' --exclude='*/node_modules' --exclude=release --exclude=out \
   --exclude='._*' . \
   | docker exec -i "$CID" tar -x -C /work --no-same-owner
 # 清理已落盘的 AppleDouble 残留（tar 行为或 Docker 卷写入都可能带入）

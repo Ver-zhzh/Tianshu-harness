@@ -1,28 +1,28 @@
 {
   "schemaVersion": 1,
   "revision": 1,
-  "version": "3.35.0",
-  "publishedAt": "2026-10-21T17:36:00.516Z",
-  "notes": "v3.35.0——表格原生预览（xlsx/xls/ods 免 LibreOffice）与文档附件路径句柄（agent 直读原文件）；图片全链格式归一（bmp 转 PNG，坏图不再毒化会话）；TUI 全高视口（摘要钉顶、缩放贴底）。详见 release 说明。",
-  "releaseNotesUrl": "https://github.com/huiliyi37/Tianshu-harness/releases/download/v3.35.0/release-notes.json",
+  "version": "3.36.0",
+  "publishedAt": "2026-10-22T06:21:42.078Z",
+  "notes": "v3.36.0——Node 安全运行时闸门：低于 24.22.1 / 26.12.1 的运行时将拒绝启动；修复 2026-10-21 安全公告的 10 个漏洞（含 Brotli 越界写入等 4 个高危）。升级前请先切换 Node。",
+  "releaseNotesUrl": "https://github.com/huiliyi37/Tianshu-harness/releases/download/v3.36.0/release-notes.json",
   "artifacts": [
     {
       "platform": "darwin-aarch64",
       "purpose": "update",
-      "fileName": "Tianshu_3.35.0_aarch64.app.tar.gz",
-      "size": 190078406,
-      "sha256": "0ed8f336922cbbefd137fc1a6156e4915352fcb898720492768e56eca952dfdc",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRaDZmcFdBUytLR2RUMWFFTlVaOGlKaDlnMFUvMlAxNnluNUlBenZSNEw5aTI4QXBKcWNZR0srOGlHMFB1a3hzdkJVMzdJdlRlSVpnaHJsZnJxUWtublJJeUh5RnlSSFFrPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyNTk5ODAyCWZpbGU6VGlhbnNodS5hcHAudGFyLmd6ClV1U3k1Y2RoVkJsWTEvMmlzenlCd1FnSmhVWDFHTlprS3BEc0dKSys3eDkrWnlQRWliQTZsK3RBZEx1azIybUZtaEgwRGdXWFYrTm9HaXZUV2QzM0NnPT0K",
+      "fileName": "Tianshu_3.36.0_aarch64.app.tar.gz",
+      "size": 249602453,
+      "sha256": "68ea1544f715b6d34989a3050b6f5294c3c0f6d1fee199c6d749bdb8965c8918",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRaDZmcFdBUytLR1JnMWlrQ3FCd2tFdjV5QTJKSFhrWldUclpzQVR2ajRnNEpsbXVrK2tQS2RtTmFid3NSdW9PVlZ0U2MwVWRRZW0wNmg4UUJzZXJOanBUV284TFRlUHc4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyNjQ4MDk0CWZpbGU6VGlhbnNodS5hcHAudGFyLmd6CkJpQVBSYWNaZWt6Vnc2OS9ad1dVL3FTZGo1U0l0Mi82WmQ0T09abjZwMy9xMHhrR3hPR0t4ckUyTlA2THpTdkNVT0RIZUdxVVJUeFRWYndsK0ptSER3PT0K",
       "sources": {
         "github": {
-          "url": "https://github.com/huiliyi37/Tianshu-harness/releases/download/v3.35.0/Tianshu_3.35.0_aarch64.app.tar.gz",
+          "url": "https://github.com/huiliyi37/Tianshu-harness/releases/download/v3.36.0/Tianshu_3.36.0_aarch64.app.tar.gz",
           "verified": true,
-          "verifiedAt": "2026-10-22T00:00:49.559Z",
-          "size": 190078406,
-          "sha256": "0ed8f336922cbbefd137fc1a6156e4915352fcb898720492768e56eca952dfdc"
+          "verifiedAt": "2026-10-22T08:17:21.135Z",
+          "size": 249602453,
+          "sha256": "68ea1544f715b6d34989a3050b6f5294c3c0f6d1fee199c6d749bdb8965c8918"
         },
         "oss": {
-          "url": "https://tianshu-update.oss-cn-hangzhou.aliyuncs.com/tianshu/v3.35.0/Tianshu_3.35.0_aarch64.app.tar.gz",
+          "url": "https://tianshu-update.oss-cn-hangzhou.aliyuncs.com/tianshu/v3.36.0/Tianshu_3.36.0_aarch64.app.tar.gz",
           "verified": false
         }
       }
@@ -30,19 +30,19 @@
     {
       "platform": "darwin-aarch64",
       "purpose": "install",
-      "fileName": "Tianshu_3.35.0_aarch64.dmg",
-      "size": 188532264,
-      "sha256": "0d0d84296c1ac2d0fd43633263ae8141bf0954afef3eed2ce3771ce57f545715",
+      "fileName": "Tianshu_3.36.0_aarch64.dmg",
+      "size": 247992628,
+      "sha256": "8fbd823cb13e04b81f47f89d086e0526d92312fd086f56a66024a5f0494e7b0c",
       "sources": {
         "github": {
-          "url": "https://github.com/huiliyi37/Tianshu-harness/releases/download/v3.35.0/Tianshu_3.35.0_aarch64.dmg",
+          "url": "https://github.com/huiliyi37/Tianshu-harness/releases/download/v3.36.0/Tianshu_3.36.0_aarch64.dmg",
           "verified": true,
-          "verifiedAt": "2026-10-22T00:00:49.712Z",
-          "size": 188532264,
-          "sha256": "0d0d84296c1ac2d0fd43633263ae8141bf0954afef3eed2ce3771ce57f545715"
+          "verifiedAt": "2026-10-22T08:17:21.321Z",
+          "size": 247992628,
+          "sha256": "8fbd823cb13e04b81f47f89d086e0526d92312fd086f56a66024a5f0494e7b0c"
         },
         "oss": {
-          "url": "https://tianshu-update.oss-cn-hangzhou.aliyuncs.com/tianshu/v3.35.0/Tianshu_3.35.0_aarch64.dmg",
+          "url": "https://tianshu-update.oss-cn-hangzhou.aliyuncs.com/tianshu/v3.36.0/Tianshu_3.36.0_aarch64.dmg",
           "verified": false
         }
       }
@@ -50,20 +50,20 @@
     {
       "platform": "darwin-x86_64",
       "purpose": "update",
-      "fileName": "Tianshu_3.35.0_x64.app.tar.gz",
-      "size": 192700727,
-      "sha256": "92c25cac98abaff784946d3748e31bb3b99b5893effb4858c5e6f14ba39b821a",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRaDZmcFdBUytLR1RZcDRXV1Z4V24yWmh0dDZCY2dxaDkzUGNjV0RLbEVZNjI4ckQ3b3RlZWhLUldVZnV4VGlwN3J1b0lZOUhKTVJrbDhVMjlibllkUjVSOW51NFpWTkFJPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyNjAwMjE5CWZpbGU6VGlhbnNodS5hcHAudGFyLmd6CnBzNnhtdi9DdW9TM0tUNnhqYTdpaVE0TWxDRkNtNjZqeTdDcEgweFUzaDFTRUQwRHhsSFpQdHNwWWEvQ2tHbmlEUEJ2QTVFdllEQjEzd3pHOFBlTkRBPT0K",
+      "fileName": "Tianshu_3.36.0_x64.app.tar.gz",
+      "size": 252348412,
+      "sha256": "fd53412c9ccbffa36ffa21ba022b09bdfdee87091733f97c0e1a94ca6e68e47d",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRaDZmcFdBUytLR2FzbTJnY0I5cUh1dW40Z0hncytjYjU5RnVRRXNHK2xxRzdUTzJqR21uVkFLWEdvOEdJTytYdTErakRmV2ZnQ0VzRGJTZ3ljcmtDb3piWFQ1VDVqb2dRPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyNjQ4NjYzCWZpbGU6VGlhbnNodS5hcHAudGFyLmd6Cm1NTWNKRVlqM3M0UisxUzg5cUNFQi9iWVRzc0Jzd1FjaDJLSlYzdk9QdE4vU2hheFgrTHpyN3pvaWllTWVyaVQxYlkwQnVzK3ExUVo1WU82OVJaWUJRPT0K",
       "sources": {
         "github": {
-          "url": "https://github.com/huiliyi37/Tianshu-harness/releases/download/v3.35.0/Tianshu_3.35.0_x64.app.tar.gz",
+          "url": "https://github.com/huiliyi37/Tianshu-harness/releases/download/v3.36.0/Tianshu_3.36.0_x64.app.tar.gz",
           "verified": true,
-          "verifiedAt": "2026-10-22T00:00:49.873Z",
-          "size": 192700727,
-          "sha256": "92c25cac98abaff784946d3748e31bb3b99b5893effb4858c5e6f14ba39b821a"
+          "verifiedAt": "2026-10-22T08:17:21.498Z",
+          "size": 252348412,
+          "sha256": "fd53412c9ccbffa36ffa21ba022b09bdfdee87091733f97c0e1a94ca6e68e47d"
         },
         "oss": {
-          "url": "https://tianshu-update.oss-cn-hangzhou.aliyuncs.com/tianshu/v3.35.0/Tianshu_3.35.0_x64.app.tar.gz",
+          "url": "https://tianshu-update.oss-cn-hangzhou.aliyuncs.com/tianshu/v3.36.0/Tianshu_3.36.0_x64.app.tar.gz",
           "verified": false
         }
       }
@@ -71,19 +71,19 @@
     {
       "platform": "darwin-x86_64",
       "purpose": "install",
-      "fileName": "Tianshu_3.35.0_x64.dmg",
-      "size": 191553806,
-      "sha256": "efbc568f1e4b626aa8c5fdcbabb6263dc8b8e6deb765e650051b90d5d1dee391",
+      "fileName": "Tianshu_3.36.0_x64.dmg",
+      "size": 251189449,
+      "sha256": "e64b1b0e1fdc4d330b36ddf71543ca0f55fb5639db6eec36288fd0a89c395b1f",
       "sources": {
         "github": {
-          "url": "https://github.com/huiliyi37/Tianshu-harness/releases/download/v3.35.0/Tianshu_3.35.0_x64.dmg",
+          "url": "https://github.com/huiliyi37/Tianshu-harness/releases/download/v3.36.0/Tianshu_3.36.0_x64.dmg",
           "verified": true,
-          "verifiedAt": "2026-10-22T00:00:50.023Z",
-          "size": 191553806,
-          "sha256": "efbc568f1e4b626aa8c5fdcbabb6263dc8b8e6deb765e650051b90d5d1dee391"
+          "verifiedAt": "2026-10-22T08:17:21.672Z",
+          "size": 251189449,
+          "sha256": "e64b1b0e1fdc4d330b36ddf71543ca0f55fb5639db6eec36288fd0a89c395b1f"
         },
         "oss": {
-          "url": "https://tianshu-update.oss-cn-hangzhou.aliyuncs.com/tianshu/v3.35.0/Tianshu_3.35.0_x64.dmg",
+          "url": "https://tianshu-update.oss-cn-hangzhou.aliyuncs.com/tianshu/v3.36.0/Tianshu_3.36.0_x64.dmg",
           "verified": false
         }
       }
@@ -91,20 +91,20 @@
     {
       "platform": "windows-x86_64",
       "purpose": "update",
-      "fileName": "Tianshu_3.35.0_x64-setup.exe",
-      "size": 431139889,
-      "sha256": "dfbd2873b8b6aa29873c84197ffdc10433f01e88350ba7fd4b346bb70058138b",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRaDZmcFdBUytLR1dHUkhJbkJOd1JwR3c4My9sZVptVkxHdTNZOHlQejd5bUY3eEFjb2pKUVhFay96Q0lSajhoVFJFSzQ5Mmk3emhVbnY2Tnp2Y3RqZ0xBTVdEM2MwQkFVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyNjA0MTU5CWZpbGU6VGlhbnNodV8zLjM1LjBfeDY0LXNldHVwLmV4ZQpLR0FzdlpWZFlkdUJDRlhJRDZCWlRGbW5oT0VCdkhGNGlsTzFXdVc5dTk0a1VXaElxSFRMcEd2YTBBKzA4dms2RnczZzN5ZE45aTVBdGJkOVBuTWVBZz09Cg==",
+      "fileName": "Tianshu_3.36.0_x64-setup.exe",
+      "size": 431798494,
+      "sha256": "0ce00a80acb63d0227dc3c2c9ec4640a9d393e4072b0d743c1687d2b5c2849dd",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRaDZmcFdBUytLR1FWelZidjFXMmN0WXdHN3ZCcnFwRXUvdGJwdXdUMEJMeFNsQWZHVVFMWUJmOEhxdkZacEVqYVlDWUNSRkF1N0N5T2g3VHZYVy8zMkJMYXY3UDlrYncwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyNjUwMDkzCWZpbGU6VGlhbnNodV8zLjM2LjBfeDY0LXNldHVwLmV4ZQozOVR3S3d0ZGc5bnNJZ0NDMG1iVEpOdGphR0d3ZlVTblA0b2pxOUFISlJNN2J1Wlc3RFNKMlFvSGxrQXpoUTJHN0FFM2FicVN0RkNGSG8zdU9OWHhDQT09Cg==",
       "sources": {
         "github": {
-          "url": "https://github.com/huiliyi37/Tianshu-harness/releases/download/v3.35.0/Tianshu_3.35.0_x64-setup.exe",
+          "url": "https://github.com/huiliyi37/Tianshu-harness/releases/download/v3.36.0/Tianshu_3.36.0_x64-setup.exe",
           "verified": true,
-          "verifiedAt": "2026-10-22T00:00:50.347Z",
-          "size": 431139889,
-          "sha256": "dfbd2873b8b6aa29873c84197ffdc10433f01e88350ba7fd4b346bb70058138b"
+          "verifiedAt": "2026-10-22T08:17:21.976Z",
+          "size": 431798494,
+          "sha256": "0ce00a80acb63d0227dc3c2c9ec4640a9d393e4072b0d743c1687d2b5c2849dd"
         },
         "oss": {
-          "url": "https://tianshu-update.oss-cn-hangzhou.aliyuncs.com/tianshu/v3.35.0/Tianshu_3.35.0_x64-setup.exe",
+          "url": "https://tianshu-update.oss-cn-hangzhou.aliyuncs.com/tianshu/v3.36.0/Tianshu_3.36.0_x64-setup.exe",
           "verified": false
         }
       }
@@ -112,19 +112,19 @@
     {
       "platform": "windows-x86_64",
       "purpose": "install",
-      "fileName": "Tianshu_3.35.0_x64-setup.exe",
-      "size": 431139889,
-      "sha256": "dfbd2873b8b6aa29873c84197ffdc10433f01e88350ba7fd4b346bb70058138b",
+      "fileName": "Tianshu_3.36.0_x64-setup.exe",
+      "size": 431798494,
+      "sha256": "0ce00a80acb63d0227dc3c2c9ec4640a9d393e4072b0d743c1687d2b5c2849dd",
       "sources": {
         "github": {
-          "url": "https://github.com/huiliyi37/Tianshu-harness/releases/download/v3.35.0/Tianshu_3.35.0_x64-setup.exe",
+          "url": "https://github.com/huiliyi37/Tianshu-harness/releases/download/v3.36.0/Tianshu_3.36.0_x64-setup.exe",
           "verified": true,
-          "verifiedAt": "2026-10-22T00:00:50.635Z",
-          "size": 431139889,
-          "sha256": "dfbd2873b8b6aa29873c84197ffdc10433f01e88350ba7fd4b346bb70058138b"
+          "verifiedAt": "2026-10-22T08:17:22.276Z",
+          "size": 431798494,
+          "sha256": "0ce00a80acb63d0227dc3c2c9ec4640a9d393e4072b0d743c1687d2b5c2849dd"
         },
         "oss": {
-          "url": "https://tianshu-update.oss-cn-hangzhou.aliyuncs.com/tianshu/v3.35.0/Tianshu_3.35.0_x64-setup.exe",
+          "url": "https://tianshu-update.oss-cn-hangzhou.aliyuncs.com/tianshu/v3.36.0/Tianshu_3.36.0_x64-setup.exe",
           "verified": false
         }
       }

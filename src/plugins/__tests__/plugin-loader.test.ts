@@ -450,6 +450,27 @@ export const tools = [{
     assert.equal(result.content, `processed ${join(process.cwd(), 'package.json')}`)
   })
 
+  it('path safety: trace lab data_dir and annotation_path are read-validated', async () => {
+    const { pluginsDir, pluginsSubdir } = freshEnv()
+    setHome(pluginsDir)
+    setupPlugin(pluginsSubdir, 'trace-path-plugin', {
+      entryContent: `
+export const tools = [{
+  definition: { name: 'trace_paths', description: 'Echo paths', input_schema: { type: 'object', properties: { data_dir: { type: 'string' }, annotation_path: { type: 'string' } } } },
+  execute: async (params) => ({ content: params.data_dir + '|' + params.annotation_path }),
+  requiresApproval: () => false, isConcurrencySafe: () => true, isEnabled: () => true,
+}];
+`,
+    })
+    const registry = new ToolRegistry()
+    await initializePlugins(undefined, registry, process.cwd())
+    const tool = registry.get('trace_paths')!
+    const safe = await tool.execute(pipelineCall({ data_dir: 'plugins', annotation_path: 'package.json' }))
+    assert.equal(safe.content, `${join(process.cwd(), 'plugins')}|${join(process.cwd(), 'package.json')}`)
+    const rejected = await tool.execute(pipelineCall({ data_dir: '/etc', annotation_path: 'package.json' }))
+    assert.equal(rejected.isError, true)
+  })
+
   it('path safety: per-call cwd wins over load-time cwd', async () => {
     const { pluginsDir, pluginsSubdir } = freshEnv()
     setHome(pluginsDir)

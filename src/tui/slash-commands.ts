@@ -14,6 +14,7 @@ import { getCapsuleByStar, listCapsuleStars } from '../agent/seed-capsule-store.
 import { microCompactOai, estimateOaiTokens } from '../compact/micro.js'
 import { rollbackToCheckpoint, getRollbackPreview } from '../agent/checkpoint.js'
 import { runResumePreflightOai } from '../context/resume-preflight.js'
+import { resolveSessionRef, formatSessionRefMessage } from '../agent/session-ref.js'
 import { trustProject, untrustProject, isProjectTrusted, listTrustedProjects, isTrustPromptDismissed } from '../config/project-trust.js'
 import { getTheme, setTheme, getActiveThemeName, THEMES, listCustomThemes } from './theme.js'
 import {
@@ -42,7 +43,7 @@ import { formatVolatilePayloadReport } from '../context/payload-diagnostic.js'
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { isFilesystemMetadata } from '../utils/file-metadata.js'
 import { basename, join, resolve } from 'node:path'
-import { buildHandoffPrompt } from './handoff.js'
+import { buildHandoffPrompt, createHandoffRequest } from './handoff.js'
 import { ensureVerifyDeclaration, renderRivetMdStack, upsertStackSection } from '../bootstrap/verify-declaration.js'
 import { exportsDir } from '../config/paths.js'
 import { listPlans, rejectPlan, resolvePlanOptionLabel, resolvePlanRef, stripCopiedTitleSuffix } from '../plan/plan-store.js'
@@ -104,6 +105,7 @@ import type { ChangeSet } from '../agent/review-discipline.js'
 import { HELP_TEXT } from './format/help-text.js'
 import { contractModels } from '../config/contract-models.js'
 import { handleEffortSlash, resolveActiveEffortChoices } from './effort-slash.js'
+import { GOAL_HELP_TEXT, normalizeGoalCriteriaArgs, parseGoalArgs, resolveGoalInvocation } from './goal-command.js'
 
 /**
  * Framework-agnostic mutable ref. Structurally compatible with React's
@@ -117,6 +119,7 @@ export interface MutableRefLike<T> {
 
 export interface SlashHandlerContext {
   parts: string[]
+  rawInput?: string
   config: Config
   agent: AgentLoop
   session: SessionContext
@@ -190,9 +193,8 @@ export interface SlashHandlerContext {
   /** Submit a prompt directly to the agent pipeline, bypassing slash routing.
    *  Used by commands that need to transform the input before sending (e.g. /goal). */
   submitToAgent?: (prompt: string) => void
-  /** /handoff 发起时登记归档任务（src=项目内 .rivet/HANDOFF.md，dest=会话目录 <id>.handoff.md）——
-   *  TUI 在交接 turn 完成后把 src 拷贝归档到 dest（loadPrevHandoff 注入管线认 dest）。 */
-  onHandoffStart?: (src: string, dest: string) => void
+  /** /handoff 发起时登记唯一源文件与会话归档目标。 */
+  onHandoffStart?: (request: import('./handoff.js').HandoffRequest) => void
   /** Mutable ref to the current GoalTracker. Set when /goal creates a tracker;
    *  read by deliver_task's B1Context for auto-review gating. */
   goalTrackerRef?: { current: import('../agent/goal-tracker.js').GoalTracker | null }
@@ -215,48 +217,6 @@ async function collectDirtyFiles(cwd: string): Promise<string[]> {
   } catch {
     return []
   }
-}
-
-interface ParsedGoalArgs {
-  goalText: string
-  maxIterations?: number
-  wallClockMs?: number
-  criteria?: string[]
-}
-
-/** 解析 /goal 命令行参数，支持 --max N / --budget M / --criteria '["..."]'
- *  其余部分合并为目标描述。 */
-function parseGoalArgs(parts: string[]): ParsedGoalArgs {
-  const out: ParsedGoalArgs = { goalText: '' }
-  const textParts: string[] = []
-  for (let i = 0; i < parts.length; i++) {
-    const p = parts[i]!
-    if (p === '--max' && parts[i + 1]) {
-      const n = Number(parts[i + 1])
-      if (Number.isInteger(n) && n > 0) out.maxIterations = n
-      i++
-      continue
-    }
-    if (p === '--budget' && parts[i + 1]) {
-      const n = Number(parts[i + 1])
-      if (!Number.isNaN(n) && n > 0) out.wallClockMs = Math.round(n * 60000)
-      i++
-      continue
-    }
-    if (p === '--criteria' && parts[i + 1]) {
-      try {
-        const parsed = JSON.parse(parts[i + 1]!)
-        if (Array.isArray(parsed) && parsed.every((c: unknown) => typeof c === 'string')) {
-          out.criteria = parsed as string[]
-        }
-      } catch { /* ignore invalid JSON */ }
-      i++
-      continue
-    }
-    textParts.push(p)
-  }
-  out.goalText = textParts.join(' ').trim()
-  return out
 }
 
 /** 把 GoalTracker 状态持久化到会话目录（best-effort）。 */
@@ -589,9 +549,12 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
     handler(ctx) {
       const { parts, pushStatic, setIsStreaming } = ctx
       const cmd = parts[0]!.toLowerCase()
-      const sub = parts[1]?.toLowerCase()
+      const literalFocus = parts[1] === '--'
+      const sub = !literalFocus && parts.length === 2 ? parts[1]?.toLowerCase() : undefined
       const msgs = ctx.session.getMessages()
       const beforeTokens = estimateOaiTokens(msgs)
+      const legacyStrategy = sub === 'llm' || sub === 'deep'
+      const focus = legacyStrategy ? '' : parts.slice(literalFocus ? 2 : 1).join(' ').trim()
 
       if (sub === 'status') {
         const compacts = ctx.session.getCompactEvents()
@@ -610,7 +573,7 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
       // 320bdd0ee 同款的替身容忍；生产装配 promptEngine 恒在，行为不变）。
       if (ctx.agent.config?.promptEngine?.getRequestBudgetPolicy?.()) {
         setIsStreaming(true)
-        void ctx.agent.compactContext().then(changed => {
+        void ctx.agent.compactContext(focus || undefined).then(changed => {
           pushStatic(createLogEntry({ type: 'system', content: changed ? '上下文已整理，原始内容已归档。' : '未替换历史：当前没有足够的安全回收空间。' }))
         }, error => { pushStatic(createLogEntry({ type: 'system', content: String(error) })) }).finally(() => setIsStreaming(false))
         return true
@@ -624,7 +587,9 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
       }
 
       // micro compact (default)
-      pushStatic(createLogEntry({ type: 'system', content: 'Micro-compacting conversation...' }))
+      pushStatic(createLogEntry({ type: 'system', content: focus
+        ? 'Micro-compacting conversation... 当前没有预算摘要策略，无法应用你指定的摘要重点；本次仅执行 micro compact。'
+        : 'Micro-compacting conversation...' }))
       const { messages: compacted, truncated } = microCompactOai(msgs, ctx.maxTokens, beforeTokens, new Map())
       ctx.session.replaceMessages(compacted)
       // 轻量测试替身没有 config.promptEngine——没有引擎也没有 appendix 基线可
@@ -1052,13 +1017,12 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
         return true
       }
       // 项目内 .rivet/ 在工作区内（auto-safe 免审批）；会话目录在工作区外会触发路径审批。
-      // projectPath 归一正斜杠：它进入给模型的交接指令文本与归档登记（跨平台期望
-      // 一致；Windows 的 join 产出反斜杠会泄漏平台分隔符——fs 两种都接受）。
-      const projectPath = join(agent.cwd, '.rivet', 'HANDOFF.md').replaceAll('\\', '/')
+      // projectPath 归一正斜杠供提示词使用；底层文件系统也接受 Windows 原生路径。
       const archivePath = join(getSessionDir(agent.cwd), `${ctx.currentSessionId}.handoff.md`)
-      // 归档登记：交接 turn 完成后 TUI 把项目内文档拷贝归档到会话目录
-      // （loadPrevHandoff 注入管线认 <id>.handoff.md）。
-      ctx.onHandoffStart?.(projectPath, archivePath)
+      const request = createHandoffRequest(agent.cwd, ctx.currentSessionId, archivePath)
+      const projectPath = request.sourcePath.replaceAll('\\', '/')
+      // 归档登记：完成、中断或失败时均清理 pending 并给出归档结果。
+      ctx.onHandoffStart?.({ ...request, sourcePath: projectPath })
       ctx.submitToAgent(buildHandoffPrompt(projectPath, note))
       return true
     },
@@ -1247,8 +1211,18 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
     immediate: true,
     async handler(ctx) {
       const { parts, pushStatic, setIsStreaming } = ctx
-      const parsed = parseGoalArgs(parts.slice(1))
-      if (!parsed.goalText) {
+      const invocation = resolveGoalInvocation(parts.slice(1))
+      if (invocation.kind === 'help') {
+        pushStatic(createLogEntry({ type: 'system', content: GOAL_HELP_TEXT }))
+        setIsStreaming(false)
+        return true
+      }
+      if (invocation.kind === 'control') {
+        return await handleSlashCommand({ ...ctx, parts: [invocation.command, ...invocation.args] })
+      }
+      const parsed = parseGoalArgs(invocation.args, invocation.literal)
+      if (parsed.error) {
+        pushStatic(createLogEntry({ type: 'system', content: parsed.error, isError: true }))
         pushStatic(createLogEntry({ type: 'system', content: 'Usage: /goal <task description> [--max N] [--budget M] [--criteria \'["..."]\']\nSets a persistent goal. The agent will auto-continue until the goal is achieved or the budget is exhausted.\nCancel with /goal-cancel.' }))
         setIsStreaming(false)
         return true
@@ -1330,7 +1304,7 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
   {
     name: '/goal-resume',
     immediate: true,
-    handler(ctx) {
+    async handler(ctx) {
       const { parts, pushStatic, setIsStreaming } = ctx
       const cmd = parts[0]!.toLowerCase()
       const tracker = ctx.goalTrackerRef?.current
@@ -1346,6 +1320,7 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
         return true
       }
       tracker.resume('user')
+      await persistGoalState(ctx, tracker)
       const wallElapsed = Math.round(tracker.getWallClockElapsedMs() / 1000)
       pushStatic(createLogEntry({ type: 'system', content: `▶️ Goal resumed: ${tracker.getGoal()}\nIteration: ${tracker.getIteration()}/${tracker.getMaxIterations()} | ⏱ ${wallElapsed}s elapsed.` }))
       ctx.submitToAgent?.(`[GOAL RESUME] 继续执行目标: ${tracker.getGoal()}`)
@@ -1355,7 +1330,7 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
   {
     name: '/goal-criteria',
     immediate: true,
-    handler(ctx) {
+    async handler(ctx) {
       const { parts, pushStatic, setIsStreaming } = ctx
       const cmd = parts[0]!.toLowerCase()
       const tracker = ctx.goalTrackerRef?.current
@@ -1367,7 +1342,7 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
       const subCmd = parts[1]?.toLowerCase()
       if (subCmd === 'set') {
         // /goal-criteria set <json array>
-        const jsonText = parts.slice(2).join(' ').trim()
+        const jsonText = normalizeGoalCriteriaArgs(parts.slice(1)).slice(1).join(' ').trim()
         if (!jsonText) {
           pushStatic(createLogEntry({ type: 'system', content: 'Usage: /goal-criteria set \'["criterion 1", "criterion 2"]\'' }))
           setIsStreaming(false)
@@ -1379,6 +1354,7 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
             throw new Error('Expected a JSON array of strings')
           }
           tracker.setSuccessCriteria(criteria as string[])
+          await persistGoalState(ctx, tracker)
           pushStatic(createLogEntry({ type: 'system', content: `✅ 验收项已更新（${(criteria as string[]).length} 项）:\n${(criteria as string[]).map((c, i) => `${i + 1}. ${c}`).join('\n')}` }))
         } catch (e) {
           pushStatic(createLogEntry({ type: 'system', content: `❌ 解析失败: ${(e as Error).message}` }))
@@ -2557,46 +2533,32 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
     immediate: true,
     handler(ctx) {
       const { parts, pushStatic, setIsStreaming } = ctx
-      const cmd = parts[0]!.toLowerCase()
-      const arg = parts[1]
-      if (!arg) {
-        // 无参 = 打开会话选择器（对齐 Claude Code /resume）；无选择器注入时退化为用法提示。
-        if (ctx.openSessionPicker) {
-          ctx.openSessionPicker()
-        } else {
-          pushStatic(createLogEntry({ type: 'system', content: '用法: /resume <id前缀 或 序号>。用 /sessions 查看会话列表。' }))
-        }
+      const rawArg = ctx.rawInput
+        ? ctx.rawInput.replace(/^\/resume\b/i, '').trim()
+        : parts.slice(1).join(' ').trim()
+
+      if (!rawArg) {
+        if (ctx.openSessionPicker) ctx.openSessionPicker()
+        else pushStatic(createLogEntry({ type: 'system', content: '用法: /resume [id前缀 或 序号 或 名称] [--id <id>]。用 /sessions 查看会话列表。' }))
         setIsStreaming(false)
         return true
       }
 
-      // 序号(兼容旧习惯)或 id 前缀 → 解析为完整 id。
-      const ordered = SessionPersist.listMainSessions(ctx.agent.cwd)
-      let targetId: string | null = null
-      if (/^\d+$/.test(arg)) {
-        const idx = parseInt(arg, 10) - 1
-        if (idx < 0 || idx >= ordered.length) {
-          pushStatic(createLogEntry({ type: 'system', content: `序号超出范围(共 ${ordered.length} 个会话)。用 /sessions 查看。` }))
-          setIsStreaming(false)
-          return true
-        }
-        targetId = ordered[idx]!.id
-      } else {
-        const resolved = SessionPersist.resolveSessionId(ctx.agent.cwd, arg)
-        if (!resolved) {
-          pushStatic(createLogEntry({ type: 'system', content: `未找到匹配会话: "${arg}"。用 /sessions 查看会话列表。` }))
-          setIsStreaming(false)
-          return true
-        }
-        if ('ambiguous' in resolved) {
-          const cands = resolved.ambiguous.map(id => `  ${id.slice(0, 12)}`).join('\n')
-          pushStatic(createLogEntry({ type: 'system', content: `前缀 "${arg}" 匹配多个会话,请用更长前缀:\n${cands}` }))
-          setIsStreaming(false)
-          return true
-        }
-        targetId = resolved.id
+      const refResult = resolveSessionRef(ctx.agent.cwd, rawArg)
+      if (refResult.kind === 'empty' && ctx.openSessionPicker) {
+        ctx.openSessionPicker()
+        setIsStreaming(false)
+        return true
       }
 
+      const errMsg = formatSessionRefMessage(refResult)
+      if (errMsg) {
+        pushStatic(createLogEntry({ type: 'system', content: errMsg }))
+        setIsStreaming(false)
+        return true
+      }
+
+      const targetId = (refResult as { id: string }).id
       if (targetId === ctx.currentSessionId) {
         pushStatic(createLogEntry({ type: 'system', content: `已经在会话 ${targetId.slice(0, 8)} 中。` }))
         setIsStreaming(false)
@@ -2611,7 +2573,7 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
         } else {
           pushStatic(createLogEntry({
             type: 'system',
-            content: `🔄 已切换到会话 ${targetId.slice(0, 8)}: 载入 ${res.messageCount ?? 0} 条消息(将重建前缀缓存)${res.repaired ? ' · 已修复孤儿工具调用' : ''}。`,
+            content: `🔄 已切换到会话 ${targetId.slice(0, 8)}: 载入 ${res.messageCount ?? 0} 条消息(将重建前缀缓存)${res.repaired ? ' · 已修复孤儿工具调用' : ''}。` ,
           }))
         }
         setIsStreaming(false)
@@ -2622,8 +2584,6 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
       const p = new SessionPersist(targetId, ctx.agent.cwd)
       const preflight = runResumePreflightOai(p.loadOai())
       ctx.session.replaceMessages(preflight.messages)
-      // 轻量测试替身没有 config.promptEngine——没有引擎也没有 appendix 基线可
-      // 重置，跳过即等价（与 320bdd0ee 同款替身容忍；生产装配 promptEngine 恒在）。
       ctx.agent.config?.promptEngine?.resetAppendixBaseline?.()
       if (preflight.repaired) p.compactOai(preflight.messages)
       pushStatic(createLogEntry({ type: 'system', content: `已恢复会话 ${targetId.slice(0, 8)} (${preflight.messages.length} 条消息, apiSafe=${preflight.safe})` }))
@@ -3780,9 +3740,9 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
 
 export async function handleSlashCommand(ctx: SlashHandlerContext): Promise<boolean> {
   const cmd = ctx.parts[0]!.toLowerCase()
-  const command = TUI_SLASH_COMMANDS.find(c => c.name === cmd)
+  const command = TUI_SLASH_COMMANDS.find(c => c.name === cmd || c.aliases?.includes(cmd))
   if (!command) return false
-  return await command.handler(ctx)
+  return await command.handler(cmd === command.name ? ctx : { ...ctx, parts: [command.name, ...ctx.parts.slice(1)] })
 }
 
 /**
@@ -3848,6 +3808,7 @@ export function registerTuiSlashCommands(app: TuiApp, ctx: BootstrapContext): vo
 
     return {
       parts,
+      rawInput: trimmed,
       config: ctx.config,
       agent: ctx.agent,
       session: ctx.session,
@@ -3924,7 +3885,7 @@ export function registerTuiSlashCommands(app: TuiApp, ctx: BootstrapContext): vo
           })()
         : undefined,
       submitToAgent: (prompt: string) => { app.submitText(prompt) },
-      onHandoffStart: (src: string, dest: string) => { app.pendingHandoffCopy = { src, dest, sinceMs: Date.now() } },
+      onHandoffStart: (request) => { app.pendingHandoffCopy = request },
       goalTrackerRef: ctx.refs.goalTrackerRef,
       reviewGateRef: ctx.refs.reviewGateRef,
       surfacePush: (id: string) => { app.activateOverlay(id) },

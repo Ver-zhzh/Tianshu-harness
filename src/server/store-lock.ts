@@ -44,9 +44,11 @@ import { dirname, join, resolve } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { isMainThread } from 'node:worker_threads'
 import { desktopDir, defaultRivetHome } from '../config/paths.js'
+import { probeLockMachineId } from './lock-machine-id.js'
 import {
   createLockFileExclusive,
   isPidAlive,
+  probeProcessZombie,
   readLockFile,
   removeLockFile,
   type LockInfo,
@@ -74,6 +76,9 @@ export const DEFAULT_HEARTBEAT_INTERVAL_MS = 10_000
 /** 心跳超过该时长未刷新即在占用者摘要里标记 heartbeatStale（仅诊断，不触发接管）。 */
 export const STORE_LOCK_HEARTBEAT_STALE_MS = 10 * 60_000
 
+/** 心跳读锁连续失败该次数才判丢锁（issue #530：防瞬时磁盘抖动误杀持锁进程）。 */
+const HEARTBEAT_READ_MISS_LIMIT = 3
+
 /**
  * 锁里记录的启动时间与该 PID 真实创建时间（ps/CIM，秒级）允许的偏差。超出 = PID 已被复用。
  * 记录值取自 owner 进程内的 `Date.now() - uptime`，与 ps 的差实测在 1s 量级。
@@ -95,6 +100,8 @@ export interface StoreLockHolder {
   hostname?: string
   /** 诊断：持有者心跳已超过 heartbeatStaleMs 未刷新。活进程心跳过期不触发接管，仅供观测。 */
   heartbeatStale?: boolean
+  /** Stable machine identity differs or cannot be read; local PID probes cannot classify this holder. */
+  localPidUnreliable?: true
 }
 
 /** 未获得锁的原因（供横幅文案/健康上报区分场景）。 */
@@ -129,6 +136,14 @@ export interface StoreLockConfig {
   legacyWriterLockPaths?: string[]
   /** 进程真实创建时间（毫秒 since epoch）的**异步**探测；返回 undefined = 核验不了。测试可注入。 */
   processStartMs?: (pid: number) => Promise<number | undefined>
+  /** 僵尸进程探测（issue #530：macOS 僵尸 kill(0) 成功 + lstart 匹配，两判据全失效）；默认 probeProcessZombie。 */
+  isProcessZombie?: (pid: number) => Promise<boolean>
+  /** Stable machine identity resolver; undefined keeps legacy hostname protection. */
+  machineId?: () => Promise<string | undefined>
+  /** Hostname source, injected for hostname-change tests. */
+  hostname?: () => string
+  /** One-shot, explicitly confirmed recovery for pre-machineId locks after hostname changes. */
+  allowLegacyHostRecovery?: boolean
 }
 
 export interface StoreLockAcquireOptions {
@@ -232,7 +247,8 @@ export function lockIdentityMatches(a: LockInfo, b: LockInfo): boolean {
   return a.pid === b.pid &&
     a.hostname === b.hostname &&
     a.ownerToken === b.ownerToken &&
-    a.startedAtMs === b.startedAtMs
+    a.startedAtMs === b.startedAtMs &&
+    a.machineId === b.machineId
 }
 
 /** 旧格式锁缺 ownerToken/startedAtMs → 身份不可核验 → 一律按占用（保守兼容，不自动清理）。 */
@@ -249,9 +265,17 @@ export class StoreLock {
   private readonly heartbeatStaleMs: number
   private readonly legacyWriterLockPaths: string[]
   private readonly processStartMs: (pid: number) => Promise<number | undefined>
+  private readonly isProcessZombie: (pid: number) => Promise<boolean>
+  private readonly machineIdResolver: () => Promise<string | undefined>
+  private readonly hostnameResolver: () => string
+  private readonly ownerHostname: string
+  private readonly allowLegacyHostRecovery: boolean
+  private machineIdPromise: Promise<string | undefined> | null = null
+  private resolvedMachineId: string | undefined
   private readonly lockLostHandlers = new Set<(state: StoreLockState) => void>()
   private state: StoreLockState | null = null
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null
+  private readMissCount = 0
 
   constructor(config?: StoreLockConfig) {
     this.lockPath = config?.lockPath ?? storeLockPath()
@@ -260,6 +284,11 @@ export class StoreLock {
     this.legacyWriterLockPaths = config?.legacyWriterLockPaths
       ?? [join(dirname(this.lockPath), LEGACY_WRITER_LOCK_FILENAME)]
     this.processStartMs = config?.processStartMs ?? probeProcessStartMs
+    this.isProcessZombie = config?.isProcessZombie ?? probeProcessZombie
+    this.machineIdResolver = config?.machineId ?? probeLockMachineId
+    this.hostnameResolver = config?.hostname ?? osHostname
+    this.ownerHostname = this.getHostname()
+    this.allowLegacyHostRecovery = config?.allowLegacyHostRecovery ?? process.env.RIVET_STORE_LOCK_RECOVER_LEGACY_HOST === '1'
     if (config?.onLockLost) this.lockLostHandlers.add(config.onLockLost)
   }
 
@@ -275,6 +304,9 @@ export class StoreLock {
       this.state = guardError
       return guardError
     }
+
+    this.machineIdPromise ??= Promise.resolve().then(() => this.machineIdResolver()).catch(() => undefined)
+    this.resolvedMachineId = await this.machineIdPromise
 
     const windowMs = Math.max(0, options?.retryWindowMs ?? DEFAULT_ACQUIRE_WINDOW_MS)
     const intervalMs = Math.max(10, options?.retryIntervalMs ?? DEFAULT_ACQUIRE_INTERVAL_MS)
@@ -368,8 +400,13 @@ export class StoreLock {
 
     if (this.isOwnLockInfo(owner)) return { status: 'acquired', acquired: true, info: owner }
 
-    if (owner.hostname !== this.getHostname()) {
-      return { status: 'contended', acquired: false, holder: toHolder(owner), reason: 'cross_host' }
+    if (!this.isSameMachine(owner)) {
+      if (this.allowLegacyHostRecovery && !owner.machineId && (await this.holderGoneReason(owner)) !== null) {
+        return this.recoverLock(owner)
+      }
+      return { status: 'contended', acquired: false, holder: {
+        ...toHolder(owner), ...(owner.machineId ? { localPidUnreliable: true as const } : {}),
+      }, reason: 'cross_host' }
     }
 
     // 旧格式锁缺身份字段 → 不可核验 → 按占用，不自动清理
@@ -395,9 +432,12 @@ export class StoreLock {
   private async legacyWriter(): Promise<LockInfo | null> {
     for (const path of this.legacyWriterLockPaths) {
       const owner = readLockFile(path)
-      if (!owner || owner.pid === process.pid) continue
-      if (owner.hostname !== this.getHostname()) return owner
-      if (!isPidAlive(owner.pid)) continue
+      if (!owner || owner.pid === process.pid && this.isSameMachine(owner)) continue
+      if (!this.isSameMachine(owner)) {
+        if (this.allowLegacyHostRecovery && !owner.machineId && (await this.holderGoneReason(owner)) !== null) continue
+        return owner
+      }
+      if (await this.isHolderGone(owner.pid)) continue
       if (typeof owner.startedAtMs !== 'number' || !Number.isFinite(owner.startedAtMs)) return owner
       const actualStartMs = await this.processStartMs(owner.pid)
       if (actualStartMs === undefined) return owner
@@ -409,13 +449,24 @@ export class StoreLock {
   }
 
   /**
+   * 持有者是否确定消失（进程不存在，或已死成僵尸——issue #530）。
+   * 僵尸的 kill(0) 成功且保留真实 lstart，pid_dead/pid_reused 两判据全失效，
+   * 必须靠 zombie 探测判死；探测失败=false（不可核验=仍占用）。
+   */
+  private async isHolderGone(pid: number): Promise<boolean> {
+    if (!isPidAlive(pid)) return true
+    return this.isProcessZombie(pid)
+  }
+
+  /**
    * 接管判据（两条；主锁与 reclaim 锁共用）：null = 视为仍被占用。
    * 身份不完整（旧格式锁）→ 不可核验 → 按占用；探测失败同理。
    * 调用方负责先判同主机（跨主机本机 PID 判不了死活）。
    */
   private async holderGoneReason(owner: LockInfo): Promise<StaleReason | null> {
-    if (!isIdentityComplete(owner)) return null
-    if (!isPidAlive(owner.pid)) return 'pid_dead'
+    if (!isIdentityComplete(owner) && !(this.allowLegacyHostRecovery && owner.pid > 0 && !owner.machineId)) return null
+    if (await this.isHolderGone(owner.pid)) return 'pid_dead'
+    if (typeof owner.startedAtMs !== 'number' || !Number.isFinite(owner.startedAtMs)) return null
     const actual = await this.processStartMs(owner.pid)
     if (actual === undefined) return null
     return Math.abs(actual - owner.startedAtMs!) > PROCESS_START_MATCH_TOLERANCE_MS ? 'pid_reused' : null
@@ -507,7 +558,7 @@ export class StoreLock {
     // 身份不完整/跨主机/探测失败 → 按占用（reclaim_in_progress）。
     if (
       owner &&
-      owner.hostname === this.getHostname() &&
+      (this.isSameMachine(owner) || this.allowLegacyHostRecovery && !owner.machineId) &&
       (await this.holderGoneReason(owner)) !== null
     ) {
       const latest = readLockFile(path)
@@ -555,8 +606,26 @@ export class StoreLock {
   /** 刷新心跳前先确认锁仍属于自己；被别人接管 → 通知上层并停心跳。 */
   private heartbeatTick(): void {
     const owner = readLockFile(this.lockPath)
-    if (!owner || !this.isOwnLockInfo(owner)) {
-      this.markLockLost(owner ?? UNKNOWN_OWNER)
+    if (!owner) {
+      // 读不到锁文件要区分两种情形（issue #530 次根因）：
+      //   ① 文件确实不存在 = 锁被删 = 真丢 → 立即判丢；
+      //   ② 文件还在但读失败/内容损坏（磁盘瞬时抖动、半截写）→ 连续
+      //      HEARTBEAT_READ_MISS_LIMIT 个 tick 才判丢——一次读失败就把进程
+      //      踢出锁会让锁文件残留成死锁（睡眠唤醒现场）。
+      if (!existsSync(this.lockPath)) {
+        this.markLockLost(UNKNOWN_OWNER)
+        return
+      }
+      this.readMissCount++
+      if (this.readMissCount >= HEARTBEAT_READ_MISS_LIMIT) {
+        this.markLockLost(UNKNOWN_OWNER)
+      }
+      return
+    }
+    this.readMissCount = 0
+    if (!this.isOwnLockInfo(owner)) {
+      // 身份不符 = 真被接管 → 立即判丢（容错不放宽这条）
+      this.markLockLost(owner)
       return
     }
     try {
@@ -588,16 +657,22 @@ export class StoreLock {
   }
 
   private getHostname(): string {
-    return osHostname() || 'unknown'
+    return this.hostnameResolver() || 'unknown'
+  }
+
+  private isSameMachine(owner: LockInfo): boolean {
+    if (owner.machineId) return owner.machineId === this.resolvedMachineId
+    return owner.hostname === this.getHostname()
   }
 
   private buildLockInfo(): LockInfo {
     return {
       pid: process.pid,
       acquiredAt: new Date().toISOString(),
-      hostname: this.getHostname(),
+      hostname: this.ownerHostname,
       ownerToken: PROCESS_OWNER_TOKEN,
       startedAtMs: PROCESS_STARTED_AT_MS,
+      ...(this.resolvedMachineId ? { machineId: this.resolvedMachineId } : {}),
     }
   }
 
@@ -609,9 +684,10 @@ export class StoreLock {
     return {
       pid: process.pid,
       acquiredAt: '',
-      hostname: this.getHostname(),
+      hostname: this.ownerHostname,
       ownerToken: PROCESS_OWNER_TOKEN,
       startedAtMs: PROCESS_STARTED_AT_MS,
+      ...(this.resolvedMachineId ? { machineId: this.resolvedMachineId } : {}),
     }
   }
 }

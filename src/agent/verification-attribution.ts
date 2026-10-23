@@ -261,6 +261,7 @@ function verificationKey(event: TaskLedgerEvent): string {
 export function getEffectiveVerifications(
   events: ReadonlyArray<TaskLedgerEvent>,
   currentSnapshotRef?: string,
+  requireBoundCandidate = false,
 ): EffectiveVerifications {
   const allVerificationEvents = events.filter(e => e.type === 'verification')
 
@@ -282,7 +283,7 @@ export function getEffectiveVerifications(
   const verificationEvents = currentSnapshotRef
     ? currentEvents.filter(e => {
         const ref = asString(e.meta?.snapshotRef)
-        if (ref && ref !== currentSnapshotRef) {
+        if (ref !== currentSnapshotRef && (ref || requireBoundCandidate)) {
           staleSnapshotDropped++
           return false
         }

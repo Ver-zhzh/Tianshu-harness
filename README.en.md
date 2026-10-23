@@ -81,7 +81,7 @@ A model's **capability ceiling** is not its **runtime behaviour**. Put the same 
 <tr>
 <td width="50%" valign="top">
 
-**Terminal CLI** (Node.js 24+)
+**Terminal CLI** (Node.js 24.x ≥ 24.22.1 or 26.x ≥ 26.12.1)
 
 ```bash
 npm install -g tianshu-harness

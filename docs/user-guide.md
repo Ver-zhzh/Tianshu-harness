@@ -233,12 +233,24 @@ RIVET_TOOL_PRESET=full tianshu        # 本次会话用 full
 
 ### Goal 自治模式
 
-```
-/goal 把认证模块全部改成 async/await
-/cancel-goal   # 提前停止
+```text
+/goal 把认证模块全部改成 async/await --max 30 --budget 20
+/goal                  # 查看当前目标、状态、轮次、预算与验收项
+/goal pause            # 暂停目标的后续自动推进
+/goal resume           # 继续已暂停或阻塞的目标
+/goal criteria         # 查看成功判据
+/goal criteria set '["认证测试全部通过", "类型检查通过"]'
+/goal clear            # 清除目标
+/goal help             # 查看完整用法
 ```
 
-设定目标后自主多轮执行，直到完成或 `/cancel-goal`。GoalTracker 与回合循环、doom-loop 检测、交付门禁集成；goal 模式下放宽 doom-loop 阈值以允许更深探索。无头用法：`tianshu --goal "<task>" --budget 50`。
+设定目标后自主多轮执行，直到完成、受阻、预算耗尽或手动清除。`--max N` 是迭代上限，`--budget M` 是分钟数；`--criteria` 接受 JSON 字符串数组，例如 `/goal 修复认证 --criteria '["认证测试全部通过", "类型检查通过"]'`。参数格式有误时会提示错误，保留原目标。GoalTracker 与回合循环、doom-loop 检测、交付门禁集成；goal 模式下放宽 doom-loop 阈值以允许更深探索。
+
+裸 `/goal` 等价于 `/goal status`；`pause`、`resume`、`clear`（也可用 `cancel`）、`criteria` 是统一管理入口。原有 `/goal-status`、`/goal-pause`、`/goal-resume`、`/goal-cancel`、`/goal-criteria` 和 `/cancel-goal` 仍可用。若目标本身恰好是控制词，使用 `/goal -- pause`；`--` 后的内容全部按字面作为目标，`/goal pause the deployment` 这样的完整任务描述也仍可直接使用。
+
+暂停用于停止后续目标循环，不等于中断正在执行的工具；通过输入框在运行中提交的命令沿用现有排队机制。恢复会保留已用轮次、预算和判据，不会自动提高预算。重新打开会话时，之前活跃的目标恢复为暂停状态，需显式继续。`/goal resume` 恢复目标，`/resume` 则切换历史会话。
+
+无头用法：`tianshu --goal "<task>" --budget 50`。注意这里的 CLI `--budget` 是回合上限，与 TUI `/goal --budget` 的分钟单位不同。
 
 ### Plan Mode（计划模式）
 
@@ -276,7 +288,7 @@ Plan Mode 内置星域委派——复杂计划自动调用 `delegate_task` 从�
 
 长会话上下文会涨，到一定程度继续跑不如开新会话。天枢用「交接 → 恢复」闭环把会话间的上下文无损传递，并保住前缀缓存。
 
-**交接 `/handoff [备注]`** —— agent 带全上下文写一份结构化交接文档到项目内 `.rivet/HANDOFF.md`（工作区内、免审批），turn 完成后自动归档到会话目录 `<id>.handoff.md`。文档写给一个**完全没有上下文的新会话**看，固定五章节：
+**交接 `/handoff [备注]`** —— agent 带全上下文写一份结构化交接文档到项目内 `.rivet/HANDOFF-<sessionId>-<requestId>.md`（工作区内、免审批；完整会话 ID 与请求 UUID 隔离并行写入），turn 完成后自动归档到兼容路径 `<id>.handoff.md`。源文件不会被覆盖；重复交接会原子更新该会话归档，并将旧版本按 requestId 保留。未生成或归档失败时 TUI 会明确反馈，项目源文件和已有有效归档会保留。文档写给一个**完全没有上下文的新会话**看，固定五章节：
 
 - **任务目标** — 用户原话级的一句话目标 + 明确的非目标
 - **已完成** — 每条带证据：改动文件（`file:line`）、跑过的验证命令与结果、提交哈希
@@ -284,7 +296,7 @@ Plan Mode 内置星域委派——复杂计划自动调用 `delegate_task` 从�
 - **下一步** — 按优先级排列、每条是可立即执行的动作
 - **坑** — 绝对不要再踩的坑，每条一句话说清后果
 
-> 上下文占用 ≥60% 时，resume 首屏与会话中各提醒一次「先 `/handoff` 再开新会话」——交接文档写入 `.rivet/HANDOFF.md` 并归档到 `<id>.handoff.md`，新会话可直接读取（`<prev-session-handoff>` 自动注入默认关闭以保障并行会话安全，设 `RIVET_PREV_HANDOFF=1` 可开启自动注入），比整段回连省前缀重建成本。退出时也会备注缓存成本（TTL 内继承锚点 ≈ 只读缓存价；过期则全量重建一次前缀）。桌面端 plus 面板有「交接」入口。
+> 上下文占用 ≥60% 时，resume 首屏与会话中各提醒一次「先 `/handoff` 再开新会话」——交接源文件使用独立请求路径并归档到 `<id>.handoff.md`，新会话可直接读取（`<prev-session-handoff>` 自动注入默认关闭以保障并行会话安全，设 `RIVET_PREV_HANDOFF=1` 可开启自动注入），比整段回连省前缀重建成本。退出时也会备注缓存成本（TTL 内继承锚点 ≈ 只读缓存价；过期则全量重建一次前缀）。桌面端 plus 面板有「交接」入口。
 
 **恢复 `--continue` / `--resume` / `/resume`** —— 恢复已有会话时：
 
@@ -299,6 +311,8 @@ tianshu --continue                 # 恢复当前 cwd 最近会话
 tianshu --resume abc123            # 恢复指定会话（短前缀即可）
 tianshu --resume                   # 启动后打开会话选择器
 ```
+
+会话内 `/resume` 无参数打开选择器，`Space` 按需预览会话记录。可用 `/resume 修复认证问题` 或 `/resume "修复认证问题"` 按完整标题恢复（忽略大小写）；多个同名会话会列出候选并拒绝误切。数字仍按 `/sessions` 中的序号解释；如果 ID 前缀本身全是数字，使用 `/resume --id 12345678` 明确指定 ID。完整 ID 优先于标题，非完整 ID 前缀在标题之后匹配。CLI 的 `--resume <id|前缀>` 继续沿用原有规则。
 
 ### Council（多视角审查）
 
@@ -605,9 +619,9 @@ tianshu config set-approval auto-safe       # 持久化默认档位
 | 命令 | 说明 |
 |------|------|
 | `/help` | 显示可用命令 |
-| `/sessions` `/resume <n>` | 列出/恢复已保存会话（恢复侧栏、待办、活动计划） |
+| `/sessions` `/resume [序号\|ID前缀\|完整标题]` | 列出/恢复已保存会话；无参打开选择器，Space 预览；重名时提示候选，`/resume --id <ID前缀>` 可明确选择数字前缀（恢复侧栏、待办、活动计划） |
 | `/fork` | 分叉当前会话（可选从某条消息起） |
-| `/handoff [备注]` | 写结构化交接文档（五章节）到 `.rivet/HANDOFF.md` 并归档至 `<id>.handoff.md`（`<prev-session-handoff>` 自动注入新会话默认关闭，可通过 `RIVET_PREV_HANDOFF=1` 开启） |
+| `/handoff [备注]` | 写结构化交接文档（五章节）到按 sessionId + requestId 隔离的 `.rivet/HANDOFF-*.md` 并归档至 `<id>.handoff.md`（`<prev-session-handoff>` 自动注入新会话默认关闭，可通过 `RIVET_PREV_HANDOFF=1` 开启） |
 | `/init` | 交互式项目初始化：verify 声明 / skills / hooks 脚手架 |
 | `/doctor` | 环境健康检查 + bash 工具用的哪个 shell |
 | `/logs [open [desktop]]` | 本会话日志落点（会话 / 缓存 / 六维 / 桌面 sidecar），含写入门控与回收说明；`open` 在文件管理器中打开 |
@@ -633,8 +647,8 @@ tianshu config set-approval auto-safe       # 持久化默认档位
 
 | 命令 | 说明 |
 |------|------|
-| `/goal <text>` | 设置自主目标，运行到完成 |
-| `/cancel-goal` | 停止目标执行 |
+| `/goal [<目标>\|status\|pause\|resume\|clear\|criteria\|help]` | 查看、设置或管理自主目标；`--max N` 限迭代数，`--budget M` 限分钟数；`--` 后按字面设置目标 |
+| `/goal-status` `/goal-pause` `/goal-resume` `/goal-cancel` `/goal-criteria` | 原有独立命令继续兼容；`/cancel-goal` 是 `/goal-cancel` 的别名 |
 | `/steer <text>` | 运行中显式以 `now` 优先级插话（等价于 `Alt+Enter`，下一工具边界立即注入） |
 | `/plan <feature>` | 生成计划草稿（writing-plans 工作流） |
 | `/plan-mode` | 进入/退出 Plan Mode（toggle；未批准退出需二次确认） |
@@ -668,7 +682,7 @@ tianshu config set-approval auto-safe       # 持久化默认档位
 
 | 命令 | 说明 |
 |------|------|
-| `/compact` | 立即压缩上下文 |
+| `/compact [重点]` | 立即压缩上下文；重点用于本次结构化摘要，如 `/compact 保留复现步骤和未完成测试`。自动压缩不继承此重点；单独 `status` 只读、单独 `llm` / `deep` 保持兼容；`/compact -- status` 把 status 当作重点 |
 | `/context` | 显示上下文账本：健康度、tokens、回合、声明 |
 | `/evidence` | 显示证据摘要（读取/修改的文件、测试） |
 | `/memory` | 记忆概览；`/memory add <内容>` 写入项目知识，`/memory search <关键词>` 检索 |

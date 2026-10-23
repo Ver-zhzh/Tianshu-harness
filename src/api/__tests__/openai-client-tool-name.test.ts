@@ -57,6 +57,7 @@ for (const [label, parts, names, expected] of [
   ['mixed echoes and fragments', ['ba', 'sh', 'bash'], ['bash'], 'bash'],
   ['legitimate repeated fragment', ['a', 'a'], ['aa'], 'aa'],
   ['adjacent underscores', ['mcp_', '_repo'], ['mcp__repo'], 'mcp__repo'],
+  ['gateway namespace wrapper', ['functions.', 'bash'], ['bash'], 'bash'],
 ] as const) {
   test(`public stream preserves ${label}`, async () => {
     const chunks = parts.map((name, index) => delta([call(name,

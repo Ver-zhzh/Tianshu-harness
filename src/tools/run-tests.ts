@@ -421,7 +421,7 @@ export const RUN_TESTS_TOOL: Tool = {
         result.content += '\n候选快照在类型检查期间变化；类型证明已作废。'
         if (result.verification) result.verification = { ...result.verification, status: 'blocked', stale: true, candidateTypecheckComplete: false, blockedReason: 'unknown_runner' }
       }
-      result.content = `[候选类型检查] ${result.content}`
+      result.content = `[提交候选 ${snapshot.snapshotRef} · 类型检查] ${result.content}`
       return result
     }
     if (params.input.deliveryFiles !== undefined || params.input.projects !== undefined || params.input.shard !== undefined || params.input.files !== undefined || existsSync(join(params.cwd, 'package.json')) && !loadDeclaredVerify(params.cwd).test

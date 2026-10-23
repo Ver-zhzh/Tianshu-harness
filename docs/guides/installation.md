@@ -3,7 +3,7 @@ title: 安装与平台说明
 type: guide
 status: active
 date: 2026-09-17
-updated: 2026-10-14
+updated: 2026-10-22
 tags: [install, platform]
 related: [../user-guide.md, troubleshooting.md]
 ---
@@ -17,7 +17,7 @@ related: [../user-guide.md, troubleshooting.md]
 
 ## 环境要求
 
-- **Node.js ≥ 24**（`engines` 钉定）—— 用 `node --version` 检查。低版本 npm 安装时仅告警但不在支持范围；一键安装脚本会直接拦截并给出升级指引。
+- **Node.js 24.x ≥ 24.22.1 或 26.x ≥ 26.12.1**（`engines` 钉定）—— 用 `node --version` 检查。受影响的旧版本在 CLI 启动时会被拒绝；一键安装脚本会提前拦截并给出升级指引。
 - **Git**（强烈建议）—— 可选。没有它天枢仍可运行（就地修改），但 git 能解锁：委派 worktree 隔离、检查点回滚、`commit`/`diff` 审查、每个 worker 的 diff 审查。安装：<https://git-scm.com/downloads>。
 
 ## 方式 A：桌面端（开箱即用）
@@ -37,7 +37,7 @@ related: [../user-guide.md, troubleshooting.md]
 
 ## 方式 B：一键安装脚本（推荐）
 
-校验 Node ≥ 24 → 全局安装 `tianshu-harness`（默认 npmmirror 镜像加速，`NPM_CONFIG_REGISTRY` 可覆盖）→ 启动 `tianshu`；幂等可重复执行：
+校验 Node 安全版本 → 全局安装 `tianshu-harness`（默认 npmmirror 镜像加速，`NPM_CONFIG_REGISTRY` 可覆盖）→ 启动 `tianshu`；幂等可重复执行：
 
 ```bash
 # macOS / Linux（bash）
@@ -71,7 +71,7 @@ tianshu
 ```bash
 # 1. 容器准备（Termux 内）
 pkg install proot-distro && proot-distro install ubuntu && proot-distro login ubuntu
-# 2. 容器内：基础工具 + Node >= 24（nodesource 或 nvm）
+# 2. 容器内：基础工具 + Node 24.x ≥ 24.22.1 或 26.x ≥ 26.12.1（nodesource 或 nvm）
 apt update && apt install -y curl ripgrep git
 # 3. 安装天枢 CLI
 npm install -g tianshu-harness

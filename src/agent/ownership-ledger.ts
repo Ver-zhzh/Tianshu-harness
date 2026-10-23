@@ -158,7 +158,7 @@ export function createOwnershipLedger(opts: {
   }
 
   function getExternalFiles(currentDirtyFiles?: string[]): string[] {
-    const base = baseline.getExternalFiles()
+    const base = baseline.getExternalFiles().filter(file => !adoptedSet.has(file))
     if (!currentDirtyFiles || currentDirtyFiles.length === 0) return base
 
     // Lazy reclassification: dirty files not owned, co-owned, adopted, or baseline-external

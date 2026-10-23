@@ -19,6 +19,7 @@ export async function runPlannedTests(params: ToolCallParams, remaining: () => n
   if (files !== undefined && (!Array.isArray(files) || files.some(file => typeof file !== 'string'))) return blockedResult({ files: [], code: 'invalid_selection', reason: 'files 必须是测试文件路径列表。' })
   if (params.input.projects !== undefined && (!Array.isArray(params.input.projects) || params.input.projects.some(p => typeof p !== 'string' || !p)) || params.input.shard !== undefined && params.input.shard !== false) return blockedResult({ files: [], code: 'invalid_selection', reason: 'projects 必须为非空名称列表；shard 只接受显式 false 覆盖。' })
   const candidate = params.verificationSnapshot?.candidateOnly ? params.verificationSnapshot : undefined
+  const candidateHeader = candidate ? `[提交候选 ${candidate.snapshotRef}]\n` : ''
   const planRoot = candidate?.path ?? params.cwd
   const executionParams = candidate && params.onOutput
     ? { ...params, onOutput: (chunk: string) => params.onOutput?.(chunk.replaceAll(candidate.path, params.cwd)) }
@@ -36,7 +37,7 @@ export async function runPlannedTests(params: ToolCallParams, remaining: () => n
       result.errorKind = 'timeout'
       Object.assign(result.verification!, { failureKind: 'timeout', blockedReason: 'timeout' })
     }
-    return result
+    return { ...result, content: candidateHeader + result.content }
   }
   if (candidate) params.onOutput?.(`[提交候选 ${candidate.snapshotRef}] 规划完成：${plan.groups.length} 批，${plan.blocked.length} 组受阻，耗时 ${Date.now() - planningStarted}ms。\n`)
   const results: ToolResult[] = []
@@ -62,7 +63,10 @@ export async function runPlannedTests(params: ToolCallParams, remaining: () => n
     if (params.abortSignal?.aborted || remaining() <= 0 || candidate && result.verification?.stale) break
   }
   results.push(...plan.blocked.map(blockedResult))
-  if (!results.length) return blockedResult({ files: [], code: 'unknown_runner', reason: '没有可执行的测试计划。' })
+  if (!results.length) {
+    const blocked = blockedResult({ files: [], code: 'unknown_runner', reason: '没有可执行的测试计划。' })
+    return { ...blocked, content: candidateHeader + blocked.content }
+  }
   const unfinished = completedGroups < plan.groups.length
   const unfinishedNote = unfinished ? `\n后续 ${plan.groups.length - completedGroups} 批未完成（${params.abortSignal?.aborted ? '已取消' : remaining() <= 0 ? '总预算超时' : '候选快照变化'}）；已完成批次的证据保留。` : ''
   const retry = [...plan.groups.slice(completedGroups).flatMap(group => group.files),
@@ -73,8 +77,8 @@ export async function runPlannedTests(params: ToolCallParams, remaining: () => n
     ? `\n下一步：run_tests(${remainingFiles.length ? `files=${JSON.stringify(remainingFiles)}, ` : ''}deliveryFiles=${JSON.stringify(params.input.deliveryFiles)}); 已完成批次的证据保留。`
     : ''
   if (nextCall) params.onOutput?.(nextCall + '\n')
-  if (results.length === 1) return { ...results[0]!, content: `${results[0]!.content}${unfinishedNote}${nextCall}`, isError: results[0]!.isError || unfinished }
+  if (results.length === 1) return { ...results[0]!, content: `${candidateHeader}${results[0]!.content}${unfinishedNote}${nextCall}`, isError: results[0]!.isError || unfinished }
   const events = results.flatMap(result => [...(result.verification ? [result.verification] : []), ...(result.extraVerifications ?? [])])
-  return { ...results[0], content: results.map((result, i) => `[验证批次 ${i + 1}/${results.length}]\n${result.content}`).join('\n\n') + unfinishedNote + nextCall,
+  return { ...results[0], content: candidateHeader + results.map((result, i) => `[验证批次 ${i + 1}/${results.length}]\n${result.content}`).join('\n\n') + unfinishedNote + nextCall,
     isError: unfinished || results.some(result => result.isError), verification: events[0], extraVerifications: events.slice(1) }
 }

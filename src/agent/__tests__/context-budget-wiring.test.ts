@@ -33,7 +33,9 @@ test('budget reaches the real request builder, transport callbacks and desktop w
 
 test('manual and isolated entry points use the same budget contract', () => {
   assert.match(source('../../server/serve-agent.ts'), /compactContext: \(\) => agent\.compactContext\(\)/)
-  assert.match(source('../../tui/slash-commands.ts'), /ctx\.agent\.compactContext\(\)/)
+  // 4fd7a528d 起 /compact 支持 focus 参数（compactContext(focus || undefined)）；
+  // 契约是「手写入入口走同一方法」，不是「必须零参」——故只钉调用点。
+  assert.match(source('../../tui/slash-commands.ts'), /ctx\.agent\.compactContext\(/)
   // src/pro 与 desktop/ 是闭源资产（公开仓不随 sync）：公开仓形态下整族缺席。
   // 逐个「缺失即跳过」会让路径漂移静默吞掉契约——改用「全有或全无」对账守卫：
   // 整族缺席（公开仓）放行；部分在位（路径漂移/资产挪位）立刻红，与硬性 ENOENT

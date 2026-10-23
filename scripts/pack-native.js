@@ -12,7 +12,7 @@
  * ── 构建期 ABI 断言（防「静默丢持久化」）────────────────────────────────
  * dist/native/ 供本机 dist/serve 使用，并作为桌面原生件的 staging 源（npm 发布
  * 的 CLI 把 dist/native 排除在 files 外，靠安装时重编自己的 better-sqlite3）。桌面 sidecar
- * 跑的是 fetch-node-runtime.js 打包进去的固定 Node（默认 24.18.0 → ABI 137），
+ * 跑的是 fetch-node-runtime.js 打包进去的固定 Node（默认 24.22.1 → ABI 137），
  * **不是**任意构建机的 Node。若宿主安装的二进制 ABI 与目标运行时不同，
  * 加载失败会让跨会话知识/claims/registry 失能，因此构建期必须核对。
  *
@@ -49,7 +49,7 @@ const TARGET_DIR = dirname(TARGET)
 // 目标运行时版本与 scripts/fetch-node-runtime.js 单一同源：直接 import 其
 // DEFAULT_NODE_VERSION，杜绝两处常量漂移（漂移会让本断言失去意义）。import 失败
 // （脚本被移动/单独取用）时退回硬编码兜底，并打一行提示。
-let DEFAULT_TARGET_NODE_VERSION = '24.18.0'
+let DEFAULT_TARGET_NODE_VERSION = '24.22.1'
 try {
   const mod = await import('./fetch-node-runtime.js')
   if (mod && typeof mod.DEFAULT_NODE_VERSION === 'string') {

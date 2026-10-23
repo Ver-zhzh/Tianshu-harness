@@ -4,6 +4,9 @@ import { captureCommitVersionAsync } from './commit-version-async.js'
 import { recordRuntimeDiagnostic } from '../utils/runtime-diagnostics.js'
 import { gitCommand } from '../tools/git-command.js'
 import { buildDeliveryVerificationPlanAsync, renderDeliveryVerificationPlan } from './delivery-verification-plan.js'
+import { deliveryCandidateScope } from './delivery-candidate-scope.js'
+import { diagnoseCandidateEvidence, renderCandidateDiagnostics } from './delivery-candidate-diagnostics.js'
+import { createDeliveryNoProgressTracker, deliveryNextAction } from './delivery-no-progress.js'
 import { scanDeliveryFilesAsync, type scanDeliveryFiles } from './delivery-readonly.js'
 /**
  * deliver_task — 语义化交付工具 (B1-8)
@@ -414,6 +417,7 @@ export function parseLearnedEntries(raw: unknown): LearnedPattern[] {
 }
 
 export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) => B1Context): Tool {
+  const noProgress = createDeliveryNoProgressTracker()
   return {
     definition: {
       name: 'deliver_task',
@@ -510,7 +514,8 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
       const adoptableExternal = new Set(ctx.ownership.getExternalFiles(currentDirtyFiles).filter(file => !dirtySet || dirtySet.has(file)))
       const adoptableCoOwned = new Set(ctx.ownership.getCoOwnedFiles().filter(file => !dirtySet || dirtySet.has(file)))
       if (adoptFiles?.length) {
-        const notAdoptable = adoptFiles.filter(file => !adoptableExternal.has(file) && !adoptableCoOwned.has(file))
+        if (!dirtySet) return { content: '❌ Adopt: cannot confirm which files are dirty; retry after Git status is available.', isError: true, errorKind: 'delivery_gate' }
+        const notAdoptable = adoptFiles.filter(file => (!adoptableExternal.has(file) && !adoptableCoOwned.has(file) && !ctx.ownership.isOwned(file)) || dirtySet?.has(file) !== true)
         if (notAdoptable.length > 0) {
           return { content: `❌ Adopt: file(s) not in external or co-owned files: ${notAdoptable.join(', ')}. Only dirty external and co-owned files can be adopted.`, isError: true, errorKind: 'delivery_gate' }
         }
@@ -528,13 +533,12 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
       }
       // A takeover is part of this delivery candidate even when `files` names
       // only the previously owned subset. Validate before changing ownership.
+      const scopeFiles = deliveryCandidateScope(requestedFiles, adoptFiles, ctx.ownership.getOwnedFiles(), currentDirtyFiles)
+      if (commit && scopeFiles.length === 0) return { content: '❌ No dirty files in the delivery candidate.', isError: true, errorKind: 'delivery_gate' }
       const adopted = adoptFiles?.length ? ctx.ownership.adoptFiles(adoptFiles) : []
-      const scopeFiles = [...new Set(requestedFiles
-        ? [...requestedFiles, ...adopted]
-        : ctx.ownership.getOwnedFiles().filter(file => !dirtySet || dirtySet.has(file)))].sort()
-      const reportDirtyFiles = requestedFiles ? scopeFiles : currentDirtyFiles
+      const reportDirtyFiles = requestedFiles || commit ? scopeFiles : currentDirtyFiles
       let candidateTree: CandidateDeliveryTree | undefined
-      if (requestedFiles) {
+      if (requestedFiles || commit && scopeFiles.length > 0) {
         try {
           candidateTree = await (ctx.prepareCandidateTree ?? openCandidateDeliveryTree)(params.cwd, scopeFiles, params.abortSignal)
           mark('candidate:snapshot-ready')
@@ -543,14 +547,14 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
         }
       }
       try {
-      const currentSnapshotRef = requestedFiles
+      const currentSnapshotRef = candidateTree
         ? candidateTree!.ref
         : ctx.getCurrentSnapshotRef?.()
       // W1 回归防线: feed Meridian blast radius into the gate. existsSync filters
       // deleted/renamed tests (static-analysis false positives) into "uncoverable".
-      const impactFiles = requestedFiles ? scopeFiles : [...new Set([...scopeFiles, ...ctx.ownership.getCoOwnedFiles()])].filter(file => !dirtySet || dirtySet.has(file))
-      const typecheckReceipt = requestedFiles && currentSnapshotRef !== 'candidate-ref-unavailable'
-        ? getEffectiveVerifications(ctx.taskLedger.getVerifications(), currentSnapshotRef).effective.find(evidence =>
+      const impactFiles = candidateTree ? scopeFiles : [...new Set([...scopeFiles, ...ctx.ownership.getCoOwnedFiles()])].filter(file => !dirtySet || dirtySet.has(file))
+      const typecheckReceipt = candidateTree && currentSnapshotRef !== 'candidate-ref-unavailable'
+        ? getEffectiveVerifications(ctx.taskLedger.getVerifications(), currentSnapshotRef, true).effective.find(evidence =>
             evidence.kind === 'typecheck' && evidence.status === 'passed' && evidence.scope === 'full'
             && evidence.candidateTypecheckComplete === true && evidence.snapshotRef === currentSnapshotRef
             && JSON.stringify([...(evidence.candidateFiles ?? [])].sort()) === JSON.stringify(scopeFiles))
@@ -573,7 +577,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
             testExists: (p: string) => existsSync(isAbsolute(p) ? p : join(impactRoot, p)),
           }
         : undefined
-      const report = ctx.gate.getReport([], reportDirtyFiles, currentSnapshotRef, moduleCoverage)
+      const report = ctx.gate.getReport([], reportDirtyFiles, currentSnapshotRef, moduleCoverage, Boolean(candidateTree))
       mark('report:done')
 
       // Cap file lists and filter external noise to keep the GREEN/YELLOW signal readable.
@@ -586,9 +590,9 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
         return shown
       }
       const externalSplit = filterExternalNoise(report.externalFiles, params.cwd)
-      const pendingTests = assessImpactedTestCoverage(impactedTests, getEffectiveVerifications(ctx.taskLedger.getVerifications(), currentSnapshotRef).effective, path => existsSync(join(impactRoot, path)), params.cwd).uncovered
+      const pendingTests = assessImpactedTestCoverage(impactedTests, getEffectiveVerifications(ctx.taskLedger.getVerifications(), currentSnapshotRef, Boolean(candidateTree)).effective, path => existsSync(join(impactRoot, path)), params.cwd).uncovered
       const planStarted = Date.now()
-      const verificationPlan = await buildDeliveryVerificationPlanAsync(params.abortSignal, impactRoot, impactedTests, pendingTests, impact?.advisoryTests.length ?? 0, ctx.taskLedger.getVerifications(), currentSnapshotRef, requestedFiles ? scopeFiles : undefined, candidateTree?.ref)
+      const verificationPlan = await buildDeliveryVerificationPlanAsync(params.abortSignal, impactRoot, impactedTests, pendingTests, impact?.advisoryTests.length ?? 0, ctx.taskLedger.getVerifications(), currentSnapshotRef, candidateTree ? scopeFiles : undefined, candidateTree?.ref)
       const planMs = Date.now() - planStarted
       if (candidateTree) {
         // Structured plans outlive the temporary worktree. Keep only live-root
@@ -598,11 +602,16 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
           return { content: '❌ 候选文件或 HEAD 在影响分析期间变化；旧验证与计划已失效，请重新运行 deliver_task。', isError: true, errorKind: 'delivery_gate' }
         }
       }
+      const candidateDiagnostics = candidateTree
+        ? diagnoseCandidateEvidence(ctx.taskLedger.getVerifications(), candidateTree.ref, scopeFiles, verificationPlan.batches[0])
+        : undefined
+      if (candidateDiagnostics) verificationPlan.candidateDiagnostics = candidateDiagnostics
       mark('candidate:plan-done')
       const lines: string[] = [
         `Delivery Gate: ${report.state}`,
         `Task: ${report.taskId}`,
         ...(candidateTree ? [`Candidate: ${candidateTree.ref} · ${scopeFiles.length} files · snapshot ${candidateTree.buildMs}ms · impact ${impactMs}ms · plan ${planMs}ms`] : []),
+        ...(candidateDiagnostics ? renderCandidateDiagnostics(candidateDiagnostics) : []),
         '',
         `Owned files (${report.ownedFileCount}):`,
         ...renderFileList(report.ownedFiles),
@@ -622,8 +631,13 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
           // 说出真实形态；越界类病因的修复指引见下方 outOfRootFingerprintPaths 段（L4）。
           : report.staleFingerprintDropped > 0
             ? `Verifications: none usable — ${report.staleFingerprintDropped} run(s) were dropped as stale (验证跑过，但验证后工作区/指纹又发生了变化)`
+            : candidateTree && report.staleSnapshotDropped > 0
+              ? `Verifications: none applicable — ${report.staleSnapshotDropped} run(s) belong to another candidate or lack a candidate ref`
             : 'Verifications: none (no tests were run for this task)',
       ]
+      const blockedCommit = (reason: string, errorKind: 'delivery_gate' | 'format_error' = 'delivery_gate'): ToolResult => noProgress.rejected(report.taskId, candidateTree?.ref, reason,
+        ctx.taskLedger.getVerifications(), deliveryNextAction(reason, candidateDiagnostics),
+        { verificationPlan, content: lines.join('\n'), isError: true, errorKind })
       if (impact) {
         lines.push(`Impact policy ${impact.policyVersion ?? 1}: ${impact.requiredTests.length} required, ${impact.advisoryTests.length} advisory test(s).`)
         for (const test of impact.requiredTests.slice(0, 5)) lines.push(`  ${test}: ${(impact.reasons?.[test] ?? []).map(step => `${step.from} → ${step.to} (${step.kind}/${step.confidence})`).join('; ') || 'modified test'}`)
@@ -636,7 +650,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
         const v = report.latestVerificationTotals
         lines.push(`  Latest: ${v.passed ?? '未确认'} pass ${v.countsReliable !== true && !v.failed ? '未确认' : v.failed ?? '未确认'} fail ${v.skipped ?? '未确认'} skip${v.countsReliable !== true ? '（已确认计数，非全量；失败数量未确认时须补证据）' : ''} — ${v.command}`)
         if (v.executionId) lines.push(`  Execution: ${v.executionId} · ${v.timestamp ? new Date(v.timestamp).toISOString() : '时间未确认'} · ${v.durationMs ?? '未确认'}ms`)
-      } else if (report.verificationCount === 0 && report.staleFingerprintDropped === 0) {
+      } else if (report.verificationCount === 0 && report.staleFingerprintDropped === 0 && report.staleSnapshotDropped === 0) {
         // stale 判废清空有效验证时不说 "no test suite was executed"——同 L4，跑过但被丢弃。
         lines.push('  (Typecheck passed, but no test suite was executed. Run tests before claiming "verified".)')
       }
@@ -745,7 +759,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
       }
 
       lines.push('', `Attribution: ${report.attributionSummary}`)
-      if (report.attributionClass === 'module_unverified' && report.state === 'YELLOW') lines.push(...renderDeliveryVerificationPlan(verificationPlan, params.cwd))
+      if (verificationPlan.pending.length > 0 || report.attributionClass === 'module_unverified' && report.state === 'YELLOW') lines.push(...renderDeliveryVerificationPlan(verificationPlan, params.cwd))
       // Failure attribution summary: distinguish "my fault" vs "not my fault" failures.
       // Helps the agent understand: which failures should I fix, which are external?
       {
@@ -970,7 +984,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
           } else {
             lines.push('', '❌ Cannot commit: 归属基线未完整建立，无法安全执行 scoped commit。')
             lines.push('文件改动已保存在工作区中。git 仓库可用后重试 deliver_task 会现场重采基线（如刚执行 git init，直接重试即可）；force 不豁免。')
-            return { verificationPlan, content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
+            return blockedCommit('baseline-incomplete')
           }
         }
         // Keep the atomic commit reminder at the commit boundary.
@@ -995,7 +1009,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
           lines.push('', 'Recovery:')
           lines.push(`  → 用 read_file / grep 逐一核验：${firewallRefs.join('、')}，然后重跑 deliver_task`)
           lines.push('  → 或从提交信息/清单中移除该引用，或为该行添加 [待核] 标注（诚实降级为线索）。')
-          return { verificationPlan, content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
+          return blockedCommit(`evidence-firewall:${firewallRefs.join(',')}`)
         }
 
         // Mechanical-change classification (computed once, reused for gate bypass
@@ -1015,7 +1029,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
             lines.push('', 'Recovery:')
             lines.push('  → 提供额外的独立证据满足冗余义务（DP 副本验证、独立工具复现、')
             lines.push('    第二条 file:line 证据链），或显式 supersede 该义务后重试。')
-            return { verificationPlan, content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
+            return blockedCommit('redundancy-obligation')
           } else if (
             report.attributionClass === 'unverified'
             && mechanicalClass?.skipVerification
@@ -1045,20 +1059,20 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
               lines.push('  → Fix the blocking issue above, then re-run deliver_task.')
               lines.push('    If tests keep timing out, run them in smaller batches by directory.')
             }
-            return { verificationPlan, content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
+            return blockedCommit(`delivery:${report.attributionClass}:${report.currentBlockingFailure ?? report.blockingReason ?? ''}`)
           }
         }
-        const effectiveEvidence = getEffectiveVerifications(ctx.taskLedger.getVerifications(), currentSnapshotRef).effective
+        const effectiveEvidence = getEffectiveVerifications(ctx.taskLedger.getVerifications(), currentSnapshotRef, Boolean(candidateTree)).effective
         if (report.ownedFileCount > 0 && !mechanicalClass?.skipVerification
           && !effectiveEvidence.some(verification => verification.status === 'passed' && verification.scope !== 'unknown')) {
           lines.push('', '❌ Cannot commit: no applicable successful verification. Unknown or blocked checks do not prove validation; force=true does not waive this obligation.')
-          return { verificationPlan, content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
+          return blockedCommit('missing-applicable-verification')
         }
         // W1 回归防线: module_unverified 在 assess 层是 YELLOW（可带条件交付），
         // commit=true 必须有覆盖证明；force 不豁免缺失验证。
         if (report.state === 'YELLOW' && report.attributionClass === 'module_unverified') {
           lines.push('', '❌ Cannot commit: impacted tests were never covered by a passed verification. force=true does not waive missing verification.')
-          return { verificationPlan, content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
+          return blockedCommit('module-unverified')
         }
         if (report.state === 'YELLOW') {
           const stanceHint = await detectSymptomPatch(params.cwd)
@@ -1066,7 +1080,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
         }
         if (!message) {
           lines.push('', '❌ Commit requires a "message" parameter.')
-          return { verificationPlan, content: lines.join('\n'), isError: true, errorKind: 'format_error' }
+          return blockedCommit('missing-commit-message', 'format_error')
         }
 
         // 宣称-证据对账（复现即证明）：commit message / checklist 里宣称测试绿，
@@ -1080,7 +1094,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
           })
           if (audit.status === 'block') {
             lines.push('', ...audit.lines)
-            return { verificationPlan, content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
+            return blockedCommit('claim-audit')
           }
           if (audit.status === 'warn') {
             lines.push('', ...audit.lines)
@@ -1099,7 +1113,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
         const filesToCommit = scopeFiles
         if (candidateTree && !candidateTree.isCurrent()) {
           lines.push('', '❌ Cannot commit: 候选文件或 HEAD 已变化；原候选验证和执行计划失效，请重新运行 deliver_task。')
-          return { verificationPlan, content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
+          return blockedCommit('candidate-changed')
         }
         const commitVersion = await captureCommitVersionAsync(params.cwd, filesToCommit, { signal: params.abortSignal })
         lines.push('', `Commit scope (${report.state}): ${filesToCommit.join(', ') || '(none)'}`)
@@ -1108,7 +1122,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
         if (blockingClaimConflicts.length > 0 && !forceGate) {
           lines.push('', '❌ Cannot commit: cross-session claim conflicts are present.')
           lines.push('   → Resolve the other session claim or use force=true only after independently verifying the override is safe.')
-          return { verificationPlan, content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
+          return blockedCommit('cross-session-claim')
         }
         if (blockingClaimConflicts.length > 0 && forceGate) {
           lines.push('', '⚠️ Cross-session claim conflicts overridden with force=true. Verify the other session has finished or approved the takeover.')
@@ -1179,7 +1193,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
         if (cohesion.needsWarning && !cohesionOverride) {
           lines.push('', ...cohesion.warningLines.map(l => `  ${l}`))
           mark('cohesion:denied')
-          return { verificationPlan, content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
+          return blockedCommit('cohesion')
         }
         if (cohesion.needsWarning && cohesionOverride) {
           lines.push('', '  ⚠️ Cohesion gate overridden with force=true. Verify this is truly one logical unit.')
@@ -1193,8 +1207,8 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
         const lockPath = join(params.cwd, '.git', 'index.lock')
         if (existsSync(lockPath)) {
           lines.push('', '  ⚠️  Git index is locked; its owner has not been verified.')
-          lines.push('     Wait for the owning Git process to finish and retry; the lock was preserved.')
-          return { verificationPlan, content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
+          lines.push('     Wait for the owning Git process to finish and retry; the lock was preserved. 当前候选的源码验证仍可用。')
+          return blockedCommit('git-index-lock')
         }
 
         // Capture HEAD before the commit so the result carries verifiable
@@ -1206,14 +1220,20 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
 
         if (candidateTree && !candidateTree.isCurrent()) {
           lines.push('', '❌ Cannot commit: 提交前候选版本变化，已停止；请重新验证当前候选。')
-          return { verificationPlan, content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
+          return blockedCommit('candidate-changed')
         }
         const executor = ctx.commitOwnedFiles ?? ((cwd, files, msg) => commitScopedFiles({ cwd, files, message: msg, expectedVersion: commitVersion ?? undefined, signal: params.abortSignal }))
         const commitResult = await executor(params.cwd, filesToCommit, message)
         if (!commitResult.ok) {
+          const afterVersion = commitVersion && candidateTree?.isCurrent()
+            ? await captureCommitVersionAsync(params.cwd, filesToCommit, { signal: params.abortSignal }) : null
+          const indexOnlyConflict = afterVersion && commitVersion && afterVersion.head === commitVersion.head
+            && afterVersion.files === commitVersion.files && afterVersion.index !== commitVersion.index
+          if (indexOnlyConflict) lines.push('', 'Git index 在提交期间变化；候选源码和同树验证仍有效。处理暂存区冲突后重试，无需因此重跑测试。')
           lines.push('', `❌ Scoped commit failed: ${commitResult.output}`)
-          return { verificationPlan, content: lines.join('\n'), isError: true, errorKind: 'delivery_gate' }
+          return blockedCommit(indexOnlyConflict ? 'git-index-changed' : 'git-commit-failed')
         }
+        noProgress.clear(report.taskId)
         lines.push('', `✅ Scoped commit created with message: "${message}"`)
         lines.push(`   Files: ${filesToCommit.join(', ') || '(none)'}`)
         if (commitResult.output) lines.push(`   ${commitResult.output}`)

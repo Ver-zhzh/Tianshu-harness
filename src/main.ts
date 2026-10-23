@@ -149,6 +149,7 @@ import { contractModels } from './config/contract-models.js'
 import { resolveModelRef, findModelOwner, findModelInKey } from './config/provider-keys.js'
 import { tryResolveCredentialKey } from './api/factory.js'
 import { canonicalizeModelId } from './api/model-aliases.js'
+import { requireSecureNodeRuntime } from './platform/node-security-policy.js'
 
 // ── CLI args ───────────────────────────────────────────────────
 
@@ -165,6 +166,8 @@ if (args.includes('--version') || args.includes('-v')) {
   process.stdout.write(formatVersionLine())
   process.exit(0)
 }
+
+requireSecureNodeRuntime()
 
 const modelArgIdx = args.indexOf('--model')
 const requestedModel = modelArgIdx >= 0 ? args[modelArgIdx + 1] : undefined

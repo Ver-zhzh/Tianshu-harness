@@ -488,9 +488,9 @@ describe('CronLock', () => {
     rmSync(tmpDir, { recursive: true, force: true })
   })
 
-  it('acquires lock when no lock file exists', () => {
+  it('acquires lock when no lock file exists', async () => {
     const lock = new CronLock({ lockPath: TEST_LOCK_PATH, healthCheckIntervalMs: 99999 })
-    const state = lock.acquire()
+    const state = await lock.acquire()
 
     assert.equal(state.status, 'acquired')
     assert.equal((state as any).info.pid, process.pid)
@@ -498,7 +498,7 @@ describe('CronLock', () => {
     lock.release()
   })
 
-  it('contends when another pid holds the lock', () => {
+  it('contends when another pid holds the lock', async () => {
     // 写入一个伪造的活跃 PID 锁文件
     const fakeOwner: LockInfo = {
       pid: process.pid, // 自己（确保存活）
@@ -508,13 +508,13 @@ describe('CronLock', () => {
     writeFileSync(TEST_LOCK_PATH, JSON.stringify(fakeOwner), 'utf-8')
 
     const lock = new CronLock({ lockPath: TEST_LOCK_PATH, healthCheckIntervalMs: 99999 })
-    const state = lock.acquire()
+    const state = await lock.acquire()
 
     assert.equal(state.status, 'contended') // 同 PID 但缺少 owner token → 不视为自己持有，防 PID 复用
     lock.release()
   })
 
-  it('recovers stale lock when owner pid is dead', () => {
+  it('recovers stale lock when owner pid is dead', async () => {
     // 写入一个不可能存活的 PID
     const fakeOwner: LockInfo = {
       pid: 99999, // 极不可能存在
@@ -524,7 +524,7 @@ describe('CronLock', () => {
     writeFileSync(TEST_LOCK_PATH, JSON.stringify(fakeOwner), 'utf-8')
 
     const lock = new CronLock({ lockPath: TEST_LOCK_PATH, healthCheckIntervalMs: 99999 })
-    const state = lock.acquire()
+    const state = await lock.acquire()
 
     assert.equal(state.status, 'stale_recovered')
     assert.equal((state as any).previousOwner.pid, 99999)
@@ -532,25 +532,25 @@ describe('CronLock', () => {
     lock.release()
   })
 
-  it('releases lock and removes file', () => {
+  it('releases lock and removes file', async () => {
     const lock = new CronLock({ lockPath: TEST_LOCK_PATH, healthCheckIntervalMs: 99999 })
-    lock.acquire()
+    await lock.acquire()
     assert.ok(existsSync(TEST_LOCK_PATH))
 
     lock.release()
     assert.equal(existsSync(TEST_LOCK_PATH), false)
   })
 
-  it('isOwner returns true after acquire', () => {
+  it('isOwner returns true after acquire', async () => {
     const lock = new CronLock({ lockPath: TEST_LOCK_PATH, healthCheckIntervalMs: 99999 })
-    lock.acquire()
+    await lock.acquire()
     assert.ok(lock.isOwner())
     lock.release()
   })
 
-  it('isOwner returns false after release', () => {
+  it('isOwner returns false after release', async () => {
     const lock = new CronLock({ lockPath: TEST_LOCK_PATH, healthCheckIntervalMs: 99999 })
-    lock.acquire()
+    await lock.acquire()
     lock.release()
     assert.equal(lock.isOwner(), false)
   })
