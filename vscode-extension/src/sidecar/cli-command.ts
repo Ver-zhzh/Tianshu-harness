@@ -1,13 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { basename, dirname, extname, join, resolve } from 'node:path'
 
-const npmNodeShim = [
-  '@ECHO off', 'GOTO start', ':find_dp0', 'SET dp0=%~dp0', 'EXIT /b', ':start', 'SETLOCAL', 'CALL :find_dp0',
-  'IF EXIST "%dp0%\\node.exe" (', 'SET "_prog=%dp0%\\node.exe"', ') ELSE (', 'SET "_prog=node"',
-  'SET PATHEXT=%PATHEXT:;.JS;=;%', ')',
-  'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%" "%dp0%\\node_modules\\tianshu-harness\\dist\\cli\\entry.js" %*',
-].join(' ').toLowerCase()
-const npmBinNodeShim = npmNodeShim.replace('%dp0%\\node_modules\\tianshu-harness', '%dp0%\\..\\tianshu-harness')
+const npmNodeShimPattern = /^@echo off goto start :find_dp0 set dp0=%~dp0 exit \/b :start setlocal call :find_dp0 if exist "%dp0%\\node\.exe" \( set "_prog=%dp0%\\node\.exe" \) else \( set "_prog=node" set pathext=%pathext:;\.js;=;% \) endlocal & goto #_undefined_# 2>nul \|\| title %comspec% & "%_prog%"(?:\s+--expose-gc)?(?:\s+--max-old-space-size=\d+)? "%dp0%\\(\.\.|node_modules)\\(tianshu-harness|tianshu-tui)\\dist\\(cli\\entry|main)\.js" %\*$/i
 
 function onPath(name: string): string | undefined {
   for (const dir of (process.env.PATH ?? process.env.Path ?? '').split(';')) {
@@ -39,11 +33,10 @@ export function resolveCliCommand(cli: string, args: string[], cwd: string): { c
   }
   // Accept complete known npm shims; extracting only the command could drop wrapper side effects.
   const normalized = shim.replace(/\s+/g, ' ').trim().toLowerCase()
-  const entry = normalized === npmNodeShim
-    ? join(dir, 'node_modules', 'tianshu-harness', 'dist', 'cli', 'entry.js')
-    : normalized === npmBinNodeShim
-      ? resolve(dir, '..', 'tianshu-harness', 'dist', 'cli', 'entry.js')
-      : undefined
+  const match = normalized.match(npmNodeShimPattern)
+  const entry = match
+    ? resolve(dir, match[1]!, match[2]!, 'dist', ...match[3]!.split('\\')) + '.js'
+    : undefined
   const node = existsSync(join(dir, 'node.exe')) ? join(dir, 'node.exe') : onPath('node.exe')
   if (['rivet', 'tianshu'].includes(basename(file, extname(file)).toLowerCase()) &&
     entry && node && existsSync(entry)) {

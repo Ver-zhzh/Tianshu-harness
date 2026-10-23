@@ -222,6 +222,11 @@ export function interpretSessionEvent(ev: SessionEvent): ChatTurnEvent | undefin
       const phase = asString(d.phase)
       return phase === '' ? undefined : { kind: 'activity', phase }
     }
+    case 'watchdog_recovery':
+    case 'retry':
+    case 'hook_result':
+    case 'plan_draft':
+      return { kind: 'activity', phase: ev.type }
     default:
       return undefined
   }

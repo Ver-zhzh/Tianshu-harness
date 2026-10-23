@@ -6,7 +6,7 @@
  */
 import * as vscode from 'vscode'
 import { join } from 'node:path'
-import { launchSidecar, SidecarLaunchError, type SidecarHandle } from './sidecar/launcher.js'
+import { launchSidecar, SidecarLaunchError, type DisposeSidecarOptions, type SidecarHandle } from './sidecar/launcher.js'
 import { SidecarClient } from './sidecar/client.js'
 import { CockpitProvider } from './views/cockpit-provider.js'
 import { registerChangesView } from './views/changes-view.js'
@@ -19,6 +19,7 @@ import { ensureRuntime, rivetOnPath } from './sidecar/runtime-downloader.js'
 import { TianshuChatParticipant } from './chat/participant.js'
 import { ChatHumanInteraction } from './chat/human-interaction.js'
 import { estimateTokens, mapProviderModels, tianshuModelInfo, TIANSHU_VENDOR, UNAVAILABLE_NOTE } from './chat/model-provider.js'
+import { createInitialSessionRunSummary, reduceSessionRunState } from './shared/session-state-reducer.js'
 
 let sidecar: SidecarHandle | undefined
 let clientPromise: Promise<SidecarClient> | undefined
@@ -41,6 +42,7 @@ let globalStorageDir = ''
  * 插件 sidecar 也不再参与桌面端的定时任务。
  */
 let sidecarDataDir = ''
+let hasWorkspaceStorage = false
 /** 崩溃自动重拉：连续尝试计数（进程稳定运行超过窗口即清零）。 */
 let restartAttempts = 0
 let restartTimer: ReturnType<typeof setTimeout> | undefined
@@ -67,6 +69,7 @@ function resolveSidecarDataDir(context: vscode.ExtensionContext): string {
 export function activate(context: vscode.ExtensionContext): void {
   output = vscode.window.createOutputChannel('天枢 Sidecar')
   globalStorageDir = context.globalStorageUri.fsPath
+  hasWorkspaceStorage = Boolean(context.storageUri?.fsPath)
   sidecarDataDir = resolveSidecarDataDir(context)
 
   const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath
@@ -154,20 +157,16 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   }
 
-  // 状态栏：会话 status → 运行指示；审批事件 → 待批计数
-  let pendingApprovals = 0
+  // 状态栏：会话 status → 运行指示；审批事件 → 待批计数（经共享归约器计算）
+  let runSummary = createInitialSessionRunSummary()
   provider.onSessionEvent = (ev) => {
-    if (ev.type === 'status') {
-      statusBar?.setSessionStatus(String((ev.data as { status?: unknown }).status ?? ''))
-    } else if (ev.type === 'approval_required') {
-      statusBar?.setPendingApprovals(++pendingApprovals)
-    } else if (ev.type === 'approval_resolved') {
-      pendingApprovals = Math.max(0, pendingApprovals - 1)
-      statusBar?.setPendingApprovals(pendingApprovals)
-    } else if (ev.type === 'done') {
-      pendingApprovals = 0
-      statusBar?.setPendingApprovals(0)
-      statusBar?.setSessionStatus('idle')
+    const prev = runSummary
+    runSummary = reduceSessionRunState(prev, ev)
+    if (runSummary.status !== prev.status || ev.type === 'status' || ev.type === 'done') {
+      statusBar?.setSessionStatus(runSummary.status)
+    }
+    if (runSummary.pendingApprovals !== prev.pendingApprovals || ev.type === 'done') {
+      statusBar?.setPendingApprovals(runSummary.pendingApprovals)
     }
   }
 
@@ -180,7 +179,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.commands.registerCommand('tianshu.restartSidecar', async () => {
       try {
-        await disposeSidecar()
+        await disposeSidecar({ forceKill: true })
         await ensureClient(provider, cwd)
         void vscode.window.showInformationMessage('天枢内核已重启')
       } catch (err) {
@@ -263,11 +262,17 @@ async function ensureClient(provider: CockpitProvider, cwd: string | undefined):
         if (generation !== sidecarGeneration) throw new Error('sidecar 启动已取消')
         const controller = new AbortController()
         launchController = controller
+        const keepAliveOnReload = Boolean(cfg.get<boolean>('sidecar.keepAliveOnReload'))
+        const leaseFile = hasWorkspaceStorage && keepAliveOnReload
+          ? join(sidecarDataDir, 'ide-daemon-lease.json')
+          : undefined
         const launching = launchSidecar({
           cwd,
           cliPath,
           port: cfg.get<number>('serverPort') || 0,
           desktopDir: sidecarDataDir,
+          leaseFile,
+          keepAliveOnDispose: Boolean(leaseFile),
           onLog: (line) => output?.appendLine(line),
           signal: controller.signal,
         })
@@ -278,7 +283,7 @@ async function ensureClient(provider: CockpitProvider, cwd: string | undefined):
           launchController = undefined
         }
         if (generation !== sidecarGeneration) {
-          await launched.dispose()
+          await launched.dispose({ forceKill: true })
           throw new Error('sidecar 启动已取消')
         }
         sidecar = launched
@@ -337,7 +342,7 @@ async function ensureClient(provider: CockpitProvider, cwd: string | undefined):
   return clientPromise
 }
 
-function disposeSidecar(): Promise<void> {
+function disposeSidecar(opts?: DisposeSidecarOptions): Promise<void> {
   sidecarGeneration++
   if (restartTimer) {
     clearTimeout(restartTimer)
@@ -349,7 +354,7 @@ function disposeSidecar(): Promise<void> {
   launchController = undefined
   pendingLaunch = undefined
   delegation?.detach()
-  const stopping = sidecar?.dispose()
+  const stopping = sidecar?.dispose(opts)
   sidecar = undefined
   clientPromise = undefined
   liveClient = undefined
@@ -357,7 +362,7 @@ function disposeSidecar(): Promise<void> {
   cleanupPromise = Promise.all([
     cleanupPromise,
     stopping,
-    launching?.then((handle) => handle.dispose(), (err) => {
+    launching?.then((handle) => handle.dispose({ forceKill: true }), (err) => {
       if (err instanceof SidecarLaunchError && err.reason === 'cleanup-failed') throw err
     }),
   ]).then(() => {})
@@ -365,5 +370,5 @@ function disposeSidecar(): Promise<void> {
 }
 
 export function deactivate(): Promise<void> {
-  return disposeSidecar()
+  return disposeSidecar({ forceKill: false })
 }
