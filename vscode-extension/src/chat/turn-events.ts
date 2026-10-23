@@ -55,6 +55,8 @@ export type ChatTurnEvent =
   /** 用量脚注（turn_complete）——promptTokens=当前上下文（contextTokens 优先），
    *  completionTokens=累计 output（单轮差分由 participant 做）；不结束 chat 轮。 */
   | { kind: 'usage'; promptTokens: number; completionTokens: number }
+  /** sidecar 活性心跳（phase 事件：heartbeat/working/preparing/tool-hint 等）——不渲染内容，仅续命静默超时窗口。 */
+  | { kind: 'activity'; phase: string }
 
 function asString(value: unknown): string {
   return typeof value === 'string' ? value : ''
@@ -215,6 +217,10 @@ export function interpretSessionEvent(ev: SessionEvent): ChatTurnEvent | undefin
       const output = asNonNegativeNumber(usage.output_tokens) ?? 0
       if (prompt <= 0 && output <= 0) return undefined
       return { kind: 'usage', promptTokens: prompt, completionTokens: output }
+    }
+    case 'phase': {
+      const phase = asString(d.phase)
+      return phase === '' ? undefined : { kind: 'activity', phase }
     }
     default:
       return undefined

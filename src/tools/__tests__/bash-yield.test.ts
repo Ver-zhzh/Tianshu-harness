@@ -127,6 +127,21 @@ test('归一化不得制造新误报：读源码形态仍免让出', () => {
   assert.equal(matchesAvailabilityHazard('rg user32 src/'), false)
   assert.equal(matchesAvailabilityHazard('grep -rn "SetForegroundWindow" src/'), false)
   assert.equal(matchesAvailabilityHazard(SAFE_GREP), false)
+  assert.equal(matchesAvailabilityHazard('python -c "import ctypes; ctypes.windll.kernel32.GetCurrentProcess()"'), false)
+  assert.equal(matchesAvailabilityHazard('python -c "import ctypes; ctypes.windll.psapi.GetProcessMemoryInfo(h, p, s)"'), false)
+})
+
+test('命令内联设置 RIVET_CU_YIELD_MS=0 逃生口生效（无需修改宿主 process.env）', async () => {
+  let probed = false
+  const result = await maybeYieldForUserActivity({
+    command: `export RIVET_CU_YIELD_MS=0; ${HAZARD_XDOTOOL}`,
+    probe: async () => {
+      probed = true
+      return 0
+    },
+  })
+  assert.equal(result, null, '内联 RIVET_CU_YIELD_MS=0 应关闭本条命令的让出护栏')
+  assert.equal(probed, false, '阈值为 0 时不触发探测')
 })
 
 // ── 批准动作 ≠ 用户正在用本机 ──────────────────────────────────────

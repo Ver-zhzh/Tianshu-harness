@@ -158,10 +158,15 @@ test('声明侧必须严格大于执行侧——否则外层看门狗先落刀�
   }
 })
 
-test('非 typecheck 形态的声明侧预算不变（仍是工具默认 120s）', () => {
+test('非 typecheck 形态的声明侧预算：默认保持 120s，显式传更大预算时外层看门狗同步抬升', () => {
   for (const cmd of ['ls -la', 'npm run build', 'git status']) {
-    assert.equal(declaredFor(cmd), 120_000, `${cmd} 不该被这次修复放大`)
-    assert.equal(declaredFor(cmd, 300_000), 120_000, `${cmd} 的模型预算不参与声明侧抬升`)
+    assert.equal(declaredFor(cmd), 120_000, `${cmd} 不传或传小值时保持工具默认 120s`)
+    assert.equal(declaredFor(cmd, 60_000), 120_000, `${cmd} 传小于 120s 时外层看门狗保持默认 120s`)
+    assert.equal(
+      declaredFor(cmd, 300_000),
+      300_000 + TYPECHECK_WATCHDOG_MARGIN_MS,
+      `${cmd} 显式传 300s 时外层看门狗须跟随抬到 300s + 余量，避免在 120s 提前落刀`,
+    )
   }
 })
 

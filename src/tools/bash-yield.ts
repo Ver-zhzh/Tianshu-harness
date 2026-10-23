@@ -75,12 +75,26 @@ export function yieldMessage(idleMs: UserIdleMs, thresholdMs: number): string {
  * ③ 阈值为 0（护栏关闭）→ 不探测；
  * ④ 探测结果 null（无法检测）→ 放行（护栏失效不该成为新的失败点）。
  */
+/**
+ * 提取命令字符串中内联设置的 `RIVET_CU_YIELD_MS`（如 `export RIVET_CU_YIELD_MS=0; ...`
+ * 或 `RIVET_CU_YIELD_MS=0 python ...`）。让出文案第 3 条教调用方用该变量关闭护栏，
+ * 但 `maybeYieldForUserActivity` 在 Node 宿主进程内先于子 shell 执行——若只读宿主
+ * `process.env`，模型在 bash 命令内写的 `export RIVET_CU_YIELD_MS=0` 永远不生效。
+ */
+export function resolveInlineYieldMs(command: string): number | undefined {
+  const normalized = normalizeBashCommand(command)
+  const m = /\bRIVET_CU_YIELD_MS=(\d+)\b/.exec(command) ?? /\bRIVET_CU_YIELD_MS=(\d+)\b/.exec(normalized)
+  if (!m) return undefined
+  const n = Number.parseInt(m[1]!, 10)
+  return Number.isFinite(n) && n >= 0 ? n : undefined
+}
+
 export async function maybeYieldForUserActivity(input: YieldCheckInput): Promise<ToolResult | null> {
   if (!matchesAvailabilityHazard(input.command)) return null
   if (input.approvalGrantedAt !== undefined && Date.now() - input.approvalGrantedAt < APPROVAL_GRACE_MS) {
     return null
   }
-  const thresholdMs = input.thresholdMs ?? resolveYieldMs()
+  const thresholdMs = input.thresholdMs ?? resolveInlineYieldMs(input.command) ?? resolveYieldMs()
   if (thresholdMs <= 0) return null
   const probe = input.probe ?? (() => probeUserIdleMs())
   const idleMs = await probe()

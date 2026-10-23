@@ -243,6 +243,12 @@
           "type": "number",
           "default": 0,
           "description": "sidecar 端口（0 = 自动选择空闲端口）"
+        },
+        "tianshu.chat.turnTimeoutMinutes": {
+          "type": "number",
+          "default": 10,
+          "minimum": 1,
+          "description": "原生聊天单轮静默超时上限（分钟，默认 10；收到文本/工具/思考/心跳事件会自动续期）"
         }
       }
     }

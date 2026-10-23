@@ -79,11 +79,15 @@ test('native chat times out on silence rather than an active long response and k
     callback({ seq: 1, ts: 1, type: 'text_delta', data: { text: 'still working' } })
     advance(2); await tick()
     assert.ok(participant.activeTurn, 'active output must start a new silence window')
-    callback({ seq: 2, ts: 2, type: 'approval_required', data: { requestId: 'approval', toolName: 'write_file' } })
-    callback({ seq: 3, ts: 3, type: 'thinking_delta', data: { text: 'waiting for approval' } })
+    advance(7)
+    callback({ seq: 2, ts: 2, type: 'phase', data: { phase: 'heartbeat' } })
+    advance(5); await tick()
+    assert.ok(participant.activeTurn, 'phase heartbeat must also start a new silence window')
+    callback({ seq: 3, ts: 3, type: 'approval_required', data: { requestId: 'approval', toolName: 'write_file' } })
+    callback({ seq: 4, ts: 4, type: 'thinking_delta', data: { text: 'waiting for approval' } })
     advance(20); await tick()
     assert.ok(participant.activeTurn, 'activity must not remove the approval exemption')
-    callback({ seq: 4, ts: 4, type: 'approval_resolved', data: { requestId: 'approval' } })
+    callback({ seq: 5, ts: 5, type: 'approval_resolved', data: { requestId: 'approval' } })
     advance(11); await pending
     assert.equal(participant.activeTurn, undefined, 'a genuinely silent response must still expire')
   } finally { participant.dispose(); await pending }
@@ -183,22 +187,22 @@ test('dismissed or disposed question dialogs never send an answer', async () => 
 // The VS Code host is external. These document doubles retain text/version and
 // apply the real executor's edits so assertions cover its observable file result.
 async function executorFixture() {
-  let text = 'before\n', version = 1
+  let text = 'before\n', diskText = 'before\n', version = 1
   const answers: any[] = [], warnings: string[] = [], terminals: any[] = []
   class Uri { fsPath: string; constructor(p: string) { this.fsPath = p } static file(p: string) { return new Uri(p) } }
   class Range { constructor(..._args: any[]) {} }
   class WorkspaceEdit { edits: any[] = []; replace(uri: any, range: any, value: string) { this.edits.push({ uri, range, value }) } createFile() {} }
-  const document = { uri: Uri.file('/fixture/file.txt'), get version() { return version }, getText: () => text, positionAt: (n: number) => ({ line: 0, character: n }) }
+  const document = { uri: Uri.file('/fixture/file.txt'), get version() { return version }, getText: () => text, positionAt: (n: number) => ({ line: 0, character: n }), save: async () => { diskText = text; return true } }
   const vscode = { Uri, Range, WorkspaceEdit, ThemeColor: class {}, OverviewRulerLane: { Left: 1 }, EventEmitter: class { event() {} fire() {} dispose() {} }, window: {
     createTextEditorDecorationType: () => ({ dispose() {} }), visibleTextEditors: [], showTextDocument: async () => ({ setDecorations() {} }),
     showInformationMessage: async (s: string) => { warnings.push(s) }, showWarningMessage: async (s: string) => { warnings.push(s) },
     createTerminal: (options: any) => { const t = { ...options, exitStatus: undefined, shellIntegration: { cwd: Uri.file(options.cwd) }, dispose() { this.exitStatus = { code: 0 } } }; terminals.push(t); return t },
-  }, workspace: { fs: { stat: async () => ({}) }, openTextDocument: async () => document, applyEdit: async (edit: WorkspaceEdit) => { for (const e of edit.edits) text = e.value; version++; return true } } }
+  }, workspace: { fs: { stat: async () => ({}), writeFile: async (_uri: any, bytes: Uint8Array) => { diskText = new TextDecoder().decode(bytes); text = diskText } }, openTextDocument: async () => document, applyEdit: async (edit: WorkspaceEdit) => { for (const e of edit.edits) text = e.value; version++; return true } } }
   const { DelegationExecutor } = await load('src/delegation/executor.ts', { vscode })
   const client = { answerDelegation: async (_s: string, _r: string, answer: any) => { answers.push(answer) } }
   const executor = new DelegationExecutor(async () => client, '/fixture')
   Object.assign(executor, { client, sessionId: 'A' })
-  return { executor, document, answers, warnings, terminals, getText: () => text, change: (t: string) => { text = t; version++ }, origin: { client, sessionId: 'A', generation: executor.sessionGeneration } }
+  return { executor, document, answers, warnings, terminals, getText: () => text, getDiskText: () => diskText, change: (t: string) => { text = t; version++ }, origin: { client, sessionId: 'A', generation: executor.sessionGeneration } }
 }
 
 test('rejecting a delegated edit preserves subsequent user edits and reports a conflict', async () => {
@@ -207,6 +211,7 @@ test('rejecting a delegated edit preserves subsequent user edits and reports a c
     const done = f.executor.handleApplyEdit('edit', { path: 'file.txt', oldContent: 'before\n', newContent: 'agent\n' }, f.origin)
     for (let n = 0; n < 20 && !f.executor.pendingDecisions.size; n++) await tick()
     assert.equal(f.getText(), 'agent\n')
+    assert.equal(f.getDiskText(), 'agent\n', 'delegated apply_edit must persist to disk immediately so CLI tools do not read 0-byte/stale files')
     f.change('agent\nUSER_ADDITION\n')
     await f.executor.decide(f.document.uri, 'rejected'); await done
     assert.equal(f.getText(), 'agent\nUSER_ADDITION\n')
@@ -220,8 +225,10 @@ test('rejecting an unchanged delegated edit restores the original text', async (
   try {
     const done = f.executor.handleApplyEdit('edit', { path: 'file.txt', oldContent: 'before\n', newContent: 'agent\n' }, f.origin)
     for (let n = 0; n < 20 && !f.executor.pendingDecisions.size; n++) await tick()
+    assert.equal(f.getDiskText(), 'agent\n')
     await f.executor.decide(f.document.uri, 'rejected'); await done
     assert.equal(f.getText(), 'before\n')
+    assert.equal(f.getDiskText(), 'before\n', 'rejecting an unchanged delegated edit must also persist the reverted content to disk')
     assert.equal(f.answers.at(-1).status, 'rejected')
   } finally { f.executor.dispose() }
 })

@@ -147,11 +147,14 @@ export const TYPECHECK_WATCHDOG_MARGIN_MS = 30_000
  * 这个大小关系是不变量而非巧合：相等即专用超时文案不可达（见上一段的机制）。
  * `bash-typecheck-timeout.test.ts` 的「声明侧必须严格大于执行侧」钉住它。
  *
- * 非 typecheck 形态原样返回 `defaultMs`（不参与抬升，与修复前一致）。
+ * 非闸门形态在不大于 `defaultMs` 时原样返回 `defaultMs`；若调用方显式传入
+ * `requestedMs > defaultMs`（如长时探针/构建显式传 `timeout: 330000`），外层看门狗
+ * 同样跟随机型预算 + 余量，避免内层按 330s 跑而外层在 120s 提前落刀。
  */
 export function resolveWatchdogTimeout(command: string, requestedMs: number, defaultMs: number): number {
-  if (!isGateBudgetCommand(command)) return defaultMs
-  return resolveCallerTimeoutBudget(command, requestedMs, defaultMs) + TYPECHECK_WATCHDOG_MARGIN_MS
+  const callerBudget = resolveCallerTimeoutBudget(command, requestedMs, defaultMs)
+  if (!isGateBudgetCommand(command) && callerBudget <= defaultMs) return defaultMs
+  return callerBudget + TYPECHECK_WATCHDOG_MARGIN_MS
 }
 
 /** 缓存条目保留数量。多会话交替修改时各自的指纹会轮换，只留一份等于互相踢掉。 */
