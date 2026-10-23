@@ -16,5 +16,5 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["src/**/*", "webview-ui/**/*"]
+  "include": ["src/**/*", "webview-ui/**/*", "../src/server/protocol.ts", "../src/server/delegation-protocol.ts"]
 }

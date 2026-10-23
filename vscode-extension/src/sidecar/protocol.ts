@@ -1,16 +1,40 @@
 /**
- * Sidecar 协议类型子集。
+ * Sidecar 协议类型（与内核 `src/server/protocol.ts` 建立编译期单一事实源 SSOT）。
  *
- * ⚠ 事实源是 dev 仓 `src/server/protocol.ts`（Apache 2.0 开源侧）。本文件是
- * 插件消费所需的最小子集手工镜像——server 契约变更时同步更新（未知事件类型
- * 在消费端一律容错忽略，向后兼容）。不要在此文件添加 server 端没有的字段。
+ * `src/server/protocol.ts` 是零依赖叶子模块（HARD CONSTRAINT），本文件直接从内核
+ * type-only 导出共享协议类型，并通过 `_AssertKnownEventTypesInCanonicalProtocol`
+ * 在编译期强制校验 `KnownEventType` 必须是 `SessionEventType` 的严格子集，彻底杜绝手抄漂移。
  */
+import type {
+  ApprovalMode as CanonicalApprovalMode,
+  ApprovalRequest,
+  ApprovalSnapshot,
+  AskModeState,
+  ContextBudgetSnapshot,
+  ForkDestination,
+  PlanModeState,
+  RuntimeCapabilities,
+  SessionEventType,
+  ZenPhaseMirror,
+} from '../../../src/server/protocol.js'
+
+export type {
+  ApprovalRequest,
+  ApprovalSnapshot,
+  AskModeState,
+  ContextBudgetSnapshot,
+  ForkDestination,
+  PlanModeState,
+  RuntimeCapabilities,
+  SessionEventType,
+  ZenPhaseMirror,
+}
 
 export type SessionStatus = 'idle' | 'running' | 'completed' | 'failed' | 'aborted'
 
-export type ApprovalMode = 'auto-accept' | 'auto-safe' | 'manual' | 'dangerously-skip-permissions'
+export type ApprovalMode = CanonicalApprovalMode
 
-/** SSE 事件类型——插件 P0 消费的子集；未列出的类型按透传处理。 */
+/** SSE 事件类型——插件消费的子集（编译期受 `SessionEventType` 强约束）；未列出的类型按透传处理。 */
 export type KnownEventType =
   | 'user'
   | 'text_delta'
@@ -21,6 +45,7 @@ export type KnownEventType =
   | 'phase'
   | 'approval_required'
   | 'approval_resolved'
+  | 'approval_snapshot'
   | 'status'
   | 'error'
   | 'todo_state'
@@ -42,6 +67,11 @@ export type KnownEventType =
   | 'queue_status'
   | 'done'
   | 'tool_delegate'
+
+/** 编译期漂移门禁：若 KnownEventType 包含任何不在内核 SessionEventType 中的事件名，tsc 立即报错。 */
+type _AssertKnownEventTypesInCanonicalProtocol = KnownEventType extends SessionEventType ? true : never
+const _protocolDriftGuard: _AssertKnownEventTypesInCanonicalProtocol = true
+void _protocolDriftGuard
 
 export interface SessionEvent {
   seq: number
