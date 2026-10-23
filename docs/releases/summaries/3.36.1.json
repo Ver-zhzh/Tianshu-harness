@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "version": "3.36.1",
+  "date": "2026-10-23",
+  "fullNotesUrl": "https://github.com/huiliyi37/Tianshu-harness/releases/tag/v3.36.1",
+  "locales": {
+    "zh": {
+      "title": "子代理委派全灭热修与工具调用协议加固",
+      "highlights": [
+        "热修：v3.35.0 / v3.36.0 中 delegate_task / delegate_batch / galaxy 全部子代理调用必然失败（parsePrompt 段间分隔符缺陷），重启无效——本版修复解析器，按原文记录每段真实分隔符并补回归用例。",
+        "主控提示词只点名实际提供的工具：默认档位下提示词不再命令模型调用未提供的 apply_patch 等工具，消除整次响应作废的 ToolNameProtocolError(unknown)；兼容网关 functions.<工具名> 包装并独立 tool_protocol 错误类。",
+        "续跑与锁稳定：缺 wireTransformVersion 的 legacy 证明不再静默替换 transport 基线；睡眠唤醒/改主机名后的 stale 锁恢复；收编公开仓 PR #531 会话命令工作流；新增 trace-lab 星域解读实验插件。"
+      ]
+    },
+    "en": {
+      "title": "Hotfix for the total subagent delegation outage, plus tool-call protocol hardening",
+      "highlights": [
+        "Hotfix: in v3.35.0 / v3.36.0 every subagent call (delegate_task / delegate_batch / galaxy) failed deterministically with a parsePrompt section-separator defect, and restarts could not help — the parser now preserves each section's exact separator, with a regression test.",
+        "The main-controller prompt now names only provided tools: it no longer tells the model to call apply_patch on presets where it is gated out, which aborted responses with ToolNameProtocolError(unknown); gateway functions.<name> wrapping is normalized, with a dedicated tool_protocol error category.",
+        "Resume and lock stability: legacy proofs missing wireTransformVersion can no longer silently replace the transport baseline; stale lock owners recover after sleep/hostname changes; community PR #531 session command workflow adopted; new trace-lab star-domain interpretation plugin."
+      ]
+    }
+  }
+}

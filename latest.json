@@ -1,19 +1,19 @@
 {
-  "version": "3.36.0",
+  "version": "3.36.1",
   "notes": "v3.36.0——Node 安全运行时闸门：低于 24.22.1 / 26.12.1 的运行时将拒绝启动；修复 2026-10-21 安全公告的 10 个漏洞（含 Brotli 越界写入等 4 个高危）。升级前请先切换 Node。",
-  "pub_date": "2026-10-22T06:21:42.078Z",
+  "pub_date": "2026-10-23T08:55:05.136Z",
   "platforms": {
     "darwin-aarch64": {
-      "url": "https://github.com/huiliyi37/Tianshu-harness/releases/download/v3.36.0/Tianshu_3.36.0_aarch64.app.tar.gz",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRaDZmcFdBUytLR1JnMWlrQ3FCd2tFdjV5QTJKSFhrWldUclpzQVR2ajRnNEpsbXVrK2tQS2RtTmFid3NSdW9PVlZ0U2MwVWRRZW0wNmg4UUJzZXJOanBUV284TFRlUHc4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyNjQ4MDk0CWZpbGU6VGlhbnNodS5hcHAudGFyLmd6CkJpQVBSYWNaZWt6Vnc2OS9ad1dVL3FTZGo1U0l0Mi82WmQ0T09abjZwMy9xMHhrR3hPR0t4ckUyTlA2THpTdkNVT0RIZUdxVVJUeFRWYndsK0ptSER3PT0K"
+      "url": "https://github.com/huiliyi37/Tianshu-harness/releases/download/v3.36.1/Tianshu_3.36.1_aarch64.app.tar.gz",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRaDZmcFdBUytLR2VQeFhFa0NZU0x3SnFkckM0cDBRL3JzWWtLVm1PRWtMNXdJWTJ5WnRiWHJTeFZYUVhhN2pDeG8wRVpXTHVoREZ2V0c3MVN1NE9CQTBGbG5ObjlXbkFvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyNzQ0NjA4CWZpbGU6VGlhbnNodS5hcHAudGFyLmd6CnZyOTFlOVM0SEZQU1lQS1lIekJ3Y1RPMjVsSlQzSWF5K2hGOUdkMVQzS2M4WVJzYm5ZZTA2a2Q5QWM2dHVBUWJERnNmYXdoTnRlZkJKZ0R4TWd1OEFRPT0K"
     },
     "darwin-x86_64": {
-      "url": "https://github.com/huiliyi37/Tianshu-harness/releases/download/v3.36.0/Tianshu_3.36.0_x64.app.tar.gz",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRaDZmcFdBUytLR2FzbTJnY0I5cUh1dW40Z0hncytjYjU5RnVRRXNHK2xxRzdUTzJqR21uVkFLWEdvOEdJTytYdTErakRmV2ZnQ0VzRGJTZ3ljcmtDb3piWFQ1VDVqb2dRPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyNjQ4NjYzCWZpbGU6VGlhbnNodS5hcHAudGFyLmd6Cm1NTWNKRVlqM3M0UisxUzg5cUNFQi9iWVRzc0Jzd1FjaDJLSlYzdk9QdE4vU2hheFgrTHpyN3pvaWllTWVyaVQxYlkwQnVzK3ExUVo1WU82OVJaWUJRPT0K"
+      "url": "https://github.com/huiliyi37/Tianshu-harness/releases/download/v3.36.1/Tianshu_3.36.1_x64.app.tar.gz",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRaDZmcFdBUytLR1FnUHRYOEtTTTVydDFXUENTck9odmpJcVZZZHdzc2tsdmFBSVdFYkVVYXNBU1NxUVBVTTBkNDQzeGFvajFkOFRjdTJLdnpRQ3FSZ0tFejlSTDVjK0FFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyNzQ1MDA2CWZpbGU6VGlhbnNodS5hcHAudGFyLmd6CmVkbk1KTndmNWR2ZUU5WkpwU1dMWUM4WVc1ZnBoQ05lV3o0Q3BQT2M1cUYveHlqZzBBN2xBS09pVGJ1akY0Z2NWb1NLWVp6OVNGNmVSY1dpbGg4ZENnPT0K"
     },
     "windows-x86_64": {
-      "url": "https://github.com/huiliyi37/Tianshu-harness/releases/download/v3.36.0/Tianshu_3.36.0_x64-setup.exe",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRaDZmcFdBUytLR1FWelZidjFXMmN0WXdHN3ZCcnFwRXUvdGJwdXdUMEJMeFNsQWZHVVFMWUJmOEhxdkZacEVqYVlDWUNSRkF1N0N5T2g3VHZYVy8zMkJMYXY3UDlrYncwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyNjUwMDkzCWZpbGU6VGlhbnNodV8zLjM2LjBfeDY0LXNldHVwLmV4ZQozOVR3S3d0ZGc5bnNJZ0NDMG1iVEpOdGphR0d3ZlVTblA0b2pxOUFISlJNN2J1Wlc3RFNKMlFvSGxrQXpoUTJHN0FFM2FicVN0RkNGSG8zdU9OWHhDQT09Cg=="
+      "url": "https://github.com/huiliyi37/Tianshu-harness/releases/download/v3.36.1/Tianshu_3.36.1_x64-setup.exe",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRaDZmcFdBUytLR2RXajEwRFc0N250TE9oalExNFl5Zi9NRWtXWUUzVldPdVNNbDFBSVlKUkVJOXNGZkxOZERFcnIvcENmMzdUZVF4bk1mMHRiek1JQVJBVmhXUmYzd2cwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyNzQ1NzA0CWZpbGU6VGlhbnNodV8zLjM2LjFfeDY0LXNldHVwLmV4ZQowT201SERxbWRKTVErZTJMdTduWjhHaTdyTGpTeFFVM2xPckN3QlBOSDA5cUF5U3J6SFZORnVPWXBsaTJ2ZkV5Y3F4bWdFNnkzSXAxRlI3cUF1S2RCUT09Cg=="
     }
   }
 }
