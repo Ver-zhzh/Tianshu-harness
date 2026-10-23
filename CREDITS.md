@@ -498,3 +498,4 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 - #528 fix(tui): 修复指令贴顶与窗口缩放时输入区贴底（CLOSED）
 - #531 feat(tui): 完善目标管理、定向压缩与会话交接恢复（OPEN）
 - #529 feat(tui): 输入框方向键导航与鼠标选区对齐 Codex CLI（OPEN）
+- #535 feat(ext): sidecar daemon lease survivability, protocol SSOT, and shared session reducer（MERGED）
