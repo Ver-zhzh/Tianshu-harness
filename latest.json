@@ -1,6 +1,6 @@
 {
   "version": "3.36.1",
-  "notes": "v3.36.0——Node 安全运行时闸门：低于 24.22.1 / 26.12.1 的运行时将拒绝启动；修复 2026-10-21 安全公告的 10 个漏洞（含 Brotli 越界写入等 4 个高危）。升级前请先切换 Node。",
+  "notes": "v3.36.1——子代理委派全灭热修：v3.35.0/3.36.0 全部子代理调用（delegate_task/delegate_batch/galaxy）必然失败的 parsePrompt 缺陷修复；工具调用协议加固（提示词只点名实际提供的工具、网关 functions. 归一）。",
   "pub_date": "2026-10-23T08:55:05.136Z",
   "platforms": {
     "darwin-aarch64": {
