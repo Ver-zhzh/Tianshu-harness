@@ -1078,6 +1078,21 @@ describe('可用性危害 —— GUI 输入注入进审批门', () => {
     })
   }
 
+  it('Windows 非 GUI Win32 API（kernel32 / psapi 查进程内存等）不应误判为可用性危害', () => {
+    for (const cmd of [
+      'import ctypes; h = ctypes.windll.kernel32.GetCurrentProcess()',
+      'import ctypes; ctypes.windll.psapi.GetProcessMemoryInfo(h, ctypes.byref(c), ctypes.sizeof(c))',
+    ]) {
+      assert.equal(AVAILABILITY_HAZARD_PATTERNS.some(p => p.test(cmd)), false, `不应命中可用性危害：${cmd}`)
+      assert.equal(matchesDangerousBash(cmd), false, `不应命中 dangerous bash：${cmd}`)
+    }
+    assert.equal(
+      AVAILABILITY_HAZARD_PATTERNS.some(p => p.test('import ctypes; ctypes.windll.user32.mouse_event(2,0,0,0,0)')),
+      true,
+      'ctypes.windll.user32 仍须命中可用性危害',
+    )
+  })
+
   it('注入签名表独立可测（导出，供上层分类器复用）', () => {
     assert.ok(AVAILABILITY_HAZARD_PATTERNS.length >= 8)
     assert.ok(AVAILABILITY_HAZARD_PATTERNS.every(p => p instanceof RegExp))

@@ -185,7 +185,6 @@ export class DelegationExecutor implements vscode.Disposable {
     const full = new vscode.Range(doc.positionAt(0), doc.positionAt(previousContent.length))
     edit.replace(uri, full, newContent)
     const ok = await vscode.workspace.applyEdit(edit)
-    const appliedVersion = doc.version
     if (!ok) {
       await client.answerDelegation(sessionId, requestId, {
         content: `WorkspaceEdit failed for ${relPath}`,
@@ -193,6 +192,15 @@ export class DelegationExecutor implements vscode.Disposable {
       })
       return
     }
+    const saved = await doc.save?.()
+    if (saved === false) {
+      await client.answerDelegation(sessionId, requestId, {
+        content: `Document save failed for ${relPath}`,
+        isError: true,
+      })
+      return
+    }
+    const appliedVersion = doc.version
     if (!this.isCurrent(origin)) {
       await client.answerDelegation(sessionId, requestId, { content: `Applied edit to ${relPath}`, isError: false, status: 'ok' })
       return
@@ -246,7 +254,7 @@ export class DelegationExecutor implements vscode.Disposable {
       }
       const span = new vscode.Range(fresh.positionAt(0), fresh.positionAt(fresh.getText().length))
       revert.replace(uri, span, previousContent)
-      const reverted = await vscode.workspace.applyEdit(revert)
+      const reverted = (await vscode.workspace.applyEdit(revert)) && (await fresh.save?.()) !== false
       if (this.isCurrent(origin)) {
         this.decorations.clear(uri)
         this.codeLenses.refresh()

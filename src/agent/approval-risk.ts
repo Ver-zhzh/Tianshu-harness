@@ -73,9 +73,9 @@ export const AVAILABILITY_HAZARD_PATTERNS: ReadonlyArray<Readonly<RegExp>> = [
   /\b(?:SetForegroundWindow|SetCursorPos|BringWindowToTop|mouse_event|keybd_event|SendInput|BlockInput)\s*\(/i,
   /\bSendKeys\b[^\n]*(?:\(|::)/i,
   /\bAppActivate\s*\(/i,
-  // 解释器 + GUI 注入能力：ctypes 直调 Win32、以及纯粹的输入模拟库
+  // 解释器 + GUI 注入能力：ctypes 直调 Win32 user32、以及纯粹的输入模拟库
   /\b(?:pyautogui|pynput|pywinauto|AutoIt|AutoHotkey)\b/i,
-  /\bctypes\b[^\n]*\b(?:windll|user32)\b/i,
+  /\bctypes\b[^\n]*\buser32\b/i,
   // ── macOS：osascript 合成键鼠 / CGEvent 底层合成 ──
   /\bosascript\b[^\n]*\b(?:keystroke|key\s*code)\b/i,
   /\bosascript\b[^\n]*\bSystem\s+Events\b[^\n]*\b(?:click|perform\s+action|set\s+value)\b/i,
@@ -124,7 +124,7 @@ export const INPUT_SYNTHESIS_PATTERNS: ReadonlyArray<Readonly<RegExp>> = [
   /\b(?:SetCursorPos|mouse_event|keybd_event|SendInput|BlockInput)\s*\(/i,
   /\bSendKeys\b[^\n]*(?:\(|::)/i,
   /\b(?:pyautogui|pynput|pywinauto|AutoIt|AutoHotkey)\b/i,
-  /\bctypes\b[^\n]*\b(?:windll|user32)\b/i,
+  /\bctypes\b[^\n]*\buser32\b/i,
   /\bosascript\b[^\n]*\b(?:keystroke|key\s*code)\b/i,
   /\bosascript\b[^\n]*\bSystem\s+Events\b[^\n]*\b(?:click|perform\s+action|set\s+value)\b/i,
   /\bCGEventPost\s*\(/i,

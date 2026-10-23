@@ -20,8 +20,16 @@ import type { ChatHumanInteraction } from './human-interaction.js'
 /** participant id；必须与 package.json 的 contributes.chatParticipants[].id 一致。 */
 const PARTICIPANT_ID = 'tianshu.default'
 
-/** 单轮时间上限：静默的 sidecar 不应永远占住聊天视图。 */
-const TURN_TIMEOUT_MS = 10 * 60 * 1000
+/** 单轮默认静默时间上限：静默的 sidecar 不应永远占住聊天视图（可通过 tianshu.chat.turnTimeoutMinutes 配置）。 */
+const DEFAULT_TURN_TIMEOUT_MINUTES = 10
+
+function resolveTurnTimeoutMs(): number {
+  const configured = vscode.workspace?.getConfiguration?.('tianshu')?.get<number>('chat.turnTimeoutMinutes')
+  const minutes = typeof configured === 'number' && Number.isFinite(configured) && configured >= 1
+    ? configured
+    : DEFAULT_TURN_TIMEOUT_MINUTES
+  return Math.round(minutes * 60_000)
+}
 
 /** 进行中的一轮：其会话、回复接收端、以及 dispatch 调用的收束钩子。 */
 interface ActiveTurn {
@@ -116,6 +124,7 @@ export class TianshuChatParticipant implements vscode.Disposable {
     }
     if (event === undefined || turn === undefined) return
     if (this.pendingApprovals.size === 0) turn.timeout.arm()
+    if (event.kind === 'activity') return
     if (event.kind === 'delta') {
       turn.sawText = true
       turn.stream.markdown(event.text)
@@ -311,10 +320,11 @@ export class TianshuChatParticipant implements vscode.Disposable {
     // 审批完结后开新窗口（见 turn-timeout.ts）。
     let settleTimeout: (event: ChatTurnEvent) => void = () => {}
     const timedOut = new Promise<ChatTurnEvent>((resolve) => { settleTimeout = resolve })
-    const timeout = new TurnTimeout(TURN_TIMEOUT_MS, () => {
+    const turnTimeoutMs = resolveTurnTimeoutMs()
+    const timeout = new TurnTimeout(turnTimeoutMs, () => {
       settleTimeout({
         kind: 'error',
-        message: `等待回答超过 ${Math.round(TURN_TIMEOUT_MS / 60_000)} 分钟，已放弃等待（任务可能仍在 sidecar 中继续）。`,
+        message: `等待回答超过 ${Math.round(turnTimeoutMs / 60_000)} 分钟，已放弃等待（任务可能仍在 sidecar 中继续）。`,
       })
     })
 

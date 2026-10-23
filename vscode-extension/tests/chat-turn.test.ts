@@ -80,7 +80,10 @@ test('user_question 无有效问题时忽略（questions 非数组或元素缺 i
   assert.equal(interpretSessionEvent(ev('user_question', { toolUseId: 't1' })), undefined)
 })
 
-test('无关事件（status/未知类型）一律忽略', () => {
+test('phase 事件 → activity 活性心跳；空 phase 或无关事件（status/未知类型）一律忽略', () => {
+  assert.deepEqual(interpretSessionEvent(ev('phase', { phase: 'heartbeat' })), { kind: 'activity', phase: 'heartbeat' })
+  assert.deepEqual(interpretSessionEvent(ev('phase', { phase: 'working' })), { kind: 'activity', phase: 'working' })
+  assert.equal(interpretSessionEvent(ev('phase', {})), undefined)
   assert.equal(interpretSessionEvent(ev('status', { status: 'running' })), undefined)
   assert.equal(interpretSessionEvent(ev('whatever', {})), undefined)
 })
