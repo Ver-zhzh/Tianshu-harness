@@ -25,6 +25,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
+          check-latest: true
           cache: npm
 
       - name: Install dependencies
@@ -66,6 +67,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 24
+          check-latest: true
           cache: npm
 
       - name: Install dependencies
@@ -113,6 +115,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+          check-latest: true
           cache: npm
       - uses: actions/setup-python@v5
         if: runner.os != 'Windows'
@@ -148,6 +151,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+          check-latest: true
           cache: npm
       - uses: actions/setup-python@v5
         with:
