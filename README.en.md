@@ -16,6 +16,7 @@
   <a href="docs/user-guide.md"><img src="https://img.shields.io/badge/Docs-User%20Guide-FBBC04" alt="Docs"></a>
   <a href="https://discord.gg/XjWTATCHB"><img src="https://img.shields.io/badge/Discord-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-34A853" alt="License"></a>
+  <a href="https://github.com/RyanAlberts/best-of-Agent-Harnesses"><img src="https://img.shields.io/badge/%F0%9F%8F%86_Best_of-Agent_Harnesses-5ac4bf" alt="Best of Agent Harnesses"></a>
 </p>
 
 <p align="center">
