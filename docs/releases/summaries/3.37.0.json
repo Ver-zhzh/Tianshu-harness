@@ -15,8 +15,8 @@
     "en": {
       "title": "Commit/verify/review separation and a focused default tool surface",
       "highlights": [
-        "Commit, verification and review are now fully separate: deliver_task is a pure safe-commit (no automatic verification or review, no quality endorsement in receipts); a new review_changes entry provides independent review (pinned snapshot, read-only reviewer, persisted findings); run_tests with no arguments no longer runs the full suite.",
-        "The default main-controller tool surface shrinks from 30 to 26 tools with 23.2% smaller tool definitions: galaxy / starflow / plan_task / council_convene move out of the default surface and mount on demand, and a new orchestration preset opens them together; /tools and desktop settings show real assembly and visibility counts.",
+        "Commit, verification and review are now fully separate: deliver_task is a pure safe-commit (no auto-verify, no auto-review); review_changes adds independent review (pinned snapshot, read-only reviewer, persisted findings); run_tests no longer defaults to the full suite.",
+        "Default main-controller tool surface shrinks 30→26 with 23.2% smaller definitions: galaxy / starflow / plan_task / council_convene mount on demand, a new orchestration preset opens them together; /tools and desktop settings show real assembly counts.",
         "Desktop: the updater is rebuilt (resumable downloads, verified sources, self-recovery of damaged runtimes), the default theme is now aether-citadel, and GitHub MCP onboarding is PAT-first with a three-step guide; automatic memory formation is now opt-in (Settings → Behavior)."
       ]
     }
