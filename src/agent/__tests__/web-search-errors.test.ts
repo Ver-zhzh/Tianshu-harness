@@ -22,7 +22,7 @@ async function runSearch(backends: SearchBackend[], query: string | undefined = 
     const tool = createWebSearchTool({ backends, timeoutMs: 5 })
     registry.register({ ...tool, execute: async params => { calls++; return tool.execute(params) } })
     const trajectory = new TrajectoryRecorder()
-    const sessionId = `search-${cwd}`
+    const sessionId = `search-fixture-${process.pid}`
     const deps = {
       config: {
         toolRegistry: registry, hooks: null, lspEnabled: false, sessionId,

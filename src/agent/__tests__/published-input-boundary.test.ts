@@ -542,7 +542,9 @@ test('withdrawing a wholly speculative task restores its prior objective, constr
   assert.ok(!JSON.stringify(session.getMessages()).includes('BOUNDARY_B'))
   assert.deepEqual(agent.taskContract, priorContract)
   assert.deepEqual(agent.obligations.getStore(), priorDebt)
-  assert.equal(agent.obligations.evaluateFinal().alreadyContinued, true)
+  // 267a0001e：delivery 义务属 isIndependentVerification——披露而不排期续轮。
+  // rollback 恢复的是债务记录本身（上方 deepEqual 已钉），final 评估不再因此续轮。
+  assert.equal(agent.obligations.evaluateFinal().alreadyContinued, false)
   assert.ok(agent.obligations.getVersion() > version)
   assert.equal(agent.workFacts.taskEpoch, epoch, 'rollback must not rewind monotonic task epochs')
   assert.equal(agent.workFacts.explicitNoMutation, true)

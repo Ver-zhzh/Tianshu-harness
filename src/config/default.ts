@@ -1,5 +1,6 @@
 import type { Config } from './schema.js'
 import { cloneProviderPreset } from './provider-presets.js'
+import { READ_CONCURRENCY } from './read-concurrency.js'
 
 export const DEFAULT_CONFIG: Config = {
   editor: { platform: 'auto', eol: 'auto' },
@@ -82,6 +83,7 @@ export const DEFAULT_CONFIG: Config = {
     constellationEnabled: false,
     companionPresenceEnabled: false,
     dreamEnabled: true,
+    memoryFormation: { autoCapture: false, consolidation: false },
     securityGuidance: true,
     interruptMarker: true,
     scoutEvidenceFirewall: false,
@@ -254,7 +256,7 @@ export const DEFAULT_CONFIG: Config = {
   // 工作区策略（issue #147）：空对象 = 不改旧行为——未指定目录的会话仍落到
   // sidecar 的 defaultCwd（process.cwd()），与 workspaceMode 缺省语义一致。
   workspace: {},
-  tools: {},
+  tools: { readConcurrency: READ_CONCURRENCY.default },
   // 前缀档位：空对象 = 走 schema 默认（standard）。这里刻意不写死 profile，
   // 让「无配置 = 现状」这一不变量只有一个来源（block-policy.resolvePromptBlocks）。
   prompt: { blocks: {} },

@@ -59,7 +59,7 @@ function deliveryObligation() {
 }
 
 describe('acceptance 义务：跑测试关不掉（靶心）', () => {
-  it('PyQt5 场景复刻：一条 passed 单测关掉 delivery，acceptance 仍未决且拿到续轮席位', () => {
+  it('PyQt5 场景复刻：一条 passed 单测关掉 delivery，acceptance 仍未决但允许诚实结束', () => {
     const acceptance = acceptanceObligation()
     const delivery = deliveryObligation()
     const store: ObligationStore = { obligations: [delivery, acceptance] }
@@ -72,9 +72,9 @@ describe('acceptance 义务：跑测试关不掉（靶心）', () => {
     assert.equal(acceptanceAfter.state, 'open', 'acceptance 绝不能被任意测试关闭——这是本机制的支点')
 
     const verdict = evaluateFinalCandidate(after)
-    assert.equal(verdict.verdict, 'continue_once')
-    assert.equal(verdict.nextAction?.obligationId, acceptanceAfter.id)
-    assert.equal(verdict.nextAction?.action, 'user_acceptance')
+    assert.equal(verdict.verdict, 'allow')
+    assert.equal(verdict.nextAction, undefined)
+    assert.equal(acceptanceAfter.requiredAction, 'user_acceptance')
   })
 
   it('跑多少次、跑 full scope 都关不掉 acceptance', () => {
@@ -92,27 +92,27 @@ describe('acceptance 义务：跑测试关不掉（靶心）', () => {
   })
 })
 
-describe('FAMILY_ORDER：acceptance 排在 delivery 之前', () => {
-  it('两条同时未决时，唯一那次续轮的席位归 acceptance', () => {
+describe('验证记录保留，但不调度后续执行', () => {
+  it('两个验证缺口都不自动续轮', () => {
     const acceptance = acceptanceObligation()
     const store: ObligationStore = { obligations: [deliveryObligation(), acceptance] }
     const verdict = evaluateFinalCandidate(store)
-    assert.equal(verdict.nextAction?.obligationId, acceptance.id)
+    assert.equal(verdict.nextAction, undefined)
   })
 
-  it('入库顺序不影响席位归属（排序而非插入序决定）', () => {
+  it('任意入库顺序不产生验证续轮', () => {
     const acceptance = acceptanceObligation()
     const store: ObligationStore = { obligations: [acceptance, deliveryObligation()] }
-    assert.equal(evaluateFinalCandidate(store).nextAction?.obligationId, acceptance.id)
+    assert.equal(evaluateFinalCandidate(store).nextAction, undefined)
   })
 
-  it('bugfix 的 RED 复现仍优先于 acceptance——先证缺陷存在，再谈验收', () => {
+  it('bugfix 和 acceptance 都只保留待验证状态', () => {
     const bugfix = createObligation({ family: 'bugfix', claim: '缺陷已复现并修复', risk: 'high' })
     const store: ObligationStore = { obligations: [acceptanceObligation(), bugfix] }
-    assert.equal(evaluateFinalCandidate(store).nextAction?.obligationId, bugfix.id)
+    assert.equal(evaluateFinalCandidate(store).nextAction, undefined)
   })
 
-  it('续轮 latch 按义务 ID 记，排第一的那条不结会吃掉唯一席位——排序即话语权', () => {
+  it('历史续轮 latch 不恢复自动验证', () => {
     const tracker = new ObligationTracker()
     const acceptanceId = tracker.upsert({
       family: 'acceptance',
@@ -123,16 +123,16 @@ describe('FAMILY_ORDER：acceptance 排在 delivery 之前', () => {
     tracker.upsert({ family: 'delivery', claim: '本任务修改的代码已通过相关验证', targets: [], risk: 'high' })
 
     const first = tracker.evaluateFinal()
-    assert.equal(first.verdict, 'continue_once')
-    assert.equal(first.nextAction?.obligationId, acceptanceId)
+    assert.equal(first.verdict, 'allow')
+    assert.equal(first.nextAction, undefined)
     tracker.markContinued(acceptanceId)
 
     // 第二次收尾：unresolved[0] 仍是 acceptance 且已在 latch 里 → 直接降
     // honest_blocked，根本不会往下看 delivery。这正是 acceptance 必须排前面
     // 的真实理由——不是执行顺序，是席位分配。
     const second = tracker.evaluateFinal()
-    assert.equal(second.verdict, 'honest_blocked')
-    assert.equal(second.alreadyContinued, true)
+    assert.equal(second.verdict, 'allow')
+    assert.equal(second.alreadyContinued, false)
   })
 })
 
@@ -215,7 +215,7 @@ describe('新家族的配套站点', () => {
     assert.match(signals[0]!.key, /^obligation:verify:/)
   })
 
-  it('义务块把下一步动作暴露给模型（被动可见通道）', () => {
+  it('义务块披露未验证，不要求模型立即补验证', () => {
     const tracker = new ObligationTracker()
     tracker.upsert({
       family: 'acceptance',
@@ -225,6 +225,7 @@ describe('新家族的配套站点', () => {
     })
     const block = tracker.renderBlock()
     assert.match(block, /acceptance:/)
-    assert.match(block, /next=user_acceptance/)
+    assert.match(block, /时机由用户决定/)
+    assert.doesNotMatch(block, /next=/)
   })
 })

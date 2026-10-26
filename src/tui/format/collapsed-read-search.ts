@@ -13,7 +13,7 @@
 import { color } from '../engine/ansi.js'
 import type { RivetTheme } from '../theme.js'
 import { ambiguousWideEnabled, displayWidth, truncateToDisplayWidth } from '../width.js'
-import { formatToolCard } from './tool-card.js'
+import { formatCollapsedToolDetailLine, formatToolCard } from './tool-card.js'
 import { EXPAND_HINT } from '../truncation-marker.js'
 
 // ── Types ──────────────────────────────────────────────────────
@@ -252,7 +252,7 @@ export interface FormatCollapsedGroupInput {
   expandHint?: string
 }
 
-/** 渲染折叠的 read+search 组（用于 scrollback） */
+/** 成功组默认只留摘要或单条标题；错误保留标题和尾部诊断，完整卡片仅在 expanded 渲染。 */
 export function formatCollapsedGroup(input: FormatCollapsedGroupInput): string[] {
   const { group, expanded, theme } = input
   const width = Math.max(2, (input.columns ?? 80) - 1)
@@ -262,46 +262,38 @@ export function formatCollapsedGroup(input: FormatCollapsedGroupInput): string[]
   const completed = group.entries.filter(entry => entry.completed)
   const elapsed = Math.max(0, Date.now() - group.startMs)
   const elapsedStr = elapsed > 1000 ? (elapsed / 1000).toFixed(1) + 's' : elapsed + 'ms'
+  const expandHint = input.expandHint ?? EXPAND_HINT
+  const summary = color(buildSummaryText(group, false) + ' · ' + elapsedStr, theme.muted)
   const lines = group.entries.length > 1
-    ? [fit(color(buildSummaryText(group, false) + ' · ' + elapsedStr, theme.muted))] : []
+    ? [expanded ? fit(summary) : formatCollapsedToolDetailLine(summary, expandHint, theme, input.columns)] : []
   if (!completed.length) return [fit(color('Read/Search · 等待结果', theme.muted))]
-  const shown = expanded ? completed : completed.filter((entry, index) => index < 3 || entry.isError)
+  const shown = expanded ? completed : completed.filter(entry => entry.isError || group.entries.length === 1)
   for (const entry of shown) {
     const card = formatToolCard({
       toolName: entry.toolName, toolInput: entry.kind === 'read' && !entry.input.file_path && !entry.input.path ? { ...entry.input, file_path: entry.displayName } : entry.input, content: entry.content ?? '',
-      rawPath: entry.rawPath, isError: entry.isError, columns: input.columns, maxLines: 3, expanded,
+      rawPath: expanded ? entry.rawPath : undefined, isError: entry.isError, columns: input.columns, maxLines: 3, expanded,
       expandHint: input.expandHint,
     }, theme)
     if (expanded) lines.push(...card)
     else {
-      lines.push(card[0]!)
-      if (entry.rawPath) lines.push(fit(color(`  全文来源: ${entry.rawPath}`, theme.muted)))
-      if (entry.isError || completed.length === 1) {
+      lines.push(group.entries.length === 1 ? formatCollapsedToolDetailLine(card[0]!, expandHint, theme, input.columns) : card[0]!)
+      if (entry.isError) {
         const rows = (entry.content ?? '').replace(/\n+$/, '').split('\n')
-        const preview = entry.isError ? rows.slice(-3) : rows.slice(0, 2)
-        lines.push(...preview.filter(Boolean).map(row => fit(`  ${color(row, entry.isError ? theme.error : theme.muted)}`)))
+        lines.push(...rows.slice(-3).filter(Boolean).map(row => fit(`  ${color(row, theme.error)}`)))
       }
     }
-  }
-  if (!expanded && (completed.length > 1 || completed.some(entry => (entry.content ?? '').split('\n').length > 2))) {
-    lines.push(fit(color(`  ${shown.length < completed.length ? `… +${completed.length - shown.length} 个结果 · ` : ''}${input.expandHint ?? EXPAND_HINT} · 工具详情`, theme.muted)))
   }
   return lines
 }
 
 // ── Rendering: live region ─────────────────────────────────────
 
-/**
- * 渲染 live 区域聚合行（进行中的探索工具）。
- * 区别于独立 tool card：所有 collapsible 工具聚合成一行，
- * 避免 live 区被 5+ 个 read/grep 卡片刷屏。
- */
+/** 进行中的探索工具只显示一条聚合标题，不附带结果预览。 */
 export function formatCollapsedGroupLive(
   group: CollapsedReadSearchGroup,
   theme: RivetTheme,
   columns?: number,
 ): string[] {
-  const lines: string[] = []
   const summary = buildSummaryText(group, true)
   const elapsed = Date.now() - group.startMs
   const elapsedStr = elapsed > 1000 ? `${(elapsed / 1000).toFixed(0)}s` : `${elapsed}ms`
@@ -309,20 +301,7 @@ export function formatCollapsedGroupLive(
   const widthOptions = { ambiguousAsWide: ambiguousWideEnabled() }
   const stats = computeGroupStats(group)
   const header = `● ${summary} · ${elapsedStr}`
-  lines.push(color(displayWidth(header, widthOptions) <= width ? header : `● ${stats.pendingCount ? `运行中 ${stats.pendingCount}` : `完成 ${stats.completedCount}`} · ${elapsedStr}`, theme.muted))
-
-  // 显示最近一条已完成 entry 的末 2 行作为进度预览
-  const lastCompleted = [...group.entries].reverse().find(e => e.content && e.completed)
-  if (lastCompleted?.content) {
-    const maxWidth = Math.max(0, width - 2)
-    const tailLines = lastCompleted.content.replace(/\n+$/, '').split('\n').slice(-2)
-    for (const line of tailLines) {
-      const trimmed = displayWidth(line, widthOptions) > maxWidth ? truncateToDisplayWidth(line, maxWidth - displayWidth('…', widthOptions), widthOptions) + '…' : line
-      lines.push(`  ${color(trimmed, theme.muted)}`)
-    }
-  }
-
-  return lines
+  return [color(displayWidth(header, widthOptions) <= width ? header : `● ${stats.pendingCount ? `运行中 ${stats.pendingCount}` : `完成 ${stats.completedCount}`} · ${elapsedStr}`, theme.muted)]
 }
 
 // ── Buffer ─────────────────────────────────────────────────────
@@ -387,5 +366,10 @@ export class CollapsedReadSearchBuffer {
   /** 是否有活跃组 */
   isActive(): boolean {
     return this.group !== null
+  }
+
+  /** 活跃组里是否已有该 toolUseId 的 entry（「有组」≠「有位置」） */
+  hasEntry(id: string): boolean {
+    return this.group?.entries.some(e => e.id === id) ?? false
   }
 }

@@ -13,6 +13,13 @@ const okDeps: ReviewRouterDeps = {
 }
 
 describe('routeReviewWorkflow', () => {
+  it('preserves non-blocking LOW defects for follow-up instead of dropping them on verified', async () => {
+    const finding = { severity: 'LOW', claim: 'real low-priority defect', evidence: 'src/agent/a.ts:2' }
+    const result = await routeReviewWorkflow({ files: ['src/agent/a.ts'], crossModule: false, isFix: true },
+      { ...okDeps, spawnWiringReviewer: async () => ({ findings: [finding] }) }, { mode: 'auto' })
+    assert.equal(result.verdict, 'verified')
+    assert.deepEqual(result.findings, [finding])
+  })
   it('routes L1 README to nudge only and spawns no agents', async () => {
     let verifierCalls = 0
     let patcherCalls = 0

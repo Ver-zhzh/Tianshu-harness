@@ -1,128 +1,99 @@
-/**
- * POST /sessions/:id/handoff — 桌面端 /handoff 入口。
- *
- * 契约：
- * - 会话不存在 404、运行中 409；
- * - ok 路径：交接 run 的 prompt 指向项目内 .rivet/HANDOFF.md（工作区内免审批），
- *   并登记 pendingHandoff 归档任务；
- * - run 收尾时 settleHandoffArchive：项目内文档拷贝归档到会话目录
- *   <id>.handoff.md（loadPrevHandoff 注入管线认的位置）+ system 事件 + 清字段；
- * - 文档缺失/陈旧则跳过拷贝，不阻断 done。
- */
-
-import { test, beforeEach, afterEach } from 'node:test'
+import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, utimesSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createRouter } from '../index.js'
 import { buildSessionRoutes } from '../session-routes.js'
 import { RuntimeSessionManager, type ManagedAgent } from '../session-manager.js'
-import { getSessionDir } from '../../agent/session-persist.js'
 import type { AgentCallbacks } from '../../agent/loop-types.js'
-import type { Artifact } from '../../artifact/types.js'
-import type { OaiMessage } from '../../api/oai-types.js'
+import { readFactHandoff } from '../../agent/fact-handoff.js'
 
-const TOKEN = 'secret-token'
-const AUTH = { authorization: `Bearer ${TOKEN}` }
-
-class FakeAgent implements ManagedAgent {
-  callbacks?: AgentCallbacks
-  artifacts: Artifact[] = []
-  running = false
-  lastPrompt = ''
-  run(p: string, cb: AgentCallbacks) {
-    this.lastPrompt = p
-    this.running = true
-    this.callbacks = cb
-    return new Promise<void>((r) => { this.resolveRun = r })
+test('real HTTP handoff defaults to facts without constructing/running an agent; narrative is isolated', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'handoff-route-')), prior = process.env.RIVET_SESSION_DIR
+  process.env.RIVET_SESSION_DIR = join(cwd, 'sessions')
+  const auth = { authorization: 'Bearer fixture' }
+  let constructions = 0, runs = 0, lastPrompt = '', finish: (() => void) | undefined
+  const agent: ManagedAgent = {
+    run: (prompt: string, _cb: AgentCallbacks) => { runs++; lastPrompt = prompt; return new Promise<void>(resolve => { finish = resolve }) },
+    abort() { finish?.() }, setActivePlan() {}, listArtifacts: () => [], readArtifact: async () => null,
+    getMessages: () => [], replaceMessages() {}, rewindToMessages() {},
   }
-  abort() { this.resolveRun?.() }
-  finish() { const r = this.resolveRun; this.resolveRun = undefined; r?.() }
-  setActivePlan(_plan: { slug: string; title: string } | null) {}
-  listArtifacts() { return this.artifacts }
-  readArtifact(id: string) { return Promise.resolve(this.artifacts.some((a) => a.id === id) ? `raw:${id}` : null) }
-  getMessages(): OaiMessage[] { return [] }
-  replaceMessages(_msgs: OaiMessage[]): void {}
-  rewindToMessages(_msgs: OaiMessage[]): void {}
-  private resolveRun?: () => void
-}
+  const manager = new RuntimeSessionManager({ createAgent: () => { constructions++; return agent }, defaultCwd: cwd })
+  const router = createRouter(buildSessionRoutes(manager, 'fixture'))
+  try {
+    assert.equal((await router('POST', '/sessions/missing/handoff', {}, auth)).status, 404)
+    const session = (await router('POST', '/sessions', { cwd }, auth)).body as { id: string }
+    const baseline = constructions
+    const result = await router('POST', `/sessions/${session.id}/handoff`, { note: 'Keep scope' }, auth)
+    assert.equal(result.status, 200)
+    const archived = (result.body as { handoff?: { snapshotId?: string; narrative?: string } }).handoff
+    assert.match(archived?.snapshotId ?? '', /^[a-f0-9]{64}$/, 'default handoff reports the archived snapshot id')
+    assert.equal(archived?.narrative, 'none', 'no narrative requested reports none instead of implying a run')
+    assert.equal(constructions, baseline); assert.equal(runs, 0)
+    const snapshot = readFactHandoff(cwd, session.id)
+    assert.match(snapshot.sections.notes!.join(), /Keep scope/)
+    assert.equal(existsSync(join(cwd, '.rivet/HANDOFF.md')), false)
+    const narrated = await router('POST', `/sessions/${session.id}/handoff`, { narrative: true }, auth)
+    assert.equal(narrated.status, 200)
+    assert.equal((narrated.body as { handoff?: { narrative?: string } }).handoff?.narrative, 'started')
+    for (let i = 0; i < 10 && !lastPrompt; i++) await new Promise(resolve => setTimeout(resolve, 10))
+    assert.equal(runs, 1)
+    const source = lastPrompt.split('\n').map(line => line.trim()).find(line => line.startsWith(cwd) && line.endsWith('.md'))!
+    assert.ok(source.includes(`HANDOFF-${session.id}-`), lastPrompt)
+    assert.equal((await router('POST', `/sessions/${session.id}/handoff`, {}, auth)).status, 409)
+    mkdirSync(join(cwd, '.rivet'), { recursive: true }); writeFileSync(source, 'Model narrative')
+    finish?.(); await new Promise(resolve => setTimeout(resolve, 30))
+    assert.match(readFactHandoff(cwd, session.id).sections.narrative!.join(), /未独立核验.*\nModel narrative/)
+    assert.ok(manager.getEvents(session.id)!.events.some(e => e.type === 'handoff_archived' && String(e.data.text).includes('归档')))
+    const target = (await router('POST', '/sessions', { cwd }, auth)).body as { id: string }
+    const before = constructions
+    assert.equal((await router('GET', `/sessions/${target.id}/handoffs`, {}, {})).status, 401)
+    assert.equal((await router('GET', `/sessions/${target.id}/handoffs`, {}, auth)).status, 200)
+    const preview = await router('GET', `/sessions/${target.id}/handoffs/${session.id}`, {}, auth)
+    assert.equal(preview.status, 200)
+    assert.equal(constructions, before, 'preview must not construct an agent')
+    const pinned = (preview.body as { snapshotId: string }).snapshotId
+    const selected = await router('POST', `/sessions/${target.id}/prompt`, { prompt: `/handoff read ${session.id} --snapshot ${pinned}` }, auth)
+    assert.equal(selected.status, 200)
+    for (let i = 0; i < 10 && !lastPrompt.includes(pinned); i++) await new Promise(resolve => setTimeout(resolve, 10))
+    assert.match(lastPrompt, new RegExp(pinned))
+    assert.match(lastPrompt, /不启动测试、审查或写入/)
+    assert.ok(!lastPrompt.includes('Model narrative'), 'brief does not silently expand narrative')
+    finish?.(); await new Promise(resolve => setTimeout(resolve, 30))
 
-let home: string
-let workDir: string
-beforeEach(() => {
-  home = mkdtempSync(join(tmpdir(), 'rivet-handoff-home-'))
-  workDir = mkdtempSync(join(tmpdir(), 'rivet-handoff-work-'))
-  process.env.RIVET_SESSION_DIR = join(home, 'sessions')
-})
-afterEach(() => {
-  rmSync(home, { recursive: true, force: true })
-  rmSync(workDir, { recursive: true, force: true })
-  delete process.env.RIVET_SESSION_DIR
-})
-
-function setup() {
-  const agents: FakeAgent[] = []
-  const manager = new RuntimeSessionManager({
-    createAgent: () => { const a = new FakeAgent(); agents.push(a); return a },
-    defaultCwd: workDir,
-  })
-  const router = createRouter(buildSessionRoutes(manager, TOKEN))
-  return { manager, agents, router }
-}
-
-const tick = () => new Promise(r => setTimeout(r, 20))
-
-test('会话不存在 → 404', async () => {
-  const { router } = setup()
-  const res = await router('POST', '/sessions/nope/handoff', {}, AUTH)
-  assert.equal(res.status, 404)
-})
-
-test('运行中 → 409', async () => {
-  const { router } = setup()
-  const s = (await router('POST', '/sessions', { cwd: workDir }, AUTH)).body as { id: string }
-  const first = await router('POST', `/sessions/${s.id}/handoff`, {}, AUTH)
-  assert.equal(first.status, 200)
-  const second = await router('POST', `/sessions/${s.id}/handoff`, {}, AUTH)
-  assert.equal(second.status, 409)
+  } finally { finish?.(); if (prior === undefined) delete process.env.RIVET_SESSION_DIR; else process.env.RIVET_SESSION_DIR = prior; rmSync(cwd, { recursive: true, force: true }) }
 })
 
-test('交接 run：prompt 指向项目内文档，收尾归档到 <id>.handoff.md', async () => {
-  const { manager, agents, router } = setup()
-  const s = (await router('POST', '/sessions', { cwd: workDir }, AUTH)).body as { id: string }
-  const res = await router('POST', `/sessions/${s.id}/handoff`, { note: '重点记下缓存方案' }, AUTH)
-  assert.equal(res.status, 200)
-
-  const agent = agents[0]!
-  assert.ok(agent.lastPrompt.includes(join(workDir, '.rivet', 'HANDOFF.md')), 'prompt 含项目内路径')
-  assert.match(agent.lastPrompt, /## 任务目标/)
-  assert.match(agent.lastPrompt, /用户补充指示：重点记下缓存方案/)
-
-  // 模拟 agent 写出交接文档（晚于登记时间），然后 run 收尾
-  mkdirSync(join(workDir, '.rivet'), { recursive: true })
-  const srcPath = join(workDir, '.rivet', 'HANDOFF.md')
-  writeFileSync(srcPath, '# Handoff 交接内容\n')
-  agent.finish()
-  await tick()
-
-  const destPath = join(getSessionDir(workDir), `${s.id}.handoff.md`)
-  assert.ok(existsSync(destPath), 'run 收尾应归档到会话目录')
-  assert.equal(readFileSync(destPath, 'utf-8'), '# Handoff 交接内容\n')
-
-  // handoff_archived 事件可见 + pendingHandoff 已清（再次 handoff 不再 409）
-  const events = manager.getEvents(s.id)?.events ?? []
-  assert.ok(events.some(e => e.type === 'handoff_archived' && String(e.data.text ?? '').includes('交接文档已写入')), '应有归档确认 handoff_archived 事件')
-  const again = await router('POST', `/sessions/${s.id}/handoff`, {}, AUTH)
-  assert.equal(again.status, 200, '归档字段已清，可再次发起')
-})
-
-test('文档缺失时跳过拷贝，不阻断收尾', async () => {
-  const { agents, router } = setup()
-  const s = (await router('POST', '/sessions', { cwd: workDir }, AUTH)).body as { id: string }
-  await router('POST', `/sessions/${s.id}/handoff`, {}, AUTH)
-  agents[0]!.finish() // agent 没写文件就结束（被 abort/失败）
-  await tick()
-  const destPath = join(getSessionDir(workDir), `${s.id}.handoff.md`)
-  assert.ok(!existsSync(destPath), '无文档不产出归档')
+test('a refused or failed narrative launch preserves archive success and discloses the skipped result through HTTP and slash events', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'handoff-skipped-')), prior = process.env.RIVET_SESSION_DIR
+  process.env.RIVET_SESSION_DIR = join(cwd, 'sessions')
+  const manager = new RuntimeSessionManager({ defaultCwd: cwd, createAgent: () => { throw Error('no model may be constructed') } })
+  const router = createRouter(buildSessionRoutes(manager, 'fixture')), auth = { authorization: 'Bearer fixture' }
+  let attempts = 0
+  try {
+    const session = manager.createSession({ cwd })
+    manager.run = () => { attempts++; return false }
+    const reply = await router('POST', `/sessions/${session.id}/handoff`, { narrative: true }, auth)
+    assert.equal(reply.status, 200)
+    const result = (reply.body as { handoff: { archived: boolean; snapshotId: string; narrative: string; reason: string } }).handoff
+    assert.equal(result.archived, true); assert.equal(result.narrative, 'skipped')
+    assert.equal(readFactHandoff(cwd, session.id, result.snapshotId).snapshotId, result.snapshotId)
+    assert.ok(result.reason)
+    const slash = await router('POST', `/sessions/${session.id}/prompt`, { prompt: '/handoff --narrative' }, auth)
+    assert.equal(slash.status, 200)
+    assert.equal((slash.body as { handoff: { narrative: string } }).handoff.narrative, 'skipped')
+    manager.run = () => { attempts++; throw Error('launch exception fixture') }
+    const thrown = await router('POST', `/sessions/${session.id}/handoff`, { narrative: true }, auth)
+    assert.equal(thrown.status, 200)
+    assert.match((thrown.body as { handoff: { reason: string } }).handoff.reason, /launch exception fixture/)
+    const notices = manager.getEvents(session.id)!.events.filter(e => e.type === 'intent_note' && String(e.data.text).includes('模型叙述未启动'))
+    assert.equal(notices.length, 3)
+    assert.ok(notices.every(e => String(e.data.text).includes('未自动重试')))
+    assert.equal(attempts, 3, 'exactly one launch attempt per explicit request')
+  } finally {
+    await manager.shutdownAll()
+    if (prior === undefined) delete process.env.RIVET_SESSION_DIR; else process.env.RIVET_SESSION_DIR = prior
+    rmSync(cwd, { recursive: true, force: true })
+  }
 })

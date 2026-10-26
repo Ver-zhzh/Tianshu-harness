@@ -126,6 +126,8 @@ export function preWriteClaimPaths(
   const one = (v: unknown): string[] =>
     typeof v === 'string' && v.length > 0 ? [norm(v)] : []
   switch (tu.name) {
+    case 'bash':
+      return Array.isArray(tu.input.write_files) ? tu.input.write_files.filter((p): p is string => typeof p === 'string').map(norm) : []
     case 'write_file':
     case 'edit_file':
     case 'hash_edit':

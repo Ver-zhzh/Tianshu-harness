@@ -157,7 +157,9 @@ describe('CVM-vector 让位矩阵（单一声音仲裁）', () => {
   })
 
   it('CV1 验证声音 pending（self-verify/typecheck-reminder）→ 让位', () => {
-    for (const key of ['self-verify', 'self-verify:verification-required', 'typecheck-reminder']) {
+    // key 与 VERIFY_YIELD_KEYS 逐项对齐（267a0001e 起 self-verify-hook 的 key
+    // 从 self-verify:verification-required 收口为 self-verify）。
+    for (const key of ['self-verify', 'self-verify-scope-mismatch', 'typecheck-reminder']) {
       const d = createCvmVectorEvaluator().evaluate(debtInput({ pendingAdvisoryKeys: [key] }))
       assert.equal(d.candidate, null, `pending ${key} 时不得发声`)
       assert.equal(d.yielded?.to, key)
@@ -201,7 +203,8 @@ describe('CVM-vector 触发与缺数据语义', () => {
     const d = createCvmVectorEvaluator().evaluate(debtInput())
     assert.equal(d.classification?.kind, 'verification-debt')
     assert.equal(d.candidate?.entry.key, 'cvm-vector-瑶光-CV1')
-    assert.deepEqual(d.candidate?.entry.expect, { kind: 'verify_attempted', withinTurns: 2 })
+    assert.equal(d.candidate?.entry.expect, undefined)
+    assert.equal(d.candidate?.entry.tier, 'informational')
   })
 
   it('CV1 不触发：无改动 / 已验证 / turn<2', () => {

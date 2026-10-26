@@ -55,11 +55,14 @@ export const FORCE_BUNDLED = [
   // distill）。4940f9c94（skills 统一）随 dependencies 加入却未归类 → dist 4 个
   // chunk 留裸 `from "yaml"` → assert-runtime-imports 红。纯 JS、无子依赖，内联。
   'yaml',
+  'parse5', // pure HTML boundary parser in the CPU worker
+  'acorn', // pure script/module syntax parser; no evaluation or imports
 ]
 
 /** 随包分发到 dist/node_modules 的根包（stage-runtime-deps ROOTS 的来源）。
  *  每项注释说明"为什么不能内联进主 bundle"。 */
 export const RUNTIME_BUNDLED = [
+  '@silvia-odwyer/photon-node', // lazy image worker + adjacent WASM payload
   'esbuild', // syntax-check JS/TS parser（native Go binary）
   'typescript', // in-process tsc LSP fallback
   '@ast-grep/napi', // structural search / ast-edit（native addon）

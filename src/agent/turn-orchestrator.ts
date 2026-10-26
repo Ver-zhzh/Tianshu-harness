@@ -31,7 +31,7 @@ import { emitStopReason, type StopReason } from './stop-reason.js'
 import { describeAction } from './evidence-obligation.js'
 import type { AdvisoryEntry } from './advisory-bus.js'
 import { debugLog } from '../utils/debug.js'
-import { hasActionIntent, hasWriteActionIntent, turnUsedOnlyReadTools, DELIVERY_SIGNAL_RE } from './action-intent-detector.js'
+import { hasActionIntent, hasWriteActionIntent, turnUsedOnlyReadTools, DELIVERY_SIGNAL_RE, ActionIntentNudges } from './action-intent-detector.js'
 import { b1ReadOnlyLimitForWindow, b2TurnLimitForWindow, isB2ConvergingRecently } from './window-thresholds.js'
 import type { ConvergenceScoreSample } from './score-history.js'
 import { recordInterruption } from './interrupt-marker.js'
@@ -39,12 +39,15 @@ import { recordInterruption } from './interrupt-marker.js'
 // ── Types re-exported for deps interface ──
 
 export interface StreamTurnParams {
+  runStartedAt?: number
+  preRequestMs?: number
   request: import('../api/oai-types.js').OaiChatRequest
   turn: number
   lastTurnTextFingerprint: string
   streamRules?: StreamRule[]
   disabledRulePatterns: ReadonlySet<string>
   callbacks: {
+    onToolInputProgress?: AgentCallbacks['onToolInputProgress']
     onTextDelta: (text: string) => void
     onThinkingDelta: (thinking: string) => void
     onToolUse: AgentCallbacks['onToolUse']
@@ -161,6 +164,7 @@ export interface TurnStateBag {
 // ── Deps interface ──
 
 export interface TurnOrchestratorDeps {
+  getRunStartedAt?: () => number | undefined
   getRuntimeAdvice?: () => string
   // === Lifecycle ===
   initializeRun: (userInput: string, callbacks: AgentCallbacks, images?: string[]) => Promise<{
@@ -338,33 +342,7 @@ export interface TurnOrchestratorDeps {
  * Extracted as a standalone function so both AgentLoop.initializeRun and
  * TurnOrchestrator (if needed) can use it without a circular import.
  */
-export function wrapCallbacksWithHeartbeat(
-  cb: AgentCallbacks,
-  hb: TurnHeartbeat,
-  _getSessionId?: () => string | undefined,
-): AgentCallbacks {
-  // #334：静默恢复补报——心跳上报过静默后，首个可见事件补发 working 相位（防客户端静默显示粘滞到下次相位切换）。
-  const resumeIfSilent = (): void => { if (hb.hasFiredSinceTick()) cb.onPhaseChange?.('working', { reason: 'resumed — activity detected' }) }
-  return {
-    ...cb,
-    onTextDelta: (text) => { resumeIfSilent(); hb.tick('streaming text'); cb.onTextDelta(text) },
-    onThinkingDelta: (thinking) => { resumeIfSilent(); hb.tick('thinking'); cb.onThinkingDelta(thinking) },
-    onToolUse: (id, name, input) => { resumeIfSilent(); hb.tick(`calling ${name}`); cb.onToolUse(id, name, input) },
-    onToolResult: (id, name, result, isError, rawPath, uiContent, evidence) => {
-      resumeIfSilent(); hb.tick(`${name} returned`)
-      cb.onToolResult(id, name, result, isError, rawPath, uiContent, evidence)
-    },
-    onTurnComplete: (usage, turnNumber, isFinal, evidenceSummary, continuationReason, stopReason) => {
-      resumeIfSilent(); hb.tick(`turn ${turnNumber} complete`)
-      cb.onTurnComplete(usage, turnNumber, isFinal, evidenceSummary, continuationReason, stopReason)
-    },
-    onPhaseChange: (phase, detail) => {
-      // Heartbeat-emitted phases must NOT recursively reset the clock.
-      if (phase !== 'heartbeat') { resumeIfSilent(); hb.tick(`phase: ${phase}`) }
-      cb.onPhaseChange?.(phase, detail)
-    },
-  }
-}
+export { wrapCallbacksWithHeartbeat } from './turn-heartbeat.js'
 
 // ── TurnOrchestrator ──
 
@@ -409,6 +387,7 @@ const ACTION_INTENT_COOLDOWN_MS = 30_000
 export class TurnOrchestrator {
   /** 上次注入 action-intent system-reminder 的时间戳。跨 run 冷却，避免频繁对话下追着提醒。 */
   private lastActionIntentNudgeTime = 0
+  private actionIntentNudges = new ActionIntentNudges()
 
   constructor(private deps: TurnOrchestratorDeps) {}
 
@@ -489,6 +468,7 @@ export class TurnOrchestrator {
    * preserved. All AgentLoop field accesses routed through deps.
    */
   async execute(userInput: string, callbacks: AgentCallbacks, images?: string[]): Promise<void> {
+    const runStartedAt = this.deps.getRunStartedAt?.() ?? Date.now()
     const { heartbeat, wrappedCallbacks } = await this.deps.initializeRun(userInput, callbacks, images)
     callbacks = wrappedCallbacks
     const gitProbeController = new AbortController()
@@ -546,6 +526,7 @@ export class TurnOrchestrator {
     const maxTurns = this.deps.getMaxTurns()
     const effectiveLimit = maxTurns > 0 ? maxTurns : Number.MAX_SAFE_INTEGER
     for (let turn = 0; turn < effectiveLimit; turn++) {
+        const preparationStartedAt = turn === 0 ? runStartedAt : Date.now()
         this.deps.state.thetaRequestsThisTurn = 0
         this.deps.state.runLoopTurn = turn
         // 轮次预算硬预警:最后一个可用轮注入「最终轮」指令——禁止新工具链,
@@ -708,6 +689,8 @@ export class TurnOrchestrator {
         const turnStartMs = Date.now()
 
         const streamOnce = () => this.deps.streamTurn({
+          runStartedAt,
+          preRequestMs: Date.now() - preparationStartedAt,
           request,
           turn,
           lastTurnTextFingerprint: this.deps.state.lastTurnTextFingerprint,
@@ -749,6 +732,7 @@ export class TurnOrchestrator {
               callbacks.onThinkingDelta(thinking)
             },
             onToolUse: callbacks.onToolUse,
+            onToolInputProgress: callbacks.onToolInputProgress,
             onToolHint: (name) => {
               callbacks.onPhaseChange?.('tool-hint', { tool: name, reason: `preparing ${name}…` })
             },
@@ -1166,9 +1150,10 @@ export class TurnOrchestrator {
           // 因直注不计账，效能账本记 0 采纳——低采纳数据会误导后续降频决策。
           if (!actionIntentFiredThisRun
               && hasWriteActionIntent(this.deps.state.streamedText)
-              && turnUsedOnlyReadTools(toolUses)) {
+              && turnUsedOnlyReadTools(toolUses)
+              && this.actionIntentNudges.claim(this.deps.state.streamedText)) {
             actionIntentFiredThisRun = true
-            const content = '上一轮你在文本里宣布了写入/修改/测试类操作，但只调用了只读工具（grep/read_file 等），写操作并未发生。如果仍需执行，请在本轮直接发起对应的工具调用；如果已不需要，请明确说明。'
+            const content = '你承诺的当前操作尚无对应执行记录。请说明该承诺的实际状态；仍需执行时按已批准范围推进，已变更或延后则说明原因，不追加测试、审查或扩大验证范围。'
             if (this.deps.submitAdvisory) {
               this.deps.submitAdvisory({
                 key: 'action-intent',
@@ -1177,11 +1162,6 @@ export class TurnOrchestrator {
                 content,
                 channel: 'system-reminder',
                 immediate: true,
-                expect: {
-                  kind: 'tool_appears',
-                  tools: ['write_file', 'edit_file', 'hash_edit', 'apply_patch', 'run_tests', 'todo'],
-                  withinTurns: 2,
-                },
               })
             } else {
               this.deps.appendSystemReminder(`<system-reminder>${content}</system-reminder>`)
@@ -1501,12 +1481,13 @@ export class TurnOrchestrator {
         if (
           !actionIntentFiredThisRun &&
           now - this.lastActionIntentNudgeTime >= ACTION_INTENT_COOLDOWN_MS &&
-          hasActionIntent(this.deps.state.streamedText)
+          hasActionIntent(this.deps.state.streamedText) &&
+          this.actionIntentNudges.claim(this.deps.state.streamedText)
         ) {
           actionIntentFiredThisRun = true
           this.lastActionIntentNudgeTime = now
           const actionIntentInjected = this.deps.appendSystemReminderAndReport(
-            '<system-reminder>上一轮你以"我将做…""接下来…"结尾但未发出对应的工具调用。如果还需要执行，请在本轮直接发起工具调用。</system-reminder>',
+            '<system-reminder>你承诺的当前操作尚无对应执行记录。请如实说明状态；仍需执行时遵循已批准范围，延后则说明原因，不追加测试或审查。</system-reminder>',
             'functional'
           )
           if (actionIntentInjected) {
@@ -1617,17 +1598,17 @@ export class TurnOrchestrator {
         // 跨会话效力先验因此长期收不到 worker 侧样本。
         // 不复用 completeTurn：它内部会再跑一次 runPostTurn，而本轮的 postTurn
         // 已在循环内执行过。照 abort 路径（下方 catch）的写法直接补 postSession。
-        await this.deps.runPostSession(callbacks)
+        await rejectOnAbort(this.deps.runPostSession(callbacks), this.deps.getAbortSignal(), 'max-turns-finalize')
         callbacks.onTurnComplete(this.deps.getTotalUsage(), this.deps.getTurnCount(), true)
       }
     } catch (err) {
-      this.deps.resetEvidence()
       if ((err as Error).name === 'AbortError') {
         await this.finishInterrupted(callbacks, {
           turn: this.deps.state.runLoopTurn, assistantResponded, userMessageConsumed,
           partialText: turnTextPersisted ? '' : this.deps.state.streamedText,
         })
       } else {
+        this.deps.resetEvidence()
         if (!assistantResponded && !userMessageConsumed && !this.deps.preserveUserOnError?.()) this.deps.removeLastMessage()
         this.recordStop({
           source: 'stream-error',

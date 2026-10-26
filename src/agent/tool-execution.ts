@@ -1,4 +1,5 @@
 import { drainSteerGuidance } from './course-episodes.js'
+import { clampReadConcurrency } from '../config/read-concurrency.js'
 import { executeWithCourseProgress } from './course-file-progress.js'
 import { courseExecutionCallbacks, type CourseExecutionCallbacks } from './course-verification-execution.js'
 import type { ContentBlock } from '../api/types.js'
@@ -33,7 +34,11 @@ import { classifyFailure, isReadProbeInvocation, isTestRunInvocation, type Failu
 import { ToolAccumulator } from './tool-accumulator.js'
 import { ZEN_UNLOCK, ZEN_UNLOCK_RESULT, ZEN_UNLOCK_NOT_ZEN } from './zen-mode.js'
 import { guardLossyToolResult } from './negative-fact-detector.js'
-import { getToolStormLevel } from './trace-store.js'
+import { withToolTerminalAudit } from './tool-terminal-audit.js'
+import { runPreparedToolBatch } from './prepared-tool-batch.js'
+import { isLiteralReadShell } from '../tools/shell-read-safety.js'
+import { READ_ONLY_TOOL_NAMES } from '../tools/write-tool-helpers.js'
+import { mergeTraceBranches, getToolStormLevel } from './trace-store.js'
 import { extractTrailingArtifactId, tierToolResult } from './tool-result-tiering.js'
 import {
   getInterventionLevel,
@@ -77,7 +82,7 @@ export interface ToolExecutionDeps extends CourseExecutionCallbacks {
    *  images). Append-only at the tail — prefix-cache safe (same boundary as
    *  the steer path). An empty image list appends plain text, which is how the
    *  bridge path below delivers its description. */
-  addUserMessageWithImages?: (text: string, images: string[]) => void
+  addUserMessageWithImages?: (text: string, images: string[], original?: boolean) => void | Promise<void>
   /** Vision bridge: describe tool-carried screenshots with the separately
    *  configured multimodal model, for primary models that cannot take images.
    *  Absent when no vision model is configured — then screenshots are dropped
@@ -356,11 +361,9 @@ export class ToolExecutionController {
     // multimodal user message — only when the model supports vision.
     const pendingImages: string[] = []
     // 结构化失败分类侧信道：wire 块（tool_result）不携带 errorKind，
-    // 按 tool_use_id 记录，postTool hook 的 vigor failureClass 优先消费。
     const errorKindByToolUse = new Map<string, FailureClass>()
+    const mutationsByTool = new Map<string, import('./mutation-facts.js').MutationFact[]>()
 
-    // Zen 解锁点：分派循环前，逐个上报 tool_use——zen 相位下面外调用触发
-    // 晋升 full 后照常执行（放行语义）。promote 是同步状态翻转 + updateTools，
     // 不阻断本批工具执行；onZenEscape 未注入或 zen 禁用时恒放行。
     // zen_unlock 是虚拟工具（不在 registry）：收集其 id 供分派时拦截，触发
     // onZenUnlock（晋升）而非面外上报。
@@ -377,31 +380,28 @@ export class ToolExecutionController {
       }
     }
 
-    // Partition tools into concurrency-safe (parallelizable) and sequential groups.
-    // Run contiguous blocks of safe tools in parallel for latency savings.
-    const indexed = input.toolUses.map((tu, i) => ({ tu, i, safe: this.deps.config.toolRegistry.get(tu.name)?.isConcurrencySafe() ?? false }))
+    const eligible = (name: string, args: Record<string, unknown>) => name === 'bash' ? args.write_files === undefined && (args.run_in_background === undefined || args.run_in_background === false) && (args.background === undefined || args.background === false) && typeof args.command === 'string' && isLiteralReadShell(args.command) : READ_ONLY_TOOL_NAMES.has(name) && (this.deps.config.toolRegistry.get(name)?.isConcurrencySafe() ?? false)
+    const indexed = input.toolUses.map((tu, i) => ({ tu, i, safe: eligible(this.deps.config.toolRegistry.resolveName(tu.name), tu.input) }))
 
     let cursor = 0
     while (cursor < indexed.length) {
-      if (input.abortSignal.aborted) break
 
-      // Collect contiguous safe tools for parallel execution
       if (indexed[cursor]!.safe) {
         const batchStart = cursor
         while (cursor < indexed.length && indexed[cursor]!.safe) cursor++
         const batch = indexed.slice(batchStart, cursor)
 
-        const results = await Promise.all(
-          batch.map(({ tu }) => executeWithCourseProgress(this.deps,
+        const baseTrace = traceStore
+        const results = await runPreparedToolBatch(
+          batch.map(({ tu }) => gate => executeWithCourseProgress(this.deps,
             tu,
-            this.buildDeps({ traceStore, importGraph, lastConflictCheckCount, latestRisk, artifactIdsEvicted, artifactIdsAccessed, abortSignal: input.abortSignal }),
-            callbacks,
-            input.turn,
-            checkpointCreatedThisTurn,
-          )),
+            { ...this.buildDeps({ traceStore: { ...baseTrace, maxEvents: Number.MAX_SAFE_INTEGER }, importGraph, lastConflictCheckCount, latestRisk, artifactIdsEvicted, artifactIdsAccessed, abortSignal: input.abortSignal }), executePrepared: gate },
+            callbacks, input.turn, checkpointCreatedThisTurn,
+          )), eligible, clampReadConcurrency(this.deps.config.readConcurrency),
         )
+        traceStore = mergeTraceBranches(baseTrace, results.map(result => result.traceStore))
         for (const result of results) {
-          traceStore = result.traceStore
+          if (result.mutations) mutationsByTool.set(batch[results.indexOf(result)]!.tu.id, result.mutations)
           importGraph = result.importGraph
           lastConflictCheckCount = result.lastConflictCheckCount
           latestRisk = result.latestRisk
@@ -413,21 +413,17 @@ export class ToolExecutionController {
           toolResults.push(result.toolResult)
         }
       } else {
-        // Sequential execution for non-safe tools
         const { tu } = indexed[cursor]!
         cursor++
 
-        // zen_unlock：虚拟解锁声明工具——不经过 executeToolUse（registry 无此工具），
-        // 直接构造成功结果（解锁已在分派前经 onZenUnlock 完成），并走与正常执行
-        // 一致的 onToolResult 回调（UI/遥测消费方可见解锁确认）。
         if (unlockIds.has(tu.id)) {
-          const unlockMsg = unlockedToFull.has(tu.id) ? ZEN_UNLOCK_RESULT : ZEN_UNLOCK_NOT_ZEN
-          const unlockBlock: ContentBlock = { type: 'tool_result', tool_use_id: tu.id, content: unlockMsg }
-          toolResults.push(unlockBlock)
-          // 终态标记（isError=false）不可省：UI 把 undefined 解释为「流式中间更新」
-          // → 结果累积进 live 工具卡等待终态；而虚拟工具不会再有第二次回调，那张卡
-          // 会永久悬停（真实用户报告「禅解除提示一直挂在推理区下面」）。
-          callbacks.onToolResult(tu.id, tu.name, unlockMsg, false)
+          const content = unlockedToFull.has(tu.id) ? ZEN_UNLOCK_RESULT : ZEN_UNLOCK_NOT_ZEN
+          const result = await withToolTerminalAudit(tu,
+            this.buildDeps({ traceStore, importGraph, lastConflictCheckCount, latestRisk, artifactIdsEvicted, artifactIdsAccessed, abortSignal: input.abortSignal }),
+            callbacks, input.turn, checkpointCreatedThisTurn,
+            async () => ({ toolResult: { type: 'tool_result', tool_use_id: tu.id, content }, traceStore, importGraph, lastConflictCheckCount, latestRisk, checkpointCreated: checkpointCreatedThisTurn }))
+          traceStore = result.traceStore
+          toolResults.push(result.toolResult)
           continue
         }
 
@@ -438,6 +434,7 @@ export class ToolExecutionController {
           input.turn,
           checkpointCreatedThisTurn,
         )
+        if (result.mutations) mutationsByTool.set(tu.id, result.mutations)
         traceStore = result.traceStore
         importGraph = result.importGraph
         lastConflictCheckCount = result.lastConflictCheckCount
@@ -678,10 +675,11 @@ export class ToolExecutionController {
         ? ` Retained as ${shotIds.join(', ')} — use ask_image with that id to re-interrogate a specific detail.`
         : ''
       if (this.deps.getSupportsVision?.() === true && this.deps.addUserMessageWithImages) {
-        this.deps.addUserMessageWithImages(
+        await this.deps.addUserMessageWithImages(
           '<system-reminder>Screenshot(s) from the tool call(s) above are attached. Use them to visually confirm UI state alongside any accessibility tree or DOM measurements; do not describe them back to the user unless asked.'
           + `${askHint}</system-reminder>`,
           images,
+          input.toolUses.some(tool => tool.name === 'ask_image'),
         )
       } else if (this.deps.describeToolImages && !input.abortSignal.aborted) {
         // Text-only primary model with a vision model configured: the bridge
@@ -695,7 +693,7 @@ export class ToolExecutionController {
           description = await this.deps.describeToolImages(images, input.abortSignal)
         } catch { /* bridge unavailable — fall through to text-only results */ }
         if (description) {
-          this.deps.addUserMessageWithImages?.(
+          await this.deps.addUserMessageWithImages?.(
             `<system-reminder>Screenshot(s) from the tool call(s) above, described by the configured vision model:\n${description}`
             + `${askHint}</system-reminder>`,
             [],
@@ -729,9 +727,11 @@ export class ToolExecutionController {
               )
            },
          },
+          input.abortSignal,
         ),
         {
           name: tu.name,
+          mutations: mutationsByTool.get(tu.id),
           success: !(result && 'is_error' in result && result.is_error === true),
           isError: result && 'is_error' in result ? result.is_error === true : false,
           target,
@@ -762,7 +762,7 @@ export class ToolExecutionController {
 
     // Update session state based on tool results
     const mgr = this.deps.sessionStateManager
-    if (mgr) {
+    if (mgr && !input.abortSignal.aborted) {
       for (const tu of input.toolUses) {
         const result = toolResults.find(r => r.type === 'tool_result' && r.tool_use_id === tu.id)
         const isError = result && 'is_error' in result ? result.is_error === true : false
@@ -774,18 +774,18 @@ export class ToolExecutionController {
             mgr.trackFileModified(tu.input.file_path)
          }
        }
-        if (tu.name === 'run_tests') {
+        if (tu.name === 'run_tests' && (tu.input.action ?? 'run') === 'run') {
           const target = typeof tu.input?.filter === 'string' ? tu.input.filter : 'tests'
           mgr.recordVerification(target, isError ? 'failed' : 'passed')
        }
      }
    }
 
-    if (shouldTippingPointReset(this.deps.getPredictionAccumulator())) {
+    if (!input.abortSignal.aborted && shouldTippingPointReset(this.deps.getPredictionAccumulator())) {
       this.deps.setPredictionAccumulator(resetAccumulator(this.deps.getPredictionAccumulator()))
       this.deps.contextInjection.clearCerebellarHint()
    }
-    if (this.deps.getAutoReasoning() && this.deps.getReasoningEffort()) {
+    if (!input.abortSignal.aborted && this.deps.getAutoReasoning() && this.deps.getReasoningEffort()) {
       const newEffort = adjustReasoningEffort(this.deps.getReasoningEffort()!, level)
       // T2-02 P0: shadow telemetry — record bandit recommendation without changing behavior
       this.shadowEffortAdjustment(this.deps.getReasoningEffort()!, newEffort)

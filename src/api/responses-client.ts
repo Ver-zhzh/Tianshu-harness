@@ -1,3 +1,6 @@
+import { withNativeRequestAudit } from './native-request-audit.js'
+import { currentExecutionScope } from './execution-continuity.js'
+import { ProviderToolProgress } from './tool-input-progress.js'
 import { requestAuditContext } from './call-audit.js'
 /**
  * ResponsesClient — OpenAI Responses API (`POST /v1/responses`) for API-key
@@ -126,13 +129,16 @@ export class ResponsesClient implements StreamClient {
     callbacks: StreamCallbacks,
     signal?: AbortSignal,
   ): Promise<void> {
-    const body = this.buildRequestBody(request)
-
-    const auditContext = requestAuditContext(this.config, request)
-    await withStructuredRetry(async () => {
-      const authHeaders = this.config.auth
-        ? await this.config.auth.getHeaders()
-        : (this.config.apiKey ? { Authorization: `Bearer ${this.config.apiKey}` } : {})
+    let requestBody: Record<string, unknown> | undefined
+    const auditContext = { ...requestAuditContext(this.config, request), model: request.model || this.config.model }
+    await withStructuredRetry(() => withNativeRequestAudit(auditContext, signal, async (attemptContext, audit) => {
+      const body = requestBody ??= audit.observation.measure('bodyPreparationMs', () => this.buildRequestBody(request))
+      const authHeaders = await audit.observation.measureAsync('authenticationMs', async () => {
+        if (this.config.auth) return this.config.auth.getHeaders()
+        const headers: Record<string, string> = {}
+        if (this.config.apiKey) headers.Authorization = `Bearer ${this.config.apiKey}`
+        return headers
+      })
 
       const url = `${this.config.baseUrl.replace(/\/+$/, '')}/responses`
       // Shared lifecycle controller (same pattern as OpenAIClient/CodexClient):
@@ -142,7 +148,7 @@ export class ResponsesClient implements StreamClient {
         if (signal.aborted) lifecycle.abort()
         else signal.addEventListener('abort', () => lifecycle.abort(), { once: true })
       }
-      await acquireRateLimitSlot(this.config.baseUrl, this.config.retry?.rateLimit, lifecycle.signal)
+      await audit.observation.measureAsync('rateLimitWaitMs', () => acquireRateLimitSlot(this.config.baseUrl, this.config.retry?.rateLimit, lifecycle.signal))
       const response = await fetchWithTimeout(url, {
         method: 'POST',
         headers: {
@@ -153,9 +159,9 @@ export class ResponsesClient implements StreamClient {
           ...(this.config.originator ? { 'Originator': this.config.originator } : {}),
           ...authHeaders,
         },
-        body: JSON.stringify(body),
+        body: audit.observation.measure('bodyPreparationMs', () => JSON.stringify(body)),
         signal: lifecycle.signal,
-      }, this.config.firstByteTimeoutMs ?? 180_000, this.proxyDispatcher, auditContext)
+      }, this.config.firstByteTimeoutMs ?? 180_000, this.proxyDispatcher, attemptContext, audit)
 
       if (!response.ok) {
         const errorBody = await response.text().catch(() => '')
@@ -174,7 +180,7 @@ export class ResponsesClient implements StreamClient {
       }
 
       await this.processSSEStream(response, callbacks, signal, lifecycle)
-    }, signal, {
+    }), signal, {
       budget: this.config.retryBudget?.(),
       maxTotalDurationMs: this.config.retry?.maxTotalDurationMs ?? 10 * 60_000,
       maxTotalRetries: this.config.maxRetries,
@@ -324,6 +330,7 @@ export class ResponsesClient implements StreamClient {
     let seenTextDelta = false
     /** Only successfully parsed calls count as emitted, across both event forms. */
     const emittedCallIds = new Set<string>()
+    const inputProgress = new ProviderToolProgress({ requestId: currentExecutionScope()?.requestId, attemptId: currentExecutionScope()?.attemptId ?? crypto.randomUUID() })
     /** message 的 output_item.done 是否到过（含仍被缓冲的）——兜底解析不重复出文本。 */
     let sawMessageItemDone = false
 
@@ -412,6 +419,7 @@ export class ResponsesClient implements StreamClient {
 
           const type = parsed.type as string
 
+          inputProgress.responses(parsed, callbacks.onToolInputProgress)
           switch (type) {
             case 'response.output_text.delta': {
               seenTextDelta = true

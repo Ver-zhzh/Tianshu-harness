@@ -23,6 +23,7 @@ interface Priv {
 
 async function frameWith(provider: () => CachePanelData): Promise<string> {
   const { app, out } = makeApp({ cols: 120, rows: 40 })
+  app.glanceDensity = 'full'
   app.registerOverlays({ cachePanelData: provider })
   out.clear()
   ;(app as unknown as Priv).renderLive()

@@ -81,7 +81,8 @@ describe('provider onboarding end-to-end (mock OpenAI-compatible server)', () =>
     })
 
     // 1. add — probe-first registers BOTH probed models (known + unknown).
-    await runProviderCLI(['add', 'mock-e2e', '--base-url', server.baseUrl, '--api-key', 'sk-e2e', '--default'], io)
+    // 本地 mock server 属私网端点，须显式 --allow-private-network（端点网络策略默认拒绝）。
+    await runProviderCLI(['add', 'mock-e2e', '--base-url', server.baseUrl, '--api-key', 'sk-e2e', '--default', '--allow-private-network'], io)
     assert.equal(sawAuth, 'Bearer sk-e2e')
 
     const config = loadConfig()

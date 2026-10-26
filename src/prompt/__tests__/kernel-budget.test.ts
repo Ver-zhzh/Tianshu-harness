@@ -126,10 +126,12 @@ describe('Kernel Budget — structural guards against trained-mode degradation',
       }
     })
 
-    it('minimal 完整装配（kernel + bootstrap）≤ 29——漂移棘轮', () => {
+    it('minimal 完整装配（kernel + bootstrap）≤ 30——漂移棘轮', () => {
       // 2026-07-19 工具审计：会话实测进 44 个工具而本预算只盯 kernel 26——
-      // 闸门看错了门。preset 三档落地后，minimal 完整装配钉死在 ≤29
-      // （当前 27——2026-07-22 裁 file_info/session_vitals/update_goal）。
+      // 闸门看错了门。preset 三档落地后，minimal 完整装配钉死在 ≤30
+      // （07-22 为 27；+3 = ask_image 07-30 feb50615d / skill 08-04 6ff12c6bf /
+      // git_scout 09-21 3f5c0d7c9，均为评审过进 minimal 档的功能工具。
+      // 3.36 周期漏抬阈导致棘轮长红，3.37 补登）。
       // 抬阈必须在 commit message 写明理由（同 job 抬阈先例）。
       const kernel = createDefaultToolRegistry().getAll().length
       const bootstrapMinimal = [
@@ -137,8 +139,8 @@ describe('Kernel Budget — structural guards against trained-mode degradation',
         'deliver_task', 'plan_task', 'recall_capsule',
       ]
       assert.ok(
-        kernel + bootstrapMinimal.length <= 29,
-        `minimal full assembly = ${kernel + bootstrapMinimal.length} (limit: 29). ` +
+        kernel + bootstrapMinimal.length <= 30,
+        `minimal full assembly = ${kernel + bootstrapMinimal.length} (limit: 30). ` +
           `See tool-preset.ts — 增长要过档位评审，不许悄悄漂移。`,
       )
     })

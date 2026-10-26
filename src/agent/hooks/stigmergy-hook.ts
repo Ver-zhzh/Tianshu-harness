@@ -143,6 +143,7 @@ export function createStigmergyRuntimeHook(deps: StigmergyRuntimeHookDeps): Post
 
       for (const deposit of deposits) {
         await deps.deposit(deposit)
+        ctx.signal?.throwIfAborted()
       }
 
       // Publish cross-session event for file modifications
@@ -166,6 +167,7 @@ export function createStigmergyRuntimeHook(deps: StigmergyRuntimeHookDeps): Post
       }
 
       const pheromones = await deps.query()
+      ctx.signal?.throwIfAborted()
       deps.setLoadedPheromones(pheromones)
     },
   }

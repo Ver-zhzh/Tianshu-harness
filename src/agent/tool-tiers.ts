@@ -1,20 +1,10 @@
-/**
- * Tool Gating Tiers — 主控工具分层门控
- *
- * 把主控可见工具从 ~37 (kernel 24 + interactive 13) 压到 CORE ~25，
- * 主收益是降认知负荷（工具过多→选择瘫痪→退回不选工具，见 kernel-budget.test.ts）。
- *
- * EXTENDED 工具从主控 getDefinitions() 过滤掉，但保留在 worker 的 baseToolRegistry
- * 全集中，主控需要时经 delegate_task 派子代理调用。
- */
+import type { ToolPreset } from '../tools/tool-preset-names.js'
+/** Main-agent visibility only. Cold registration and worker permissions are independent. */
 
 import type { StarDomain } from './star-domain.js'
 import { applyDescriptionMode, type ToolDescriptionMode } from '../tools/description-compact.js'
 
-/**
- * CORE 层 — 主控常驻工具（~25）。
- * 这些是每个 turn 都可能需要的工具：读写编辑、搜索、测试、委派、交付。
- */
+/** 26 default tools plus optional browser/semantic tools controlled by assembly. */
 export const CORE_TOOLS = [
   // 文件读写编辑
   'read_file',
@@ -24,6 +14,7 @@ export const CORE_TOOLS = [
   // 搜索导航
   'grep',
   'glob',
+  'ast_grep',
   'semantic_search',
   'web_search',
   'web_fetch',
@@ -37,7 +28,6 @@ export const CORE_TOOLS = [
   'job',
   // 规划与交付
   'plan',
-  'plan_task',
   'deliver_task',
   // 委派
   'delegate_task',
@@ -46,23 +36,14 @@ export const CORE_TOOLS = [
   'memory',
   // 用户交互
   'ask_user_question',
+  'ask_image',
   // 路径与技能（首调澄清/路径授权/技能加载依赖，static prompt 直接引用）
   'request_path_access',
   'skill',
   // 换视角方法论：static prompt L80 直接指示使用，必须常驻（与 skill 同源）
   'recall_capsule',
-  // 浏览器联调与 UI 视觉验证（2026-07-15 从 EXTENDED 升入）：改 UI 不看渲染
-  // 是高频失败模式，browser_debug 是渲染验证闭环的主工具，主控必须恒可见。
   'browser_debug',
-  // PAL 攻坚案件账本（2026-07-17 直入 CORE，预算 26→27）：攻坚场景在会话
-  // 中期才出现，EXTENDED 中途挂载 = 改 tool fingerprint = 200K 前缀全量重建
-  // （DeepSeek V4 创建 ¥3/M、高峰 ¥6/M，一次一两块）；早期窗口挂载则等于
-  // 没有这个功能。常驻是唯一缓存零成本方案——schema 字节稳定进冻结前缀。
-  'attack_case',
-  // 编排入口（2026-07-29 从 EXTENDED 升入 CORE）：team_orchestrate 是唯一
-  // 能派发多 worker 波次 + 门禁 + 审查的主控工具，放在 EXTENDED 等于入口
-  // 被默认 deny-list 摘除、用户到不了这条链路。T3 修复——与 attack_case
-  // 同理由：中途挂载 = 改 tool fingerprint = 前缀全量重建。
+  // Basic team stays available without the advanced orchestration preset.
   'team_orchestrate',
 ] as const
 
@@ -70,7 +51,17 @@ export const CORE_TOOLS = [
  * EXTENDED 层 — 子代理可用，主控需 opt-in 或委派。
  * web/browser/doc/council/team/import/lsp/undo 等低频或重场景工具。
  */
+export const ORCHESTRATION_TOOLS = ['galaxy', 'starflow', 'plan_task', 'council_convene'] as const
+const FULL_MAIN_TOOLS = ['ast_edit', 'attack_case', 'cli_discover', 'monitor', 'recall_general', 'record_general_finding', 'session_vitals', 'update_goal', 'web_crawl', 'web_map'] as const
+const SCHEDULE_TOOLS = ['schedule_create', 'schedule_list', 'schedule_delete'] as const
+
 export const EXTENDED_TOOLS = [
+  'galaxy',
+  'starflow',
+  'plan_task',
+  ...FULL_MAIN_TOOLS,
+  'git_scout',
+  ...SCHEDULE_TOOLS,
   // browser（一次性 headless）与 browser_debug 能力重叠且默认未注册——退役候选。
   'browser',
   'computer_use',
@@ -79,11 +70,6 @@ export const EXTENDED_TOOLS = [
   // （preflight），full 档注册。查询面低频——同 repo_graph/semantic_search
   // 定位，不占 CORE 常驻字节；主控需要时 /tools enable 挂回，worker 始终可用。
   'capability',
-  // council_convene 留在 EXTENDED（不随 team_orchestrate 升入 CORE）：
-  // 议事会是多视角审查决策，使用频率远低于编排、每次调用的成本也更高
-  // （fanout 3-5 审查 worker），不适合占 CORE 常驻字节预算。
-  // 主控可用 /tools enable council_convene 或通过 team_orchestrate 触发
-  // review gate（L3 = council 审查队，语义等价但入口由编排承担）。
   'council_convene',
   'import_resource',
   'apply_patch',
@@ -108,6 +94,7 @@ export const EXTENDED_TOOLS = [
   'create_pdf',
   'export_file',
   'open_path',
+  'review_changes',
 ] as const
 
 /** 所有已知工具名 — CORE ∪ EXTENDED */
@@ -162,6 +149,8 @@ export function resolveMainToolTier(
 export interface ToolGatingState {
   /** config.toolGating.enabled。false → 不过滤，返回全集。 */
   enabled: boolean
+  /** Frozen from the actual registry, not inferred from a mutable user config. */
+  preset?: ToolPreset
   /** 域级 mainToolTier 覆盖（allow-list）。 */
   domainTier?: readonly string[]
   /** config.toolGating.coreTools 覆盖（allow-list）。 */
@@ -189,34 +178,26 @@ export function gateToolDefinitions<T extends { name: string; description?: stri
   allDefs: readonly T[],
   state: ToolGatingState,
 ): T[] {
-  if (!state.enabled) return applyDescriptionMode(allDefs, state.toolDescriptions)
+  const disabled = new Set(state.disabledTools ?? [])
+  const describe = (defs: readonly T[]) => applyDescriptionMode(defs.filter(d => !disabled.has(d.name)), state.toolDescriptions)
+  if (!state.enabled) return describe(allDefs)
+  const explicit = new Set(state.extraCore ?? [])
+  const allowList = state.domainTier?.length ? state.domainTier : state.coreOverride?.length ? state.coreOverride : null
+  // A user allow-list is a boundary: preset defaults and runtime mounts never widen it.
+  if (allowList) return describe(allDefs.filter(d => allowList.includes(d.name) || explicit.has(d.name)))
+  const preset = state.preset ?? 'minimal'
+  const defaults = preset === 'orchestration' ? [...ORCHESTRATION_TOOLS]
+    : preset === 'full' ? [...ORCHESTRATION_TOOLS, ...FULL_MAIN_TOOLS, 'git_scout', ...SCHEDULE_TOOLS]
+    : preset === 'taiyi' ? [...SCHEDULE_TOOLS] : preset === 'frontend' ? ['browser_debug'] : []
+  const exempt = new Set<string>([...defaults, ...explicit, ...(state.mountedExtras ?? [])])
+  return describe(allDefs.filter(d => !EXTENDED_SET.has(d.name) || exempt.has(d.name)))
+}
 
-  const exempt = new Set<string>([...(state.extraCore ?? []), ...(state.mountedExtras ?? [])])
-
-  // allow-list 模式：域级 tier 优先，其次 config coreOverride
-  const allowList =
-    state.domainTier && state.domainTier.length > 0
-      ? state.domainTier
-      : state.coreOverride && state.coreOverride.length > 0
-        ? state.coreOverride
-        : null
-
-  if (allowList) {
-    const allow = new Set<string>([...allowList, ...exempt])
-    return applyDescriptionMode(allDefs.filter(d => allow.has(d.name)), state.toolDescriptions)
-  }
-
-  // deny-list 模式（默认）：只摘 EXTENDED，保留 CORE + 未分类（MCP/LSP/自定义）
-  let filtered = allDefs.filter(d => !EXTENDED_SET.has(d.name) || exempt.has(d.name))
-
-  // config 级静态禁用（最高优先级，即使在 exempt 中也剔除）。
-  // 缓存约束：disabledTools 在 session 启动时读 config，运行中不变。
-  if (state.disabledTools && state.disabledTools.length > 0) {
-    const disabled = new Set(state.disabledTools)
-    filtered = filtered.filter(d => !disabled.has(d.name))
-  }
-
-  return applyDescriptionMode(filtered, state.toolDescriptions)
+export function toolMountRestriction(name: string, state: ToolGatingState): 'disabled' | 'restricted' | undefined {
+  if (state.disabledTools?.includes(name)) return 'disabled'
+  if (!state.enabled) return undefined
+  const allow = state.domainTier?.length ? state.domainTier : state.coreOverride?.length ? state.coreOverride : null
+  if (allow && !allow.includes(name) && !state.extraCore?.includes(name)) return 'restricted'
 }
 
 /** 判断工具是否在 CORE 层 */

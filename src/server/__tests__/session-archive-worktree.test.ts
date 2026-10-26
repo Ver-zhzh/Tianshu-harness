@@ -337,3 +337,29 @@ test('archive keeps the branch when it has committed but unmerged work', () => {
 
   git(repo, ['branch', '-D', rec.worktreeBranch!])
 })
+
+
+for (const confirmed of [true, false]) {
+  test(`archive waits for external hook cleanup; confirmed=${confirmed}`, async () => {
+    let release!: (value: boolean) => void
+    const cleanup = new Promise<boolean>(resolve => { release = resolve })
+    class HookAgent extends NoopAgent { retireExternalHooks() { return cleanup } }
+    const manager = new RuntimeSessionManager({ createAgent: () => new HookAgent(), defaultCwd: repo })
+    const record = manager.createSession({ isolatedWorktree: true })
+    try {
+      await manager.runAndWait(record.id, 'fixture')
+      assert.equal(manager.archiveSession(record.id), true)
+      assert.ok(existsSync(record.worktreePath!), 'archive must not remove a workspace while scripts still own it')
+      release(confirmed)
+      const deadline = Date.now() + 3000
+      while (confirmed && existsSync(record.worktreePath!) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10))
+      if (!confirmed) await new Promise(resolve => setTimeout(resolve, 20))
+      assert.equal(existsSync(record.worktreePath!), !confirmed)
+    } finally {
+      release(confirmed)
+      await manager.shutdownAll()
+      if (existsSync(record.worktreePath!)) git(repo, ['worktree', 'remove', '--force', record.worktreePath!])
+      if (git(repo, ['branch', '--list', record.worktreeBranch!]).trim()) git(repo, ['branch', '-D', record.worktreeBranch!])
+    }
+  })
+}

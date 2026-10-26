@@ -36,6 +36,7 @@ const testConfig = {
     constellationEnabled: false,
     companionPresenceEnabled: false,
     dreamEnabled: true,
+    memoryFormation: { autoCapture: false, consolidation: false },
     securityGuidance: true,
     interruptMarker: true,
     scoutEvidenceFirewall: false,
@@ -77,6 +78,13 @@ describe('createAgentConfig', () => {
     provider: testProvider,
   }
 
+  it('forwards tools.readConcurrency through the shared main factory to the consumed agent config', () => {
+    const main = createMainAgentConfigInput({ toolPreset: 'minimal', userInstructions: DISABLED_USER_INSTRUCTIONS, apiKey: 'fixture', model: baseInput.model, cwd: '/tmp/test', config: { ...testConfig, tools: { readConcurrency: 1 } }, sessionId: 'read-config', toolDefinitions: [], provider: testProvider })
+    assert.equal(main.readConcurrency, 1)
+    assert.equal(createAgentConfig(main).readConcurrency, 1)
+    assert.equal(createAgentConfig(baseInput).readConcurrency, 4)
+  })
+
   it('creates client with correct model params', () => {
     const cfg = createAgentConfig(baseInput)
     assert.ok(cfg.client)
@@ -85,6 +93,29 @@ describe('createAgentConfig', () => {
     assert.equal(cfg.sessionId, 'session-1')
     assert.equal(cfg.providerProfile?.cacheType, 'exact-prefix')
     assert.equal(cfg.providerProfile?.contextWindow, 128000)
+  })
+
+  it('assembles reasoning experiment eligibility from the final protocol capability mapping', () => {
+    assert.equal(createAgentConfig(baseInput).latencyReasoningSupported, false, 'DeepSeek medium maps to high')
+    const supported = createAgentConfig({ ...baseInput, provider: { ...testProvider, name: 'fixture', protocol: 'openai-responses', capabilities: {} } })
+    assert.equal(supported.latencyReasoningSupported, true)
+    const clamped = createAgentConfig({ ...baseInput, provider: { ...testProvider, name: 'fixture', protocol: 'openai-responses', capabilities: { effortCap: { medium: 'high' } } } })
+    assert.equal(clamped.latencyReasoningSupported, false)
+  })
+
+  it('freezes prompt experiment eligibility for new sessions and disables it on inherited snapshots', t => {
+    const old = process.env.RIVET_LATENCY_PROMPT_EXPERIMENT
+    t.after(() => { if (old === undefined) delete process.env.RIVET_LATENCY_PROMPT_EXPERIMENT; else process.env.RIVET_LATENCY_PROMPT_EXPERIMENT = old })
+    delete process.env.RIVET_LATENCY_PROMPT_EXPERIMENT
+    const baseline = createAgentConfig(baseInput)
+    process.env.RIVET_LATENCY_PROMPT_EXPERIMENT = '1'
+    const fresh = createAgentConfig(baseInput)
+    assert.equal(fresh.latencyPromptExperiment, true)
+    assert.equal(fresh.blockPolicy?.toolDescriptions, 'full')
+    const restored = createAgentConfig({ ...baseInput, inheritFrozenFrom: fresh.promptEngine })
+    assert.equal(restored.latencyPromptExperiment, false)
+    assert.equal(restored.blockPolicy?.toolDescriptions, 'full')
+    assert.deepEqual(restored.blockPolicy?.caps, baseline.blockPolicy?.caps)
   })
 
   it('resolves a model-aware compactionProfile (task 5 assembly wiring)', () => {
@@ -147,7 +178,7 @@ describe('createAgentConfig', () => {
   })
 
   it('builds main AgentConfig input from layered config including songlineEnabled', () => {
-    const input = createMainAgentConfigInput({ userInstructions: DISABLED_USER_INSTRUCTIONS,
+    const input = createMainAgentConfigInput({ toolPreset: 'minimal', userInstructions: DISABLED_USER_INSTRUCTIONS,
       apiKey: 'test-key',
       model: baseInput.model,
       cwd: '/tmp/test',
@@ -183,7 +214,7 @@ describe('createAgentConfig', () => {
   // 导致 buildVisionClient 恒返回 undefined、桥接从不触发（"配了却报图片未发送"）。
   // 这两条测试钉住 config → input → visionClient 这条线。
   it('wires config.agent.visionModel through createMainAgentConfigInput', () => {
-    const input = createMainAgentConfigInput({ userInstructions: DISABLED_USER_INSTRUCTIONS,
+    const input = createMainAgentConfigInput({ toolPreset: 'minimal', userInstructions: DISABLED_USER_INSTRUCTIONS,
       apiKey: 'test-key',
       model: baseInput.model,
       cwd: '/tmp/test',
@@ -397,7 +428,7 @@ describe('createAgentConfig', () => {
   })
 
   it('wires config.agent.reconnect into agentReconnect (PLAN §4)', () => {
-    const input = createMainAgentConfigInput({ userInstructions: DISABLED_USER_INSTRUCTIONS,
+    const input = createMainAgentConfigInput({ toolPreset: 'minimal', userInstructions: DISABLED_USER_INSTRUCTIONS,
       apiKey: 'test-key',
       model: baseInput.model,
       cwd: '/tmp/test',
@@ -415,7 +446,7 @@ describe('createAgentConfig', () => {
   })
 
   it('keeps agentReconnect disabled when config.agent.reconnect is unset', () => {
-    const input = createMainAgentConfigInput({ userInstructions: DISABLED_USER_INSTRUCTIONS,
+    const input = createMainAgentConfigInput({ toolPreset: 'minimal', userInstructions: DISABLED_USER_INSTRUCTIONS,
       apiKey: 'test-key',
       model: baseInput.model,
       cwd: '/tmp/test',

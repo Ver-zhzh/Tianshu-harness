@@ -5,8 +5,16 @@ export function proseColumns(columns: number, indentColumns = 0): number {
   return Math.max(1, columns - indentColumns - 1)
 }
 
+export interface WrapReadingTextOptions {
+  preserveWhitespace?: boolean
+}
+
+export function normalizeReadingText(text: string): string {
+  return text.split(/(\x1b\]8;[^\x07\x1b]*(?:\x07|\x1b\\))/).map(part => part.startsWith('\x1b]8;') ? part : enforceTextContract(part)).join('').replace(/\t/g, '    ')
+}
+
 /** Keep styles, links and graphemes intact when prose wraps. */
-export function wrapReadingText(text: string, width: number, continuation = ''): string[] {
+export function wrapReadingText(text: string, width: number, continuation = '', options: WrapReadingTextOptions = {}): string[] {
   const rows: string[] = [], wide = { ambiguousAsWide: ambiguousWideEnabled() }
   width = Math.max(1, width)
   continuation = truncateToDisplayWidth(continuation, Math.max(0, width - 2), wide)
@@ -16,7 +24,7 @@ export function wrapReadingText(text: string, width: number, continuation = ''):
   const emit = (count: number, wrapping: boolean) => {
     const chunk = pending.splice(0, count)
     let end = chunk.length
-    if (wrapping) {
+    if (wrapping && !options.preserveWhitespace) {
       while (end > 0 && (chunk[end - 1]!.control || chunk[end - 1]!.text === ' ')) end--
     }
     let current = styles + link + prefix
@@ -44,7 +52,7 @@ export function wrapReadingText(text: string, width: number, continuation = ''):
     }
     pending.push(atom); cells += atom.cells
   }
-  const clean = text.split(/(\x1b\]8;[^\x07\x1b]*(?:\x07|\x1b\\))/).map(part => part.startsWith('\x1b]8;') ? part : enforceTextContract(part)).join('').replace(/\t/g, '    ')
+  const clean = normalizeReadingText(text)
   const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
   for (const part of clean.split(/(\x1b\[[\d;]*m|\x1b\]8;[^\x07\x1b]*(?:\x07|\x1b\\)|\n)/)) {
     if (part === '\n') emit(pending.length, false)

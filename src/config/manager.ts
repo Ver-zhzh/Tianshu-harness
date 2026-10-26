@@ -1,3 +1,4 @@
+import { TOOL_PRESET_NAMES } from '../tools/tool-preset-names.js'
 import { readFileSync, existsSync } from 'fs'
 import { writeFileAtomicSync } from '../fs-atomic.js'
 import { normalizeHttpProxyUrl } from '../tools/net/proxy-url.js'
@@ -18,10 +19,10 @@ import { cloneResolvedPreset, resolvePreset } from '../api/pro-registry.js'
 import { normalizeBaseUrl } from '../api/endpoint-map.js'
 import { backfillPresetModelFields, migratePresetModelBackfill } from './preset-model-backfill.js'
 import { migrateProviderToKeys, keyRefFor, defaultKeyOf, keyRefReferrers, applyProviderCredential, alignModelsWithDefaultKey, writeModelsToDefaultKey } from './provider-keys.js'
-import { injectProviderKeys, stripProviderKeys, writeProviderKeysFile, providerKeysPath } from './provider-keys-store.js'
+import { injectProviderKeys, stripProviderKeys, writeProviderKeysFile, providerKeysPath, migrateFlashRetirementWithKeyPools } from './provider-keys-store.js'
 import { assertDefaultModelRef, contractModels } from './contract-models.js'
 import { upsertProviderPoolModel, addProviderPoolModel, removeProviderPoolModel } from './provider-models.js'
-import { migrateDeepseekVisionExpRetirement, migrateDeepseekV4FlashRetirement } from './preset-model-retirement.js'
+import { migrateDeepseekVisionExpRetirement } from './preset-model-retirement.js'
 import { migrateInvalidWorkerTiers } from './worker-tier-repair.js'
 import { writeSecret, readSecret, deleteSecret } from './secrets-store.js'
 import { invalidateToolPreset } from '../tools/tool-preset.js'
@@ -444,7 +445,10 @@ export function loadConfig(options?: {
     const dsChanged = migrateDeepseekMaxTokens(cpMigrated)
     const flashChanged = migrateV4FlashEffort(cpMigrated)
     const visionExpRetired = migrateDeepseekVisionExpRetirement(cpMigrated)
-    const v4FlashRetired = migrateDeepseekV4FlashRetirement(cpMigrated)
+    // 走 provider-keys.json 的权威池：外部池形态下 config.json 没有 keys，直接调
+    // migrateDeepseekV4FlashRetirement 会看不到池、把替代档补进无人读的顶层 models
+    // （详见 migrateFlashRetirementWithKeyPools 头注释）。
+    const v4FlashRetired = migrateFlashRetirementWithKeyPools(cpMigrated)
     const keysMoved = migrateInlineApiKeys(cpMigrated)
     const searchKeysMoved = migrateSearchInlineApiKeys(cpMigrated)
     const capsChanged = migrateLegacyCapabilities(cpMigrated)
@@ -1275,15 +1279,14 @@ export function setDeliveryConfig(input: { autoCommit?: unknown }): DeliveryConf
   return { autoCommit: cfg.agent.delivery?.autoCommit !== false }
 }
 
-// --- Tool preset (minimal/frontend/full/taiyi, session-start assembly tier) ---
+// --- Tool preset (minimal/frontend/orchestration/full/taiyi, session-start assembly tier) ---
 
 export interface ToolPresetConfigSnapshot {
-  preset: 'minimal' | 'frontend' | 'full' | 'taiyi'
+  preset: 'minimal' | 'frontend' | 'orchestration' | 'full' | 'taiyi'
 }
 
-const TOOL_PRESETS = new Set(['minimal', 'frontend', 'full', 'taiyi'])
+const TOOL_PRESETS = new Set<string>(TOOL_PRESET_NAMES)
 
-/** Snapshot of the tool preset for the desktop/TUI settings UI. */
 export function getToolPresetConfig(): ToolPresetConfigSnapshot {
   // 回退口径与 resolveToolPreset 的装配默认一致（2026-09-23 起为 minimal）。
   return { preset: loadConfig().tools.preset ?? 'minimal' }
@@ -1298,7 +1301,7 @@ export function setToolPresetConfig(input: { preset?: unknown }): ToolPresetConf
   const cfg = loadConfig()
   if (input.preset !== undefined) {
     if (typeof input.preset !== 'string' || !TOOL_PRESETS.has(input.preset)) {
-      throw new Error(`preset must be one of: minimal | frontend | full | taiyi`)
+      throw new Error(`preset must be one of: minimal | frontend | orchestration | full | taiyi`)
     }
     cfg.tools.preset = input.preset as ToolPresetConfigSnapshot['preset']
   }
@@ -1319,7 +1322,7 @@ export interface RuntimeLeanConfigSnapshot {
 
 /** 域级 runtime 覆盖（runtime.domains[domainId]，见 runtime-lean.ts）。 */
 export interface RuntimeDomainConfigSnapshot extends RuntimeLeanConfigSnapshot {
-  toolPreset?: 'minimal' | 'frontend' | 'full' | 'taiyi'
+  toolPreset?: 'minimal' | 'frontend' | 'orchestration' | 'full' | 'taiyi'
 }
 
 /** Snapshot of runtime.lean (+ optional pool caps) for desktop/TUI settings. */
@@ -1344,7 +1347,7 @@ function validateDomainSlice(id: string, slice: unknown): void {
   const s = slice as Record<string, unknown>
   validateRuntimeLeanSlice(s, `domains.${id}`)
   if (s.toolPreset !== undefined && (typeof s.toolPreset !== 'string' || !TOOL_PRESETS.has(s.toolPreset))) {
-    throw new Error(`domains.${id}.toolPreset must be one of minimal/frontend/full/taiyi`)
+    throw new Error(`domains.${id}.toolPreset must be one of minimal/frontend/orchestration/full/taiyi`)
   }
 }
 

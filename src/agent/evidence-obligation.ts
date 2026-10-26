@@ -12,7 +12,7 @@
  * - 不记录私有 CoT：只存外显事实断言摘要、证据类型、风险、动作和结果。
  * - blocked ≠ satisfied：高风险义务不得因受阻被当作已关闭；但真实证据
  *   出现后 blocked 义务仍可被 satisfy（受阻不是死刑）。
- * - final gate 只对 high 义务硬拦（low_risk_small_edit_never_gates_final）。
+ * - final gate 只处理非验证类 high 断言；验证/验收缺口只披露，不自动续轮。
  *
  * @module evidence-obligation
  */
@@ -53,6 +53,11 @@ export type ObligationFamily =
   | 'acceptance'
 
 export type ObligationRisk = 'low' | 'medium' | 'high'
+
+/** Quality records disclose verification gaps; they never schedule extra work. */
+export function isIndependentVerification(family: ObligationFamily): boolean {
+  return family === 'bugfix' || family === 'regression' || family === 'delivery' || family === 'acceptance'
+}
 
 export interface EvidenceObligation {
   readonly id: string
@@ -486,31 +491,21 @@ export interface FinalEvaluation {
   nextAction?: { obligationId: string; action: EvidenceAction; claim: string }
 }
 
-/**
- * `evaluateFinalCandidate` 挑 `nextAction` 时的家族优先级。
- *
- * **acceptance 必须排在 delivery 之前**，理由不是"先验收后跑测试"的执行顺序
- * （这里排的不是执行顺序，delivery 被任意 passed 验证自动关闭，与排位无关），
- * 而是续轮席位的分配：`evaluateFinal` 只看 `unresolved[0]`，而 `#continuedOnce`
- * 是按义务 ID 记的 latch。排第一的那条若一直不结，第二次收尾时它仍是 `[0]`、
- * 已在 latch 里 → 直接降 honest_blocked 返回，**排在后面的义务永远拿不到
- * nextAction 席位**。delivery 本就能被任意测试自动满足，acceptance 是设计上
- * 关不掉的那条——唯一那次续轮的话语权必须归 acceptance。
- */
+/** Stable display order; verification/acceptance records never compete for continuation. */
 const FAMILY_ORDER: Record<ObligationFamily, number> = {
   bugfix: 0, regression: 1, acceptance: 2, delivery: 3,
   external_claim: 4, behavior: 5, existence: 6, environment: 7,
 }
 
 /**
- * natural-finish 候选判定。**只有 high 风险义务参与门禁**
+ * natural-finish 候选判定。只有非验证类 high 风险断言参与门禁
  * （low_risk_small_edit_never_gates_final）：
  * - 高风险 open/attempted 存在 → continue_once（调用方负责"仅自动续轮一次"）。
  * - 只剩高风险 blocked → honest_blocked（允许结束，强制披露）。
  * - 其余 → allow。低/中风险义务永不阻拦 natural-finish。
  */
 export function evaluateFinalCandidate(store: ObligationStore): FinalEvaluation {
-  const high = store.obligations.filter(o => o.risk === 'high')
+  const high = store.obligations.filter(o => o.risk === 'high' && !isIndependentVerification(o.family))
   const unresolved = high
     .filter(o => o.state === 'open' || o.state === 'attempted')
     .sort((a, b) => FAMILY_ORDER[a.family] - FAMILY_ORDER[b.family] || (a.id < b.id ? -1 : 1))
@@ -551,7 +546,7 @@ export function decideAcceptanceOutcome(
   items: readonly import('../tools/types.js').AcceptanceItemInput[],
 ): AcceptanceOutcome | null {
   if (items.length === 0) return null
-  if (items.some(i => i.status === 'pending')) return { kind: 'declared' }
+  if (items.some(i => i.status === 'pending' || i.status === 'deferred')) return { kind: 'declared' }
   if (items.some(i => i.status === 'met' && !i.evidence?.trim())) return { kind: 'missing_evidence' }
 
   const blocked = items.filter(i => i.status === 'blocked')
@@ -576,8 +571,8 @@ export function renderObligationBlock(store: ObligationStore): string {
     .filter(o => o.state === 'open' || o.state === 'attempted' || o.state === 'blocked')
     .sort((a, b) => RISK_RANK[b.risk] - RISK_RANK[a.risk] || FAMILY_ORDER[a.family] - FAMILY_ORDER[b.family] || (a.id < b.id ? -1 : 1))
   if (active.length === 0) return ''
-  const lines = active.map(o =>
-    `- [${o.risk}/${o.state}] ${o.family}: ${o.claim} → next=${o.requiredAction}`,
-  )
+  const lines = active.map(o => isIndependentVerification(o.family)
+    ? `- [${o.risk}/${o.state}] ${o.family}: ${o.claim}（尚未核销；仅披露，验证时机由用户决定，不追加测试或阻止提交/收尾）`
+    : `- [${o.risk}/${o.state}] ${o.family}: ${o.claim} → next=${o.requiredAction}`)
   return `<evidence-obligation count="${active.length}">\n${lines.join('\n')}\n</evidence-obligation>`
 }

@@ -1,3 +1,6 @@
+import { withNativeRequestAudit } from './native-request-audit.js'
+import { currentExecutionScope } from './execution-continuity.js'
+import { ProviderToolProgress } from './tool-input-progress.js'
 import { requestAuditContext } from './call-audit.js'
 import type { StreamClient } from './stream-client.js'
 import type { OaiChatRequest, OaiUserMessage } from './oai-types.js'
@@ -84,13 +87,13 @@ export class CodexClient implements StreamClient {
     callbacks: StreamCallbacks,
     signal?: AbortSignal,
   ): Promise<void> {
-    const body = this.buildRequestBody(request)
-
-    const auditContext = requestAuditContext(this.config, request)
-    await withStructuredRetry(async () => {
-      const authHeaders = this.config.auth
-        ? await this.config.auth.getHeaders()
-        : {}
+    let requestBody: Record<string, unknown> | undefined
+    const auditContext = { ...requestAuditContext(this.config, request), model: request.model || this.config.model }
+    await withStructuredRetry(() => withNativeRequestAudit(auditContext, signal, async (attemptContext, audit) => {
+      const body = requestBody ??= audit.observation.measure('bodyPreparationMs', () => this.buildRequestBody(request))
+      const authHeaders = await audit.observation.measureAsync('authenticationMs', async () => this.config.auth
+        ? this.config.auth.getHeaders()
+        : {})
 
       const url = `${this.config.baseUrl.replace(/\/+$/, '')}/responses`
       // 共享 lifecycle controller（见 openai-client 同名注释）：传给 fetch，
@@ -102,7 +105,7 @@ export class CodexClient implements StreamClient {
         else signal.addEventListener('abort', () => lifecycle.abort(), { once: true })
       }
       // 客户端限速（未配置 rateLimit 时零开销）：同 provider 的所有 client 实例共享一只桶。
-      await acquireRateLimitSlot(this.config.baseUrl, this.config.retry?.rateLimit, lifecycle.signal)
+      await audit.observation.measureAsync('rateLimitWaitMs', () => acquireRateLimitSlot(this.config.baseUrl, this.config.retry?.rateLimit, lifecycle.signal))
       const response = await fetchWithTimeout(url, {
         method: 'POST',
         headers: {
@@ -113,9 +116,9 @@ export class CodexClient implements StreamClient {
           'Connection': 'Keep-Alive',
           ...authHeaders,
         },
-        body: JSON.stringify(body),
+        body: audit.observation.measure('bodyPreparationMs', () => JSON.stringify(body)),
         signal: lifecycle.signal,
-      }, 180_000, providerDispatcher(url, this.config.network), auditContext)
+      }, 180_000, providerDispatcher(url, this.config.network), attemptContext, audit)
 
       if (!response.ok) {
         const errorBody = await response.text().catch(() => '')
@@ -134,7 +137,7 @@ export class CodexClient implements StreamClient {
       }
 
       await this.processSSEStream(response, callbacks, signal, lifecycle)
-    }, signal, {
+    }), signal, {
       budget: this.config.retryBudget?.(),
       maxTotalDurationMs: this.config.retry?.maxTotalDurationMs ?? 10 * 60_000,
       maxTotalRetries: this.config.maxRetries,
@@ -269,6 +272,7 @@ export class CodexClient implements StreamClient {
     let usage: { input_tokens?: number; output_tokens?: number; reasoning_tokens?: number; cacheRead?: number; cacheWrite?: number } | undefined
 
     const emittedCallIds = new Set<string>()
+    const inputProgress = new ProviderToolProgress({ requestId: currentExecutionScope()?.requestId, attemptId: currentExecutionScope()?.attemptId ?? crypto.randomUUID() })
 
     // Reasoning-before-text ordering buffer.
     // DeepSeek Codex API may emit output_item.done (message) before
@@ -391,6 +395,7 @@ export class CodexClient implements StreamClient {
 
           const type = parsed.type as string
 
+          inputProgress.responses(parsed, callbacks.onToolInputProgress)
           switch (type) {
             case 'response.output_text.delta': {
               seenTextDelta = true

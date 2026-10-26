@@ -29,6 +29,7 @@ import {
   upsertProviderKeyModel,
 } from '../config/provider-key-store.js'
 import { probeForTestKey } from './provider-probe-adapter.js'
+import { endpointNetworkInput } from './endpoint-network-input.js'
 
 function withAuth(handler: RouteHandler, apiToken?: string): RouteHandler {
   return async (body, params, headers, res) => {
@@ -90,6 +91,9 @@ export function buildProviderKeyRoutes(apiToken?: string, onChanged?: () => void
         apiKey: apiKey.trim(),
         ...(provider.protocol ? { protocol: provider.protocol } : {}),
         providerName: name,
+        // 端点网络策略与 provider 级路由同源：body 显式声明优先，否则沿用已存策略
+        // （私网端点的 provider 此前不加这条会在加 key 探测处被默认拒绝）。
+        ...endpointNetworkInput(body, provider.baseUrl, name),
       })
       if (!probe.ok) {
         return { status: 400, body: { error: probe.error ?? 'probe-failed', ...(probe.status !== undefined ? { status: probe.status } : {}) } }
@@ -152,6 +156,7 @@ export function buildProviderKeyRoutes(apiToken?: string, onChanged?: () => void
           apiKey: apiKey.trim(),
           ...(provider.protocol ? { protocol: provider.protocol } : {}),
           providerName: name,
+          ...endpointNetworkInput(body, provider.baseUrl, name),
         })
         if (!probe.ok) {
           return { status: 400, body: { error: probe.error ?? 'probe-failed', ...(probe.status !== undefined ? { status: probe.status } : {}) } }

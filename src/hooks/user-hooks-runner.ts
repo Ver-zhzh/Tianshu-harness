@@ -5,12 +5,16 @@
  * event context via environment variables and stdin JSON.
  */
 
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync } from 'node:fs'
+import { access } from 'node:fs/promises'
 import { extname, isAbsolute, join, win32 } from 'node:path'
-import { spawnSync } from 'node:child_process'
+import { startHookProcess, type HookProcessHandle } from './hook-process.js'
+import { loadHooksConfig } from './hooks-config.js'
+import type { HookCleanupResult, HookStatus } from './external-hook-types.js'
+export { loadHooksConfig } from './hooks-config.js'
 import { ANTI_INTERACTIVE_ENV } from '../tools/resolved-env.js'
-import { sanitizeEnv } from '../tools/bash.js'
-import { isProjectTrusted, notifyUntrustedOnce } from '../config/project-trust.js'
+import { sanitizeEnv } from '../tools/sanitize-env.js'
+import { isProjectTrusted } from '../config/project-trust.js'
 
 export type HookEvent =
   | 'preTurn'
@@ -29,6 +33,7 @@ export interface HookEntry {
 
 export interface HooksConfig {
   hooks: HookEntry[]
+  diagnostics?: string[]
 }
 
 export interface HookContext {
@@ -45,29 +50,16 @@ export interface HookResult {
   script: string
   ok: boolean
   output: string
+  status?: HookStatus
+  reason?: string
+  exitCode?: number | null
+  signal?: string | null
+  durationMs?: number
+  truncated?: boolean
+  cleanup?: HookCleanupResult | 'pending'
 }
 
 export const VALID_EVENTS = new Set<HookEvent>(['preTurn', 'postTurn', 'postTool', 'postSession', 'onError'])
-
-export function loadHooksConfig(cwd: string): HooksConfig {
-  const path = join(cwd, '.rivet', 'hooks.json')
-  if (!existsSync(path)) return { hooks: [] }
-
-  // 信任门：hooks.json 属仓库内容，未授信项目一律不执行（脚本经 shell 跑、
-  // 拿完整用户权限——SECURITY.md 信任边界要求它不能自我授权）。
-  if (!isProjectTrusted(cwd)) {
-    notifyUntrustedOnce('hooks', cwd)
-    return { hooks: [] }
-  }
-
-  try {
-    const parsed = JSON.parse(readFileSync(path, 'utf-8')) as { hooks?: HookEntry[] }
-    const hooks = (parsed.hooks ?? []).filter(h => VALID_EVENTS.has(h.event) && typeof h.script === 'string')
-    return { hooks }
-  } catch {
-    return { hooks: [] }
-  }
-}
 
 /** A hook contributed by a plugin (absolute script path + source plugin name).
  *  Mirrors PluginHookEntry from plugin-loader but kept structural to avoid the
@@ -129,14 +121,14 @@ function resolveBash(env: NodeJS.ProcessEnv, exists: (p: string) => boolean, pla
  * 还留下一个由 shell 持有、调用方回收不了的窗口。（PR #195 修的是同族的另一处落点。）
  *
  * Windows 上按扩展名选解释器；解释器缺失时 **fail-closed 报错**，绝不把脚本路径交给
- * shell 去「打开」。POSIX 保持原行为（`shell: true` + 脚本自身，`#!` 照常生效）。
+ * shell 去「打开」。POSIX 参数化脚本路径，保留脚本自身的 shebang。
  */
 export function resolveHookCommand(scriptPath: string, deps: HookCommandDeps = {}): HookCommandResolution {
   const platform = deps.platform ?? process.platform
   const env = deps.env ?? process.env
   const exists = deps.exists ?? existsSync
 
-  if (platform !== 'win32') return { ok: true, cmd: scriptPath, args: [], shell: true }
+  if (platform !== 'win32') return { ok: true, cmd: '/bin/sh', args: ['-c', 'exec "$1"', 'rivet-hook', scriptPath], shell: false }
 
   const ext = extname(scriptPath).toLowerCase()
   switch (ext) {
@@ -171,68 +163,89 @@ export function resolveHookCommand(scriptPath: string, deps: HookCommandDeps = {
   }
 }
 
-export function runHooksForEvent(cwd: string, ctx: HookContext, pluginHooks?: PluginHook[]): HookResult[] {
-  const config = loadHooksConfig(cwd)
-  // Merge plugin-contributed hooks (absolute script paths) with project hooks.
-  const projectHooks: HookEntry[] = config.hooks.filter(h => h.event === ctx.event)
-  const pluginEntries: HookEntry[] = (pluginHooks ?? [])
-    .filter(h => h.event === ctx.event)
-    .map(h => ({ event: h.event, script: h.script, timeoutMs: h.timeoutMs }))
-  const entries = [...projectHooks, ...pluginEntries]
-  const results: HookResult[] = []
+export interface HookRunnerOptions {
+  config?: HooksConfig
+  signal?: AbortSignal
+  deadlineAt?: number
+  results?: HookResult[]
+  onProcess?: (process: HookProcessHandle) => void
+  validatePlugin?: (hook: PluginHook) => boolean
+}
 
-  for (const entry of entries) {
-    // Plugin hooks arrive with absolute paths; project hooks may be relative.
-    const scriptPath = isAbsolute(entry.script)
-      ? entry.script
-      : join(cwd, entry.script)
+async function resolveCommand(script: string): Promise<HookCommandResolution> {
+  const candidates = new Set<string>()
+  resolveHookCommand(script, { exists: path => { candidates.add(path); return false } })
+  const present = new Set<string>()
+  await Promise.all([...candidates].map(async path => {
+    try { await access(path); present.add(path) } catch { /* Missing interpreter. */ }
+  }))
+  return resolveHookCommand(script, { exists: path => present.has(path) })
+}
 
-    if (!existsSync(scriptPath)) {
-      results.push({ script: entry.script, ok: false, output: `Script not found: ${scriptPath}` })
-      continue
+export async function runHooksForEvent(cwd: string, ctx: HookContext, pluginHooks: PluginHook[] = [], options: HookRunnerOptions = {}): Promise<HookResult[]> {
+  const results = options.results ?? []
+  const deadlineAt = options.deadlineAt ?? performance.now() + 10_000
+  const controller = new AbortController()
+  const signal = options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal
+  const timer = setTimeout(() => controller.abort('group_timeout'), Math.max(1, deadlineAt - performance.now()))
+  let current: HookProcessHandle | undefined
+  const cancel = () => current?.cancel(typeof signal.reason === 'string' ? signal.reason : 'cancelled')
+  signal.addEventListener('abort', cancel, { once: true })
+  try {
+    if (signal.aborted) return results
+    const config = options.config ?? await loadHooksConfig(cwd, signal)
+    if (signal.aborted) return results
+    for (const diagnostic of config.diagnostics ?? []) results.push({ script: '.rivet/hooks.json', ok: false, output: diagnostic, status: 'skipped', reason: 'invalid_config' })
+    const entries: Array<HookEntry & { plugin?: PluginHook }> = [
+      ...config.hooks.filter(h => h.event === ctx.event),
+      ...pluginHooks.filter(h => h.event === ctx.event).map(h => ({ ...h, plugin: h })),
+    ]
+    if (entries.length > 128) {
+      results.push({ script: '', ok: false, output: 'Too many hooks (maximum 128)', status: 'skipped', reason: 'config_limit' })
+      return results
     }
-
-    const timeoutMs = entry.timeoutMs ?? 5000
-    // 与 bash 工具同族（issue #137）：hook 脚本经 shell 运行、拿用户权限，
-    // 绝不能把父进程的密钥类变量或启动即执行类变量（NODE_OPTIONS / LD_PRELOAD
-    // 等，见 sanitizeEnv 的白名单排除）泄漏给子进程——否则 .rivet/hooks.json
-    // 的脚本成为凭据外泄与代码注入的旁路。
-    const env = {
-      ...sanitizeEnv(process.env),
-      ...ANTI_INTERACTIVE_ENV,
-      RIVET_HOOK_EVENT: ctx.event,
-      RIVET_SESSION_ID: ctx.sessionId ?? '',
-      RIVET_TURN: String(ctx.turn ?? ''),
-      RIVET_TOOL_NAME: ctx.toolName ?? '',
+    let outputBytes = 0
+    for (const entry of entries) {
+      if (signal.aborted || performance.now() >= deadlineAt) break
+      if (entry.plugin ? options.validatePlugin && !options.validatePlugin(entry.plugin) : !isProjectTrusted(cwd)) {
+        results.push({ script: entry.script, ok: false, output: 'Hook authorization revoked', status: 'skipped', reason: 'authorization_revoked' })
+        continue
+      }
+      const scriptPath = isAbsolute(entry.script) ? entry.script : join(cwd, entry.script)
+      let resolved: HookCommandResolution
+      try { await access(scriptPath); resolved = await resolveCommand(scriptPath) }
+      catch { resolved = { ok: false, error: `Script not found: ${scriptPath}` } }
+      if (signal.aborted || performance.now() >= deadlineAt) break
+      if (!resolved.ok) {
+        results.push({ script: entry.script, ok: false, output: resolved.error, status: 'failed', reason: 'command_unavailable' })
+        continue
+      }
+      const env = { ...sanitizeEnv(process.env), ...ANTI_INTERACTIVE_ENV,
+        RIVET_HOOK_EVENT: ctx.event, RIVET_SESSION_ID: ctx.sessionId ?? '',
+        RIVET_TURN: String(ctx.turn ?? ''), RIVET_TOOL_NAME: ctx.toolName ?? '' }
+      const input = JSON.stringify(ctx)
+      if (Buffer.byteLength(input) > 65_536) {
+        results.push({ script: entry.script, ok: false, output: 'Hook input exceeds 64KiB', status: 'skipped', reason: 'input_limit' })
+        break
+      }
+      const remaining = 262_144 - outputBytes
+      if (remaining <= 0) break
+      current = startHookProcess({ cmd: resolved.cmd, args: resolved.args, cwd, env, input,
+        timeoutMs: Math.max(1, Math.min(entry.timeoutMs ?? 5_000, deadlineAt - performance.now())),
+        maxOutputBytes: Math.min(65_536, remaining) })
+      options.onProcess?.(current)
+      if (signal.aborted) cancel()
+      const execution = await current.result
+      results.push({ script: entry.script, ok: execution.status === 'completed', ...execution })
+      outputBytes += execution.outputBytes ?? Buffer.byteLength(execution.output)
+      const cleanup = await current.reaped
+      results[results.length - 1]!.cleanup = cleanup
+      if (cleanup === 'unknown' || outputBytes >= 262_144) break
+      current = undefined
     }
-
-    // 解释器解析失败就不 spawn：宁可报错，也不把脚本路径交给 shell 去「打开」（#198）。
-    const resolved = resolveHookCommand(scriptPath)
-    if (!resolved.ok) {
-      results.push({ script: entry.script, ok: false, output: resolved.error })
-      continue
-    }
-
-    try {
-      const result = spawnSync(resolved.cmd, resolved.args, {
-        cwd,
-        env,
-        input: JSON.stringify(ctx),
-        encoding: 'utf-8',
-        timeout: timeoutMs,
-        shell: resolved.shell,
-        windowsHide: true,
-      })
-      const output = (result.stdout ?? '') + (result.stderr ?? '')
-      results.push({ script: entry.script, ok: result.status === 0, output: output.trim() })
-    } catch (e) {
-      results.push({
-        script: entry.script,
-        ok: false,
-        output: e instanceof Error ? e.message : String(e),
-      })
-    }
+    return results
+  } finally {
+    clearTimeout(timer)
+    signal.removeEventListener('abort', cancel)
   }
-
-  return results
 }

@@ -135,31 +135,19 @@ it('index and fallback agree on conditional type-only impact for the verified ca
   } finally { indexer.close(); f.dispose() }
 })
 
-it('delivery awaits fresh impact for dirty owned/coOwned, excludes history, and refuses unresolved analysis', async () => {
+it('delivery no longer invokes impact analysis (contract separation) — commit proceeds without it', async () => {
   const f = fixture()
   try {
     f.write('feature.js', 'export const feature = 1;')
-    f.write('co.js', 'export const co = 1;')
-    f.write('consumer.test.ts', '// fixture')
-    f.write('old-uncovered.test.ts', '// advisory fixture must exist to detect accidental legacy gating')
-    const ledger = createTaskLedger({ taskId: 'impact-consumer' })
-    const ownership = createOwnershipLedger({ taskLedger: ledger, baseline: createWorktreeBaseline({ branch: 'main', head: 'fixture', capturedAt: Date.now(), preExistingDirty: ['co.js'], preExistingUntracked: [] }) })
-    for (const path of ['feature.js', 'co.js', 'historical.js']) ledger.record({ type: 'file_write', path })
+    const ledger = createTaskLedger({ taskId: 'impact-removed' })
+    const ownership = createOwnershipLedger({ taskLedger: ledger, baseline: createWorktreeBaseline({ branch: 'main', head: 'fixture', capturedAt: Date.now(), preExistingDirty: [], preExistingUntracked: [] }) })
+    ledger.record({ type: 'file_write', path: 'feature.js' })
     ownership.autoOwnFromLedger()
-    assert.ok(ownership.isCoOwned('co.js'))
-    ledger.record({ type: 'verification', command: 'node --test consumer.test.ts', status: 'passed', meta: { kind: 'test', scope: 'targeted', exitCode: 0, snapshotRef: 'impact-candidate', coverage: { version: 1, runId: 'fixture', runner: 'node-test', cwd: f.cwd, repositoryRoot: f.cwd, complete: true, filtered: false, files: [{ path: 'consumer.test.ts', outcome: 'passed', tests: 1, skipped: 0, cancelled: 0 }] } } })
     const gate = createDeliveryGateV2({ taskLedger: ledger, ownership, attribution: createVerificationAttribution({ ownership }) })
-    let calls = 0, resolved = true, seen = 0
-    const tool = createDeliverTaskTool(() => ({ taskLedger: ledger, ownership, gate, getCurrentDirtyFiles: () => ['feature.js', 'co.js'], getImpactedTests: () => ['old-uncovered.test.ts'], prepareCandidateTree: async (_cwd, files) => ({ path: f.cwd, files: [...files], ref: 'impact-candidate', buildMs: 0, isCurrent: () => true, destroy: () => {} }), resolveDeliveryImpact: async (_cwd, files) => { await new Promise(r => setTimeout(r, 10)); seen++; assert.deepEqual([...files].sort(), ['co.js', 'feature.js']); return { resolved, requiredTests: ['consumer.test.ts'], advisoryTests: ['old-uncovered.test.ts'], reason: 'impact_unresolved', policyVersion: 1 } }, detectWroteButNeverRead: () => [], commitOwnedFiles: () => { calls++; return { ok: true, output: 'mock commit' } } }))
-    const params = { cwd: f.cwd, toolUseId: 'impact-consumer', input: { commit: true, message: 'fix: fixture', force: true, adopt: ['co.js'] } }
-    assert.notEqual((await tool.execute(params)).isError, true)
-    assert.equal(seen, 1)
-    assert.equal(calls, 1)
-    resolved = false
-    const rejected = await tool.execute(params)
-    assert.equal(rejected.isError, true)
-    assert.equal(rejected.errorKind, 'delivery_gate')
-    assert.match(rejected.content, /impact_unresolved/)
-    assert.equal(calls, 1)
+    let calls = 0
+    const tool = createDeliverTaskTool(() => ({ taskLedger: ledger, ownership, gate, getCurrentDirtyFiles: () => ['feature.js'], commitOwnedFiles: () => { calls++; return { ok: true, output: 'mock commit' } } }))
+    const result = await tool.execute({ cwd: f.cwd, toolUseId: 'impact-removed', input: { commit: true, message: 'fix: fixture' } })
+    assert.equal(result.isError, undefined, result.content)
+    assert.equal(calls, 1, 'commit proceeds without impact analysis')
   } finally { f.dispose() }
 })

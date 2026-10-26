@@ -34,7 +34,7 @@ describe('obstacle recovery at the actual prompt consumers', () => {
     assert.ok(!prompt.includes('⇒ 外部阻塞/污染'))
     assert.ok(!prompt.includes('验证门禁已重置（编辑计数清零）'))
     assert.ok(!prompt.includes('门能跑但被影响面覆盖义务卡死'))
-    assert.ok(prompt.includes('仍须满足所选文件的覆盖、版本和所有权检查'))
+    assert.ok(prompt.includes('所有权与版本检查始终生效'))
   })
 
   it('Yaoguang worker keeps negative reproduction separate from a repair acceptance', () => {
@@ -67,7 +67,9 @@ describe('obstacle recovery at the actual prompt consumers', () => {
     ] } } as RuntimeHookContext)
     const entry = entries.find(e => e.key === 'self-verify')!
     assert.ok(entry)
-    assert.equal(entry.expect?.kind, 'verify_attempted')
+    // 267a0001e：self-verify 收口为 informational advisory，不再挂 expect 核销
+    // 义务（与「不补测试义务」文案同源）。钉住新契约：expect 恒为 undefined。
+    assert.equal(entry.expect, undefined)
     assert.match(entry.content, /不补测试.*义务/)
     assert.doesNotMatch(entry.content, /跑测试\/读原文\/用原输入自检/)
     assert.equal(verificationAttempted('read_file', { file_path: 'src/a.ts' }), false)

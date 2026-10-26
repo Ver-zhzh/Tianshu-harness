@@ -120,7 +120,10 @@ async function main(): Promise<void> {
     if (only && p.id !== only) return false
     // 需凭据的预设默认跳过：它们连不上是「没配 key」，不是「推荐列表有问题」，
     // 混在一起会淹掉真正的信号。要一起跑用 --all。
-    if (!includeCredentialed && (p.requiredEnv?.length ?? 0) > 0) {
+    if (
+      !includeCredentialed
+      && ((p.requiredEnv?.length ?? 0) > 0 || (p.requiredHeaders?.length ?? 0) > 0)
+    ) {
       skipped.push(`${p.id}（需凭据）`)
       return false
     }

@@ -7,12 +7,14 @@
 
 import type { Config, ProviderConfig, ModelConfig, ProviderKeyConfig } from '../config/schema.js'
 import type { AuthProvider } from '../auth/types.js'
+import { isDeepStrictEqual } from 'node:util'
 import { createAuthProvider } from '../auth/registry.js'
 import { canonicalizeModelId } from '../api/model-aliases.js'
 import { contractModels } from '../config/contract-models.js'
 import { resolveModelRef, findModelOwner, findModelInKey } from '../config/provider-keys.js'
 import { isKeylessProviderEntry } from '../config/provider-presets.js'
 import { tryResolveCredentialKey } from '../api/factory.js'
+import { sessionProviderKey } from '../model/model-binding.js'
 
 export interface ResolvedModelTarget {
   provider: ProviderConfig
@@ -28,6 +30,23 @@ export interface ModelResolutionContext {
   provider: ProviderConfig
   apiKey: string
   auth?: AuthProvider
+}
+
+/** Compare the active endpoint/account and model contract, not just the display id. */
+export function isCurrentModelTarget(ctx: ModelResolutionContext, currentModel: string | undefined, target: ResolvedModelTarget): boolean {
+  if (currentModel !== target.modelId || ctx.apiKey !== target.apiKey || ctx.auth !== target.auth) return false
+  try {
+    if (sessionProviderKey(ctx.config.provider.providers, ctx.provider) !== target.providerName) return false
+  } catch { return false }
+  const contract = (provider: ProviderConfig) => {
+    const { models: _models, keys, apiKey: _key, apiKeyEnv: _env, keyRef: _ref, ...settings } = provider
+    return {
+      settings,
+      keyId: keys?.[0]?.id,
+      model: contractModels(provider).find(model => model.id === currentModel),
+    }
+  }
+  return isDeepStrictEqual(contract(ctx.provider), contract(target.provider))
 }
 
 interface ResolvedCredentials {

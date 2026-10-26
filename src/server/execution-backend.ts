@@ -32,6 +32,8 @@ export function inProcessBackend(createAgent: AgentFactory): ExecutionBackend {
 export interface ResolveExecutionBackendOptions {
   /** 显式指定后端（测试 / 受控装配）；缺省读 `RIVET_EXECUTION_BACKEND`。 */
   kind?: string
+  hookBinding?: (cwd: string, sessionId: string) => import('../hooks/external-hook-types.js').HookRuntimeBinding
+  externalHookHost?: import('../hooks/external-hook-types.js').ExternalHookHostPort
 }
 
 /**
@@ -52,8 +54,8 @@ export async function resolveExecutionBackend(
   ]
   for (const path of candidates) {
     try {
-      const mod = (await import(path)) as { createIsolatedBackend?: () => ExecutionBackend }
-      if (typeof mod.createIsolatedBackend === 'function') return mod.createIsolatedBackend()
+      const mod = (await import(path)) as { createIsolatedBackend?: (options: Pick<ResolveExecutionBackendOptions, 'externalHookHost' | 'hookBinding'>) => ExecutionBackend }
+      if (typeof mod.createIsolatedBackend === 'function') return mod.createIsolatedBackend({ externalHookHost: opts.externalHookHost, hookBinding: opts.hookBinding })
     } catch { /* 试下一个候选 */ }
   }
   console.error('[execution-backend] RIVET_EXECUTION_BACKEND=isolated 但隔离适配器不可用，回退进程内执行')

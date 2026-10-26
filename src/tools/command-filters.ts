@@ -91,23 +91,7 @@ function filterTsc(stdout: string, exitCode: number): string {
     return summary ? summary[0] : '✓ typecheck passed'
   }
 
-  const lines = stdout.split('\n')
-  const kept: string[] = []
-
-  for (const line of lines) {
-    const trimmed = line.trim()
-    // Keep the full diagnostic line (file:line:col + error TS…) — 位置信息是
-    // 修复的第一素材，剥掉前缀的"美化"曾让 agent 拿着错误找不到现场。
-    if (/\berror\s+TS\d+:/i.test(trimmed)) {
-      kept.push(trimmed)
-    }
-    // Keep the summary footer: "Found N error(s)."
-    if (/^Found\s+\d+\s+error/i.test(trimmed)) {
-      kept.push(trimmed)
-    }
-  }
-
-  return kept.length > 0 ? kept.join('\n') : stdout.trim()
+  return filterFailureOutput(stdout, line => line.trim() === 'Compiling...') ?? stdout.trim()
 }
 
 // ── node:test (tsx --test / node --test) ────────────────────────────────────
@@ -121,21 +105,7 @@ function filterNodeTest(stdout: string, exitCode: number): string {
     return summary.length > 0 ? summary.join('\n') : stdout.trim()
   }
 
-  // Failure: keep only failing test details + summary
-  const kept: string[] = []
-  for (const line of lines) {
-    const trimmed = line.trim()
-    if (
-      /^not ok\b/.test(trimmed) ||
-      /\bAssertionError\b/.test(trimmed) ||
-      /\d+\s+passed/.test(trimmed) ||
-      /\d+\s+failed/.test(trimmed)
-    ) {
-      kept.push(trimmed)
-    }
-  }
-
-  return kept.length > 0 ? kept.join('\n') : stdout.trim()
+  return filterFailureOutput(stdout) ?? stdout.trim()
 }
 
 // ── git status ──────────────────────────────────────────────────────────────
@@ -288,12 +258,10 @@ function filterGitDiff(stdout: string): string | null {
 
 // ── test runners（npm/pnpm/yarn/bun test、vitest/jest）───────────────────────
 // 策略参照 rtk vitest/npm 过滤器：剥生命周期头/WARN/进度噪声；成功只留统计行；
-// 失败保留失败块（失败名 + 断言详情窗口）+ 统计行，丢通过项与 coverage 表。
+// 失败只移除明确通过项；未知诊断保留，超长输出保留头尾与原文回查声明。
 // ≤15 行不过滤。
 
 const TEST_SUMMARY_RE = /Test Files|Test Suites|Tests\s+\d|Duration|^\s*ℹ\s+(tests|suites|pass|fail|skipped|todo)|\d+\s+passed|\d+\s+failed|Ran all test suites/
-const TEST_FAILURE_START_RE = /^\s*(FAIL\b|✕|×|✖|✗|not ok\b|●\s|ERR_ASSERTION|AssertionError)/
-const TEST_FAILURE_DETAIL_RE = /(AssertionError|Expected|Actual|Difference|error:\s|Error:\s|\bat\s+\S+\s*\(|\bpassed\b|\bfailed\b)/
 const TEST_PASS_LINE_RE = /^\s*(✓|✔|ok\b|PASS\b)/
 const TEST_NOISE_RE = /^>\s+\S+@[\w.-]+\s+\S|^\s*npm\s+(WARN|notice)\b|^\s*pnpm\s+WARN\b/
 
@@ -318,20 +286,20 @@ function filterTestRun(stdout: string, exitCode: number): string | null {
     return [head, ...summary].join('\n')
   }
 
-  const kept: string[] = []
-  let window = 0
-  for (const line of lines) {
-    if (TEST_SUMMARY_RE.test(line)) { kept.push(line); window = Math.max(window, 0); continue }
-    if (TEST_FAILURE_START_RE.test(line)) { kept.push(line); window = 5; continue }
-    if (TEST_FAILURE_DETAIL_RE.test(line) && !TEST_PASS_LINE_RE.test(line)) { kept.push(line); window = Math.max(window, 3); continue }
-    if (window > 0 && !TEST_PASS_LINE_RE.test(line)) { kept.push(line); window--; continue }
-    if (window > 0) window--
-    // 通过项、coverage 行、npm ERR! 前言全部丢弃
-  }
-  if (kept.length === 0) return lines.slice(-15).join('\n')
+  return filterFailureOutput(stdout)
+}
+
+/** Unknown lines can explain a process failure even when every assertion passed. */
+function filterFailureOutput(stdout: string, omittable = (line: string) => TEST_PASS_LINE_RE.test(line)): string | null {
+  const rawLines = stripSgr(stdout).split('\n')
+  const kept = rawLines.filter(line => !omittable(line))
+  const omitted = rawLines.length - kept.length
+  if (kept.every(line => !line.trim())) return null
+  const hasDiagnostic = kept.some(line => line.trim() && !TEST_SUMMARY_RE.test(line) && !TEST_NOISE_RE.test(line))
   const MAX_KEPT = 120
-  if (kept.length > MAX_KEPT) {
-    return [...kept.slice(0, MAX_KEPT), `[+${kept.length - MAX_KEPT} lines omitted]`].join('\n')
-  }
-  return kept.join('\n')
+  const preview = kept.length > MAX_KEPT
+    ? [...kept.slice(0, 80), `[+${kept.length - MAX_KEPT} diagnostic lines omitted; raw output remains available]`, ...kept.slice(-40)]
+    : kept
+  return [...(!hasDiagnostic ? ['未取得可解释退出原因的诊断；请查询原始输出或已有执行回执。'] : []),
+    ...preview, ...(omitted ? [`[${omitted} known progress/passing lines omitted]`] : [])].join('\n')
 }

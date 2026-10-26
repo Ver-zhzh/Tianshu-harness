@@ -34,7 +34,7 @@ test('issue 514: real workspace receipt clears required and scoped commit preser
       detectWroteButNeverRead: () => [], getProjectMemoryContent: () => '',
       commitOwnedFiles: (cwd, files, message) => commitScopedFiles({ cwd, files, message }),
     }))
-    const params = { cwd: f.cwd, toolUseId: 'issue514-deliver', input: { commit: true, force: true, skip_review: true, message: 'fix: source fixture' } }
+    const params = { cwd: f.cwd, toolUseId: 'issue514-deliver', input: { verification_policy: 'strict', commit: true, force: true, skip_review: true, message: 'fix: source fixture' } }
     const before = await tool.execute(params)
     assert.equal(before.isError, true)
     assert.deepEqual(before.verificationPlan!.pending, [f.path])

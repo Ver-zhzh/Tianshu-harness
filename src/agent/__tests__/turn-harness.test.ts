@@ -194,8 +194,10 @@ describe('TurnHarness', () => {
     let calls = 0
     const result = await harness.executeTool({
       id: 'tu7',
-      name: 'run_tests',
-      input: { command: 'npm test' },
+      // run_tests 自 267a0001e 起属 NON_IDEMPOTENT（显式资源消耗，禁隐式重跑）——
+      // 本用例断言的是 harness 重试机制本身，改用可重试的 web_search。
+      name: 'web_search',
+      input: { query: 'npm test' },
       turn: 1,
       execute: async () => {
         calls++

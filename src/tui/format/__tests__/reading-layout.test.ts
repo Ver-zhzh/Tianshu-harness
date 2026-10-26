@@ -40,6 +40,14 @@ test('换行后 ANSI 样式和 OSC 8 链接仍完整，链接内文件名整体�
   assert.ok(rows[1]!.includes('\x1b[36m'))
 })
 
+test('preserveWhitespace 默认关闭，启用后折行两侧空格不丢失', () => {
+  const text = 'abcde  cache-routes.ts'
+  assert.deepEqual(wrapReadingText(text, 16), ['abcde', 'cache-routes.ts'])
+  const rows = wrapReadingText(text, 16, '', { preserveWhitespace: true })
+  assert.deepEqual(rows, ['abcde  ', 'cache-routes.ts'])
+  assert.equal(rows.join(''), text)
+})
+
 test('混合列表保留原编号、子列表缩进及续行对齐', () => {
   const rows = markdown('1. 主项\n   - 子项目 cache-routes.ts 和 insights-route.test.ts\n2. 下一项', 38)
   assert.ok(rows.includes('1. 主项'))

@@ -92,7 +92,8 @@ function scope(change: ChangeSet): DelegationRequest['scope'] {
   // 就是被审文件，也就是主控刚写完并提交的那批，必然与主控争用同一批路径
   // （并且磁盘上可能已被并发修改）。判定据此把这些 worker 推进独立 worktree，
   // 见 isolation-policy.ts。
-  return { files: files(change), overlapsPrimary: true }
+  return { files: files(change), overlapsPrimary: true,
+    ...(change.reviewSnapshot ? { reviewSnapshot: { cwd: change.reviewSnapshot.cwd, ref: change.reviewSnapshot.ref } } : {}) }
 }
 
 function request(input: {
@@ -110,6 +111,11 @@ function request(input: {
     parentTurnId: input.options.parentTurnId ?? REVIEW_PARENT_TURN_ID,
     objective: [
       input.objective,
+      ...(input.change.reviewSnapshot ? [
+        `只读固定快照 ${input.change.reviewSnapshot.ref}；基准 ${input.change.reviewSnapshot.baseRef ?? '(root)'} → ${input.change.reviewSnapshot.headRef}。`,
+        `先用 read_file 读取 ${input.change.reviewSnapshot.diffFile}，再读取本快照内的相关代码；不要读取主工作区或用共享 HEAD 替换审查对象。`,
+        '本任务只做代码审查，不执行测试、不写代码、不提交、不派修复。未执行的验证必须标注未执行。',
+      ] : []),
       '',
       `审查深度: ${reviewDepth}。审查 worker 不得调用 deliver_task；仅报告 verdict/evidence 即可。`,
     ].join('\n'),
@@ -154,17 +160,13 @@ function summarizeRun(run: CoordinatorRun): string {
 }
 
 function extractSeverity(text: string): ReviewFinding['severity'] {
-  if (/\bCRITICAL\b|\bC\d+\b/i.test(text)) return 'CRITICAL'
-  if (/\bHIGH\b|\bH\d+\b/i.test(text)) return 'HIGH'
-  if (/\bMEDIUM\b|\bM\d+\b/i.test(text)) return 'MEDIUM'
-  if (/\bLOW\b|\bL\d+\b/i.test(text)) return 'LOW'
-  return undefined
+  // 兼容旧报告的条目标题；证据中的级别名、H1/C1 等编号都不是本条严重度。
+  return text.match(/^\s*(?:\[|【)?(CRITICAL|HIGH|MEDIUM|LOW)(?=[\s\]】·:：]|$)/i)?.[1]?.toUpperCase()
 }
 
-function mapWorkerFinding(result: WorkerResult, finding: WorkerFinding): ReviewFinding {
-  const text = `${finding.claim}\n${finding.evidence}\n${result.summary}`
+function mapWorkerFinding(_result: WorkerResult, finding: WorkerFinding): ReviewFinding {
   return {
-    severity: extractSeverity(text),
+    severity: finding.severity ?? extractSeverity(finding.claim),
     claim: finding.claim,
     evidence: finding.evidence,
     // 极性透传：worker 未上报时缺席，blocking 判定按 defect 处理（fail-closed）。
@@ -236,7 +238,7 @@ export function classifyInfraFailure(result: WorkerResult): ReviewInfraFailure['
   return 'worker'
 }
 
-function mapSquadronInfraFailures(run: CoordinatorRun): ReviewInfraFailure[] {
+function mapSquadronInfraFailures(run: CoordinatorRun, expected = 1): ReviewInfraFailure[] {
   if (run.status === 'skipped') {
     return [{ kind: 'skip', claim: 'Review Squadron skipped before producing findings' }]
   }
@@ -258,6 +260,7 @@ function mapSquadronInfraFailures(run: CoordinatorRun): ReviewInfraFailure[] {
       ...(salvaged !== undefined ? { salvagedFindings: salvaged } : {}),
     })
   }
+  if (run.results.length < expected) failures.push({ kind: 'worker', claim: `审查结果不完整：${run.results.length}/${expected} 个审查者返回结果` })
   return failures
 }
 
@@ -267,6 +270,7 @@ function verifierResult(run: CoordinatorRun): VerifierResult {
   return {
     verdict: verified ? 'verified' : 'rejected',
     evidence: summarizeRun(run),
+    findings: mapSquadronFindings(run),
   }
 }
 
@@ -384,7 +388,7 @@ function stanceBlocks(stances: InspectorStance[]): string[] {
 
 const FINDING_CONTRACT = [
   '每项发现须报告严重级别 CRITICAL/HIGH/MEDIUM/LOW、结论、证据（file:line）、以及最小修复建议。若该审查维度无问题，须明确报告"未发现异常"——沉默不等于通过。',
-  'severity 语义：CRITICAL/HIGH 只用于必须修复的缺陷。确认性结论（已核实无问题、链路闭合、口径对齐）不是缺陷——在该 finding 上标 "polarity": "confirmation"，它会进入「已核实清单」而非 blocking findings；缺陷可显式标 "defect"（缺省按 defect 处理）。',
+  '每个 finding 单独填写 severity 字段：CRITICAL/HIGH/MEDIUM/LOW；不要只在摘要写级别。severity 语义：CRITICAL/HIGH 只用于必须修复的缺陷。确认性结论（已核实无问题、链路闭合、口径对齐）不是缺陷——在该 finding 上标 "polarity": "confirmation"，它会进入「已核实清单」而非 blocking findings；缺陷可显式标 "defect"（缺省按 defect 处理）。',
   'status 语义：status 表示你的审查任务是否完成，不是被审代码的判定。发现 CRITICAL 缺陷时 status 仍为 passed——缺陷经 findings 表达；failed/blocked 只用于你自己没完成审查（预算耗尽、读不到代码等）。',
 ].join('\n')
 
@@ -509,6 +513,14 @@ export function createCoordinatorReviewDeps(
   options: CoordinatorReviewDepsOptions = {},
 ): ReviewRouterDeps {
   return {
+    spawnReadonlyReviewer: async (change, signal, onActivity): Promise<SquadronResult> => {
+      const run = await coordinator.delegate(request({ change, options, kind: 'review', profile: 'reviewer',
+        objective: ['独立审查指定 diff：报告缺陷、证据和建议；不要将未测试描述为验证通过。',
+          `范围: ${files(change).join(', ')}`, objectiveReviewStanceBlock(), FINDING_CONTRACT,
+          ...(change.focusHint ? [`审查重点: ${change.focusHint}`] : [])].join('\n'), onActivity }), signal ?? options.abortSignal)
+      return { findings: mapSquadronFindings(run), infraFailures: mapSquadronInfraFailures(run) }
+    },
+
     spawnVerifier: async (change, _signal, onActivity) => {
       const run = await coordinator.delegate(request({
         change,
@@ -517,7 +529,7 @@ export function createCoordinatorReviewDeps(
         profile: 'adversarial_verifier',
         objective: verifierObjective(change),
         onActivity,
-      }), options.abortSignal)
+      }), _signal ?? options.abortSignal)
       return verifierResult(run)
     },
 
@@ -529,16 +541,16 @@ export function createCoordinatorReviewDeps(
         profile: 'patcher',
         objective: patcherObjective(change, verifier),
         onActivity,
-      }), options.abortSignal)
+      }), _signal ?? options.abortSignal)
       return patcherResult(run)
     },
 
     spawnSquadron: async (change, _signal, onActivity): Promise<SquadronResult> => {
       const requests = squadronRequests(change, options, onActivity)
       const run = coordinator.delegateBatch
-        ? await coordinator.delegateBatch(requests, 'all_required', options.abortSignal)
-        : await runSquadronSerially(coordinator, requests, options.abortSignal)
-      return { findings: mapSquadronFindings(run), infraFailures: mapSquadronInfraFailures(run) }
+        ? await coordinator.delegateBatch(requests, 'all_required', _signal ?? options.abortSignal)
+        : await runSquadronSerially(coordinator, requests, _signal ?? options.abortSignal)
+      return { findings: mapSquadronFindings(run), infraFailures: mapSquadronInfraFailures(run, requests.length) }
     },
 
     spawnWiringReviewer: async (change, _signal, onActivity): Promise<SquadronResult> => {
@@ -569,7 +581,7 @@ export function createCoordinatorReviewDeps(
       const run = coordinator.delegateBatch
         ? await coordinator.delegateBatch(requests, 'all_required', options.abortSignal)
         : await runSquadronSerially(coordinator, requests, options.abortSignal)
-      return { findings: mapSquadronFindings(run), infraFailures: mapSquadronInfraFailures(run) }
+      return { findings: mapSquadronFindings(run), infraFailures: mapSquadronInfraFailures(run, requests.length) }
     },
   }
 }

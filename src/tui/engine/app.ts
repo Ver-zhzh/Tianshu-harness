@@ -1,4 +1,6 @@
 import { bindConnectEndpointPolicy } from '../connect-apply.js'
+import { createReviewFollowupController } from '../../agent/review-followup-controller.js'
+import type { ReviewFollowupNotice } from '../../agent/review-inbox.js'
 import { configuredEndpointNetwork } from '../../config/endpoint-network-policy.js'
 import { workerDispatchKey } from '../../tools/worker-identity.js'
 /**
@@ -16,11 +18,9 @@ import { workerDispatchKey } from '../../tools/worker-identity.js'
 
 import { DecisionController, type PlanDecision, type PlanDecisionResult, type PlanReviewView } from './decision-controller.js'
 import { renderDecisionCard } from '../format/decision-card.js'
-import { formatPinnedPrompt } from '../format/pinned-prompt.js'
 import type { WriteStream, ReadStream } from 'node:tty'
 import { CommitEngine } from './commit-engine.js'
-import { LiveEngine, thinkingRowBudgetFor, type LiveRegionLine } from './live-engine.js'
-import { CommittedHistoryViewport, layoutPinnedViewport } from './pinned-viewport.js'
+import { LiveEngine, padDynamicRegion, thinkingRowBudgetFor, type LiveRegionLine } from './live-engine.js'
 import { installOutputGuard, type OutputGuard } from './output-guard.js'
 import { OverlayEngine } from './overlay-engine.js'
 import { ModePanel } from './mode-panel.js'
@@ -88,9 +88,10 @@ import { SlashCommandRegistry, type SlashCommandContext } from '../slash-command
 import { getTheme, getActiveThemeName, type RivetTheme } from '../theme.js'
 import { formatUserMessage } from '../format/user-message.js'
 import { formatAskUserQuestion } from '../format/ask-user-question.js'
-import { formatToolCard, formatToolCardLive, isToolCardTruncated, toolCardTitle } from '../format/tool-card.js'
+import { formatToolCard, formatToolCardLive, toolCardTitle } from '../format/tool-card.js'
 import { formatCollapsedGroup, formatCollapsedGroupLive, CollapsedReadSearchBuffer, isCollapsibleTool, type CollapsedReadSearchGroup } from '../format/collapsed-read-search.js'
 import { formatCollapsedBashGroup, formatCollapsedBashGroupLive, isCollapsibleBashCommand, type CollapsedBashGroup } from '../format/collapsed-bash.js'
+import { formatCollapsedProcess, formatCollapsedProcessDetails } from '../format/collapsed-process.js'
 import { formatApprovalPromptLayout } from '../format/approval-renderers.js'
 import { outOfWorkspaceFilePaths } from '../../agent/tool-pipeline.js'
 import { formatThinking } from '../format/thinking.js'
@@ -156,6 +157,7 @@ import { renderSettings } from '../format/settings.js'
 import type { SettingsFlow, SettingsSaveRequest, SettingsSaveResult, SettingsView } from '../settings-flow.js'
 import { parseScrollbackTranscript } from '../scrollback-transcript.js'
 import { preparePlanPreview } from '../format/plan-preview.js'
+import { preparePagerDocument } from '../format/pager-document.js'
 import { renderCockpit } from '../format/cockpit.js'
 import type { CockpitSnapshot, Panel } from '../cockpit/types.js'
 import { PANELS } from '../cockpit/types.js'
@@ -185,7 +187,7 @@ export function liveMaxRowsFor(rows: number): number {
 
 /**
  * live 区同时展示的进行中工具卡数量上限，超出折叠成 `…(+N)` 一行。
- * 只有最新一张展开输出末尾，其余仅标题行——见 renderLive 的 2d 段。
+ * 默认均为标题行；verbose 仅最新一张展开输出末尾——见 renderLive 的 2d 段。
  */
 export const LIVE_TOOL_CARD_MAX = 3
 
@@ -331,6 +333,7 @@ import { ZEN_UNLOCK } from '../../agent/zen-mode.js'
 import { phaseStatusLabel } from '../phase-status.js'
 
 export interface AgentCallbacks {
+  onToolInputProgress?: RuntimeAgentCallbacks['onToolInputProgress']
   onTextDelta: (text: string) => void
   onThinkingDelta: (thinking: string) => void
   onToolUse: (id: string, name: string, input: Record<string, unknown>) => void
@@ -352,6 +355,7 @@ export interface AgentCallbacks {
   onAutonomyCheckpoint?: (info: AutonomyCheckpointInfo) => void
   /** T4 — structured per-worker delegation status/progress feeding the fleet read model. */
   onDelegationActivity?: (activity: DelegationActivity) => void
+  onReviewReady?: (notice: ReviewFollowupNotice) => void
   /** issue #247 第 1–3 条 — CVM 拦截「发生时提示」（分级与文案在 agent/cvm-notice.ts）。
    *  ⚠️ 必须与 agent/loop-types.ts 的 AgentCallbacks 同步——两份接口目前无守卫测试。 */
   onCvmInterception?: (notice: CvmInterceptionNotice) => void
@@ -608,6 +612,8 @@ export class TuiApp {
   private workerSteer: ((workerId: string, text: string) => boolean) | null = null
 
   // ── W3: 渲染 ticker + 指标 ───────────────────────────────────
+  private toolInputLabel?: string
+  private toolInputProgress = new Map<string, string>()
   /** W-B3: stream render state manager (ticker/tick/lastActivity/header) */
   private streamRenderController = new StreamRenderController()
   /** W-B6: metrics + glance + domain state manager */
@@ -618,6 +624,7 @@ export class TuiApp {
   private activePlanProvider?: () => string | undefined
   /** Plan Mode 活动草稿路径（侧栏「起草中」） */
   private planDraftProvider?: () => { path: string; bytes?: number } | null | undefined
+  private detailPagerCache?: { source: string; columns: number; document: ReturnType<typeof preparePagerDocument> }
   private planPreviewCache?: { source: string; columns: number; theme: RivetTheme; document: ReturnType<typeof preparePlanPreview>; messages: PagerData['messages'] }
   /** 当前 GoalTracker 快照访问器 */
   private goalTrackerProvider?: () => import('../../agent/goal-tracker.js').GoalTracker | null
@@ -644,6 +651,9 @@ export class TuiApp {
 
   // External hooks
   private onSubmitCallback?: (text: string, images?: string[], options?: import('../../agent/input-origin.js').InputOptions) => unknown
+  private reviewOwnerProvider?: () => { cwd: string; sessionId: string } | undefined
+  private reviewFollowup?: ReturnType<typeof createReviewFollowupController>
+  private reviewFollowupPaused = false
   private onAbortCallback?: () => void
   private onExitCallback?: () => void
   /** External slash command handler. If set, it is tried before the registry. */
@@ -660,8 +670,6 @@ export class TuiApp {
    * 现在暂存到这里，随下一条 prompt 一并发出，并即时告知用户去向。
    */
   private deferredImages: string[] = []
-  /** 置顶上一轮/执行中指令条状态（对标 Codex CLI prompt_header 契约） */
-  private pinnedPrompt: { text: string; status: 'running' | 'completed' } | null = null
 
   /** 测试断言用：暂存待随下一条 prompt 发送的附件数。 */
   getDeferredImagesCount(): number {
@@ -845,6 +853,7 @@ export class TuiApp {
    *  否则会在 main.ts 清屏前画出一版输入框；若清屏/flush 出现偏差，旧帧会
    *  残留在欢迎屏上方形成重影。 */
   private started = false
+  private workspaceWelcomeCommitted = false
   /** Ctrl+X leader key 待处理状态（用于 ctrl+x r 打开右侧面板） */
   private sidePanelLeaderPending = false
   private sidePanelLeaderTimer: ReturnType<typeof setTimeout> | null = null
@@ -936,8 +945,7 @@ export class TuiApp {
     this.live = new LiveEngine({
       stdout: options.stdout,
       reservedRows: 3,
-      maxRows: Math.max(1, options.rows || 24),
-      fullViewport: true,
+      maxRows: liveMaxRowsFor(options.rows),
       // CPR 自愈：帧后/空闲探针经 stdout 发出，响应由 InputHandler 的 onCpr 喂回；
       // 检出污染（外来写入移动光标）→ 重渲染走恢复路径重锚帧。
       onProbeRequest: () => { options.stdout.write(QUERY_CURSOR_POS) },
@@ -1079,12 +1087,13 @@ export class TuiApp {
       if ((!this.frontend.isFullscreen && this.overlay.activeId() !== 'ui-history') || !this.workflow.preferences.mouse || this.editorActive) return
       mouse.handle(event, { session: this.frontend, line: this.inputLine, overlay: this.overlay, controller: this.overlayController,
         columns: this.columns, render: () => this.renderLive(), key: name => this.handleOverlayKey({ char: '', name }),
-        copy: () => this.copyFrontendSelection(), copyOnSelect: this.workflow.preferences.copyOnSelect, message: text => this.commitStatic(text) })
+        copy: () => this.copyFrontendSelection(), copyOnSelect: this.workflow.preferences.copyOnSelect, message: text => this.commitStatic(text),
+        copyComposer: () => this.copyComposerSelection() })
     })
     this.resize.onResize((cols, rows) => {
       this.columns = cols
       this.rows = rows
-      this.live.setMaxRows(this.screenReader ? liveMaxRowsFor(rows) : Math.max(1, rows || 24))
+      this.live.setMaxRows(liveMaxRowsFor(rows))
       this.rerender()
     })
 
@@ -1201,7 +1210,8 @@ export class TuiApp {
     this.input.onAnyKey((key) => {
       if (key.name !== 'tab') this.cancelFileCompletionQuery()
       if (this.editorActive) return
-      if (key.name === 'ctrl_c' && !this.approvalIntentController.approvalPending && !this.pendingPlanApproval && !this.pendingAskFlow && this.copyFrontendSelection()) return
+      if (key.name === 'ctrl_c' && !this.approvalIntentController.approvalPending && !this.pendingPlanApproval && !this.pendingAskFlow
+        && (this.copyFrontendSelection() || (!this.overlay.isActive() && this.copyComposerSelection()))) return
       if (this.overlay.activeId() === 'ui-history') {
         if (!this.frontend.handleHistoryKey(key)) this.deactivateOverlay()
         return
@@ -1298,6 +1308,12 @@ export class TuiApp {
 
       if (!this.overlay.isActive() && !this.approvalIntentController.approvalPending && this.decisions.handleKey(key, !this.inputLine.value && !this.inputLine.images.length, !!this.inputController.fileCompletion || this.inputController.slashMenu.open)) return
       if (!this.overlay.isActive() && this.frontend.handleKey(key, !!this.inputLine.value || this.inputLine.images.length > 0)) return
+      if (key.name === 'escape' && !this.overlay.isActive() && !this.approvalIntentController.approvalPending
+        && !this.pendingPlanApproval && !this.pendingAskFlow && this.inputLine.vimMode !== 'visual' && this.inputLine.clearSelection()) {
+        this.inputController.lastEscAt = 0
+        this.renderLive()
+        return
+      }
 
       // ── Global shortcuts (before input line processing) ──────
       if (key.name === 'shift_tab') {
@@ -1581,6 +1597,16 @@ export class TuiApp {
 
     // Build AgentCallbacks (aligned to loop-types.ts AgentCallbacks)
     this.callbacks = {
+      onToolInputProgress: progress => {
+        const key = `${progress.attemptId ?? ''}:${progress.toolCallId}`
+        if (progress.state === 'generating') {
+          this.setPhase('analyzing')
+          this.markActivity()
+          this.toolInputProgress.set(key, `正在生成 ${progress.toolName ?? '工具'} 输入 · ${progress.argumentBytes} B`)
+        } else this.toolInputProgress.delete(key)
+        this.toolInputLabel = [...this.toolInputProgress.values()].at(-1)
+        this.writeBatcher.schedule()
+      },
       onTextDelta: (text) => {
         this.frontend.textDelta(text)
         if (this.perfMonitor?.enabled) this.perfMonitor.measure('delta', () => this.handleTextDelta(text))
@@ -1654,6 +1680,7 @@ export class TuiApp {
           analyzing: 'analyzing',
           working: 'streaming',
           preparing: 'thinking',
+          'tool-hint': 'analyzing',
           blocked: 'waiting',
         }
         const mapped = knownPhases[phase]
@@ -1677,6 +1704,7 @@ export class TuiApp {
         return this.steerBuffer.drainHuman('next')
       },
       onDelegationActivity: (activity) => this.handleDelegationActivity(activity),
+      onReviewReady: notice => this.requestReviewFollowup(notice),
       // issue #247 第 1–3 条：CVM 拦截发生时提示（分级/文案在 agent/cvm-notice.ts）
       onCvmInterception: (notice) => this.handleCvmInterception(notice),
     }
@@ -1757,6 +1785,16 @@ export class TuiApp {
     else this.renderLive()
     return true
   }
+  /** 输入框选区复制（鼠标松开 / Ctrl+C）：选区保留，随后可直接退格删除或输入替换。 */
+  private copyComposerSelection(): boolean {
+    const selection = this.inputLine.selectedText
+    if (!selection) return false
+    void copyTextToClipboard(selection, sequence => { if (!this.terminalRestored) this.stdout.write(sequence) }, { signal: this.clipboardAbort.signal }).then(method => {
+      if (this.terminalRestored || method === 'cancelled') return
+      this.commitStatic(`${method === 'native' ? '已复制' : '已发送复制请求'}（${selection.length}字符）`)
+    })
+    return true
+  }
   async setUIHistorySession(path: string, priorMessages = false): Promise<void> {
     // 换会话前把悬着的提问归档进**当前**（旧）会话历史——frontend 尚未切到新
     // history，此刻写入才落在旧会话里；否则旧会话回看时会缺掉这次提问。
@@ -1770,6 +1808,7 @@ export class TuiApp {
 
   private openTextDetail(title: string, content: string): void {
     this.detailReturn = this.overlay.activeId() === 'chronicle' ? { id: 'chronicle', nav: { ...this.overlayController.nav() } } : undefined
+    this.detailPagerCache = undefined
     this.detailPager = { title, content, page: 0, footerHints: [['↑↓', '逐行'], ['PgUp/PgDn', '半屏'], ['Esc', '返回']] }
     this.overlayController.resetNav()
     this.activateOverlay('pager')
@@ -1811,7 +1850,10 @@ export class TuiApp {
       return false
     }
     const full = resolveFrontendRenderer(mode, this.stdout.isTTY, this.screenReader) === 'fullscreen'
-    if (full === this.frontend.isFullscreen) return true
+    if (full === this.frontend.isFullscreen) {
+      if (!full) this.commitWorkspaceWelcome()
+      return true
+    }
     try {
       if (full) {
         if (this.stdout.isTTY === false) throw new Error('此输出不是交互终端')
@@ -1826,6 +1868,7 @@ export class TuiApp {
         this.commit.setOutputEnabled(true)
         this.live.reset()
         this.live.resumeProbe()
+        this.commitWorkspaceWelcome()
       }
       this.renderLive()
       return true
@@ -1880,6 +1923,20 @@ export class TuiApp {
     }
   }
 
+  private commitWorkspaceWelcome(): void {
+    if (!this.started || this.workspaceWelcomeCommitted || this.frontend.isFullscreen) return
+    const welcomeBudget = this.approvalIntentController.approvalPending || this.pendingPlanApproval || this.pendingAskFlow ? 0 : Math.max(0, (this.rows || 24) - 9)
+    const welcome = this.frontend.renderWelcome(this.columns, welcomeBudget)
+    this.workspaceWelcomeCommitted = true
+    if (!welcome.length) return
+    try {
+      this.commitBlock(welcome.join('\n'))
+    } catch (error) {
+      this.workspaceWelcomeCommitted = false
+      throw error
+    }
+  }
+
   /**
    * 首屏渲染：启动后立即绘制底部 chrome（GlanceBar + 输入框），
    * 无需等待第一次按键。main-ansi 在欢迎块写完后调用。
@@ -1930,6 +1987,16 @@ export class TuiApp {
     this.onSubmitCallback = callback
   }
 
+  setReviewOwnerProvider(provider: () => { cwd: string; sessionId: string } | undefined): void { this.reviewOwnerProvider = provider }
+
+  private requestReviewFollowup(notice: ReviewFollowupNotice): void {
+    if (this.reviewOwnerProvider?.()?.sessionId !== notice.sessionId) return
+    // 契约分离（2026-10-25）：自动后续核实控制器退役。审查完成只通知用户
+    // （发现已持久化在会话收件箱），不再自动驱动核实 run；「处理发现」是
+    // 用户显式发起的新任务。followupClaimed 不再驱动任何执行。
+    this.commitStatic(`审查完成：发现已记入本会话待办（review_changes action=list 查看；处理发现由你决定何时发起）。`)
+  }
+
   // ── Mission Contract 预览（§13）─────────────────────────────────────
   /** 预览卡待决提交：Enter 确认 / e 返回编辑 / Esc 取消。 */
   private contractPreview: { text: string; images?: string[]; draft: MissionDraft } | null = null
@@ -1947,6 +2014,7 @@ export class TuiApp {
 
   /** 输入提交主流程（InputLine onSubmit 回调；原构造器闭包提取，逻辑零改动）。 */
   private async handleInputSubmit(text: string, images?: string[], decision = false, questionRequestId?: string, steer = false): Promise<void> {
+    if (text.trim()) this.reviewFollowupPaused = false
     // 提交 = 继续对话：取消 Ctrl+C 退出确认（同 Esc/编辑键/粘贴，防残留误退）。
     if (this.inputController.ctrlCPendingSince > 0) this.inputController.clearExitConfirm()
     // 入口先规范化图片数组，后续气泡/渲染/回调看到的是同一份。
@@ -2104,8 +2172,7 @@ export class TuiApp {
       this.agentBusy = true
       this.decisions.setBusy(true)
       this.todosWrittenThisRun = false
-      this.pinnedPrompt = { text: submitText.trim(), status: 'running' }
-      // 新 run 开始，上一轮的 thinking 回看作废——否则 ctrl+t 会重印出陈旧思考。
+      // 新 run 开始，上一轮的 thinking 详情作废，避免回看陈旧内容。
       this.thinkingReview.clear()
     }
     // Reset turn timer for the new turn
@@ -2199,7 +2266,6 @@ export class TuiApp {
     this.agentBusy = false
     this.decisions.setBusy(false)
     this.setPhase('idle')
-    if (this.pinnedPrompt?.status === 'running') this.pinnedPrompt.status = 'completed'
     this.renderLive()
   }
 
@@ -2227,6 +2293,7 @@ export class TuiApp {
   }
 
   notifyRunSettled(): void {
+    this.reviewFollowup?.settled()
     this.abortSettling = false
     const backfill = this.abortSteerBackfill
     this.abortSteerBackfill = false
@@ -2314,7 +2381,6 @@ export class TuiApp {
     const outgoingImages = combinedImages.length ? combinedImages : undefined
     this.agentBusy = true
     this.decisions.setBusy(true)
-    this.pinnedPrompt = { text: text.trim(), status: 'running' }
     try {
       if (!entry.bubbleCommitted) {
         await this.awaitUserCommit(text, outgoingImages)
@@ -2347,7 +2413,6 @@ export class TuiApp {
     this.agentBusy = false
     this.decisions.setBusy(false)
     this.currentTaskTitle = ''
-    if (this.pinnedPrompt?.status === 'running') this.pinnedPrompt.status = 'completed'
     this.frontend.record({ kind: 'error', text: '上一轮尚未收尾，这条没有发出 — 请重新发送' })
     this.setPhase('idle')
     this.commitAbove(() => {
@@ -2610,7 +2675,10 @@ export class TuiApp {
     if (closingId === 'token-ledger-connect') { this.tokenLedgerConnect?.clear(); this.tokenLedgerConnect = undefined }
     if (closingId === 'ui-history') this.frontend.closeHistory()
     const preview = this.planPreview
-    if (closingId === 'pager') this.detailPager = null
+    if (closingId === 'pager') {
+      this.detailPager = null
+      this.detailPagerCache = undefined
+    }
     this.suppressCommitRender = true
     try {
       this.overlay.deactivate()
@@ -2748,6 +2816,28 @@ export class TuiApp {
 
   private getPagerContent(): PagerData {
     const data = this.detailPager ?? this.overlayController.getData()?.pagerContent?.() ?? { content: '(no content)', page: 0 }
+    if (this.detailPager) {
+      const cached = this.detailPagerCache
+      if (!cached || cached.source !== data.content || cached.columns !== this.columns) {
+        const document = preparePagerDocument(data.content, this.columns)
+        this.detailPagerCache = { source: data.content, columns: this.columns, document }
+        if (cached) {
+          const nav = this.overlayController.nav(), pageSize = Math.max(1, this.rows - 4)
+          const anchor = cached.document.anchorAt(nav.pagerLineOffset ?? nav.pagerPage * pageSize)
+          remapPagerOffsets(nav, offset => document.rowForAnchor(cached.document.anchorAt(offset)))
+          let row = document.rowForAnchor(anchor)
+          if ((nav.pagerMode === 'search' || nav.pagerMode === 'results') && nav.pagerSearchCurrent > 0) {
+            const matches = document.searchRows(nav.pagerSearchQuery)
+            nav.pagerSearchCurrent = Math.min(nav.pagerSearchCurrent, matches.length)
+            row = matches[nav.pagerSearchCurrent - 1] ?? row
+          }
+          nav.pagerLineOffset = Math.max(0, Math.min(row, document.content.split('\n').length - pageSize))
+          nav.pagerPage = Math.floor(nav.pagerLineOffset / pageSize)
+        }
+      }
+      const { document } = this.detailPagerCache!
+      return { ...data, content: document.content, searchRows: document.searchRows }
+    }
     if (!this.planPreview) return data
     const cached = this.planPreviewCache
     if (!cached || cached.source !== data.content || cached.columns !== this.columns || cached.theme !== this.theme) {
@@ -4184,7 +4274,6 @@ export class TuiApp {
     this.historyOpenGeneration++
     if (this.historyOpening) { this.historyOpening = false; this.frontend.closeHistory() }
     try {
-      const inlineViewport = this.started && !this.screenReader && !this.frontend.isFullscreen
       // 备用屏只在确实处于激活态时才退出：无条件发 ?1049l 会让部分终端跳到
       // 一个陈旧的保存光标位置。
       if (this.frontend.isFullscreen) this.frontend.stopFullscreen()
@@ -4196,13 +4285,13 @@ export class TuiApp {
       // 弹出 Kitty keyboard protocol（与 start() 的 DISAMBIGUATE_ON 成对），
       // 避免把增强键盘状态遗留给 shell/后续程序。
       this.stdout.write(ANSI.KITTY_KEYBOARD_OFF)
-      if (inlineViewport) this.stdout.write(`\x1B[${Math.max(1, this.stdout.rows || this.rows || 24)};1H\r\n`)
       this.stdout.write(ANSI.SHOW_CURSOR)
     } catch { /* 还原失败不得吞掉原始崩溃栈 */ }
   }
 
   /** 销毁资源 */
   dispose(): void {
+    this.reviewFollowupPaused = true
     this.tokenLedgerConnect?.clear(); this.tokenLedgerConnect = undefined
     this.cancelFileCompletionQuery()
     this.archiveAskCards()
@@ -4243,16 +4332,13 @@ export class TuiApp {
     if (this.screenReader === enabled) return
     this.screenReader = enabled
     if (enabled && this.frontend.isFullscreen) { this.frontend.stopFullscreen(); this.overlay.setBorrowed(false); this.commit.setOutputEnabled(true); this.live.reset() }
-    this.live.setFullViewport(!enabled)
-    this.live.setMaxRows(enabled ? liveMaxRowsFor(this.rows) : Math.max(1, this.rows || 24))
     // 立刻收敛：开启时要把已经画在屏上的动态段擦掉，关闭时要让 ticker 重新起转。
     this.updateTicker()
     this.forceRedraw()
   }
 
   setVerbose(enabled: boolean): void {
-    this.flushToolGroup()
-    this.flushBashGroup()
+    this.settleToolGroups()
     this.verboseToolOutput = enabled
   }
 
@@ -4358,7 +4444,6 @@ export class TuiApp {
       this.agentBusy = true
       this.decisions.setBusy(true)
       this.todosWrittenThisRun = false
-      this.pinnedPrompt = { text: text.trim(), status: 'running' }
       this.state.turnStartMs = Date.now()
       this.streamRenderController.lastActivityMs = Date.now()
       this.onSubmitCallback?.(text, images, options)
@@ -4870,12 +4955,7 @@ export class TuiApp {
     this.frontend.clearDisplay()
     this.live.reset()
     this.resetLiveHighWater()
-    this.pinnedPrompt = null
     this.renderLive()
-  }
-
-  clearPinnedPrompt(): void {
-    this.pinnedPrompt = null
   }
 
   /** 注册内置 slash 命令（/clear、/starmap、/chronicle、/exit）。 */
@@ -5145,6 +5225,8 @@ export class TuiApp {
     this.state.isStreaming = true
     this.setPhase('streaming')
     this.markActivity()
+    // 工具结果先于后续回答落盘：稳定正文可立即 commit，不能等 turnComplete 才结算工具组。
+    this.settleToolGroups()
     // Push through block writer (buffers text, emits in display-sized blocks)
     const stableCommitGeneration = this.stableStreamCommitGeneration
     this.blockWriter.push(text)
@@ -5186,8 +5268,8 @@ export class TuiApp {
     // 主面板星域位会让用户误以为 /domain 切了域（还牵连缓存语义），且顺带改变了
     // 输入框边框的星域 persona separator。会话星域显示恒随 /domain 设定。
 
-    // 工具折叠组：read/search 与可折叠 bash 各走各的 buffer，互相打断。
-    // non-collapsible（含变更型 bash）到达时 flush 两个组。
+    // 工具族切换先把已结算组放入统一过程缓冲；non-collapsible（含变更型 bash）
+    // 到达时输出合并摘要，避免 read → bash → read 形成多条同级历史。
     if (!this.verboseToolOutput && isCollapsibleTool(name)) {
       if (this.toolGroupController.isActiveBashGroup()) this.flushBashGroup()
       this.toolGroupController.pushUse(id, name, input)
@@ -5195,33 +5277,51 @@ export class TuiApp {
       if (this.toolGroupController.isActiveGroup()) this.flushToolGroup()
       this.toolGroupController.pushBashUse(id, input.command as string, Date.now())
     } else {
-      if (this.toolGroupController.isActiveGroup()) this.flushToolGroup()
-      if (this.toolGroupController.isActiveBashGroup()) this.flushBashGroup()
+      this.settleToolGroups()
     }
 
-    // Commit thinking if any
-    if (this.state.thinkingText) {
-      this.commitAbove(() => this.commitThinking())
-    } else {
-      this.writeBatcher.flushNow()
-    }
+    // 工具边界只归档 thinking 供回看，不向主 scrollback 留逐段摘要。
+    if (this.state.thinkingText) this.finishThinking()
+    this.writeBatcher.flushNow()
   }
-  /** 将 read/search 折叠组 buffer 刷新到 scrollback */
   private flushToolGroup(): void {
     const group = this.toolGroupController.flushGroup()
     if (!group || group.entries.length === 0) return
+    if (!group.entries.some(entry => entry.isError)) {
+      this.toolGroupController.stageProcessReadGroup(group)
+      return
+    }
+    this.commitProcessSummary()
     flushPendingAssistantText(this.blockWriter, this.streamRenderer)
     const formatted = formatCollapsedGroup({ group, columns: this.columns, theme: this.theme, expandHint: toolExpandHint(this.workflow.preferences) })
     this.commitBlock(formatted.join('\n'))
   }
 
-  /** 将 bash 折叠组 buffer 刷新到 scrollback */
   private flushBashGroup(): void {
     const group = this.toolGroupController.flushBashGroup()
     if (!group || group.entries.length === 0) return
+    if (!group.entries.some(entry => entry.isError)) {
+      this.toolGroupController.stageProcessBashGroup(group)
+      return
+    }
+    this.commitProcessSummary()
     flushPendingAssistantText(this.blockWriter, this.streamRenderer)
     const formatted = formatCollapsedBashGroup({ group, columns: this.columns, theme: this.theme, expandHint: toolExpandHint(this.workflow.preferences) })
     this.commitBlock(formatted.join('\n'))
+  }
+
+  private commitProcessSummary(): void {
+    const process = this.toolGroupController.commitProcess()
+    if (!process) return
+    flushPendingAssistantText(this.blockWriter, this.streamRenderer)
+    const formatted = formatCollapsedProcess({ process, columns: this.columns, theme: this.theme, expandHint: toolExpandHint(this.workflow.preferences) })
+    if (formatted.length) this.commitBlock(formatted.join('\n'))
+  }
+
+  private settleToolGroups(): void {
+    if (this.toolGroupController.isActiveGroup()) this.flushToolGroup()
+    if (this.toolGroupController.isActiveBashGroup()) this.flushBashGroup()
+    this.commitProcessSummary()
   }
 
   /**
@@ -5513,14 +5613,21 @@ export class TuiApp {
 
     // 可折叠 tool（read/grep/glob/repo_map 等探索型）：按 toolUseId 绑定结果到折叠组
     if (!this.verboseToolOutput && isCollapsibleTool(name)) {
-      // G4 修复：buffer 已被 flush（如 write 打断），迟到 result 自动开新组
-      if (!this.toolGroupController.isActiveGroup()) {
+      // 迟到 result 的判据是「活跃组里有没有我这个 id」，不是「有没有活跃组」。
+      // 只问有没有组时，并行乱序（err→ok→err）的第三跳会掉进缝隙：有组 → 跳过 pushUse，
+      // 而组里又查无此 id → attach 返回 null → 结果从主屏和详情一起静默消失。
+      if (!this.toolGroupController.hasGroupEntry(id)) {
         this.toolGroupController.pushUse(id, name, meta?.input ?? {})
       }
-      this.toolGroupController.attachResult(id, finalContent, isError, rawPath)
-      // 不单独 commit — 将在 flushToolGroup 时作为组渲染
-      this.writeBatcher.flushNow()
-      return
+      const attached = this.toolGroupController.attachResult(id, finalContent, isError, rawPath)
+      if (attached) {
+        // 错误标题与尾诊断立即可见；组内其他 pending 的迟到结果会在上方重开新组。
+        if (isError) this.flushToolGroup()
+        // 成功结果仍不单独 commit — 将在 flushToolGroup 时作为组渲染
+        this.writeBatcher.flushNow()
+        return
+      }
+      // 兜底：绑定失败（分类器拒绝入组等）宁可多渲染一张卡，也不能丢结果——落到下方普通卡片路径
     }
 
     // 可折叠 bash：成功则绑定到组延迟渲染；错误则把前面成功命令摘要后单独渲染错误卡片
@@ -5528,6 +5635,7 @@ export class TuiApp {
       if (isError) {
         this.toolGroupController.detachBashEntry(id)
         this.flushBashGroup()
+        this.commitProcessSummary()
       } else {
         this.toolGroupController.attachBashResult(id, finalContent, isError, rawPath)
         this.writeBatcher.flushNow()
@@ -5586,12 +5694,14 @@ export class TuiApp {
       toolInput: meta?.input,
       elapsedMs: meta ? Date.now() - meta.startMs : undefined,
       expanded: this.verboseToolOutput,
+      compact: !this.verboseToolOutput,
       showParameters: this.verboseToolOutput,
     }
     const formatted = formatToolCard(cardInput, this.theme)
 
-    // 记录截断结果供 ctrl+o 展开
-    if (!this.verboseToolOutput && isToolCardTruncated(cardInput)) {
+    // 所有非 verbose 普通结果都保留只读详情入口，包括短输出、rawPath 与单条长行；
+    // verbose 已完整写入主屏，不重复登记。
+    if (!this.verboseToolOutput) {
       this.toolGroupController.setLastTruncatedTool({
         toolName: name,
         content: finalContent,
@@ -5613,41 +5723,26 @@ export class TuiApp {
     }
   }
 
-  /** ctrl+o：展开最近被截断的工具结果或折叠组 */
+  /** 最近工具详情走只读 pager；活跃组取当前快照，不结算，也不改主 scrollback。 */
   private expandLastTruncatedTool(): void {
-    // 优先展开 read/search 折叠组
-    const collapsed = this.toolGroupController.getLastCollapsedGroup()
-    if (collapsed) {
-      const g = collapsed
-      this.toolGroupController.clearLastCollapsedGroup()
-      const formatted = formatCollapsedGroup({ group: g, columns: this.columns, expanded: true, theme: this.theme })
-      this.commitBlock(formatted.join('\n'))
+    const target = this.toolGroupController.takeLatestToolDetail()
+    if (!target) return
+    if (target.kind === 'process') {
+      const formatted = formatCollapsedProcessDetails({ process: target.group, columns: this.columns, theme: this.theme })
+      this.openTextDetail('执行过程 · 工具详情', formatted.join('\n'))
       return
     }
-    // live 中的活跃 read/search 组：flush 并展开提交（无需等非折叠工具打断）。
-    // flushGroup 会写入 lastCollapsedGroup——立即清掉，避免下次 ctrl+o 重复展开同一组。
-    if (this.toolGroupController.isActiveGroup()) {
-      const g = this.toolGroupController.flushGroup()
-      if (g) {
-        this.toolGroupController.clearLastCollapsedGroup()
-        const formatted = formatCollapsedGroup({ group: g, columns: this.columns, expanded: true, theme: this.theme })
-        this.commitBlock(formatted.join('\n'))
-        return
-      }
-    }
-    // 其次展开 bash 折叠组
-    const collapsedBash = this.toolGroupController.getLastCollapsedBashGroup()
-    if (collapsedBash) {
-      const g = collapsedBash
-      this.toolGroupController.clearLastCollapsedBashGroup()
-      const formatted = formatCollapsedBashGroup({ group: g, columns: this.columns, expanded: true, theme: this.theme })
-      this.commitBlock(formatted.join('\n'))
+    if (target.kind === 'read-search') {
+      const formatted = formatCollapsedGroup({ group: target.group, columns: this.columns, expanded: true, theme: this.theme })
+      this.openTextDetail('工具详情 · Read/Search', formatted.join('\n'))
       return
     }
-    // 回退：展开单个截断工具卡片
-    const t = this.toolGroupController.getLastTruncatedTool()
-    if (!t) return
-    this.toolGroupController.clearLastTruncatedTool()
+    if (target.kind === 'bash') {
+      const formatted = formatCollapsedBashGroup({ group: target.group, columns: this.columns, expanded: true, theme: this.theme })
+      this.openTextDetail('工具详情 · Bash', formatted.join('\n'))
+      return
+    }
+    const t = target.tool
     const formatted = formatToolCard({
       toolName: t.toolName,
       columns: this.columns,
@@ -5657,10 +5752,11 @@ export class TuiApp {
       toolInput: t.toolInput,
       expanded: true,
     }, this.theme)
-    this.commitBlock(formatted.join('\n'))
+    this.openTextDetail(`工具详情 · ${toolCardTitle(t.toolName, t.toolInput, t.rawPath)}`, formatted.join('\n'))
   }
 
   private handleCheckpoint(hash: string): void {
+    if (!this.verboseToolOutput) return
     this.commitAbove(() => {
       this.commit.write({
         text: `Checkpoint saved: ${hash.slice(0, 7)} — /rollback to restore`,
@@ -5672,7 +5768,7 @@ export class TuiApp {
 
   private async handleTurnComplete(usage: Partial<Usage>, turnNumber: number, isFinal: boolean, stopReason?: string): Promise<void> {
     this.turnCompleteInFlight++
-    if (isFinal) { this.rejectPendingApprovals(); this.decisions.setBusy(false); if (this.pinnedPrompt) this.pinnedPrompt.status = 'completed' }
+    if (isFinal) { this.rejectPendingApprovals(); this.decisions.setBusy(false) }
     try {
     this.state.turnNumber = turnNumber
 
@@ -5681,8 +5777,7 @@ export class TuiApp {
     this.watchdogPolicy.recordTurnComplete()
 
     // Flush 工具折叠组残余
-    if (this.toolGroupController.isActiveGroup()) this.flushToolGroup()
-    if (this.toolGroupController.isActiveBashGroup()) this.flushBashGroup()
+    this.settleToolGroups()
 
     // Flush any pending blocks from the writer, then commit the remaining tail
     await this.blockWriter.flush()
@@ -5701,15 +5796,8 @@ export class TuiApp {
       this.agentBusy = false
     this.decisions.setBusy(false)
       this.lastSubmittedText = null // 回合成功 settle——错误回填底料作废
-      // 收尾段 thinking 不落 scrollback（正文答案即收尾），但留存供 ctrl+t 回看。
-      if (this.state.thinkingText) {
-        this.frontend.record({ kind: 'thinking', text: this.state.thinkingText })
-        this.thinkingReview.save({
-          text: this.state.thinkingText,
-          elapsedMs: Date.now() - this.state.thinkStartMs,
-          domainId: this.getActiveDomainId(),
-        })
-      }
+      // 收尾段 thinking 不落 scrollback（正文答案即收尾），但留存供回看。
+      this.archiveThinking()
       this.state.thinkingText = ''
       this.state.isStreaming = false
       this.state.isThinking = false
@@ -5749,10 +5837,8 @@ export class TuiApp {
         } catch { /* provider 失败不影响收尾 */ }
       }
     } else {
-      // Intermediate turn: archive thinking, keep writer alive
-      if (this.state.thinkingText) {
-        this.commitAbove(() => this.commitThinkingToScrollback())
-      }
+      // 中间轮同样只归档正文，不向经典 scrollback 留「已推理」摘要。
+      this.archiveThinking()
       this.state.thinkingText = ''
       this.state.isThinking = false
       this.state.thinkStartMs = 0
@@ -5817,10 +5903,8 @@ export class TuiApp {
     this.setPhase('idle')
     this.state.isStreaming = false
     this.state.isThinking = false
-    if (this.pinnedPrompt) this.pinnedPrompt.status = 'completed'
     // 与 abort 同口径 flush 折叠组，避免错误后孤儿结果滞留组内无法提交。
-    if (this.toolGroupController.isActiveGroup()) this.flushToolGroup()
-    if (this.toolGroupController.isActiveBashGroup()) this.flushBashGroup()
+    this.settleToolGroups()
     // 与 abort 同口径回收 run 本地状态：provider 在工具/委派回合中报错走 onError，
     // 此时 pendingTools/toolAccumulator 可能持有半成品数据。只清 fleet 而漏清这两者，
     // 下一轮会读到上轮孤儿条目（live 区显示已死工具卡片、累加器跨 run 污染）。
@@ -6007,11 +6091,11 @@ export class TuiApp {
   }
 
   private handleAbort(reason?: string): void {
+    this.reviewFollowupPaused = true
     this.frontend.flushText()
     this.frontend.record({ kind: 'error', text: reason ?? '已中止当前执行' })
     this.mainTaskStopped = true
     this.mainTaskEnded = Date.now()
-    if (this.pinnedPrompt) this.pinnedPrompt.status = 'completed'
     // 用户主动 abort（非 watchdog 守护）= 参与——取消倒计时自动批准
     if (!reason?.startsWith('watchdog')) this.cancelPlanAutoApprove()
     // 中断走自有回填路径（abortSettling backfill）——错误回填底料作废，防双份回填
@@ -6030,8 +6114,7 @@ export class TuiApp {
     // 输入框无法使用（这是 abort 中途审批"假死"的一个分支）。
     this.rejectPendingApprovals()
     // Flush 工具折叠组残余
-    if (this.toolGroupController.isActiveGroup()) this.flushToolGroup()
-    if (this.toolGroupController.isActiveBashGroup()) this.flushBashGroup()
+    this.settleToolGroups()
     // 保留 steer 队列：对齐 Ink。用户在卡死期间排队的指引不应因中断而丢失——
     // 下次 submit 会把排队内容归并进新 prompt（见 onSubmit 的 steer 收口）。
     this.streamRenderer.reset()
@@ -6228,11 +6311,46 @@ export class TuiApp {
     return Math.ceil(dw / width)
   }
 
-  private committedViewport = new CommittedHistoryViewport()
+  /** Classic live chrome caps initial growth; active resize preserves the established high-water height. */
+  private getDynamicBudget(chromeRows: number, dynamicRows: number): number {
+    const rows = this.rows || 24
+    const decision = this.decisions.active
+    const expanded = !!(this.approvalIntentController.approvalPending || decision?.visible
+      || this.inputController.slashMenu.open || this.inputLine.value.startsWith('/'))
+    const previousMode = this.liveRowsHighWaterMode
+    const cap = expanded ? liveMaxRowsFor(rows) : Math.min(liveMaxRowsFor(rows), Math.ceil(rows / 2))
+    if (decision && !this.approvalIntentController.approvalPending) {
+      // 决策卡有自己的稳定行预算：展开时按内容计（cap 封顶），收起时按当前
+      // 内容释放高水位——否则收起后保留展开高度，输入框上方留大片空白。
+      this.liveRowsHighWaterMode = 'released'
+      this.liveRowsHighWater = Math.min(Math.max(chromeRows, cap), dynamicRows + chromeRows)
+      return Math.max(0, this.liveRowsHighWater - chromeRows)
+    }
+    if (!expanded && this.state.phase === 'idle') {
+      this.liveRowsHighWaterMode = 'released'
+      this.liveRowsHighWater = dynamicRows + chromeRows
+      return dynamicRows
+    }
+    // 普通运行帧跨 resize 保留既有高水位，仅按新终端高度钳顶；菜单/审批关闭后
+    // 不保留扩容态，仍回落到普通半屏，避免把交互扩容误当成窗口几何。
+    const preservedCap = expanded || previousMode === 'ordinary'
+      ? Math.min(liveMaxRowsFor(rows), this.liveRowsHighWater)
+      : 0
+    const highWaterCap = Math.max(cap, preservedCap)
+    this.liveRowsHighWater = Math.min(Math.max(chromeRows, highWaterCap), Math.max(this.liveRowsHighWater, dynamicRows + chromeRows))
+    this.liveRowsHighWaterMode = expanded ? 'expanded' : 'ordinary'
+    return Math.max(0, this.liveRowsHighWater - chromeRows)
+  }
 
-  /** 会话切换与 /clear 只把旧显示藏出视口，pager 历史原样保留（投影边界后移）。 */
+  /** Stable within an active phase; menus/decisions and idle may shrink once. */
+  private liveRowsHighWater = 0
+  private liveRowsHighWaterMode: 'ordinary' | 'expanded' | 'released' = 'released'
+
+  /** Session switches discard the previous session's geometry. */
+
   resetLiveHighWater(): void {
-    this.committedViewport.clear(this.commit.revision)
+    this.liveRowsHighWater = 0
+    this.liveRowsHighWaterMode = 'released'
   }
 
   /**
@@ -6323,7 +6441,7 @@ export class TuiApp {
       if (this.columns !== latestCols || this.rows !== latestRows) {
         this.columns = latestCols
         this.rows = latestRows
-        this.live.setMaxRows(this.screenReader ? liveMaxRowsFor(this.rows) : Math.max(1, this.rows || 24))
+        this.live.setMaxRows(liveMaxRowsFor(this.rows))
       }
     }
     if (this.perfMonitor?.enabled) {
@@ -6427,24 +6545,28 @@ export class TuiApp {
     let lines: LiveRegionLine[] = []
     lines = []
 
-    // 0. 置顶上一轮/执行中指令条（对标 Codex CLI prompt_header 契约）
-    if (this.pinnedPrompt && !this.frontend.isFullscreen) {
-      const pinnedLine = formatPinnedPrompt({
-        prompt: this.pinnedPrompt.text,
-        status: this.pinnedPrompt.status,
-        width: cols,
-        theme: this.theme,
-      })
-      lines.push({ text: this.clampLine(pinnedLine), livePart: 'pinned' })
-    }
-
     // 身份/环境不再占独立行：星域·分支·cwd 内嵌输入框顶边框标签（formatGlanceLeft），
     // 模型与指标收敛到状态行（5b）——辅助信息只此两处。
-    if (!this.frontend.isFullscreen && !this.streamRenderer.hasCommitted) {
+    if (!this.frontend.isFullscreen && !this.workspaceWelcomeCommitted && !this.streamRenderer.hasCommitted) {
       const welcomeBudget = this.approvalIntentController.approvalPending || this.pendingPlanApproval || this.pendingAskFlow ? 0 : Math.max(0, (this.rows || 24) - 9)
       const welcome = this.frontend.renderWelcome(cols, welcomeBudget)
       for (const text of welcome) lines.push({ text })
       if (welcome.length) lines.push({ text: '' })
+    }
+
+    const visiblePendingTools: Array<[string, PendingToolMeta]> = []
+    for (const [id, meta] of this.toolGroupController.getPendingEntries()) {
+      if (id === this.approvalIntentController.approvalPending?.id) continue
+      if (!this.verboseToolOutput && isCollapsibleTool(meta.name)) continue
+      if (meta.name === 'bash' && this.toolGroupController.hasBashEntry(id)) continue
+      visiblePendingTools.push([id, meta])
+    }
+    const workerViewActive = !!(this.viewingWorkerId && this.fleet.getWorkerById(this.viewingWorkerId))
+    const suppressActivitySpinner = !workerViewActive && visiblePendingTools.length > 0
+    const chromeActivity: LiveRegionLine[] = []
+    const pushActivityStatus = (line: LiveRegionLine): void => {
+      if (this.frontend.isFullscreen || this.screenReader) lines.push(line)
+      else chromeActivity.push(line)
     }
 
     // 1. Spinner 状态行（⠋ Thinking… (12s · esc to interrupt)），10s 无 token 变琥珀。
@@ -6458,7 +6580,7 @@ export class TuiApp {
     // analyzing 相位如实化：有工具在跑时说出在跑什么（最新 pending 的标题），
     // 不再轮换「琢磨中」系动词冒充模型活动——长跑工具（bash/monitor/job）下
     // 动词池会让用户以为模型在思考，实际在等工具（与 approvalWait 如实化同族）。
-    let activityLabel: string | undefined
+    let activityLabel: string | undefined = this.toolInputLabel
     if (this.state.phase === 'analyzing' && !approvalWaiting && !jobAwaiting) {
       const pending = [...this.toolGroupController.getPendingEntries()]
       const latest = pending[pending.length - 1]
@@ -6480,13 +6602,15 @@ export class TuiApp {
     if (jobAwaiting) {
       const row = jobAwaiting.jobId ? this.jobsModel.get(jobAwaiting.jobId) : undefined
       const view = formatJobAwaitWait(jobAwaiting, row, Date.now())
-      lines.push({ text: this.clampLine(color(view.line, this.theme.warning)), livePart: 'status' })
-      if (view.detail) lines.push({ text: this.clampLine(color(`  ${view.detail}`, this.theme.muted)), livePart: 'status' })
+      pushActivityStatus({ text: this.clampLine(color(view.line, this.theme.warning)), livePart: 'status' })
+      if (view.detail) pushActivityStatus({ text: this.clampLine(color(`  ${view.detail}`, this.theme.muted)), livePart: 'status' })
     } else if (spinnerLine && !approvalWaiting) {
-      // spinner 行含 …/·（East-Asian Ambiguous），CJK 终端按 2 列渲染 → 长行会折行而
-      // rowsForLine 低估 → 重影。clampLine 用 wide 上界截断到 columns-1，保证不折行。
-      lines.push({ text: this.clampLine(spinnerLine), livePart: 'status' })
-      // 分档等待提示：spinner 只说「还在转」，这行说「卡在哪个阶段、多久了、能做什么」。
+      if (!suppressActivitySpinner) {
+        // spinner 行含 …/·（East-Asian Ambiguous），CJK 终端按 2 列渲染 → 长行会折行而
+        // rowsForLine 低估 → 重影。clampLine 用 wide 上界截断到 columns-1，保证不折行。
+        pushActivityStatus({ text: this.clampLine(spinnerLine), livePart: 'status' })
+      }
+      // 非折叠 live 卡已承载当前动作时只收起重复 spinner；分档安全提示仍独立保留。
       // 审批挂起时必须换成审批专属口径——原分档到 action 档会说「No response —
       // Ctrl+C to interrupt」，明明在等用户按 y/n 却引导用户杀会话（2d8b67ca 事故
       // 的观感来源：审批 await 无超时 + 看门狗 disarm，卡住的表象=失去响应）。
@@ -6499,7 +6623,7 @@ export class TuiApp {
           const staleColor = stale.level === 'action' ? this.theme.error
             : stale.level === 'warn' ? this.theme.warning
             : this.theme.muted
-          lines.push({ text: this.clampLine(color(`  ${stale.message}`, staleColor)), livePart: 'status' })
+          pushActivityStatus({ text: this.clampLine(color(`  ${stale.message}`, staleColor)), livePart: 'status' })
         }
       }
     }
@@ -6561,22 +6685,11 @@ export class TuiApp {
       }
     }
 
-    // 2d. 进行中非 collapsible 工具。
-    //
-    // 只有最新一张卡展开末 3 行输出，其余压成单标题行，并整体封顶——每张卡
-    // 4 行 × 无上限并发是动态段峰值的最大来源（4 个工具就 16 行），而高度峰值
-    // 会经定高视口的高水位固化成输入框上方的常驻空白。较早的工具通常已在滚动
-    // 输出，看最新那张就够；全部详情随工具完成 commit 进 scrollback。
-    if (this.toolGroupController.getPendingSize() > 0) {
-      const visible: Array<[string, PendingToolMeta]> = []
-      for (const [id, meta] of this.toolGroupController.getPendingEntries()) {
-        if (id === this.approvalIntentController.approvalPending?.id) continue
-        // 跳过已归入折叠组的 collapsible 工具（它们在 2c 聚合行中显示）
-        if (!this.verboseToolOutput && isCollapsibleTool(meta.name)) continue
-        // 跳过已归入 bash 折叠组的 bash 工具
-        if (meta.name === 'bash' && this.toolGroupController.hasBashEntry(id)) continue
-        visible.push([id, meta])
-      }
+    // 2d. 进行中非 collapsible 工具。默认只留标题；verbose 才给最新一张卡展开末 3 行。
+    // 卡片整体封顶，避免并发工具的动态段峰值经定高视口固化成常驻空白；
+    // 完整结果仍由详情 pager / verbose 提供。
+    if (visiblePendingTools.length > 0) {
+      const visible = visiblePendingTools
       const overflow = Math.max(0, visible.length - LIVE_TOOL_CARD_MAX)
       // 保留最近的若干张：正在跑的工具里，新起的那些信息量更大。
       const shown = overflow > 0 ? visible.slice(-LIVE_TOOL_CARD_MAX) : visible
@@ -6590,7 +6703,7 @@ export class TuiApp {
           elapsedMs: Date.now() - meta.startMs,
           columns: cols,
           tick: this.streamRenderController.tick,
-          tailLines: i === shown.length - 1 ? 3 : 0,
+          tailLines: this.verboseToolOutput && i === shown.length - 1 ? 3 : 0,
         }, this.theme)
         for (const line of toolLines) {
           lines.push({ text: line })
@@ -6702,6 +6815,9 @@ export class TuiApp {
         text: this.clampLine(color(`perf loop p99 ${lag.p99Ms}ms · max ${lag.maxMs}ms`, this.theme.muted)),
       })
     }
+    // 经典主屏的活动状态属于固定 chrome：工具和思考输出都在它上方，
+    // 任务阶段紧贴输入区，不会隔着输出与历史中的用户提问形成第二个气泡。
+    lines.push(...chromeActivity)
 
     // 5. Input line / Ctrl+C hint（多行输入：每行单独 push）
     // 渲染防御：输入框有内容时永远显示输入框——提示行只在空输入时取代它，
@@ -6840,7 +6956,7 @@ export class TuiApp {
         lines.push({ text: this.clampLine(color(imageLabel, this.theme.muted)) })
       }
 
-      // 5b. 状态行：左符号化指标（模型 ◎effort ⚡cache ◧ctx ¥cost + 运行徽章），
+      // 5b. 状态行：compact 显示模型/effort/上下文/异常信号，full 显示完整指标与运行徽章；
       //     右权限模式（右对齐）——辅助信息只此一行，与顶边框标签同属固定 chrome。
       //     slash 激活时权限让位（slash 菜单自带键位语境）；整行放不下时权限独占下一行。
       const rightStr = formatGlanceRight({ width: cols,
@@ -6997,7 +7113,7 @@ export class TuiApp {
 
     const decisionRows = lines.slice(0, chromeStart).filter(line => line.decisionPart).length
     if (decisionRows && !this.screenReader) {
-      const cap = this.rows || 24
+      const cap = this.frontend.isFullscreen ? this.rows : liveMaxRowsFor(this.rows)
       const chrome = lines.slice(chromeStart), keep = Math.max(1, cap - decisionRows)
       lines = [...lines.slice(0, chromeStart), ...budgetInputChrome(chrome, keep)]
     }
@@ -7007,15 +7123,24 @@ export class TuiApp {
       lines = lines.slice(chromeStart)
       chromeStart = 0
     } else if (!this.frontend.isFullscreen) {
-      // 全高 normal-buffer 投影：摘要钉窗口顶、输入区贴窗口底；
-      // 已提交历史只做只读投影进帧，绝不再交给 CommitEngine 二次提交。
-      const viewport = layoutPinnedViewport(lines, chromeStart, {
-        rows: this.rows || 24,
-        historyLines: this.committedViewport.project(this.commit, cols, this.rows || 24),
-        rowsForLine: text => this.displayRowsFor(text, cols),
-      })
-      lines = viewport.lines
-      chromeStart = viewport.chromeStart
+      // CommitEngine owns completed output in the native buffer; never replay it in this frame.
+      // ── 定高视口：动态段垫到「总高度高水位 − chrome」，slash/todo 等 chrome
+      //    关掉后垫行补上，输入框不上跳。欢迎首帧（未开 slash、水位 0）仍不垫。
+      //    度量与 LiveEngine.rowsForLine 同口径。
+      let chromeRows = 0
+      for (let i = chromeStart; i < lines.length; i++) {
+        chromeRows += this.displayRowsFor(lines[i]!.text, cols)
+      }
+      let dynamicRows = 0
+      for (let i = 0; i < chromeStart; i++) {
+        dynamicRows += this.displayRowsFor(lines[i]!.text, cols)
+      }
+      const budget = this.getDynamicBudget(chromeRows, dynamicRows)
+      if (budget > 0) {
+        const padded = padDynamicRegion(lines, chromeStart, budget, (text) => this.displayRowsFor(text, cols))
+        lines = padded.lines
+        chromeStart = padded.chromeStart
+      }
     }
 
     if (showSidePanel) {
@@ -7062,6 +7187,11 @@ export class TuiApp {
         goal: goalSnapshot,
       }
       const panelLines = renderSidePanel(sidePanelInput, this.theme)
+      if (!this.frontend.isFullscreen && !this.screenReader && !lines.some(line => line.decisionPart)) {
+        const padding = Math.max(0, Math.min(liveMaxRowsFor(this.rows), panelLines.length) - lines.length)
+        lines.splice(chromeStart, 0, ...Array.from({ length: padding }, () => ({ text: '' })))
+        chromeStart += padding
+      }
       lines = this.mergeSidePanel(lines, panelLines, contentCols, sidePanelWidth)
     }
 
@@ -7084,35 +7214,18 @@ export class TuiApp {
     }
   }
 
-  /**
-   * 将 thinking 文本 commit 到 scrollback（保留内部状态）。
-   *
-   * collapse-on-commit：流式期已完整显示推理，turn 结束只在 scrollback 留一行
-   * 过去式摘要「✶ 已推理 · Ns · N 行」，避免啰嗦推理逐轮堆满历史。终端 scrollback
-   * 是只读追加的，无法像桌面端那样回溯折叠已打印的行，故在 commit 时即收敛为摘要。
-   */
-  private commitThinkingToScrollback(): void {
+  /** 归档当前 thinking 正文供 /thinking 与历史查看；不向经典 scrollback 写逐段摘要。 */
+  private archiveThinking(): void {
     if (!this.state.thinkingText) return
     const elapsedMs = Date.now() - this.state.thinkStartMs
     const domainId = this.getActiveDomainId()
-    // 留存正文供 ctrl+t 回看——scrollback 只有一行头部，正文是唯一可重印来源。
     this.thinkingReview.save({ text: this.state.thinkingText, elapsedMs, domainId })
     this.frontend.record({ kind: 'thinking', text: this.state.thinkingText })
-    const formatted = formatThinking({
-      text: this.state.thinkingText,
-      elapsedMs,
-      done: true,
-      expanded: false,
-      domainId,
-      reviewHint: this.workflow.preferences.keymap === 'standard' ? '/thinking 回看' : 'ctrl+t 回看',
-    }, this.theme)
-    if (formatted.length === 0) return
-    this.commit.write({ text: formatted.join('\n'), trailingNewline: true })
   }
 
-  /** 将 thinking 文本 commit 到 scrollback 并清空状态 */
-  private commitThinking(): void {
-    this.commitThinkingToScrollback()
+  /** 工具边界归档 thinking 并按原生命周期清理当前段状态。 */
+  private finishThinking(): void {
+    this.archiveThinking()
     this.state.thinkingText = ''
     this.state.isThinking = false
     this.state.thinkStartMs = 0

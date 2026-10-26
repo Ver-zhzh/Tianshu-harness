@@ -84,6 +84,7 @@ export const aggregationPolicySchema = z.union([
 export type AggregationPolicy = z.infer<typeof aggregationPolicySchema>
 
 export const workOrderScopeSchema = z.object({
+  reviewSnapshot: z.object({ cwd: z.string(), ref: z.string() }).optional(),
   files: z.array(z.string()).optional(),
   symbols: z.array(z.string()).optional(),
   commands: z.array(z.string()).optional(),
@@ -222,6 +223,8 @@ export const workerFindingSchema = z.object({
   claim: z.string().min(1),
   evidence: z.string().min(1),
   confidence: z.enum(['low', 'medium', 'high']),
+  /** 本条发现的严重级别，禁止从报告摘要或其他 finding 继承。 */
+  severity: z.enum(['CRITICAL', 'HIGH', 'MEDIUM', 'LOW']).optional(),
   /** 'firsthand' = worker 亲自 read/grep/跑命令拿到的原始观测。
    *  'inferred' = 基于已有信息的推断，未经 worker 亲自落地取证。
    *  省略时表示未声明（等同于旧版 finding，消费端按转述处理）。 */

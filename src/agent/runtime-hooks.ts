@@ -1,13 +1,16 @@
+import { HookGroupTimeoutError, HookCleanupUnconfirmedError } from '../hooks/external-hook-types.js'
 import type { ToolHistoryEntry } from '../prompt/volatile.js'
 import type { CognitiveSeason } from './cognitive-season.js'
 import type { FailureClass } from './failure-classifier.js'
 import type { Sensorium, SensoriumInput, StrategyProfile } from './sensorium.js'
 import type { VigorState } from './vigor.js'
 import type { DecisionShift } from './loop-types.js'
+import { rejectOnAbort } from './turn-boundary-abort.js'
 
 export type RuntimeHookPhase = 'preTurn' | 'afterPerception' | 'postTool' | 'postTurn' | 'postSession'
 
 export interface RuntimeToolEvent {
+  mutations?: import('./mutation-facts.js').MutationFact[]
   name: string
   success: boolean
   target?: string
@@ -29,6 +32,7 @@ export interface RuntimeToolEvent {
 }
 
 export interface RuntimeHookSnapshot {
+  runId?: string
   modelTurn?: number
   cwd: string
   turn: number
@@ -109,6 +113,8 @@ export interface RuntimeHookContext {
   effects: RuntimeHookEffects
   /** Lifetime of this invocation. Hooks must pass it to cancellable I/O. */
   signal?: AbortSignal
+  deadlineAt?: number
+  budgetMs?: number
 }
 
 export interface PreTurnRuntimeHook {
@@ -145,6 +151,8 @@ export interface PostSessionRuntimeHook {
   phase: 'postSession'
   name: string
   budgetMs?: number
+  /** Detach run-local buffers before another run can append to them. */
+  capture?: (ctx: RuntimeHookContext) => PostSessionRuntimeHook['run']
   run(ctx: RuntimeHookContext): Promise<void> | void
 }
 
@@ -156,6 +164,9 @@ export type RuntimeHook =
   | PostSessionRuntimeHook
 
 export interface RuntimeHookError {
+  snapshot?: RuntimeHookSnapshot
+  signal?: AbortSignal
+  late?: boolean
   phase: RuntimeHookPhase
   hookName: string
   message: string
@@ -171,6 +182,8 @@ export interface RuntimeHookManifestEntry {
 }
 
 export interface RuntimeHookRunEvent {
+  turn?: number
+  runId?: string
   id: string
   phase: RuntimeHookPhase
   outcome: RuntimeHookRunOutcome
@@ -217,9 +230,11 @@ function toMessage(error: unknown): string {
 export function createRuntimeHookContext(
   snapshot: RuntimeHookSnapshot,
   effects: Partial<RuntimeHookEffects> = {},
+  signal?: AbortSignal,
 ): RuntimeHookContext {
   return {
     snapshot,
+    signal,
     effects: {
       setSensorium: sensorium => {
         snapshot.sensorium = sensorium
@@ -328,7 +343,16 @@ export class RuntimeHookPipeline {
   }
 
   async runPostSession(ctx: RuntimeHookContext): Promise<void> {
-    await this.runPhase('postSession', this.postSessionHooks, ctx, (hook, scoped) => hook.run(scoped))
+    await this.capturePostSession(ctx)()
+  }
+
+  capturePostSession(ctx: RuntimeHookContext): () => Promise<void> {
+    const hooks = this.postSessionHooks.map(hook => {
+      if (!hook.capture || !this.isEnabled(hook.name)) return hook
+      try { return { ...hook, run: hook.capture(ctx) } }
+      catch (error) { return { ...hook, run: () => { throw error } } }
+    })
+    return () => this.runPhase('postSession', hooks, ctx, (hook, scoped) => hook.run(scoped))
   }
 
   private async runPhase<T extends RuntimeHook>(
@@ -338,6 +362,7 @@ export class RuntimeHookPipeline {
     invoke: (hook: T, scoped: RuntimeHookContext) => Promise<void> | void,
   ): Promise<void> {
     for (const hook of hooks) {
+      if (ctx.signal?.aborted) return
       if (this.disabledHookIds.has(hook.name)) {
         this.publishRun({
           id: hook.name,
@@ -366,6 +391,8 @@ export class RuntimeHookPipeline {
       const scoped: RuntimeHookContext = {
         ...ctx,
         signal,
+        budgetMs: timeoutMs,
+        deadlineAt: timeoutMs > 0 ? performance.now() + timeoutMs : undefined,
         effects: new Proxy(ctx.effects, {
           get(target, key, receiver) {
             const effect = Reflect.get(target, key, receiver)
@@ -382,7 +409,7 @@ export class RuntimeHookPipeline {
           return invoke(hook, scoped)
         })
         if (timeoutMs > 0) {
-          await Promise.race([
+          await rejectOnAbort(Promise.race([
             pending,
             new Promise<never>((_, reject) => {
               timeout = setTimeout(() => {
@@ -393,18 +420,26 @@ export class RuntimeHookPipeline {
                 reject(error)
               }, timeoutMs)
             }),
-          ])
+          ]), ctx.signal, `hook:${hook.name}`)
         } else {
-          await pending
+          await rejectOnAbort(pending, ctx.signal, `hook:${hook.name}`)
         }
       } catch (error) {
-        outcome = timedOut ? 'timed_out' : 'failed'
+        if (ctx.signal?.aborted) {
+          outcome = 'skipped'
+          message = 'cancelled'
+          return
+        }
+        outcome = timedOut || error instanceof HookGroupTimeoutError ? 'timed_out' : 'failed'
+        if (error instanceof HookCleanupUnconfirmedError) throw error
         message = toMessage(error)
         this.options.onError?.({
           phase,
           hookName: hook.name,
           message,
           error,
+          snapshot: { ...ctx.snapshot },
+          signal: ctx.signal,
         })
       } finally {
         active = false
@@ -414,6 +449,8 @@ export class RuntimeHookPipeline {
         this.publishRun({
           id: hook.name,
           phase,
+          turn: ctx.snapshot.turn,
+          runId: ctx.snapshot.runId,
           outcome,
           durationMs,
           budgetMs: timeoutMs,
@@ -432,6 +469,9 @@ export class RuntimeHookPipeline {
             hookName: hook.name,
             message: `late failure after timeout: ${toMessage(lateError)}`,
             error: lateError,
+            late: true,
+            snapshot: { ...ctx.snapshot },
+            signal: ctx.signal,
           })
         })
       }

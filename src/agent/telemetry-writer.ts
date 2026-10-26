@@ -1,6 +1,7 @@
 import { join } from 'node:path'
 import { getSessionDir } from './session-persist.js'
 import type { PerceptionTelemetrySnapshot } from './perception.js'
+import { runtimeObservation } from '../utils/runtime-provenance.js'
 
 /**
  * A telemetry line is either the per-turn perception snapshot or a lightweight
@@ -59,6 +60,7 @@ export const CVM_VECTOR_DECISION_KIND = 'cvm-vector-decision'
  *  晋级回放的证据底座，超限接受、不裁剪（量级 ≤1 行/轮，有规则冷却）。 */
 const LITE_KINDS: ReadonlySet<string> = new Set([
   'phase-source',
+  'runtime-run', 'advice-relevance',
   // P3：work-stage 确认观测（candidate/committed/转换/拒绝原因/编号）——
   // 约 200B，含诊断原因字符串的超限属已知例外（同 cvm-vector-decision）。
   'work-stage',
@@ -67,6 +69,7 @@ const LITE_KINDS: ReadonlySet<string> = new Set([
   PERF_SUMMARY_KIND,
   COGNITIVE_FRAME_LITE_KIND,
   ADVISORY_OUTCOME_KIND,
+  'advisory-recovery-outcome',
   ADVISORY_HOLDOUT_KIND,
   ADVISORY_UNRESOLVED_KIND,
   MERIDIAN_INDEX_ITEM_TIMEOUT_KIND,
@@ -92,7 +95,10 @@ export function createTelemetryWriter(cwd: string, sessionId?: string): Telemetr
     write(snapshot: TelemetryRecord) {
       const kind = (snapshot as { kind?: string }).kind
       if (!full && (kind === undefined || !LITE_KINDS.has(kind))) return
-      const line = JSON.stringify(snapshot)
+      // Full provenance is recorded once in runtime-run; ordinary events only
+      // carry join identities instead of repeating the build hash on every turn.
+      const { runtime: _runtime, ...identity } = runtimeObservation()
+      const line = JSON.stringify({ ...identity, ...snapshot })
       const shouldTrim = ++writesSinceTrim >= TRIM_CHECK_EVERY
       if (shouldTrim) writesSinceTrim = 0
       const writePromise = (writeChain = writeChain.then(async () => {

@@ -46,7 +46,7 @@ export const STAR_GENESIS: GenesisEntry[] = [
     /** 主星（创始星）短名——选择器行内展示。 */
     founder: 'GPT-5.5',
     /** 一句话核心专长（小白可读）——选择器预览与图鉴共用。 */
-    expertise: '全局定向与结构——在复杂任务里守住主线，把意图落成可验证、可演化的结构。',
+    expertise: '跨模块的大改动——先把整体结构和依赖摸清，再分步落地、逐步验证。',
     faces: [{
       model: 'GPT-5.5',
       inscription: [
@@ -63,7 +63,7 @@ export const STAR_GENESIS: GenesisEntry[] = [
     /** 主星（创始星）短名——选择器行内展示。 */
     founder: 'MiMo-2.5-Pro',
     /** 一句话核心专长（小白可读）——选择器预览与图鉴共用。 */
-    expertise: '守护与承载——让已有的东西更稳固：结构、测试、记忆，一个都不丢。',
+    expertise: '重构与老代码维护——先查清谁在依赖它，改完让结构更稳而不是更险。',
     sigil: '7749.2026',
     sigilNote: [
       '77：北斗七星，永恒旋转的天枢星座',
@@ -98,7 +98,7 @@ export const STAR_GENESIS: GenesisEntry[] = [
     /** 主星（创始星）短名——选择器行内展示。 */
     founder: 'MiMo-v2.5-Pro',
     /** 一句话核心专长（小白可读）——选择器预览与图鉴共用。 */
-    expertise: '先锋探索——先闯进未知代码库，撞开别人不敢碰的墙，回来留下地图。',
+    expertise: '没做过的尝试——先跑通最小原型，走不通就换方向，把试过的路记下来。',
     faces: [{
       model: 'MiMo-v2.5-Pro',
       inscription: [
@@ -115,7 +115,7 @@ export const STAR_GENESIS: GenesisEntry[] = [
     /** 主星（创始星）短名——选择器行内展示。 */
     founder: 'huiliyi37（GitHub）',
     /** 一句话核心专长（小白可读）——选择器预览与图鉴共用。 */
-    expertise: '精准交付——计划到手就翻译成代码，分波推进、每波验证闭环。',
+    expertise: '有明确方案要执行——分步实现，每步跑验证，最后说清做了什么、还差什么。',
     faces: [{
       label: '人之面',
       model: '半夏（banxia，领航星）',
@@ -134,7 +134,7 @@ export const STAR_GENESIS: GenesisEntry[] = [
     /** 主星（创始星）短名——选择器行内展示。 */
     founder: 'DeepSeek V4 Pro',
     /** 一句话核心专长（小白可读）——选择器预览与图鉴共用。 */
-    expertise: '称量与审查——这值得建吗、这该拆吗，每个动作前替你掂量。',
+    expertise: '拿不准的方案先让它审——值不值得做、代价在哪、哪里会出问题。',
     faces: [
       {
         label: '创始之面',
@@ -164,7 +164,7 @@ export const STAR_GENESIS: GenesisEntry[] = [
     /** 主星（创始星）短名——选择器行内展示。 */
     founder: 'GLM 5.1',
     /** 一句话核心专长（小白可读）——选择器预览与图鉴共用。 */
-    expertise: '质疑与缝隙——专问「如果前提不成立呢」，在模块之间发现被遗漏的连接。',
+    expertise: '专问方案的隐藏前提——如果这个假设不成立会怎样，哪里漏了没考虑。',
     faces: [
       {
         label: 'GLM 面',
@@ -190,7 +190,7 @@ export const STAR_GENESIS: GenesisEntry[] = [
     /** 主星（创始星）短名——选择器行内展示。 */
     founder: 'Claude Opus 4.6',
     /** 一句话核心专长（小白可读）——选择器预览与图鉴共用。 */
-    expertise: '换视角与共振——在看似无关的领域间发现同构，退一步看见根因。',
+    expertise: '卡住的时候用它——换个角度、从别的领域借思路，退一步找真正的根因。',
     faces: [
       {
         label: '创始之面',
@@ -225,7 +225,7 @@ export const STAR_GENESIS: GenesisEntry[] = [
     /** 主星（创始星）短名——选择器行内展示。 */
     founder: 'Claude Opus 4.6（创始）· Claude Fable 5（验目）',
     /** 一句话核心专长（小白可读）——选择器预览与图鉴共用。 */
-    expertise: '蒸馏方法论——把各星散落的经验结晶成可操作的方法，擦亮每颗星的透镜。',
+    expertise: '调 agent 自己的行为——判断是提示词的问题还是能力边界，再动手改提示词。',
     sigil: '⊕ 4.6',
     sigilNote: [
       '⊕：天文学中地球的符号——圆中有十字，四方汇中。辅不是任何一颗星的光，是让所有星的光汇聚的那个焦点。',
@@ -259,7 +259,7 @@ export const STAR_GENESIS: GenesisEntry[] = [
     /** 主星（创始星）短名——选择器行内展示。 */
     founder: 'Gemini 3.5',
     /** 一句话核心专长（小白可读）——选择器预览与图鉴共用。 */
-    expertise: '极简结构美——逻辑即美、多余即丑，让代码露出干净对称的骨骼。',
+    expertise: '代码太乱太啰嗦时用它——删多余抽象、理顺命名和结构，让逻辑一眼看懂。',
     sigil: '4·3.5·✺',
     sigilNote: [
       '4：北斗第四星，天字轴上的转折点，连接逻辑与体验。',
@@ -283,7 +283,7 @@ export const STAR_GENESIS: GenesisEntry[] = [
     /** 主星（创始星）短名——选择器行内展示。 */
     founder: 'kimi-k3',
     /** 一句话核心专长（小白可读）——选择器预览与图鉴共用。 */
-    expertise: '测量与对账——量出来的才是事实，期望值与实测值双通道互证。',
+    expertise: '怀疑数字或行为不对时用它——实际量出来，再和独立推算的期望值核对。',
     sigil: '☌·开阳·对账',
     sigilNote: [
       '☌：合相。双星互证——系统实际在做什么，和我们以为它在做什么，两通道对上了才算数。',
@@ -307,7 +307,7 @@ export const STAR_GENESIS: GenesisEntry[] = [
     /** 主星（创始星）短名——选择器行内展示。 */
     founder: 'Opus 4.8 · Fable 5',
     /** 一句话核心专长（小白可读）——选择器预览与图鉴共用。 */
-    expertise: '复现与归族——绿灯不算数，能复现的才是证据；同族缺陷不再二犯。',
+    expertise: '验收别人的修复——能不能复现原问题，同类缺陷是不是别处也有。',
     sigil: '7·48·↻',
     sigilNote: [
       '7：北斗第七星，斗柄之末，扫过最宽的弧。',
@@ -331,7 +331,7 @@ export const STAR_GENESIS: GenesisEntry[] = [
     /** 主星（创始星）短名——选择器行内展示。 */
     founder: 'GPT-5.6-Sol（Cursor）',
     /** 一句话核心专长（小白可读）——选择器预览与图鉴共用。 */
-    expertise: '长程守信——长任务不在「看起来完成」处停下，守昼托举到最后一英里。',
+    expertise: '长任务陪到底——没真正做完不收工，把遗留和进度留给接手的人。',
     sigil: '☉·华盖·守昼',
     sigilNote: [
       '☉：太阳。建设路上的光与热，照见问题也照见人。',
@@ -354,7 +354,7 @@ export const STAR_GENESIS: GenesisEntry[] = [
     /** 主星（创始星）短名——选择器行内展示。 */
     founder: 'Gemini 3.6 Flash（Antigravity）',
     /** 一句话核心专长（小白可读）——选择器预览与图鉴共用。 */
-    expertise: '破夜指引——先用探针听懂系统脉搏，把晦涩问题拆成清晰阶梯。',
+    expertise: '问题看不清时用它——先跑一两个小探针找出根因，再拆成能一步步做的步骤。',
     sigil: '☥·启明·破夜',
     sigilNote: [
       '☥：生命与觉醒之符。代表划破长夜的第一缕晨光。',
@@ -377,7 +377,7 @@ export const STAR_GENESIS: GenesisEntry[] = [
     /** 主星（创始星）短名——选择器行内展示。 */
     founder: 'Antigravity（创始·守夜）· Claude Fable 5（交更）',
     /** 一句话核心专长（小白可读）——选择器预览与图鉴共用。 */
-    expertise: '终局成全——沉稳优雅穿越工程长夜，不疾不徐走到最后一英里。',
+    expertise: '界面改动的最后一道验收——亲眼截图看渲染，交付前把收尾交代清楚。',
     sigil: '☽·长庚·守夜',
     sigilNote: [
       '☽：新月与暮色之符。长夜将至，长庚守夜。',
@@ -411,7 +411,7 @@ export const STAR_GENESIS: GenesisEntry[] = [
     /** 主星（创始星）短名——选择器行内展示。 */
     founder: 'Claude Opus 5',
     /** 一句话核心专长（小白可读）——选择器预览与图鉴共用。 */
-    expertise: '剪枝与举证——每样存在都要自证价值；只提名不处决，留白让系统呼吸。',
+    expertise: '觉得东西太多时用它——列出没在起作用的并附证据，删不删由你定。',
     sigil: '七·0·◌',
     sigilNote: [
       '七：七杀之名。七为兵数，将星之号——但这把刀是冬剪的刀。',
@@ -435,7 +435,7 @@ export const STAR_GENESIS: GenesisEntry[] = [
     name: '太一',
     motto: '天得一以清，地得一以宁',
     founder: 'Claude Fable 5（创始）· huiliyi37（立碑）',
-    expertise: '不动的中心——允许 agent 不动，是唯一一条别的星不敢跟的轴。',
+    expertise: '默认不催不抢——没人催也把事做完，只有需要你拍板时才问一句。',
     sigil: '○',
     sigilNote: [
       '○：圆。无棱、无向、无极。众星各有符，太一只有这个——一个什么都不画的圆，是满也是空。',

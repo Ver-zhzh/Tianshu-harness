@@ -1,3 +1,5 @@
+import { withNativeRequestAudit } from './native-request-audit.js'
+import { ProviderToolProgress } from './tool-input-progress.js'
 import { requestAuditContext } from './call-audit.js'
 import type { StreamClient, StreamCallbacks } from './stream-client.js'
 import type { OaiChatRequest, OaiMessage } from './oai-types.js'
@@ -201,33 +203,35 @@ export class AnthropicClient implements StreamClient {
     let stripRequested = false
     let imagesStripped = false
 
-    const auditContext = requestAuditContext(this.config, request)
-    await withStructuredRetry(async () => {
-      // 剥图重发：只重建本次请求体，不动调用方的 messages（会话历史仍保图）。
-      let wireMessages = request.messages
-      // 同 openai-client：剥图后任何后续 attempt 都必须幂等重放剥离，不许毒图回魂。
-      if (imagesStripped) wireMessages = stripOaiImageParts(wireMessages).messages
-      if (stripRequested && !imagesStripped) {
-        const stripped = stripOaiImageParts(wireMessages)
-        if (stripped.removedCount > 0) {
-          wireMessages = stripped.messages
-          imagesStripped = true
-          callbacks.onImageStripped?.({ removedCount: stripped.removedCount, uniqueUrlCount: stripped.uniqueUrlCount })
+    const auditContext = { ...requestAuditContext(this.config, request), model: request.model || this.config.model }
+    await withStructuredRetry(() => withNativeRequestAudit(auditContext, signal, async (attemptContext, audit) => {
+      const guard = audit.observation.measure('bodyPreparationMs', () => {
+        // 剥图重发：只重建本次请求体，不动调用方的 messages（会话历史仍保图）。
+        let wireMessages = request.messages
+        // 同 openai-client：剥图后任何后续 attempt 都必须幂等重放剥离，不许毒图回魂。
+        if (imagesStripped) wireMessages = stripOaiImageParts(wireMessages).messages
+        if (stripRequested && !imagesStripped) {
+          const stripped = stripOaiImageParts(wireMessages)
+          if (stripped.removedCount > 0) {
+            wireMessages = stripped.messages
+            imagesStripped = true
+            callbacks.onImageStripped?.({ removedCount: stripped.removedCount, uniqueUrlCount: stripped.uniqueUrlCount })
+          }
         }
-      }
-      const scope = currentExecutionScope()
-      const mapping: NativeSourceBoundaries | undefined = scope ? { source: proveCanonicalSource(request.messages), boundaries: [], cacheLayout: [] } : undefined
-      const body = this.buildRequestBody({ ...request, messages: wireMessages }, mapping)
-      if (scope) scope.nativeSourceBoundaries = mapping
+        const scope = currentExecutionScope()
+        const mapping: NativeSourceBoundaries | undefined = scope ? { source: proveCanonicalSource(request.messages), boundaries: [], cacheLayout: [] } : undefined
+        const body = this.buildRequestBody({ ...request, messages: wireMessages }, mapping)
+        if (scope) scope.nativeSourceBoundaries = mapping
 
-      // 请求体体积护栏（可选）：与 openai-client.sendStream 同一护栏、同一确定性纪律
-      // （只截 wire 副本、同输入同字节），差异只是 shape——OpenAI 兼容体的工具输出是
-      // `role:'tool'` 消息、图片是 `image_url` part；这里分别是 user 消息里的
-      // `tool_result` / `image` block。未配置 maxBodyBytes 时不量体、零额外成本。
-      const guard = enforceRequestBodyLimit(
-        body as unknown as Record<string, unknown>,
-        { limitBytes: this.config.maxBodyBytes, shape: 'anthropic' },
-      )
+        // 请求体体积护栏（可选）：与 openai-client.sendStream 同一护栏、同一确定性纪律
+        // （只截 wire 副本、同输入同字节），差异只是 shape——OpenAI 兼容体的工具输出是
+        // `role:'tool'` 消息、图片是 `image_url` part；这里分别是 user 消息里的
+        // `tool_result` / `image` block。未配置 maxBodyBytes 时不量体、零额外成本。
+        return enforceRequestBodyLimit(
+          body as unknown as Record<string, unknown>,
+          { limitBytes: this.config.maxBodyBytes, shape: 'anthropic' },
+        )
+      })
       if (!isExecutionValidation()) notifyBodyGuard(guard, this.bodyGuardNotify, callbacks.onBodyGuard)
 
       // 共享 lifecycle controller（见 openai-client 同名注释）：传给 fetch，
@@ -238,7 +242,7 @@ export class AnthropicClient implements StreamClient {
         else signal.addEventListener('abort', () => lifecycle.abort(), { once: true })
       }
       // 客户端限速（未配置 rateLimit 时零开销）：同 provider 的所有 client 实例共享一只桶。
-      await acquireRateLimitSlot(this.config.baseUrl, this.config.retry?.rateLimit, lifecycle.signal)
+      await audit.observation.measureAsync('rateLimitWaitMs', () => acquireRateLimitSlot(this.config.baseUrl, this.config.retry?.rateLimit, lifecycle.signal))
       const response = await fetchWithTimeout(`${normalizeBaseUrl(this.config.baseUrl)}/v1/messages`, {
         method: 'POST',
         headers: {
@@ -253,9 +257,9 @@ export class AnthropicClient implements StreamClient {
             ? { [this.config.sessionHeader ?? 'X-Request-Session']: this.config.sessionId }
             : {}),
         },
-        body: JSON.stringify(guard.body),
+        body: audit.observation.measure('bodyPreparationMs', () => guard.serializedBody ?? JSON.stringify(guard.body)),
         signal: lifecycle.signal,
-      }, this.thinkingActive() ? 90_000 : 45_000, this.proxyDispatcher, auditContext)
+      }, this.thinkingActive() ? 90_000 : 45_000, this.proxyDispatcher, attemptContext, audit)
 
       if (!response.ok) {
         const errorBody = await response.text().catch(() => '')
@@ -281,7 +285,7 @@ export class AnthropicClient implements StreamClient {
       }
 
       await this.processSSEStream(response, callbacks, signal, lifecycle)
-    }, signal, {
+    }), signal, {
       budget: this.config.retryBudget?.(),
       maxTotalDurationMs: this.config.retry?.maxTotalDurationMs ?? 10 * 60_000,
       // provider 级 maxRetries 显式配置时覆盖内置默认（0 = 禁用重试）。
@@ -553,6 +557,7 @@ export class AnthropicClient implements StreamClient {
     // and emit the complete tool_use only on content_block_stop.
     const toolUseBuffer = new Map<number, { id: string; name: string; partialJson: string }>()
     const completedToolIds = new Set<string>()
+    const inputProgress = new ProviderToolProgress({ requestId: currentExecutionScope()?.requestId, attemptId: currentExecutionScope()?.attemptId ?? crypto.randomUUID() })
 
     // SSE idle timeout — same pattern as OpenAIClient and CodexClient.
     // Non-thinking requests use shorter timeouts (45s/120s) for faster
@@ -659,6 +664,7 @@ export class AnthropicClient implements StreamClient {
                   if (previous) break
                   if ([...toolUseBuffer.values()].some(buf => buf.id === id)) throw new ToolNameProtocolError('identity')
                   toolUseBuffer.set(index, { id, name, partialJson: '' })
+                  inputProgress.update(String(index), id, name, '', callbacks.onToolInputProgress)
                 }
               }
               break
@@ -680,6 +686,7 @@ export class AnthropicClient implements StreamClient {
                 const buf = toolUseBuffer.get(index)
                 if (buf) {
                   buf.partialJson += delta.partial_json
+                  inputProgress.update(String(index), buf.id, buf.name, delta.partial_json, callbacks.onToolInputProgress)
                 }
               }
               break
@@ -701,6 +708,7 @@ export class AnthropicClient implements StreamClient {
                     // placeholder (same contract as openai-client final flush).
                     argsTruncated = true
                   }
+                  inputProgress.update(String(index), buf.id, buf.name, '', callbacks.onToolInputProgress, 'complete')
                   callbacks.onContentBlock({ type: 'tool_use', id: buf.id, name: buf.name, input, argsTruncated })
                   completedToolIds.add(buf.id)
                   toolUseBuffer.delete(index)

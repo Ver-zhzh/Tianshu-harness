@@ -58,16 +58,20 @@ function switchFixture() {
     volatileCtx: { cwd: '/controlled-fixture' } })
   const proof = { marker: 'original-execution-proof' }
   Reflect.set(engine, 'executionSnapshot', proof)
-  const state = { fail: true, canceled: 0, oldShutdown: 0, candidateShutdown: 0, model: 'old', reloadSeen: false }
+  const state = { fail: true, canceled: 0, oldShutdown: 0, candidateShutdown: 0, model: 'old', reloadSeen: false,
+    mounted: [] as string[], mountStatus: 'mounted', visible: undefined as boolean | undefined }
   const oldCoordinator = { shutdown() { state.oldShutdown++ } }
   const refs = { coordinator: oldCoordinator, promptEngine: engine, claimTrackerRef: { current: 'old-claims' } }
   const reload = () => ({ fixture: true })
-  const agent = { config: { promptEngine: engine, approvalMode: 'normal' },
+  const agent = { getMountedToolNames: () => state.mounted,
+    getActiveToolNames: () => (state.visible ?? state.mountStatus === 'mounted') ? state.mounted : [],
+    enableTool: (name: string) => ({ status: state.mountStatus, name, cacheImpact: 'none' as const }),
+    config: { promptEngine: engine, approvalMode: 'normal' },
     cancelIdleCompaction() { state.canceled++; return Promise.resolve() },
     getSessionDomain() { return state.model },
   }
   const { facade, readSpec } = new Function('agent', 'spec', 'stores', 'ctx', 'reload', 'shared', 'sessionId',
-    'resolveModelSpecWithReload', 'assembleAgentLoop', 'cwd', 'registry', 'allowedTools', 'buildReplacementAgent', code)(
+    'resolveModelSpecWithReload', 'assembleAgentLoop', 'cwd', 'registry', 'allowedTools', 'buildReplacementAgent', 'runtimeNoticeHandler', code)(
     agent, { provider: { name: 'fixture' }, model: { id: 'old' } },
     { refs, persist: { updateMetadata() {}, appendModelSwitch() {} } }, {}, reload, undefined, 'fixture-id',
     (_ctx: unknown, model: string, actualReload: unknown) => {
@@ -80,7 +84,7 @@ function switchFixture() {
       if (state.fail) throw new Error('synthetic constructor failure')
       state.model = spec.model.id
       return { ...agent, config: { ...agent.config, client: { authorizeCacheGeneration() {} } } }
-    }, '/controlled-fixture', undefined, undefined, buildReplacementAgent) as { facade: ManagedAgent; readSpec(): { model: { id: string } } }
+    }, '/controlled-fixture', undefined, undefined, buildReplacementAgent, undefined) as { facade: ManagedAgent; readSpec(): { model: { id: string } } }
   return { facade, readSpec, engine, proof, state, refs, oldCoordinator }
 }
 
@@ -105,4 +109,57 @@ test('managed model switch resolves against the injected live configuration', ()
   fixture.state.fail = false
   fixture.facade.switchModel!('new')
   assert.equal(fixture.state.reloadSeen, true)
+})
+
+function capturingStderr(): { writes: string[]; restore(): void } {
+  const writes: string[] = []
+  const original = process.stderr.write
+  process.stderr.write = ((chunk: string | Uint8Array) => { writes.push(String(chunk)); return true }) as typeof process.stderr.write
+  return { writes, restore: () => { process.stderr.write = original } }
+}
+
+test('a mounted tool the replacement cannot restore is disclosed instead of silently dropped', () => {
+  const fixture = switchFixture()
+  const sink = capturingStderr()
+  try {
+    fixture.state.fail = false
+    fixture.state.mounted = ['galaxy']
+    fixture.state.mountStatus = 'not-extended'
+    fixture.facade.switchModel!('new')
+  } finally { sink.restore() }
+  assert.equal(sink.writes.length, 1, sink.writes.join(''))
+  assert.match(sink.writes[0]!, /galaxy/)
+  assert.match(sink.writes[0]!, /not-extended/)
+})
+
+test('restored mounts stay quiet', () => {
+  const fixture = switchFixture()
+  const sink = capturingStderr()
+  try {
+    fixture.state.fail = false
+    fixture.state.mounted = ['galaxy', 'computer_use']
+    fixture.state.mountStatus = 'mounted'
+    fixture.facade.switchModel!('new')
+  } finally { sink.restore() }
+  assert.deepEqual(sink.writes, [])
+})
+
+test('notice transport failures do not undo a successful replacement', () => {
+  const fixture = switchFixture()
+  fixture.state.fail = false
+  fixture.state.mounted = ['galaxy']; fixture.state.mountStatus = 'disabled'
+  fixture.facade.setRuntimeNoticeHandler!(() => { throw Error('notice sink unavailable') })
+  assert.equal(fixture.facade.switchModel!('new'), 'fixture:new')
+  assert.equal(fixture.state.oldShutdown, 1)
+  assert.equal(fixture.readSpec().model.id, 'new')
+})
+
+test('mount restoration reports actual published visibility rather than assuming status means success', () => {
+  for (const [status, visible, noticeCount] of [['gating-off', false, 1], ['mounted', false, 1], ['not-extended', true, 0]] as const) {
+    const fixture = switchFixture(), notices: string[] = []
+    fixture.state.fail = false; fixture.state.mounted = ['galaxy']; fixture.state.mountStatus = status; fixture.state.visible = visible
+    fixture.facade.setRuntimeNoticeHandler!(message => notices.push(message))
+    assert.equal(fixture.facade.switchModel!('new'), 'fixture:new')
+    assert.equal(notices.length, noticeCount, `${status}/${visible}`)
+  }
 })

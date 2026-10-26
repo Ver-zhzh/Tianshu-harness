@@ -5,6 +5,8 @@ import { rivetHome } from '../config/paths.js'
 import type { ModelConfig } from '../config/schema.js'
 import { computeUsageCost } from '../utils/pricing.js'
 import { currentExecutionScope, isExecutionValidation } from './execution-continuity.js'
+import { RequestObservation, type RequestMeasurements } from './request-observability.js'
+import { runtimeObservation, recordRuntimeRequest } from '../utils/runtime-provenance.js'
 
 export interface CallAuditContext {
   requestId?: string
@@ -18,7 +20,10 @@ export interface CallAuditContext {
   routeReason?: string
   configFingerprint?: string
 }
-export interface CallAuditRecord extends CallAuditContext {
+export interface CallAuditRecord extends CallAuditContext, RequestMeasurements {
+  runtime?: import('../utils/runtime-provenance.js').RuntimeProvenance
+  instanceId?: string
+  runId?: string
   operationId: string
   t: number
   phase: 'started' | 'finished'
@@ -38,7 +43,8 @@ function append(record: CallAuditRecord): void {
 }
 
 /** Accepts only diagnostic fields, never request bodies or authentication headers. */
-export function beginCallAudit(context: CallAuditContext) {
+export function beginCallAudit(context: CallAuditContext, startedAt?: number) {
+  const observation = new RequestObservation(undefined, startedAt)
   const validationOnly = isExecutionValidation()
   const execution = currentExecutionScope()
   context = { ...context, sessionId: execution?.sessionId ?? context.sessionId }
@@ -47,17 +53,26 @@ export function beginCallAudit(context: CallAuditContext) {
     execution.attemptId = context.attemptId
   }
   const operationId = context.attemptId ?? randomUUID()
+  if (!validationOnly) recordRuntimeRequest(context, operationId)
+  const { runtime, instanceId, runId } = runtimeObservation()
+  const provenance = { runtime, instanceId, runId }
   const identity: CallAuditContext = Object.fromEntries(Object.entries(context).filter(([key, value]) =>
     ['requestId', 'attemptId', 'sessionId', 'parentRequestId', 'workOrderId', 'provider', 'model', 'purpose', 'routeReason', 'configFingerprint'].includes(key) && typeof value === 'string'))
-  if (!validationOnly) append({ ...identity, operationId, t: Date.now(), phase: 'started' })
+  if (!validationOnly) append({ ...provenance, ...identity, operationId, t: Date.now(), phase: 'started' })
   let finished = false
   return {
     operationId,
+    observation,
+    setWireContext(wire: { model?: string; provider?: string; configFingerprint: string }) {
+      if (typeof wire.model === 'string') identity.model = wire.model
+      if (typeof wire.provider === 'string') identity.provider = wire.provider
+      if (typeof wire.configFingerprint === 'string') identity.configFingerprint = wire.configFingerprint
+    },
     finish(result: Pick<CallAuditRecord, 'status' | 'responseId' | 'responseModel' | 'systemFingerprint' | 'finishReason' | 'usage' | 'errorName'>) {
       if (finished || validationOnly) return
       finished = true
       const usage = result.usage && Object.fromEntries(Object.entries(result.usage).filter(([key, n]) => /^(?:input_tokens|output_tokens|cache_read_input_tokens|cache_creation_input_tokens|reasoning_tokens|prompt_tokens|completion_tokens|total_tokens|prompt_cache_hit_tokens|prompt_cache_miss_tokens)$/.test(key) && Number.isFinite(n) && n >= 0))
-      append({ ...identity, operationId, t: Date.now(), phase: 'finished', status: result.status,
+      append({ ...provenance, ...identity, ...observation.snapshot(), operationId, t: Date.now(), phase: 'finished', status: result.status,
         responseId: result.responseId, responseModel: result.responseModel, systemFingerprint: result.systemFingerprint,
         finishReason: result.finishReason, errorName: result.errorName, usage, usageKnown: !!usage && Object.keys(usage).length > 0 })
     },

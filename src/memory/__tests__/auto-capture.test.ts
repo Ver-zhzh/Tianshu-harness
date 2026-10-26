@@ -65,8 +65,10 @@ describe('auto-capture 记忆形成', () => {
     assert.equal(noWrite, 0)
   })
 
-  it('enabled by default, opt-out via env', () => {
-    assert.equal(autoCaptureEnabled(undefined), true)
+  it('disabled by default, explicitly enabled via env', () => {
+    assert.equal(autoCaptureEnabled(''), false)
+    assert.equal(autoCaptureEnabled('on'), true)
+    assert.equal(autoCaptureEnabled('unknown'), false)
     assert.equal(autoCaptureEnabled('off'), false)
     assert.equal(autoCaptureEnabled('0'), false)
   })

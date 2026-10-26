@@ -19,7 +19,7 @@
  */
 import { spawn, type ChildProcess } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import * as os from 'node:os'
 import { dirname, join } from 'node:path'
@@ -76,6 +76,7 @@ export interface DaemonLeaseRecord {
   baseUrl: string
   cliPath?: string
   desktopDir?: string
+  instanceId?: string
   updatedAt: number
 }
 
@@ -115,6 +116,8 @@ function pickFreePort(): Promise<number> {
 
 /** /health 体里与就绪判定相关的字段；字段缺失（老运行时/匿名响应）按「未失败」处理。 */
 interface HealthProbe {
+  pid?: number
+  instanceId?: string
   readiness?: string
   initializationError?: string
   storeLockHolder?: { pid?: number; hostname?: string }
@@ -157,7 +160,7 @@ async function waitHealthy(
   getSpawnError: () => Error | undefined,
   signal?: AbortSignal,
   timeoutMs = 20_000,
-): Promise<void> {
+): Promise<HealthProbe | undefined> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     signal?.throwIfAborted()
@@ -182,9 +185,7 @@ async function waitHealthy(
     let probe: HealthProbe | undefined
     let ok = false
     try {
-      const res = await fetch(`${baseUrl}/health`, {
-        // 带 token 才有全量体（含 readiness / initializationError / storeLockHolder）；
-        // 匿名探测只回 {ok, version}，识别不出初始化失败。
+      const res = await fetch(`${baseUrl}/readyz`, {
         headers: { authorization: `Bearer ${token}` },
         signal: healthController.signal,
       })
@@ -199,7 +200,7 @@ async function waitHealthy(
     // 分类在 catch 之外：进程已起来并自报初始化失败时不能当成「还没起来」继续等，
     // 否则只会等到 20s 超时（且把锁冲突报成 health-timeout）。
     if (probe?.readiness === 'failed') throw readinessFailure(probe)
-    if (ok) return
+    if (ok) return probe
     signal?.throwIfAborted()
     await new Promise((r) => setTimeout(r, 300))
   }
@@ -240,6 +241,7 @@ export function readDaemonLease(leaseFile: string, requiredPort?: number): Daemo
       baseUrl: expectedBaseUrl,
       cliPath: typeof raw.cliPath === 'string' ? raw.cliPath : undefined,
       desktopDir: typeof raw.desktopDir === 'string' ? raw.desktopDir : undefined,
+      instanceId: typeof raw.instanceId === 'string' ? raw.instanceId : undefined,
       updatedAt: typeof raw.updatedAt === 'number' ? raw.updatedAt : 0,
     }
   } catch {
@@ -248,95 +250,178 @@ export function readDaemonLease(leaseFile: string, requiredPort?: number): Daemo
 }
 
 export function writeDaemonLease(leaseFile: string, record: DaemonLeaseRecord): void {
+  const temporary = `${leaseFile}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`
   try {
     mkdirSync(dirname(leaseFile), { recursive: true })
-    writeFileSync(leaseFile, JSON.stringify(record, null, 2), { encoding: 'utf8', mode: 0o600 })
+    writeFileSync(temporary, JSON.stringify(record, null, 2), { encoding: 'utf8', mode: 0o600 })
+    renameSync(temporary, leaseFile)
   } catch {
-    // 租约写入失败不阻断当前会话运行
+    try { rmSync(temporary, { force: true }) } catch { /* best effort */ }
   }
 }
 
-export function removeDaemonLease(leaseFile: string | undefined, expectedPid?: number): void {
+export function removeDaemonLease(leaseFile: string | undefined, expectedPid?: number, expectedInstanceId?: string): void {
   if (!leaseFile) return
-  try {
-    if (expectedPid !== undefined) {
-      const current = readDaemonLease(leaseFile)
-      if (current && current.pid !== expectedPid) return
-    }
+  if (expectedPid === undefined && expectedInstanceId === undefined) {
     rmSync(leaseFile, { force: true })
-  } catch {
-    // ignore
+    return
   }
+  const tombstone = `${leaseFile}.${process.pid}.${randomBytes(4).toString('hex')}.tombstone`
+  try {
+    renameSync(leaseFile, tombstone)
+    const current = readDaemonLease(tombstone)
+    const matches = current
+      && (expectedPid === undefined || current.pid === expectedPid)
+      && (expectedInstanceId === undefined || current.instanceId === expectedInstanceId)
+    if (matches) {
+      rmSync(tombstone, { force: true })
+      return
+    }
+    try { linkSync(tombstone, leaseFile) } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+    }
+    rmSync(tombstone, { force: true })
+  } catch {
+    try { linkSync(tombstone, leaseFile) } catch { /* target already exists: keep the newer lease */ }
+    try { rmSync(tombstone, { force: true }) } catch { /* best effort */ }
+  }
+}
+
+type VerifiedDaemon = HealthProbe & { pid: number; instanceId: string }
+type DaemonProbeResult = VerifiedDaemon | 'stale' | 'mismatch'
+
+async function probeDaemon(lease: DaemonLeaseRecord, timeoutMs: number, signal?: AbortSignal): Promise<DaemonProbeResult> {
+  const controller = new AbortController()
+  const cancel = () => controller.abort()
+  const timer = setTimeout(cancel, timeoutMs)
+  signal?.addEventListener('abort', cancel, { once: true })
+  try {
+    const res = await fetch(`${lease.baseUrl}/readyz`, {
+      headers: { authorization: `Bearer ${lease.token}` },
+      signal: controller.signal,
+    })
+    if (!res.ok && res.status !== 503) return 'stale'
+    const probe = await readHealthProbe(res)
+    if (!probe?.instanceId || typeof probe.pid !== 'number') return 'stale'
+    if ((lease.instanceId !== undefined && probe.instanceId !== lease.instanceId) || probe.pid !== lease.pid) return 'mismatch'
+    return probe as VerifiedDaemon
+  } catch (error) {
+    if (signal?.aborted) throw error
+    if (controller.signal.aborted) throw new SidecarLaunchError('sidecar 租约健康检查超时', 'health-timeout')
+    return 'stale'
+  } finally {
+    clearTimeout(timer)
+    signal?.removeEventListener('abort', cancel)
+  }
+}
+
+function pidExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ESRCH'
+  }
+}
+
+async function waitForPidExit(pid: number): Promise<void> {
+  const deadline = Date.now() + 15_000
+  while (Date.now() < deadline) {
+    if (!pidExists(pid)) return
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
+  throw new SidecarLaunchError(`sidecar 进程未在 15s 内退出（pid ${pid}）`, 'cleanup-failed')
 }
 
 async function killPidTree(pid: number): Promise<void> {
   if (os.platform() === 'win32') {
-    await new Promise<void>((resolve) => {
+    await new Promise<void>((resolve, reject) => {
       const killer = spawn(
         join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'taskkill.exe'),
         ['/PID', String(pid), '/T', '/F'],
         { stdio: 'ignore', windowsHide: true },
       )
-      killer.once('error', () => resolve())
-      killer.once('close', () => resolve())
+      killer.once('error', (error) => reject(new SidecarLaunchError(`sidecar 进程树回收失败: ${error.message}`, 'cleanup-failed')))
+      killer.once('close', (code) => {
+        if (code === 0) resolve()
+        else reject(new SidecarLaunchError(`sidecar 进程树回收失败（taskkill exit ${code}）`, 'cleanup-failed'))
+      })
     })
   } else {
     try {
       process.kill(pid)
-    } catch {
-      // process already gone
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') {
+        throw new SidecarLaunchError(`sidecar 进程回收失败（pid ${pid}）`, 'cleanup-failed')
+      }
     }
   }
+  await waitForPidExit(pid)
+}
+
+async function destroyDaemon(leaseFile: string, lease: DaemonLeaseRecord): Promise<void> {
+  const verified = await probeDaemon(lease, 2_000)
+  if (verified === 'stale' || verified === 'mismatch') {
+    removeDaemonLease(leaseFile, lease.pid, lease.instanceId)
+    return
+  }
+  await killPidTree(lease.pid)
+  removeDaemonLease(leaseFile, lease.pid, lease.instanceId)
 }
 
 async function tryAttachExistingDaemon(opts: LauncherOptions): Promise<SidecarHandle | undefined> {
   const leaseFile = opts.leaseFile?.trim()
   if (!leaseFile) return undefined
-  const lease = readDaemonLease(leaseFile, opts.port)
+  const lease = readDaemonLease(leaseFile)
   if (!lease) {
     removeDaemonLease(leaseFile)
     return undefined
   }
   const desktopDir = opts.desktopDir?.trim()
-  if (desktopDir && lease.desktopDir && lease.desktopDir !== desktopDir) {
-    return undefined
-  }
-  const healthController = new AbortController()
-  const cancelHealth = () => healthController.abort()
-  const timer = setTimeout(cancelHealth, 1_500)
-  opts.signal?.addEventListener('abort', cancelHealth, { once: true })
-  try {
-    const res = await fetch(`${lease.baseUrl}/health`, {
-      headers: { authorization: `Bearer ${lease.token}` },
-      signal: healthController.signal,
-    })
-    if (!res.ok) {
-      removeDaemonLease(leaseFile, lease.pid)
-      return undefined
-    }
-    const probe = await readHealthProbe(res)
-    if (probe?.readiness === 'failed') {
-      removeDaemonLease(leaseFile, lease.pid)
-      return undefined
-    }
-  } catch {
-    removeDaemonLease(leaseFile, lease.pid)
-    return undefined
-  } finally {
-    clearTimeout(timer)
-    opts.signal?.removeEventListener('abort', cancelHealth)
-  }
+  if (desktopDir && lease.desktopDir && lease.desktopDir !== desktopDir) return undefined
 
+  const verified = await probeDaemon(lease, 20_000, opts.signal)
+  if (verified === 'mismatch') {
+    throw new SidecarLaunchError(`sidecar 租约实例或 PID 已变化（pid ${lease.pid}），拒绝接管`, 'initialization-failed')
+  }
+  if (verified === 'stale' || verified.readiness === 'failed') {
+    removeDaemonLease(leaseFile, lease.pid, lease.instanceId)
+    return undefined
+  }
+  lease.instanceId = verified.instanceId
   opts.onLog?.(`[tianshu] reattached to existing sidecar daemon (pid ${lease.pid}, port ${lease.port})`)
+
   let disposed = false
-  const dispose = async (disposeOpts?: DisposeSidecarOptions): Promise<void> => {
+  let disposal: Promise<void> | undefined
+  let exitMonitor: ReturnType<typeof setInterval> | undefined
+  const exitCbs: Array<(code: number | null) => void> = []
+  const stopExitMonitor = () => {
+    if (exitMonitor !== undefined) clearInterval(exitMonitor)
+    exitMonitor = undefined
+  }
+  const notifyExit = (code: number | null) => {
     if (disposed) return
     disposed = true
+    stopExitMonitor()
+    removeDaemonLease(leaseFile, lease.pid, lease.instanceId)
+    for (const cb of exitCbs) cb(code)
+  }
+  const dispose = async (disposeOpts?: DisposeSidecarOptions): Promise<void> => {
+    if (disposal) return disposal
+    disposed = true
+    stopExitMonitor()
     if (opts.keepAliveOnDispose && !disposeOpts?.forceKill) {
-      return
+      disposal = Promise.resolve()
+      return disposal
     }
-    removeDaemonLease(leaseFile, lease.pid)
-    await killPidTree(lease.pid)
+    disposal = destroyDaemon(leaseFile, lease)
+    try {
+      await disposal
+    } catch (error) {
+      disposed = false
+      disposal = undefined
+      throw error
+    }
   }
   return {
     port: lease.port,
@@ -344,14 +429,34 @@ async function tryAttachExistingDaemon(opts: LauncherOptions): Promise<SidecarHa
     baseUrl: lease.baseUrl,
     reused: true,
     dispose,
-    onExit: () => {},
+    onExit: (cb) => {
+      exitCbs.push(cb)
+      if (exitMonitor !== undefined) return
+      let probing = false
+      exitMonitor = setInterval(() => {
+        if (probing || disposed) return
+        probing = true
+        void probeDaemon(lease, 1_000)
+          .then((verified) => {
+            if (verified === 'stale' || verified === 'mismatch' || verified.instanceId !== lease.instanceId) notifyExit(null)
+          })
+          .catch(() => {})
+          .finally(() => { probing = false })
+      }, 1_000)
+      exitMonitor.unref?.()
+    },
   }
 }
 
 export async function launchSidecar(opts: LauncherOptions): Promise<SidecarHandle> {
   opts.signal?.throwIfAborted()
+  const leaseFile = opts.leaseFile?.trim()
   const attached = await tryAttachExistingDaemon(opts)
-  if (attached) return attached
+  if (attached) {
+    const portMismatch = opts.port !== undefined && opts.port > 0 && attached.port !== opts.port
+    if (!opts.keepAliveOnDispose || portMismatch) await attached.dispose({ forceKill: true })
+    else return attached
+  }
 
   opts.signal?.throwIfAborted()
   const cli = opts.cliPath?.trim() || 'rivet'
@@ -371,13 +476,20 @@ export async function launchSidecar(opts: LauncherOptions): Promise<SidecarHandl
   // sidecar（lib.rs）/ WSL attach（wsl_attach.rs）同语义；审批 UI 落地时三处
   // 一起改 gate。显式覆盖而非继承：用户 shell 里设过别的值不应透传进 sidecar。
   env.RIVET_MCP_APPROVAL = 'open'
-  const child = spawn(command.command, command.args, {
-    cwd: opts.cwd,
-    env,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    shell: false,
-    windowsHide: true,
-  })
+  if (opts.keepAliveOnDispose && leaseFile) mkdirSync(dirname(leaseFile), { recursive: true })
+  const daemonLogFd = opts.keepAliveOnDispose && leaseFile ? openSync(`${leaseFile}.log`, 'a') : -1
+  let child: ChildProcess
+  try {
+    child = spawn(command.command, command.args, {
+      cwd: opts.cwd,
+      env,
+      stdio: ['ignore', daemonLogFd >= 0 ? daemonLogFd : 'pipe', daemonLogFd >= 0 ? daemonLogFd : 'pipe'],
+      shell: false,
+      windowsHide: true,
+    })
+  } finally {
+    if (daemonLogFd >= 0) closeSync(daemonLogFd)
+  }
   let spawnError: Error | undefined
   let settleStopped!: () => void
   const stopped = new Promise<void>((resolve) => { settleStopped = resolve })
@@ -397,9 +509,8 @@ export async function launchSidecar(opts: LauncherOptions): Promise<SidecarHandl
   const exitCbs: Array<(code: number | null) => void> = []
   let disposed = false
   let disposal: Promise<void> | undefined
-  const leaseFile = opts.leaseFile?.trim()
   child.on('exit', (code) => {
-    removeDaemonLease(leaseFile, child.pid)
+    removeDaemonLease(leaseFile, child.pid, healthProbe?.instanceId)
     settleStopped()
     if (!disposed) for (const cb of exitCbs) cb(code)
   })
@@ -414,7 +525,7 @@ export async function launchSidecar(opts: LauncherOptions): Promise<SidecarHandl
     }
     if (!disposal) {
       disposed = true
-      removeDaemonLease(leaseFile, child.pid)
+      removeDaemonLease(leaseFile, child.pid, healthProbe?.instanceId)
       disposal = (async () => {
         if (os.platform() === 'win32' && child.pid && child.exitCode === null && child.signalCode === null) {
           await new Promise<void>((resolve, reject) => {
@@ -447,9 +558,10 @@ export async function launchSidecar(opts: LauncherOptions): Promise<SidecarHandl
   })
   opts.signal?.addEventListener('abort', cancelLaunch, { once: true })
 
+  let healthProbe: HealthProbe | undefined
   try {
     if (opts.signal?.aborted) cancelLaunch()
-    await Promise.race([waitHealthy(baseUrl, token, child, () => spawnError, opts.signal), cancelled])
+    healthProbe = await Promise.race([waitHealthy(baseUrl, token, child, () => spawnError, opts.signal), cancelled])
   } catch (err) {
     await dispose({ forceKill: true })
     throw err
@@ -457,7 +569,11 @@ export async function launchSidecar(opts: LauncherOptions): Promise<SidecarHandl
     opts.signal?.removeEventListener('abort', cancelLaunch)
   }
 
-  if (leaseFile && child.pid) {
+  if (leaseFile && !healthProbe?.instanceId) {
+    opts.onLog?.('[tianshu] runtime 缺少 instanceId，Reload 不启用租约复用')
+  }
+
+  if (leaseFile && child.pid && healthProbe?.instanceId) {
     writeDaemonLease(leaseFile, {
       pid: child.pid,
       port,
@@ -465,6 +581,7 @@ export async function launchSidecar(opts: LauncherOptions): Promise<SidecarHandl
       baseUrl,
       cliPath: cli,
       desktopDir,
+      instanceId: healthProbe.instanceId,
       updatedAt: Date.now(),
     })
   }

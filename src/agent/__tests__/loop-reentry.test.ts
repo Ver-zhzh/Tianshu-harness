@@ -53,6 +53,9 @@ test('run claims the instance synchronously before awaiting idle compaction', as
     // 症状表现为「_running 没被同步置位」——看着像 re-entry 契约回归，实为 fake 过时
     // （同 2026-09-15 / toolRegistry 两处）。借真原型方法，保持「只换叶子」的原意。
     runObserved: (AgentLoop.prototype as unknown as { runObserved: unknown }).runObserved,
+    // getRunSignal 接入（runObserved 视觉桥派发读 this.getRunSignal，loop.ts:2733）：
+    // 裸 fake 缺它 → 同款「fake 过时」红。最小桩，与本轮不变量无关。
+    getRunSignal: () => undefined,
     cancelIdleCompaction: async () => {
       cancelCalls++
       cancellationStarted()

@@ -6,7 +6,7 @@ import { spawnSync } from 'node:child_process'
 
 const root = path.resolve(import.meta.dirname, '..')
 const isolated = await mkdtemp(path.join(tmpdir(), 'tianshu-prompt-defects-'))
-const modules = ['src/tui/engine/app.ts', 'src/tui/engine/input-line.ts', 'src/tui/engine/input-layout.ts', 'src/tui/format/pinned-prompt.ts', 'src/tui/engine/__tests__/_harness.ts']
+const modules = ['src/tui/engine/app.ts', 'src/tui/engine/input-line.ts', 'src/tui/engine/input-layout.ts', 'src/tui/engine/__tests__/_harness.ts']
 const cases = [
   ['software-marker-displacement', 1, 'const softwareCursor = options.softwareCursor ?? false', 'const softwareCursor = options.softwareCursor ?? true', 'src/tui/__tests__/engine-input-line.test.ts', 'zero-displacement'],
   ['caret-before-wrap', 2, '    if (!softwareCursor && currentWidth > 0 && currentWidth + chWidth > maxContentWidth) flush()', '', 'src/tui/__tests__/engine-input-line.test.ts', 'hardware caret follows'],
@@ -16,9 +16,10 @@ const cases = [
   ['workflow-image-theft', 0, '    // 带图提交是异步原子单元', '    for (const entry of this.steerBuffer.getPendingEntries()) { images = [...(images ?? []), ...(entry.images ?? [])]; entry.images = undefined }\n    // 带图提交是异步原子单元', 'src/tui/engine/__tests__/app-busy-attachments.test.ts', 'workflow cannot steal images'],
   ['failed-queue-lost', 0, '      entry.images = outgoingImages\n      this.steerBuffer.restoreEntry(entry)\n      this.rejectSubmit()', '      this.rejectSubmit()', 'src/tui/engine/__tests__/app-busy-attachments.test.ts', 'failed queued submission preserves'],
   ['manual-steer-duplicate', 0, 'await this.awaitUserCommit(commitText.trim(), outgoingCommitImages', 'await this.awaitUserCommit(submitText.trim(), outgoingCommitImages', 'src/tui/engine/__tests__/steer-explicit-lane.test.ts', 'manual merge keeps'],
-  ['invisible-hardware-caret', 0, 'hardwareCursorVisible: true', 'hardwareCursorVisible: false', 'src/tui/format/__tests__/pinned-prompt.test.ts', 'hardware cursor is visible'],
-  ['empty-double-cursor', 0, "${color('❯', arrowColor, { bold: true })} ${color(this.inputLine.placeholder, this.theme.dim)}", "${color('❯', arrowColor, { bold: true })} ${color('█', this.theme.primary)}${color(this.inputLine.placeholder, this.theme.dim)}", 'src/tui/format/__tests__/pinned-prompt.test.ts', 'hardware cursor is visible'],
-  ['pinned-terminal-control', 3, "stripVTControlCharacters(boundedPrompt).replace(/[\\x00-\\x08\\x0b\\x0c\\x0e-\\x1f\\x7f]/g, '')", 'boundedPrompt', 'src/tui/format/__tests__/pinned-prompt.test.ts', 'pinned summary cannot inject'],
+  ['invisible-hardware-caret', 0, 'hardwareCursorVisible: true', 'hardwareCursorVisible: false', 'src/tui/engine/__tests__/current-task-layout.test.ts', 'hardware cursor remains visible'],
+  ['empty-double-cursor', 0, "${color('❯', arrowColor, { bold: true })} ${color(this.inputLine.placeholder, this.theme.dim)}", "${color('❯', arrowColor, { bold: true })} ${color('█', this.theme.primary)}${color(this.inputLine.placeholder, this.theme.dim)}", 'src/tui/engine/__tests__/current-task-layout.test.ts', 'hardware cursor remains visible'],
+  ['classic-double-prompt', 0, '    lines = []\n\n    // 身份/环境', "    lines = []\n    lines.push({ text: this.currentTaskTitle, livePart: 'pinned' })\n\n    // 身份/环境", 'src/tui/engine/__tests__/current-task-layout.test.ts', '经典主屏只在历史记录提问'],
+  ['status-in-dynamic', 0, '      else chromeActivity.push(line)', '      else lines.push(line)', 'src/tui/engine/__tests__/current-task-layout.test.ts', '经典主屏只在历史记录提问'],
 ]
 const absolutize = (source, file) => source.replace(/(from\s*|import\s*\()(['"])(\.[^'"]+)\2/g,
   (_match, prefix, quote, ref) => `${prefix}${quote}${path.resolve(path.dirname(file), ref)}${quote}`)

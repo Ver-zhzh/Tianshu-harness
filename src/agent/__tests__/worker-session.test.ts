@@ -63,6 +63,31 @@ function validPacket(workOrderId: string) {
   })
 }
 
+it('worker session forwards readConcurrency to actual multi-tool dispatch', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'worker-read-limit-')), previous = process.env.RIVET_SESSION_DIR
+  process.env.RIVET_SESSION_DIR = join(cwd, 'sessions')
+  try {
+    const order = createReadOnlyWorkOrder({ parentTurnId: 'worker-read-limit', profile: 'code_scout', kind: 'code_search', objective: 'Read two independent symbols', scope: {} })
+    let turn = 0, active = 0, maximum = 0, calls = 0
+    const toolRegistry = new ToolRegistry()
+    toolRegistry.register({ definition: { name: 'grep', description: 'fixture read', input_schema: { type: 'object', properties: {} } }, isEnabled: () => true, isConcurrencySafe: () => true, requiresApproval: () => false, execute: async () => {
+      active++; calls++; maximum = Math.max(maximum, active)
+      await new Promise(resolve => setTimeout(resolve, 10)); active--
+      return { content: 'found local symbol' }
+    } })
+    const client = { stream: async (_req: unknown, cb: StreamCallbacks) => {
+      if (turn++ === 0) {
+        for (const id of ['one', 'two']) cb.onContentBlock({ type: 'tool_use', id, name: 'grep', input: { pattern: id } })
+        cb.onStopReason('tool_use', { input_tokens: 10, output_tokens: 5 })
+      } else {
+        const text = validPacket(order.id); cb.onTextDelta(text); cb.onContentBlock(textBlock(text)); cb.onStopReason('end_turn', { input_tokens: 10, output_tokens: 5 })
+      }
+    } } as unknown as StreamClient
+    const run = await runWorkerSession({ order, client, promptEngine: makePromptEngine(), toolRegistry, cwd, readConcurrency: 1, maxTurns: 3, contextWindow: 200_000, compact: { enabled: false, autoThreshold: 800_000, autoFloor: 500_000, model: 'flash' } })
+    assert.equal(run.result.status, 'passed'); assert.equal(calls, 2); assert.equal(maximum, 1)
+  } finally { if (previous === undefined) delete process.env.RIVET_SESSION_DIR; else process.env.RIVET_SESSION_DIR = previous; rmSync(cwd, { recursive: true, force: true }) }
+})
+
 describe('runWorkerSession', () => {
   it('runs a headless worker and returns a schema-valid result', async () => {
     const order = createReadOnlyWorkOrder({

@@ -3,9 +3,9 @@ name: VS Code Extension
 on:
   push:
     branches: [main]
-    paths: ['vscode-extension/**']
+    paths: ['vscode-extension/**', 'src/server/protocol.ts', 'src/server/delegation-protocol.ts']
   pull_request:
-    paths: ['vscode-extension/**']
+    paths: ['vscode-extension/**', 'src/server/protocol.ts', 'src/server/delegation-protocol.ts']
   release:
     types: [published]
 

@@ -192,15 +192,17 @@ describe('formatGlanceRight density（Wave 2 减密分档）', () => {
     todoSummary: { total: 5, done: 2, inProgress: 1, current: '修复主题' },
   }
 
-  it('compact 档保留模型 + effort + cache% + 上下文% + 耗时（权限 badge/todo 收起）', () => {
+  it('compact 档保留模型 + effort + 上下文 + 异常信号 + 耗时，常规指标移到 full', () => {
     const plain = stripAnsi(formatGlanceRight({ ...fullInput, density: 'compact' }, theme))
     assert.ok(!plain.includes('[safe]'), '权限 badge 不再出现在 GlanceBar')
     assert.ok(plain.includes('deepseek-v4'), '模型保留')
-    assert.ok(plain.includes('◎high'), 'effort 保留')
-    assert.ok(plain.includes('⚡80%'), 'cache 命中率保留')
+    assert.ok(plain.includes('◎high'), '初始 effort 必须默认可见')
+    assert.ok(!plain.includes('⚡80%'), '正常 cache 命中率不占位')
+    const warning = stripAnsi(formatGlanceRight({ ...fullInput, density: 'compact', cacheHitRate: 0.3 }, theme))
+    assert.ok(warning.includes('⚡30%'), `低 cache 命中率仍作为异常信号显示: ${warning}`)
     assert.ok(plain.includes('◧25%'), `上下文百分比保留: ${plain}`)
     assert.ok(plain.includes('1m5s'), '耗时保留')
-    assert.ok(plain.includes('¥1.23'), 'cost 保留——常驻指标契约（6dca8b545 恢复常驻指标）')
+    assert.ok(!plain.includes('¥1.23'), 'cost 移到 full')
     assert.ok(plain.includes('≡2/5'), 'todo 徽章（compact 档 ≡done/total）显示')
     assert.ok(!plain.includes('○2'), '分态计数仅 full 档')
     assert.ok(!plain.includes('50k'), 'token 绝对值收起（只留百分比）')
@@ -228,12 +230,11 @@ describe('DeepSeek 计价时段段（pricingPhase，W1）', () => {
     assert.ok(peak.includes('◷峰时'), `peak full: ${peak}`)
   })
 
-  it('compact 档：◷闲½ / ◷峰 短文案', () => {
+  it('compact 档不占位展示计价时段，full 档保留', () => {
     const offpeak = stripAnsi(formatGlanceRight({ width: 120, density: 'compact', pricingPhase: 'offpeak' }, theme))
-    assert.ok(offpeak.includes('◷闲½'), `offpeak compact: ${offpeak}`)
+    assert.ok(!offpeak.includes('◷'), `offpeak compact: ${offpeak}`)
     const peak = stripAnsi(formatGlanceRight({ width: 120, density: 'compact', pricingPhase: 'peak' }, theme))
-    assert.ok(peak.includes('◷峰'), `peak compact: ${peak}`)
-    assert.ok(!peak.includes('◷峰时'), `compact 不用 full 文案: ${peak}`)
+    assert.ok(!peak.includes('◷'), `peak compact: ${peak}`)
   })
 
   it('缺省（非 deepseek）不渲染计价段', () => {

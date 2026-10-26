@@ -12,7 +12,6 @@ import { killProcessTree } from './process-kill.js'
 import { persistRawOutput, buildUiOutput } from './output-store.js'
 import { getResolvedEnv } from './resolved-env.js'
 import { createRequire } from 'node:module'
-import { pathToFileURL } from 'node:url'
 import { completionFacts } from './verification-facts.js'
 import { loadDeclaredVerify } from '../config/verify-config.js'
 import { buildLegacyTestCommand, type TestCommand } from './legacy-test-command.js'
@@ -22,6 +21,11 @@ import { runPlannedTests } from './run-planned-tests.js'
 import { verificationTimeout, runTestsTimeoutMs, verificationBudgetStop } from './verification-budget.js'
 import { resolveNpmCliCommand } from '../platform/resolve-node-cli.js'
 import { candidateTypecheckCommand } from './candidate-typecheck.js'
+import { verificationLifecycle } from '../agent/verification-runs.js'
+import { queryVerificationRuns } from './verification-query.js'
+import { BoundedLog } from './bounded-log.js'
+import { reuseVerification } from './verification-reuse.js'
+import { unwrapVerification } from './verification-invocation.js'
 import { candidateSnapshotRef } from '../agent/candidate-snapshot-ref.js'
 
 /** context-collapse 靠此正则解析 formatOutput 摘要行；改文案必须与消费方同步（常量共享，禁止两边各自手抄）。 */
@@ -42,15 +46,6 @@ export interface RunnableTestCommand {
   /** True for declared/fingerprint commands that are full shell strings
    *  (e.g. "cargo test", "go test ./...") rather than argv arrays. */
   shell?: boolean
-}
-
-/** Node's loader runs the same targeted tests without the tsx CLI's IPC server. */
-function withNodeTsxLoader(cwd: string, command: RunnableTestCommand): RunnableTestCommand {
-  let loader = 'tsx'
-  try { loader = pathToFileURL(createRequire(join(cwd, 'package.json')).resolve('tsx')).href } catch { /* Missing project dependency remains a Node invocation error. */ }
-  const args = ['--import', loader, ...command.args]
-  const displayArgs = command.args.map(arg => /^[A-Za-z0-9_./=:-]+$/.test(arg) ? arg : shellWord(arg))
-  return { ...command, command: process.execPath, args, display: `node --import tsx ${displayArgs.join(' ')}` }
 }
 
 /** A spawn descriptor normalized for the host OS (see {@link resolveTestSpawn}). */
@@ -362,7 +357,7 @@ export const RUN_TESTS_TOOL: Tool = {
 
 ### filter 怎么写
 文件名和相对路径都可以，带不带 .test/.spec 后缀都能解析：
-好：run_tests() —— 运行全部测试
+查询已有结果：run_tests(action="list") / run_tests(action="get", execution_id="...")；查询不会重跑。\n好：run_tests(full=true) —— 用户明确要求的全量测试
 好：run_tests(filter="loop.test.ts") —— 按文件名定位
 好：run_tests(filter="loop") —— 词干也可以，重名时改用精确路径
 好：run_tests(files=["packages/web/src/a.spec.ts"]) —— workspace 文件
@@ -376,18 +371,27 @@ export const RUN_TESTS_TOOL: Tool = {
     input_schema: {
       type: 'object',
       properties: {
+        action: { type: 'string', enum: ['run', 'list', 'get'], description: '默认 run；list/get 只读查询真实执行回执，不启动进程或发现测试。' },
+        execution_id: { type: 'string', description: 'get：本会话 executionId' },
+        rerun: { type: 'boolean', description: '仅用户明确要求重跑时 true；相同版本/范围/环境默认复用已结束回执，不因增大 timeout 重跑' },
+        full: { type: 'boolean', description: '用户明确要求全量测试时设置 true；与 files/filter 互斥。遵循现有工具审批。' },
+        environment: { type: 'string', enum: ['workspace', 'candidate', 'compare'], description: '默认只运行一个环境；deliveryFiles 默认 candidate。compare 显式要求候选与工作区对照。' },
         files: { type: 'array', items: { type: 'string' }, minItems: 1, description: '精确的仓库相对测试路径；可以跨包，与 filter 互斥。' },
         deliveryFiles: { type: 'array', items: { type: 'string' }, minItems: 1, description: '拟提交的仓库相对文件路径；仅验证这些改动与当前 HEAD 形成的候选树。' },
         check: { type: 'string', enum: ['typecheck'], description: '对 deliveryFiles 候选树做完整本地 TypeScript 类型检查；不运行测试。' },
-        projects: { type: 'array', items: { type: 'string' }, description: '明确选择配置项目，空数组表示恢复标准配置的全部项目；不会缩小交付所需的项目范围。' },
+        projects: { type: 'array', items: { type: 'string' }, description: '明确选择配置项目，空数组表示配置的全部项目；必须同时给出 files/filter 或显式 full。' },
         shard: { type: 'boolean', enum: [false], description: '显式取消原 Jest/Vitest 分片，用于剩余文件定向补测。' },
-        filter: { type: 'string', description: '测试文件名、词干或相对路径（不是测试名）。留空跑全量。' },
-        timeout: { type: 'integer', description: '整次验证的总预算（毫秒，默认：120000），隔离、集成与归因重试共用。' },
+        filter: { type: 'string', description: '测试文件名、词干或相对路径（不是测试名）。必须与 files 至少给一个——空参数只返回范围预览，不再默认全量。' },
+        timeout: { type: 'integer', description: '整次验证的总预算（毫秒，默认：120000）；仅显式 compare 时两个环境共用，不自动重跑。' },
       },
     },
   },
 
   async execute(params: ToolCallParams) {
+    const query = queryVerificationRuns(params)
+    if (query) return query
+    const reused = reuseVerification(params, 'run_tests')
+    if (reused) return reused
     if (params.input.deliveryFiles !== undefined) {
       const files = params.input.deliveryFiles
       if (!Array.isArray(files) || files.length === 0 || files.some(file => typeof file !== 'string' || !file.trim()) || params.candidateSnapshotError || !params.verificationSnapshot?.candidateOnly) {
@@ -424,6 +428,21 @@ export const RUN_TESTS_TOOL: Tool = {
       result.content = `[提交候选 ${snapshot.snapshotRef} · 类型检查] ${result.content}`
       return result
     }
+    // A default command or candidate environment does not select test files.
+    const hasFiles = Array.isArray(params.input.files) && params.input.files.length > 0
+      && params.input.files.every(file => typeof file === 'string' && file.trim())
+    const hasFilter = typeof filter === 'string' && filter.trim().length > 0
+    if (!hasFiles && !hasFilter && params.input.full !== true) {
+      return { content: 'run_tests：未指定测试范围，本次未执行测试。用 files/filter 定向选择；用户要求全量时用 full=true。候选文件、projects、默认 verify.test 都不代表本次全量授权。',
+        isError: true, errorKind: 'format_error' }
+    }
+    if (params.input.full === true && (params.input.files !== undefined || params.input.filter !== undefined)) {
+      return { content: 'full=true 与 files/filter 互斥；请明确选择全量或定向范围。', isError: true, errorKind: 'format_error' }
+    }
+    if (params.input.environment === 'workspace' && params.input.deliveryFiles !== undefined
+      || (params.input.environment === 'candidate' || params.input.environment === 'compare') && params.input.deliveryFiles === undefined && !params.verificationSnapshot) {
+      return { content: 'candidate/compare 环境需要 deliveryFiles；workspace 不接受 deliveryFiles。环境选择不扩大测试范围。', isError: true, errorKind: 'format_error' }
+    }
     if (params.input.deliveryFiles !== undefined || params.input.projects !== undefined || params.input.shard !== undefined || params.input.files !== undefined || existsSync(join(params.cwd, 'package.json')) && !loadDeclaredVerify(params.cwd).test
       && (filter || classifyVerificationCommand('npm test', params.cwd).runner)) {
       return runPlannedTests(params, remaining)
@@ -447,8 +466,8 @@ export const RUN_TESTS_TOOL: Tool = {
 
   timeoutMs: runTestsTimeoutMs,
 
-  requiresApproval(): boolean {
-    return false
+  requiresApproval(params: ToolCallParams): boolean {
+    return (params.input.action ?? 'run') === 'run' && params.input.full === true
   },
 
   isConcurrencySafe: () => false,
@@ -465,6 +484,7 @@ export interface RunTestChild {
   stderr: NodeJS.ReadableStream | null
   on(event: 'close', listener: (code: number | null, signal: NodeJS.Signals | null) => void): this
   on(event: 'error', listener: (error: Error) => void): this
+  on(event: 'spawn', listener: () => void): this
 }
 
 export interface RunTestCommandDeps {
@@ -542,7 +562,17 @@ export async function runTestCommandIn(
     return Promise.resolve({ content, isError: true, verification: { command: testCommand.display, kind: 'test', scope: testCommand.scope,
       status: 'blocked', blockedReason: 'invocation_failure', userGuidance: content, timestamp: startTime, countsReliable: false } })
   }
-  return new Promise<ToolResult>((resolve) => {
+  const receipt = verificationLifecycle(params, testCommand.display, cwd, { kind: params.input.check === 'typecheck' ? 'typecheck' : 'test', scope: testCommand.scope, targetFiles: testCommand.targetFiles, attribution: testCommand.shell && !unwrapVerification(testCommand.command, cwd) ? 'opaque' : 'known' })
+  receipt.actual([spawnSpec.command, ...spawnSpec.args].map(shellWord).join(' '))
+  return new Promise<ToolResult>((settle) => {
+      const resolve = (result: ToolResult) => {
+        if (result.verification) result.verification = receipt.finish({ ...result.verification,
+          ...(params.input.check === 'typecheck' ? { kind: 'typecheck' as const } : {}), omittedBytes: rawLog.omittedBytes },
+          params.abortSignal?.aborted ? 'cancelled' : result.errorKind === 'timeout' ? 'timed_out' : spawnFailed ? 'failed_to_start' : 'exited', result.rawPath)
+        settle(result)
+      }
+      const rawLog = new BoundedLog()
+      let spawnFailed = false
       // Single-settlement guard: timeout, abort, close and error can all race
       // (e.g. the killed child's `close` fires after the timeout already
       // resolved). Without this the losing path still runs its async work
@@ -564,13 +594,14 @@ export async function runTestCommandIn(
         detached: process.platform !== 'win32',
       })
 
+      child.on('spawn', () => receipt.started())
       let stdout = ''
       let hasNonWhitespaceOutput = false
       let stderr = ''
       let omittedStdout = 0
       let omittedStderr = 0
       const logScopeNote = () => omittedStdout || omittedStderr
-        ? `[run_tests 输出尾部：stdout 早期省略 ${omittedStdout} 字符；stderr 早期省略 ${omittedStderr} 字符。此前输出未保留。]`
+        ? `[run_tests 展示尾部：stdout 省略 ${omittedStdout} 字符；stderr 省略 ${omittedStderr} 字符。捕获日志可查询，超限字节单独标注。]`
         : ''
       const displayOutput = new DisplayOutputBuffer()
 
@@ -587,6 +618,7 @@ export async function runTestCommandIn(
         const text = stdoutDecoder.write(data)
         hasNonWhitespaceOutput ||= text.trim().length > 0
         stdout += text
+        rawLog.append(text)
         displayOutput.append(text)
         uiOutput.push(text)
         if (stdout.length > 100_000) {
@@ -599,6 +631,7 @@ export async function runTestCommandIn(
         if (settled) return
         const text = stderrDecoder.write(data)
         stderr += text
+        rawLog.append(text)
         displayOutput.append(text)
         uiOutput.push(text)
         if (stderr.length > 100_000) {
@@ -625,9 +658,9 @@ export async function runTestCommandIn(
         const raw = finalStdout + (finalStderr ? '\n' + finalStderr : '')
         const meta = { command: testCommand.display, exitCode: -1, durationMs: Date.now() - startTime }
         const logNote = logScopeNote()
-        const rawPath = await deps.persist(params.toolUseId, logNote ? `${logNote}\n${raw}` : raw)
+        const rawPath = await deps.persist(params.toolUseId, rawLog.text() || raw)
         resolve({
-          content: `测试在 ${timeout}ms 后超时` + (logNote ? `\n${logNote}\n已保存输出尾部见 ${rawPath}` : ''),
+          content: `测试在 ${timeout}ms 后超时` + (logNote ? `\n${logNote}\n已保存捕获日志见 ${rawPath}` : ''),
           uiContent: buildUiOutput(raw, meta),
           displayOutput: displayOutput.text(),
           displayOutputTruncated: displayOutput.truncated,
@@ -648,7 +681,7 @@ export async function runTestCommandIn(
       // 因 abortSignal 源自各自 AgentLoop 的 abortController，这天然是"范围化 kill 本实例"——
       // 中止一个实例不会波及另一个实例的进程，无需全局 killAll 硬锤。
       const signal = params.abortSignal
-      const onAbort = () => {
+      const onAbort = async () => {
         if (!claimSettlement()) return
         deps.clearTimeout(timer)
         completion?.dispose()
@@ -656,7 +689,9 @@ export async function runTestCommandIn(
         deps.setTimeout(() => deps.kill(child, 'SIGKILL'), 3000)
         uiOutput.flush()
         uiOutput.dispose()
-        resolve({ ...verificationBudgetStop(testCommand, startTime, 'cancelled'), uiContent: '⏹ 已中止', displayOutput: displayOutput.text(), displayOutputTruncated: true, command: testCommand.display })
+        let rawPath: string | undefined
+        try { rawPath = await deps.persist(params.toolUseId, rawLog.text()) } catch { /* execution remains cancelled */ }
+        resolve({ ...verificationBudgetStop(testCommand, startTime, 'cancelled'), rawPath, uiContent: '⏹ 已中止', displayOutput: displayOutput.text(), displayOutputTruncated: true, command: testCommand.display })
       }
       if (signal) {
         if (signal.aborted) onAbort()
@@ -672,6 +707,7 @@ export async function runTestCommandIn(
         const stdoutTail = stdoutDecoder.end()
         hasNonWhitespaceOutput ||= stdoutTail.trim().length > 0
         const stderrTail = stderrDecoder.end()
+        rawLog.append(stdoutTail); rawLog.append(stderrTail)
         const finalStdout = stdout + stdoutTail
         const finalStderr = stderr + stderrTail
         displayOutput.append(stdoutTail)
@@ -681,17 +717,6 @@ export async function runTestCommandIn(
         uiOutput.flush()
         uiOutput.dispose()
         const raw = finalStdout + (finalStderr ? '\n' + finalStderr : '')
-
-        // Preserve the existing EPERM fallback. ENOTSUP is retryable only when
-        // the tsx IPC server failed before running tests, not for test failures.
-        const unsupportedTsxIpc = code !== 0 && !hasNonWhitespaceOutput && /\blisten ENOTSUP\b/.test(finalStderr)
-          && /\bcreateIpcServer\b/.test(finalStderr) && /\.pipe\b/.test(finalStderr) && /tsx[/\\]dist[/\\]cli\.mjs\b/.test(finalStderr)
-        if (testCommand.command === 'tsx' && testCommand.args[0] === '--test' && (raw.includes('EPERM') || unsupportedTsxIpc)) {
-          const retryCmd = withNodeTsxLoader(cwd, testCommand)
-          completion?.dispose()
-          resolve(await runTestCommandIn(cwd, retryCmd, params, filter, Math.max(0, timeout - (Date.now() - startTime)), deps, repositoryRoot))
-          return
-        }
 
         const durationMs = Date.now() - startTime
         const exitCode = code ?? 1
@@ -703,7 +728,7 @@ export async function runTestCommandIn(
         Object.assign(parsed, completionFacts(coverage))
         const formatted = formatOutput(parsed)
         const logNote = logScopeNote()
-        const rawPath = await deps.persist(params.toolUseId, logNote ? `${logNote}\n${raw}` : raw)
+        const rawPath = await deps.persist(params.toolUseId, rawLog.text() || raw)
         const truncated = truncateOutput(formatted, rawPath, !!logNote)
         const meta = { command: testCommand.display, exitCode, durationMs }
 
@@ -767,13 +792,15 @@ export async function runTestCommandIn(
           if (rawTail.length > 0) failureContent = `${truncated}\n\n[运行器输出尾部]\n${rawTail}`
         }
 
-        const content = exitCode === 0
+        const content = exitCode === 0 && parsed.passed === 0 && parsed.failed === 0
+            ? `命令已退出（exit 0）；未观察到通过用例，测试结果未知。\n${truncated}`
+            : exitCode === 0
             ? (parsed.passed === 0 && !parsed.duration
               ? truncated  // parse likely failed — fall back to full formatted output
               : `✓ ${parsed.passed} 通过${parsed.skipped ? `，${parsed.skipped} 跳过` : ''}${parsed.duration ? `（${parsed.duration}）` : ''}`)
             : failureContent
         resolve({
-          content: content + (logNote ? `\n\n${logNote}\n已保存输出尾部见 ${rawPath}` : ''),
+          content: content + (logNote ? `\n\n${logNote}\n已保存捕获日志见 ${rawPath}` : ''),
           uiContent: buildUiOutput(raw, meta),
           displayOutput: displayOutput.text(),
           displayOutputTruncated: displayOutput.truncated,
@@ -786,12 +813,14 @@ export async function runTestCommandIn(
       })
 
       child.on('error', async (err) => {
+        spawnFailed = true
         completion?.dispose()
         deps.clearTimeout(timer)
         if (!claimSettlement()) return
         uiOutput.flush()
         uiOutput.dispose()
-        const rawPath = await deps.persist(params.toolUseId, err.message)
+        rawLog.append(err.message)
+        const rawPath = await deps.persist(params.toolUseId, rawLog.text())
         resolve({
           content: err.message,
           uiContent: err.message,

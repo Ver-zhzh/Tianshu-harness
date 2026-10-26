@@ -332,12 +332,13 @@ describe('ToolExecutionController vision-channel injection', () => {
       throwRegistryGetOnce: true,
     })
 
-    await assert.rejects(controller.executeBatch(makeInput()), /tool pipeline exploded/)
+    const failed = await controller.executeBatch(makeInput())
+    assert.ok(failed.traceStore.events.some(e => e.terminal === true && e.status === 'blocked'), 'preflight exception still produces a terminal audit')
     assert.deepEqual(observability.consumeForRequest(), {
-      outputRawBytes: 0,
+      outputRawBytes: Buffer.byteLength('Error: tool pipeline exploded'),
       outputTrimmedBytes: 0,
       outputFilterIds: [],
-      toolUiEvents: 0,
+      toolUiEvents: 1,
     })
 
     await controller.executeBatch(makeInput())

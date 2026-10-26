@@ -1,3 +1,4 @@
+import { ownedProcessTreeAliveAsync } from '../../tools/process-group-state.js'
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -80,8 +81,8 @@ export class EnvironmentLeases {
       onSpawn: (pid: number) => { lease.phase = 'running'; lease.childPid = pid; writeFileAtomicSync(path, JSON.stringify(lease)) },
       retain: () => {
         retained = true
-        const timer = setInterval(() => {
-          if (lease.childPid && !ownedProcessTreeAlive(lease.childPid)) {
+        const timer = setInterval(async () => {
+          if (lease.childPid && !await ownedProcessTreeAliveAsync(lease.childPid)) {
             try { rmSync(path, { force: true }); clearInterval(timer) } catch {}
           }
         }, 1000)

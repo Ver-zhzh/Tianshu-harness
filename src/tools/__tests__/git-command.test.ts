@@ -28,7 +28,12 @@ test('cancelled Git waits for its hook process to exit before returning and neve
     const result = await operation
     assert.equal(result.interrupted, true)
     assert.ok(Date.now() - cancelledAt < 2500, 'cancellation must not wait for the command timeout')
-    assert.throws(() => process.kill(pid, 0), /ESRCH/)
+    // 杀钩子进程与 ESRCH 可见之间存在收割竞态（高负载批内实测偶发）——
+    // 短轮询确认终态，不放松「必须被杀死」的契约。
+    const reapDeadline = Date.now() + 2000
+    const alive = () => { try { process.kill(pid, 0); return true } catch { return false } }
+    while (alive() && Date.now() < reapDeadline) await new Promise(resolve => setTimeout(resolve, 25))
+    assert.ok(!alive(), 'cancelled commit must kill its hook process')
     assert.equal(git(['rev-parse', 'HEAD']), head)
   } finally { rmSync(cwd, { recursive: true, force: true }) }
 })

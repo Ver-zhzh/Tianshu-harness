@@ -3,6 +3,7 @@ import { findModelInKey, findModelOwner } from '../config/provider-keys.js'
 import { resolveApiKey, resolveCredentialKey } from '../api/factory.js'
 import { createAuthProvider } from '../auth/registry.js'
 import type { ProviderNetwork } from '../api/provider-network.js'
+import { userConfigPath } from '../config/paths.js'
 
 /** Serializable identity only; credentials never cross the worker protocol. */
 export interface ModelBindingRef {
@@ -16,7 +17,21 @@ export interface ModelBindingRef {
 export type ModelUnavailableReason = 'provider_deleted' | 'model_deleted' | 'route_deleted' | 'missing_credentials' | 'oauth_not_authenticated'
 
 export class ModelBindingUnavailable extends Error {
-  constructor(readonly reason: ModelUnavailableReason) { super(reason); this.name = 'ModelBindingUnavailable' }
+  /** 只含可序列化的身份；凭据、凭据主体与网关地址永不进入 worker 协议。 */
+  readonly target?: Pick<ModelBindingRef, 'provider' | 'model' | 'keyId'>
+  constructor(readonly reason: ModelUnavailableReason, target?: ModelBindingRef) {
+    super(reason)
+    this.name = 'ModelBindingUnavailable'
+    if (target) this.target = { provider: target.provider, model: target.model, ...(target.keyId ? { keyId: target.keyId } : {}) }
+  }
+
+  /** 人读摘要：机器可读的 reason 保持不变（classifyWorkerError 与既有消费方按它匹配），
+   *  额外补目标身份与**实际生效的**配置路径 + PID——主会话与 worker 可能连着不同实例，
+   *  只报 model_deleted 让排查者无从判断该看哪份配置（2026-10-24 收编公开仓 PR #37）。 */
+  describe(): string {
+    if (!this.target) return this.reason
+    return `${this.reason}: ${JSON.stringify(this.target)}; config=${JSON.stringify(userConfigPath())}; pid=${process.pid}`
+  }
 }
 
 export function sessionProviderKey(providers: Record<string, ProviderConfig>, provider: ProviderConfig): string {
@@ -41,26 +56,26 @@ export function sessionProviderKey(providers: Record<string, ProviderConfig>, pr
 /** Exact lookup, with the same model-owner and credential rules as main sessions. */
 export function resolveModelBinding(providers: Record<string, ProviderConfig>, target: ModelBindingRef, network?: ProviderNetwork) {
   const configured = providers[target.provider]
-  if (!configured) throw new ModelBindingUnavailable('provider_deleted')
+  if (!configured) throw new ModelBindingUnavailable('provider_deleted', target)
   const found = target.keyId
     ? findModelInKey(configured, target.keyId, target.model)
     : findModelOwner(configured, target.model)
-  if (!found) throw new ModelBindingUnavailable('model_deleted')
+  if (!found) throw new ModelBindingUnavailable('model_deleted', target)
   const provider = { ...configured, ...(target.baseUrl ? { baseUrl: target.baseUrl } : {}) }
   let apiKey = ''
   let auth: ReturnType<typeof createAuthProvider> | undefined
   if (provider.auth?.type === 'oauth') {
     try {
       auth = createAuthProvider(provider.auth, process.env, provider.apiKey, { ...network, proxy: provider.proxy ?? network?.proxy })
-      if (!auth.isAuthenticated()) throw new ModelBindingUnavailable('oauth_not_authenticated')
-    } catch { throw new ModelBindingUnavailable('oauth_not_authenticated') }
+      if (!auth.isAuthenticated()) throw new ModelBindingUnavailable('oauth_not_authenticated', target)
+    } catch { throw new ModelBindingUnavailable('oauth_not_authenticated', target) }
   } else {
     const owner = found.owner
     try {
       apiKey = owner && (owner.keyRef || owner.apiKey || owner.apiKeyEnv)
         ? resolveCredentialKey({ name: provider.name, keyRef: owner.keyRef, apiKey: owner.apiKey, apiKeyEnv: owner.apiKeyEnv })
         : resolveApiKey(provider)
-    } catch { throw new ModelBindingUnavailable('missing_credentials') }
+    } catch { throw new ModelBindingUnavailable('missing_credentials', target) }
   }
   return { provider, apiKey, auth, spec: found.model, ref: {
     provider: target.provider, model: found.model.id,

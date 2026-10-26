@@ -1051,7 +1051,7 @@ async function runStarflowUnlocked(deps: StarflowDeps, input: StarflowInput, sta
       try {
         result = await runWithPhaseHeartbeat(deps, 'galaxy', () => deps.galaxyTool.execute({
           ...subParams(deps, 'galaxy'),
-          input: { objective: input.objective, dimensions: dims, autoReview: input.autoReview ?? true, confirm: true },
+          input: { objective: input.objective, dimensions: dims, autoReview: input.autoReview ?? false, confirm: true },
         }))
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)

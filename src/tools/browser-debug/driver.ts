@@ -4,7 +4,9 @@ import { browserKeyParameters } from './keyboard-input.js'
  * browser-debug/driver — Playwright-backed CDP driver (lazy, optional dep).
  */
 
-import { shouldCaptureResponseBody, truncateResponseBody } from './log-capture.js'
+import type { DiagnosticScope } from './log-capture.js'
+import { wirePageEvents } from './driver-events.js'
+import { randomUUID } from 'node:crypto'
 export type { BrowserCookie } from './pw-surface.js'
 import { PLAYWRIGHT_INSTALL_HINT, isBrowserMissingError, resolveLaunchExecutablePath } from '../net/playwright-driver.js'
 import {
@@ -19,7 +21,7 @@ import {
 } from './pw-surface.js'
 
 export interface DriverEvents {
-  onConsole(level: string, text: string): void
+  onConsole(level: string, text: string, scope?: DiagnosticScope): void
   onRequestStart(
     requestId: string,
     method: string,
@@ -27,6 +29,7 @@ export interface DriverEvents {
     resourceType?: string,
     headers?: Record<string, string>,
     postData?: string,
+    scope?: DiagnosticScope,
   ): void
   onResponse(requestId: string, status: number, resourceType?: string, headers?: Record<string, string>): void
   onRequestFailed(requestId: string, method: string, url: string, errorText?: string, resourceType?: string): void
@@ -90,6 +93,8 @@ export interface BrowserInputEvent {
 
 export interface BrowserPageInfo {id:string;url:string;title:string;active:boolean;canBack:boolean;canForward:boolean;loading:boolean}
 export interface BrowserDebugDriver {
+  flushDiagnostics?(): Promise<boolean>
+  currentDiagnosticScope?(): DiagnosticScope
   subscribeTargetChanges?(listener: () => void): () => void
   listPages?():Promise<BrowserPageInfo[]>
   selectPage?(id:string):Promise<void>
@@ -206,83 +211,11 @@ function mergeAbortSignal(timeoutMs: number, signal?: AbortSignal): { signal?: A
   }
 }
 
-async function captureResponseBody(res: PwResponse, requestId: string, events: DriverEvents): Promise<void> {
-  try {
-    const headers = res.headers()
-    const contentType = headers['content-type'] ?? headers['Content-Type']
-    const text = await res.text()
-    const { body } = truncateResponseBody(text)
-    events.onResponseBody(requestId, body, contentType)
-  } catch {
-    /* binary or unreadable body — skip */
-  }
-}
-
-/** Wire Playwright page events into our DriverEvents sink. The id counter is
- *  shared across all pages of a session so popup/tab requests don't collide
- *  with the main page's request ids (r1, r2, …). */
-function wireEvents(page: PwPage, events: DriverEvents, counter: { seq: number }): void {
-  const ids = new WeakMap<PwRequest, string>()
-  const idFor = (req: PwRequest): string => {
-    let id = ids.get(req)
-    if (!id) {
-      id = `r${++counter.seq}`
-      ids.set(req, id)
-    }
-    return id
-  }
-
-  page.on('console', ((msg: PwConsoleMessage) => {
-    try {
-      events.onConsole(msg.type(), msg.text())
-    } catch {
-      /* ignore */
-    }
-  }) as never)
-
-  page.on('pageerror', ((err: Error) => {
-    events.onConsole('error', err?.message ?? String(err))
-  }) as never)
-
-  page.on('request', ((req: PwRequest) => {
-    try {
-      let headers: Record<string, string> | undefined
-      let postData: string | undefined
-      try { headers = req.headers() } catch { /* ignore */ }
-      try { postData = req.postData() ?? undefined } catch { /* ignore */ }
-      events.onRequestStart(idFor(req), req.method(), req.url(), req.resourceType(), headers, postData)
-    } catch {
-      /* ignore */
-    }
-  }) as never)
-
-  page.on('response', ((res: PwResponse) => {
-    try {
-      const req = res.request()
-      const id = idFor(req)
-      const resourceType = req.resourceType()
-      const status = res.status()
-      let headers: Record<string, string> | undefined
-      try { headers = res.headers() } catch { /* ignore */ }
-      events.onResponse(id, status, resourceType, headers)
-      if (shouldCaptureResponseBody(resourceType, status)) {
-        void captureResponseBody(res, id, events)
-      }
-    } catch {
-      /* ignore */
-    }
-  }) as never)
-
-  page.on('requestfailed', ((req: PwRequest) => {
-    try {
-      events.onRequestFailed(idFor(req), req.method(), req.url(), req.failure()?.errorText, req.resourceType())
-    } catch {
-      /* ignore */
-    }
-  }) as never)
-}
-
 export interface PageTracker {
+  flushDiagnostics(): Promise<boolean>
+  ready(page: PwPage): Promise<unknown>
+  diagnosticScope(): DiagnosticScope
+  beginNavigation(page: PwPage): () => void
   /** 解析一个可用页面：active 已关闭→回退剩余活页；一个都没有→新建。
    *  页面级自愈的主入口（见 docs/analysis/2026-09-25-browser_debug-归因复核与优化设计.md W1）。 */
   resolvePage(): Promise<PwPage>
@@ -309,16 +242,17 @@ export function attachPageTracker(
   events: DriverEvents,
   initial: PwPage,
 ): PageTracker {
-  const counter = { seq: 0 }
+  const counter = { seq: 0, generation: randomUUID() }
   let active: PwPage | null = initial
   let creating: Promise<PwPage> | null = null
   const known = new WeakSet<PwPage>()
+  const scopes = new WeakMap<PwPage, ReturnType<typeof wirePageEvents>>()
   const pageIds=new WeakMap<PwPage,string>();let pageSeq=0
   const track = (page: PwPage): void => {
     if (known.has(page)) return
     known.add(page)
     pageIds.set(page,`page-${++pageSeq}`)
-    wireEvents(page, events, counter)
+    scopes.set(page, wirePageEvents(page, events, counter, pageIds.get(page)!, context))
     active = page
     page.on('close', (() => {
       if (active !== page) return
@@ -331,18 +265,23 @@ export function attachPageTracker(
     try { track(page) } catch { /* ignore */ }
   }) as never)
   return {
+    flushDiagnostics: () => active ? scopes.get(active)?.flush() ?? Promise.resolve(false) : Promise.resolve(false),
+    ready: page => scopes.get(page)?.ready ?? Promise.resolve(false),
+    diagnosticScope: () => active ? scopes.get(active)?.scope() ?? { pageId: null, navigationId: null } : { pageId: null, navigationId: null },
+    beginNavigation: page => scopes.get(page)?.beginNavigation() ?? (() => {}),
     resolvePage: (): Promise<PwPage> => {
-      if (active && !active.isClosed()) return Promise.resolve(active)
+      if (active && !active.isClosed()) { const page = active; return (scopes.get(page)?.ready ?? Promise.resolve()).then(() => page) }
       const open = context.pages().filter((p) => !p.isClosed())
       if (open.length > 0) {
         active = open[open.length - 1]!
-        return Promise.resolve(active)
+        const page = active
+        return (scopes.get(page)?.ready ?? Promise.resolve()).then(() => page)
       }
       // 浏览器还活着但没有页面（用户关窗/关标签）——补一个。并发 action 共用
       // 同一个创建 Promise，避免同时 newPage() 造出两个标签页。
       if (!creating) {
         creating = context.newPage()
-          .then((page) => { active = page; return page })
+          .then(async (page) => { active = page; await scopes.get(page)?.ready; return page })
           .finally(() => { creating = null })
       }
       return creating
@@ -354,7 +293,7 @@ export function attachPageTracker(
   }
 }
 
-function buildDriver(
+export function buildDriver(
   resolvePage: () => Promise<PwPage>,
   activePage: () => PwPage | null,
   context: PwContext,
@@ -407,6 +346,8 @@ function buildDriver(
   const watch=()=>{for(const {page} of tracker.pages())if(!observed.has(page)){observed.add(page);page.on('request',((request:{resourceType():string})=>{if(request.resourceType()==='document')loading.set(page,true)}) as never);page.on('domcontentloaded',(()=>loading.set(page,false)) as never);page.on('load',(()=>loading.set(page,false)) as never);page.on('requestfailed',(()=>loading.set(page,false)) as never);page.on('download',((d:{suggestedFilename():string;path():Promise<string|null>})=>{const item={id:`download-${downloads.length+1}`,name:d.suggestedFilename(),path:null as string|null};downloads.push(item);void d.path().then(path=>{item.path=path}).catch(()=>{})}) as never)}}
   watch();context.on('page',(()=>watch()) as never)
   return {
+    flushDiagnostics: tracker.flushDiagnostics,
+    currentDiagnosticScope: tracker.diagnosticScope,
     subscribeTargetChanges: targets.subscribe,
     listPages:async()=>{watch();const rows=[];for(const {id,page} of tracker.pages()){
       let title='';try{title=String(await page.evaluate('document.title'))}catch{}
@@ -415,7 +356,7 @@ function buildDriver(
       rows.push({id,url:page.url(),title,active:page===activePage(),canBack,canForward,loading:loading.get(page)??false})
     }return rows},
     selectPage:async id=>{tracker.selectPage(id);targetChanged();await detachCdp()},
-    newPage:async url=>{const page=await context.newPage();if(url)await page.goto(url,{waitUntil:'domcontentloaded',timeout:30000})},
+    newPage:async url=>{const page=await context.newPage();await tracker.ready(page);if(url)await page.goto(url,{waitUntil:'domcontentloaded',timeout:30000})},
     closePage:async id=>{const p=tracker.pages().find(p=>p.id===id)?.page;if(!p?.close)throw new Error('Page cannot be closed');await p.close();await detachCdp()},
     insertText:async (text,checkContext)=>{const session=await ensureCdp();checkContext?.();await session.send('Input.insertText',{text})},
     uploadFiles:async files=>{const page=await resolvePage();if(!page.setInputFiles)throw new Error('File upload unavailable');await page.setInputFiles('input[type=file]',files)},
@@ -423,10 +364,13 @@ function buildDriver(
     downloads:()=>downloads,
     goto: async (url, signal) => {
       const page = await resolvePage()
+      const cancel = page.url() === url || page.url().split('#')[0] !== url.split('#')[0] ? tracker.beginNavigation(page) : () => {}
       const merged = mergeAbortSignal(30_000, signal)
       try {
         await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000, signal: merged.signal })
+        await tracker.flushDiagnostics()
       } finally {
+        cancel()
         merged.cleanup?.()
       }
     },
@@ -525,27 +469,44 @@ function buildDriver(
     },
     reload: async (signal) => {
       const merged = mergeAbortSignal(30_000, signal)
+      let cancel = () => {}
       try {
-        await (await resolvePage()).reload({ waitUntil: 'domcontentloaded', timeout: 30_000, signal: merged.signal })
+        const page = await resolvePage()
+        cancel = tracker.beginNavigation(page)
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: 30_000, signal: merged.signal })
+        await tracker.flushDiagnostics()
       } finally {
+        cancel()
         merged.cleanup?.()
       }
     },
     goBack: async (signal) => {
       const merged = mergeAbortSignal(30_000, signal)
+      let cancel = () => {}
       try {
-        const res = await (await resolvePage()).goBack({ waitUntil: 'domcontentloaded', timeout: 30_000, signal: merged.signal })
+        const page = await resolvePage()
+        cancel = tracker.beginNavigation(page)
+        const res = await page.goBack({ waitUntil: 'domcontentloaded', timeout: 30_000, signal: merged.signal })
+        if (res === null) cancel()
+        await tracker.flushDiagnostics()
         return res !== null
       } finally {
+        cancel()
         merged.cleanup?.()
       }
     },
     goForward: async (signal) => {
       const merged = mergeAbortSignal(30_000, signal)
+      let cancel = () => {}
       try {
-        const res = await (await resolvePage()).goForward({ waitUntil: 'domcontentloaded', timeout: 30_000, signal: merged.signal })
+        const page = await resolvePage()
+        cancel = tracker.beginNavigation(page)
+        const res = await page.goForward({ waitUntil: 'domcontentloaded', timeout: 30_000, signal: merged.signal })
+        if (res === null) cancel()
+        await tracker.flushDiagnostics()
         return res !== null
       } finally {
+        cancel()
         merged.cleanup?.()
       }
     },

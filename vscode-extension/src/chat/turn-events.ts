@@ -21,6 +21,7 @@
  * @module
  */
 import type { SessionEvent } from '../sidecar/protocol.js'
+import { isLivenessEvent } from '../shared/session-state-reducer.js'
 
 /** 结构化提问的一条问题（server ask_user_question 载荷的归一化投影）。 */
 export interface ChatQuestion {
@@ -32,6 +33,7 @@ export interface ChatQuestion {
 
 /** 一次聊天轮内，一条 sidecar 事件对回复流的贡献。 */
 export type ChatTurnEvent =
+  | { kind: 'tool-input-progress'; id: string; name: string; bytes: number; state: string }
   /** 追加到回复的助手文本增量。 */
   | { kind: 'delta'; text: string }
   /** 本轮收束；`reason` 为 done.status（completed/failed/aborted）。 */
@@ -151,6 +153,10 @@ function summarizeToolInput(input: unknown): string {
 export function interpretSessionEvent(ev: SessionEvent): ChatTurnEvent | undefined {
   const d = ev.data ?? {}
   switch (ev.type) {
+    case 'tool_input_progress':
+      return typeof d.toolCallId === 'string' && typeof d.argumentBytes === 'number' && Number.isFinite(d.argumentBytes)
+        ? { kind: 'tool-input-progress', id: d.toolCallId, name: asString(d.toolName) || '工具', bytes: d.argumentBytes, state: asString(d.state) }
+        : undefined
     case 'text_delta': {
       const text = asString(d.text)
       return text === '' ? undefined : { kind: 'delta', text }
@@ -220,14 +226,9 @@ export function interpretSessionEvent(ev: SessionEvent): ChatTurnEvent | undefin
     }
     case 'phase': {
       const phase = asString(d.phase)
-      return phase === '' ? undefined : { kind: 'activity', phase }
+      return phase === '' || phase === 'idle' ? undefined : { kind: 'activity', phase }
     }
-    case 'watchdog_recovery':
-    case 'retry':
-    case 'hook_result':
-    case 'plan_draft':
-      return { kind: 'activity', phase: ev.type }
     default:
-      return undefined
+      return isLivenessEvent(ev) ? { kind: 'activity', phase: ev.type } : undefined
   }
 }

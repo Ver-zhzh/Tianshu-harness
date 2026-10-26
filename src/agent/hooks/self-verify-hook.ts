@@ -2,6 +2,7 @@ import type { PostTurnRuntimeHook, RuntimeHookContext } from '../runtime-hooks.j
 import type { AdvisoryBus } from '../advisory-bus.js'
 import type { VerificationMetadata } from '../../tools/types.js'
 import { isVerificationIntent } from '../verification-activity.js'
+import { readonlyAdviceDecision, readonlyAdviceMode, type ReadonlyAdviceMode } from '../readonly-advice.js'
 
 /**
  * Self-Verify Hook — postTurn check that prevents the model from treating
@@ -102,6 +103,10 @@ export function detectScopeMismatch(
 // ─── Hook ───────────────────────────────────────────────────────
 
 export interface SelfVerifyHookDeps {
+  readonlyAdviceMode?: ReadonlyAdviceMode
+  getReadonlyTaskConstraint?: () => boolean | undefined
+  recordReadonlyAdvice?: (event: { mode: ReadonlyAdviceMode; decision: string; runId?: string; modelTurn?: number }) => void
+  hasActiveRepair?: () => boolean
   /** Only `submit` is used — narrowed for testability (interface segregation). */
   advisoryBus: Pick<AdvisoryBus, 'submit'>
   /** W5: EvidenceTracker state getter for scope-mismatch detection.
@@ -114,7 +119,7 @@ export interface SelfVerifyHookDeps {
   /** 证据义务状态机（同义 advisory supersede，Wave 3）：存在未决高风险
    *  delivery/bugfix 义务时，义务块已是"改了没验证"事实的模型可见声音——
    *  跳过泛化 self-verify advisory，避免同一事实两份文案同轮出现。 */
-  obligations?: Pick<import('../obligation-tracker.js').ObligationTracker, 'unresolvedHigh'>
+  obligations?: Pick<import('../obligation-tracker.js').ObligationTracker, 'unresolvedHigh'> & Partial<Pick<import('../obligation-tracker.js').ObligationTracker, 'getStore'>>
   /** W3 债龄阶梯（2026-07-25 advisory-ecology-repair）：验证债判据
    *  （EvidenceTracker.hasVerificationDebt()，与 cognitive frame 同一口径）。
    *  hook 自持连续计数——债连续在场越久，提交的 advisory priority 越高
@@ -142,6 +147,7 @@ export function escalatedPriority(base: number, debtDuration: number): number {
 }
 
 export function createSelfVerifyHook(deps: SelfVerifyHookDeps): PostTurnRuntimeHook {
+  const adviceMode = deps.readonlyAdviceMode ?? readonlyAdviceMode()
   // W5 nag 抑制：同一模块规模只提醒一次；改动继续扩到新模块才再次提醒。
   let lastMismatchModuleCount = 0
   // W3 债龄：验证债连续为真的轮数。债消失即清零——计的是"这笔债"的驻留，
@@ -151,6 +157,7 @@ export function createSelfVerifyHook(deps: SelfVerifyHookDeps): PostTurnRuntimeH
     phase: 'postTurn',
     name: 'self-verify',
     run(ctx: RuntimeHookContext) {
+      if (deps.hasActiveRepair?.()) return
       const { recentToolHistory, turn } = ctx.snapshot
 
       // 债龄计数每轮更新（在一切早退之前——早退轮的债同样在陈化）
@@ -172,7 +179,8 @@ export function createSelfVerifyHook(deps: SelfVerifyHookDeps): PostTurnRuntimeH
             key: 'self-verify-scope-mismatch',
             priority: escalatedPriority(0.55, debtDuration),
             category: 'discipline',
-            content: `【瑶光】本任务改动已跨 ${scope.moduleCount} 个模块，但已有验证全是 targeted 单点、没有任何 full-scope 验证。引入回归是最常见的交付失败——在收尾前跑一次全量（或逐模块）验证，别等交付门禁 RED。`,
+            tier: 'informational',
+            content: `本次改动涉及 ${scope.moduleCount} 个模块，已有记录仅覆盖定向测试；更大范围尚未验证。可告知用户选择独立审查或扩大验证；不要自动追加全量测试，不影响提交。`,
             ttl: 1,
             observe: { turns: 1 },
           })
@@ -188,19 +196,6 @@ export function createSelfVerifyHook(deps: SelfVerifyHookDeps): PostTurnRuntimeH
       const allReadOrWrite = recentToolHistory.every(isReadOrWriteCall)
       if (!allReadOrWrite) return
 
-      // 结构化信号：kind='verification' + attention → control plane focus 转
-      // 'verify'。key 稳定、无自由文本——同一事实反复触发不会抖动 revision。
-      deps.submitControlSignal?.({
-        key: 'self-verify:verification-required',
-        kind: 'verification',
-        severity: 'attention',
-        summary: 'recent conclusions built on reads/edits without ground-truth verification',
-        routeHint: 'status',
-        requiresDecision: false,
-        ttlTurns: 2,
-        cacheImpact: 'none',
-      })
-
       // 同义 supersede：未决高风险 delivery/bugfix 义务在场时，义务块
       // （evidence-obligation projection + control plane）已承载同一事实与
       // 更具体的下一动作——不再叠发泛化 advisory。
@@ -208,15 +203,24 @@ export function createSelfVerifyHook(deps: SelfVerifyHookDeps): PostTurnRuntimeH
         .some(o => o.family === 'delivery' || o.family === 'bugfix')
       if (obligationVoice) return
 
+      if (adviceMode !== 'off') {
+        const evidence = deps.getEvidenceState?.()
+        const store = deps.obligations?.getStore?.()
+        const decision = readonlyAdviceDecision({ explicitReadonly: deps.getReadonlyTaskConstraint?.(),
+          modifiedFiles: evidence?.filesModified.size, verificationDebt: deps.getVerificationDebt?.(),
+          pendingObligations: store ? store.obligations.some(o => o.state !== 'satisfied' && o.state !== 'superseded') : undefined,
+          history: recentToolHistory })
+        deps.recordReadonlyAdvice?.({ mode: adviceMode, decision, runId: ctx.snapshot.runId, modelTurn: ctx.snapshot.modelTurn })
+        if (adviceMode === 'active' && decision === 'eligible') return
+      }
+
       deps.advisoryBus.submit({
         key: 'self-verify',
         priority: escalatedPriority(0.58, debtDuration),
         category: 'discipline',
-        content: '【瑶光】最近几步没有独立验证中的测试或类型检查记录。若当前任务需要测试或类型检查，执行对应项目入口并检查结果；读原文、浏览器观测可核实对应事实，但不补测试或类型检查义务。任务只需事实核查时保留其证据，不为核销提醒运行无关测试；不得把摘要或自述当通过。',
+        tier: 'informational',
+        content: '【瑶光】最近几步没有独立验证中的测试或类型检查记录。按当前任务已授权的定向验证执行；扩大范围或单独验证由用户决定，缺少记录不阻止提交或收尾；读原文、浏览器观测可核实对应事实，但不补测试或类型检查义务。任务只需事实核查时保留其证据，不为核销提醒运行无关测试；不得把摘要或自述当通过。',
         ttl: 1,
-        // P1a 核销 + Phase 2 挂起观察：模型常在下一轮自发验证——挂 1 个周期,
-        // 窗口内 expect 已满足则自愈撤销（ICU 延迟确认降误报）,否则准时送达。
-        expect: { kind: 'verify_attempted', withinTurns: 2 },
         observe: { turns: 1 },
       })
     },

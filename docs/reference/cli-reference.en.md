@@ -64,14 +64,21 @@ Zen Mode is **explicit opt-in (`enabled: false` by default)** so new sessions st
 
 ## Subagent Orchestration & Tool Presets
 
-Tianshu ships **51 built-in tools** (`full` preset) assembled in four preset tiers. Resolution priority: `RIVET_TOOL_PRESET` env > project `.rivet-config.json` `tools.preset` > per-domain `runtime.domains.<domain>.toolPreset` > domain built-in tier (`taiyi` → `taiyi`) > default **`minimal`**:
+Presets separate registration from main-agent visibility. Resolution order: environment > project preset > project domain override > user preset > user domain override > built-in domain default > **minimal**. Baselines below exclude MCP/LSP, schedulers and forced extras.
 
-| Preset | Tools | Description |
-|--------|-------|-------------|
-| **minimal** (default) | 30 | Full daily-dev capability — read/write/search/bash/`git_scout`/tests/delegation/web/plan/todo/memory; saves tokens and preserves prefix cache |
-| **frontend** | 31 | `minimal` + `browser_debug` (UI rendering verification loop) |
-| **full** | 51 | Everything — `council_convene` / `team_orchestrate` / `attack_case` / `semantic_search` / `repo_graph` / `monitor` / `computer_use` / `capability` / `cli_discover` / office tools, etc. |
-| **taiyi** | 14 | Minimal evaluation tier — high-frequency core + delivery loop without heavy orchestration/browser/network/vision tools; auto-applied when the `taiyi` star domain is pinned |
+| Preset | Registered / main-visible | Description |
+|---|---|---|
+| **minimal** (default) | 36 / 26 | Daily development, basic delegation, team, memory, capsules and image queries |
+| **frontend** | 37 / 27 | minimal + `browser_debug` |
+| **orchestration** | 36 / 30 | minimal + `galaxy`, `starflow`, `plan_task`, `council_convene`; full is not required |
+| **full** | 56 / 43 | All assembly capabilities and advanced orchestration; cold tools retain explicit visibility controls |
+| **taiyi** | 14 / 13 | Frozen evaluation baseline; `diff` stays cold |
+
+A real scheduler registers three additional tools. They are visible by default only in full/taiyi. Use `/tools enable <name>` for explicit activation in other presets. Readonly workers retain `git_scout`; the default main agent uses `git`.
+
+`/tools` reports actual registered and visible tools, cold tools, missing tools and explicit restrictions. `/galaxy`, `/starflow` and `/council` mount only the requested tool, respect restrictions, and disclose the one-time cache impact. They do not upgrade the preset. Settings apply to subsequent sessions.
+
+Default `/team` directly accepts `planPath` or `planMarkdown` with `### Task N: title` headings, exact files, dependencies and acceptance criteria. It does not require `plan_task`. Explicit current plans take priority over stored plans; `/team max` retains its existing entitlement policy. Execution, commits, verification and review remain separate facts.
 
 ## Plan Mode
 
@@ -188,7 +195,7 @@ Design-first workflow (`/plan-mode` toggle, or automatic entry on complex tasks 
 |----------|--------|
 | `RIVET_HOME` | Override `~/.rivet` data root for CLI (Desktop uses Settings → Storage) |
 | `DEEPSEEK_API_KEY` | DeepSeek API key |
-| `RIVET_TOOL_PRESET` | Toolset preset: `minimal` (default) / `frontend` / `full` / `taiyi` |
+| `RIVET_TOOL_PRESET` | Toolset preset: `minimal` (default) / `frontend` / `orchestration` / `full` / `taiyi` |
 | `RIVET_LEAN=1` | Enable Lean resource tier for low-memory / low-disk machines |
 | `RIVET_LANG=en` | Switch Cockpit panel labels to English (default `zh`) |
 | `RIVET_TERMINAL_MODE` | Terminal UI mode: `auto` / `captured-pty` / `native` |
@@ -239,7 +246,7 @@ Example `~/.rivet/config.json` (only write overrides; defaults are deep-merged �
     "autoThreshold": 800000
   },
   "tools": {
-    "preset": "minimal"           // minimal (default) | frontend | full | taiyi
+    "preset": "minimal"           // minimal (default) | frontend | orchestration | full | taiyi
   },
   "workers": {
     "profiles": {

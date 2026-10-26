@@ -7,6 +7,7 @@ import type { ContentBlock, Usage } from './types.js'
  *  streamed reasoning; forensics had to reverse-engineer the loss from
  *  cache-log timestamp gaps. This event makes the discard observable. */
 export interface StreamAttemptAbortedInfo {
+  measurements?: import('./request-observability.js').RequestMeasurements
   turn?: number
   usage?: Partial<Usage>
   requestId?: string
@@ -22,6 +23,7 @@ export interface StreamAttemptAbortedInfo {
 }
 
 export interface StreamCallbacks {
+  onToolInputProgress?: (progress: import('./tool-input-progress.js').ToolInputProgress) => void
   onContextBudget?: (budget: import('../server/protocol.js').ContextBudgetSnapshot) => void
   /** Streaming text delta for live display */
   onTextDelta: (text: string) => void

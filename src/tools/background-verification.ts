@@ -1,5 +1,5 @@
-import { randomUUID } from 'node:crypto'
-import { buildBashVerification, suggestSingleCommand } from '../agent/bash-verification.js'
+import { verificationLifecycle } from '../agent/verification-runs.js'
+import { buildBashVerification } from '../agent/bash-verification.js'
 import { classifyVerificationIntent, type VerificationExecutionIntent } from '../agent/verification-intent.js'
 import { completionFacts } from './verification-facts.js'
 import { prepareCompletionCaptureAsync } from './test-completion-async.js'
@@ -10,6 +10,9 @@ import { classifyDeclaredCommand, loadDeclaredVerify } from '../config/verify-co
 import { unwrapVerification } from './verification-invocation.js'
 
 export async function prepareBackgroundVerification(command: string, params: ToolCallParams): Promise<{
+  executionId?: string
+  actual(command: string): void
+  onStarted: JobSpawnOptions['onStarted']
   preparationError?: string
   command: string; env: NodeJS.ProcessEnv; onCompleted: JobSpawnOptions['onCompleted']; note: string; dispose(): void
   /** 同一条命令的执行意图（共同命令事实的唯一解析点）——由 spawn 侧写入
@@ -24,7 +27,7 @@ export async function prepareBackgroundVerification(command: string, params: Too
   params.abortSignal?.addEventListener('abort', cancelPreparation, { once: true })
   const capture = await prepareCompletionCaptureAsync(command, params.cwd, getShellCommand().kind, undefined,
     Number.MAX_SAFE_INTEGER, preparation.signal).finally(() => params.abortSignal?.removeEventListener('abort', cancelPreparation))
-  const startedAt = Date.now(), executionId = randomUUID()
+  const startedAt = Date.now()
   const intent = classifyVerificationIntent(command, params.cwd)
   const leaf = unwrapVerification(command, params.cwd)
   const declaredKind = classifyDeclaredCommand(leaf?.command ?? command, loadDeclaredVerify(leaf?.cwd ?? params.cwd))
@@ -38,16 +41,20 @@ export async function prepareBackgroundVerification(command: string, params: Too
    *  （2026-10-10 回归，用例：verification-run-evidence.test.ts
    *  「background exit facts override replayed failure text」）。 */
   const trustworthyExit = !!leaf && (!!declaredKind || !!kind) && intent.lifetime !== 'persistent'
-  const suggestion = verificationCommand ? suggestSingleCommand(command) : null
+  const receipt = verificationLifecycle(params, command, params.cwd, { kind, scope: intent.scope?.scope ?? 'unknown', attribution: leaf ? 'known' : 'opaque' }, 'bash')
+  receipt.actual(capture?.command ?? command)
   let recorded = false
   return {
+    executionId: verificationCommand ? receipt.executionId : undefined,
+    actual(command) { receipt.actual(command) },
+    onStarted(job) { if (verificationCommand) { receipt.bindJob(job.id); receipt.started() } },
     preparationError: capture?.preparationError,
     command: capture?.command ?? command, env: capture?.env ?? {},
     dispose: () => capture?.dispose(),
     intent,
     note: !verificationCommand ? '' : capture || trustworthyExit && kind !== 'test'
       ? '\n验证运行中，完成后自动记录；启动或输出命中不代表验证通过。'
-      : `\n无法自动获取完整证明，请用独立命令或 run_tests；退出结果会保留，日志尾部不能补齐覆盖。${suggestion ? `\n可复制的单条命令：${suggestion}` : ''}`,
+      : `\n覆盖尚未确认；退出结果和日志保留，可查询已有执行回执，不自动重跑。`,
     async onCompleted({ job, output, error, timedOut }) {
       if (recorded) return
       recorded = true
@@ -62,12 +69,13 @@ export async function prepareBackgroundVerification(command: string, params: Too
         if (trustworthyExit || coverage) verification.status = exitCode === 0 && !result.isError ? 'passed' : 'failed'
         if (kind) verification.kind = kind
         if (verification.status === 'passed') delete verification.failureKind
-        Object.assign(verification, completionFacts(coverage), { executionId: coverage?.runId ?? executionId, timestamp: startedAt, durationMs: (job.endedAt ?? Date.now()) - startedAt })
+        Object.assign(verification, completionFacts(coverage), { executionId: receipt.executionId, timestamp: startedAt, durationMs: (job.endedAt ?? Date.now()) - startedAt })
         if (coverage?.complete) delete verification.userGuidance
         if (kind === 'test' && !coverage) verification.countsReliable = false
         if (kind !== 'test') { delete verification.passed; delete verification.failed; delete verification.skipped; delete verification.countsReliable }
         if (stopped) verification.userGuidance = timedOut ? '后台验证超时并已终止；未取得完整覆盖证明。' : '后台验证已终止；未取得完整覆盖证明。'
-        params.onVerificationCompleted?.(verification)
+        const final = receipt.finish({ ...verification, omittedBytes: job.omittedBytes }, error ? 'failed_to_start' : timedOut ? 'timed_out' : stopped ? 'cancelled' : 'exited', job.logRef)
+        params.onVerificationCompleted?.(final)
       } finally { capture?.dispose() }
     },
   }

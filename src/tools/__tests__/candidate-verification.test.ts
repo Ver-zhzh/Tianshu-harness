@@ -71,7 +71,12 @@ test('candidate batch planning reads the isolated package script, not a peer edi
       assert.ok(result.content.includes(tree.ref))
       assert.match(output.join(''), /提交候选/)
       assert.doesNotMatch(output.join(''), /missing-peer-runner|\.rivet\/vsw/)
-      const full = await RUN_TESTS_TOOL.execute({ cwd, toolUseId: 'candidate-full-plan', input: { deliveryFiles: ['feature.mjs'] },
+      let previewOutput = 0
+      const preview = await runPlannedTests({ cwd, toolUseId: 'candidate-no-test-scope', input: { deliveryFiles: ['feature.mjs'] },
+        verificationSnapshot: { path: tree.path, snapshotRef: tree.ref, repositoryRoot: cwd, candidateOnly: true }, onOutput: () => { previewOutput++ } }, () => 30_000)
+      assert.equal(preview.isError, true)
+      assert.equal(previewOutput, 0, 'a candidate environment must not start discovery or a full run without a test scope')
+      const full = await RUN_TESTS_TOOL.execute({ cwd, toolUseId: 'candidate-full-plan', input: { full: true, deliveryFiles: ['feature.mjs'] },
         verificationSnapshot: { path: tree.path, snapshotRef: tree.ref, repositoryRoot: cwd, candidateOnly: true } })
       assert.equal(full.isError, false, full.content)
       assert.equal(full.verification?.snapshotRef, tree.ref)
@@ -124,12 +129,13 @@ test('candidate test failures do not reveal a temporary worktree path', async ()
     const tree = await openCandidateDeliveryTree(cwd, ['feature.mjs'])
     try {
       const streamed: string[] = []
-      const result = await runPlannedTests({ cwd, toolUseId: 'candidate-output', input: { deliveryFiles: ['feature.mjs'] },
+      const result = await runPlannedTests({ cwd, toolUseId: 'candidate-output', input: { files: ['feature.test.mjs'], deliveryFiles: ['feature.mjs'] },
         verificationSnapshot: { path: tree.path, snapshotRef: tree.ref, repositoryRoot: cwd, candidateOnly: true }, onOutput: chunk => streamed.push(chunk) }, () => 30_000)
       assert.equal(result.isError, true)
       assert.doesNotMatch(result.content + streamed.join(''), /\.rivet\/vsw\/candidate-/)
       assert.match(result.content, /feature\.test\.mjs/)
-      assert.match(result.content, /下一步：run_tests\(deliveryFiles=\["feature.mjs"\]\)/)
+      assert.doesNotMatch(result.content, /下一步：run_tests/)
+      assert.match(result.content, /是否继续由用户决定/)
     } finally { tree.destroy() }
   } finally { rmSync(cwd, { recursive: true, force: true }) }
 })
@@ -160,7 +166,8 @@ test('completed batches record receipts before a later batch is deferred', async
       assert.equal(receipts[0]?.status, 'passed')
       assert.equal(receipts[0]?.targetFiles?.length, 20)
       assert.match(output.join(''), /验证批次 1\/2/)
-      assert.match(result.content, /下一步：run_tests\(files=\["case-20.test.mjs"\], deliveryFiles=\["feature.mjs"\]\)/)
+      assert.match(result.content, /case-20\.test\.mjs/)
+      assert.doesNotMatch(result.content, /下一步：run_tests/)
       assert.equal(result.verification?.executionId, receipts[0]?.executionId)
       const controller = new AbortController()
       const cancelledReceipts: VerificationMetadata[] = []
@@ -171,7 +178,8 @@ test('completed batches record receipts before a later batch is deferred', async
       assert.equal(cancelled.isError, true)
       assert.match(cancelled.content, /已取消/)
       assert.equal(cancelledReceipts[0]?.status, 'passed')
-      assert.match(cancelled.content, /下一步：run_tests\(files=\["case-20.test.mjs"\], deliveryFiles=\["feature.mjs"\]\)/)
+      assert.match(cancelled.content, /case-20\.test\.mjs/)
+      assert.doesNotMatch(cancelled.content, /下一步：run_tests/)
     } finally { tree.destroy() }
   } finally { rmSync(cwd, { recursive: true, force: true }) }
 })

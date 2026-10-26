@@ -6,6 +6,7 @@ export type ReviewVerdict = 'verified' | 'rejected'
 
 export interface VerifierResult {
   verdict: ReviewVerdict
+  findings?: ReviewFinding[]
   /** Required command + observed output evidence. Blank evidence makes verified fail closed. */
   evidence: string
 }
@@ -98,6 +99,7 @@ export interface SquadronResult {
 }
 
 export interface ReviewRouterDeps {
+  spawnReadonlyReviewer?: (change: ChangeSet, signal?: AbortSignal, onActivity?: (event: WorkerActivityEvent) => void) => Promise<SquadronResult>
   spawnVerifier: (change: ChangeSet, signal?: AbortSignal, onActivity?: (event: WorkerActivityEvent) => void) => Promise<VerifierResult>
   spawnPatcher: (change: ChangeSet, verifier: VerifierResult, signal?: AbortSignal, onActivity?: (event: WorkerActivityEvent) => void) => Promise<PatcherResult>
   spawnSquadron: (change: ChangeSet, signal?: AbortSignal, onActivity?: (event: WorkerActivityEvent) => void) => Promise<SquadronResult>
@@ -109,6 +111,7 @@ export interface ReviewRouterDeps {
 export type ReviewMode = 'auto' | 'manual'
 
 export interface ReviewRouterOptions {
+  readonly?: boolean
   maxRounds?: number
   /** AbortSignal to propagate to spawned verifier/patcher/squadron workers.
    *  When aborted, coordinator.delegate() will cancel in-flight worker sessions. */
@@ -144,6 +147,8 @@ export interface ReviewOutcome {
    *  隔离模式下这是主控了解「补丁工到底做了什么」的唯一出口（I2：产物必可见）；
    *  不回流时主控会把「验证通过」误读成「改动已落地」。 */
   patcherArtifacts?: PatcherArtifact[]
+  /** LOW/MEDIUM defects remain actionable even when the overall verdict is verified. */
+  findings?: ReviewFinding[]
 }
 
 // ─── Review workflow budgets ────────────────────────────────────────
@@ -257,6 +262,19 @@ export async function routeReviewWorkflow(
     change = { ...change, focusHint: options.focusHint }
   }
 
+  if (options.readonly) {
+    const tier = change.forceLevel === 'L3' ? 'L3' : 'L2'
+    const result = tier === 'L3' ? await deps.spawnSquadron(change, signal, options.onActivity)
+      : deps.spawnReadonlyReviewer ? await deps.spawnReadonlyReviewer(change, signal, options.onActivity)
+      : { findings: [], infraFailures: [{ kind: 'worker', claim: 'Read-only reviewer unavailable' }] }
+    const defects = result.findings.filter(isDefect)
+    const incomplete = Boolean(result.infraFailures?.length)
+    return { tier, verdict: defects.length ? 'rejected' : incomplete ? 'inconclusive' : 'verified',
+      findings: result.findings, infraFailures: result.infraFailures, rounds: 1,
+      evidence: [defects.length ? `${defects.length} 项待核实发现` : incomplete ? '审查未完成' : '代码审查未发现问题',
+        ...(result.infraFailures ?? []).map(f => `${f.kind}: ${f.claim}`)].join('\n') }
+  }
+
   if (options.mode === 'auto') {
     // Mechanical-change fast-path: skip review workers for docs/rename/heuristic-rename
     if (change.changeClass?.skipReview) return { tier: 'auto', verdict: 'nudge' }
@@ -283,6 +301,7 @@ export async function routeReviewWorkflow(
       return {
         tier: 'auto',
         verdict: 'rejected',
+        findings: wiring.findings,
         evidence: summarizeSquadronFindings(wiring),
         rounds: attempts,
         ...(infraFailures.length > 0 ? { infraFailures } : {}),
@@ -319,6 +338,7 @@ export async function routeReviewWorkflow(
     return {
       tier: 'auto',
       verdict: 'verified',
+      findings: wiring.findings,
       evidence: `auto wiring review: no blocking findings${countConfirmations(wiring) > 0 ? `（${countConfirmations(wiring)} 项核实确认）` : ''}`,
       rounds: attempts,
       ...(infraFailures.length > 0 ? { infraFailures } : {}),
@@ -338,6 +358,7 @@ export async function routeReviewWorkflow(
         tier,
         verdict: 'rejected',
         evidence: summarizeSquadronFindings(squadron),
+        findings: squadron.findings,
         escalated: true,
         rounds: 0,
         ...(infraFailures.length > 0 ? { infraFailures } : {}),
@@ -349,6 +370,7 @@ export async function routeReviewWorkflow(
       tier,
       verdict: 'verified',
       evidence: `L3 squadron verified (5 inspectors): no blocking findings${countConfirmations(squadron) > 0 ? `（${countConfirmations(squadron)} 项核实确认）` : ''}`,
+      findings: squadron.findings,
       rounds: 0,
       ...(infraFailures.length > 0 ? { infraFailures } : {}),
     }
@@ -370,6 +392,7 @@ export async function routeReviewWorkflow(
         tier,
         verdict: 'verified',
         evidence: infraEvidence,
+        findings: last.findings,
         rounds: round,
         ...(infraFailures.length > 0 ? { infraFailures } : {}),
         // 经过修复才通过时，主控必须知道「谁修的、修在哪儿」——那些改动不在它
@@ -392,6 +415,7 @@ export async function routeReviewWorkflow(
         verdict: 'rejected',
         evidence: last.evidence,
         escalated: true,
+        findings: last.findings,
         rounds: round,
         ...(patcherArtifacts.length > 0 ? { patcherArtifacts } : {}),
       }
@@ -403,6 +427,7 @@ export async function routeReviewWorkflow(
     verdict: 'rejected',
     evidence: last.evidence,
     escalated: true,
+    findings: last.findings,
     rounds: maxRounds,
     ...(patcherArtifacts.length > 0 ? { patcherArtifacts } : {}),
   }

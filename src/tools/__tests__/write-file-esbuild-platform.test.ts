@@ -39,7 +39,10 @@ it('write_file stores valid JS/TS/MJS/CJS without a false low-risk warning when 
       const result = await WRITE_FILE_TOOL.execute(params(cwd, filePath, source))
       const userVisibleOutput = `${result.content}\n${result.uiContent ?? ''}`
 
-      assert.equal(esbuildCalls, esbuildCallsBefore + 1, `${extension}: the esbuild worker failure must be exercised`)
+      // 一次 write 现经两处 checkSyntax：write-file 的事后校验与 mutation-facts
+      // 的事实记录（2026-10-25 起）。此处只要求 mock 的基础设施失败被真正走到，
+      // 不再钉死调用次数；两次失败都必须优雅降级（下面逐条断言）。
+      assert.ok(esbuildCalls >= esbuildCallsBefore + 1, `${extension}: the esbuild worker failure must be exercised`)
       assert.ok(!result.isError, `${extension}: ${result.content}`)
       assert.ok(existsSync(filePath), `${extension}: write_file must leave the new file on disk`)
       assert.equal(readFileSync(filePath, 'utf8').replace(/\r\n/g, '\n'), source, `${extension}: written content`)

@@ -1,5 +1,12 @@
 import type { Tool, ToolCallParams, ToolResult } from './types.js'
 import type { JobSnapshot } from './job-store.js'
+import { listVerificationRuns, renderVerificationRun } from '../agent/verification-runs.js'
+
+function receipt(params: ToolCallParams, job: JobSnapshot): string {
+  if (!params.sessionId || !job.executionId) return ''
+  const run = listVerificationRuns(params.cwd, params.sessionId).find(r => r.executionId === job.executionId)
+  return run ? `\n${renderVerificationRun(run)}` : ''
+}
 
 /** Cap for an await's blocking window so a runaway pattern never hangs the loop. */
 const MAX_AWAIT_MS = 600_000
@@ -42,6 +49,10 @@ Actions:
         id: { type: 'string', description: '任务 id（await/logs/kill 必填）' },
         pattern: { type: 'string', description: '仅 await：服务就绪探测可按实际日志设置正则；命中会提前返回，不证明任务退出或测试通过。等待测试结束时省略。' },
         timeout: { type: 'integer', description: '仅 await：最长阻塞毫秒数（默认 120000，上限 600000）' },
+        offset: { type: 'integer', description: 'logs：起始行，默认 0' },
+        limit: { type: 'integer', description: 'logs：最多返回 500 行，默认 100' },
+        tail: { type: 'boolean', description: 'logs：查看末尾' },
+        search: { type: 'string', description: 'logs：按字面量搜索已有日志，不运行命令' },
       },
       required: ['action'],
     },
@@ -75,7 +86,7 @@ Actions:
           ? `● 任务已${job.status === 'killed' ? '被终止' : '退出'} (exit ${job.exitCode ?? '?'})`
           : (matched ? '● 输出命中 pattern' : timedOut ? `⏱ 等待超时（${fmtDuration(timeoutMs)}）` : '● 等待已返回') +
             '，任务仍在运行；不代表执行完成或测试通过'
-        const header = `[${job.id}] ${verdict} · ${fmtStatus(job)}`
+        const header = `[${job.id}] ${verdict} · ${fmtStatus(job)}${receipt(params, job)}`
         return {
           content: tail ? `${header}\n── 输出尾部 ──\n${tail}` : header,
           uiContent: `await ${job.id}: ${job.status !== 'running' ? fmtStatus(job) : matched ? '命中（仍在运行）' : timedOut ? '等待超时（仍在运行）' : fmtStatus(job)}`,
@@ -85,9 +96,10 @@ Actions:
 
       case 'logs': {
         if (!id) return { content: 'logs 需要 id 参数。', isError: true }
-        const logs = jobs.logs(id)
+        const logs = jobs.logs(id, { offset: Number(params.input.offset) || 0, limit: Number(params.input.limit) || 100, tail: params.input.tail === true, pattern: typeof params.input.search === 'string' ? params.input.search : undefined })
         if (logs == null) return { content: `未找到任务 ${id}。`, isError: true }
-        return { content: logs || '(无输出)', uiContent: `logs ${id}`, isError: false }
+        const job = jobs.list().find(j => j.id === id)
+        return { content: (logs || '(无输出)') + (job ? receipt(params, job) : ''), uiContent: `logs ${id}`, isError: false }
       }
 
       case 'kill': {

@@ -160,6 +160,8 @@ export interface SessionMemoryState {
 }
 
 export interface SessionMetadata {
+  /** Latest observed run; older events retain their own identities. */
+  lastRuntimeRun?: ReturnType<typeof import('../utils/runtime-provenance.js').runtimeObservation>
   modelSelection?: import('../tools/types.js').DelegationActivity['modelSelection']
   workspaceRoots?: string[]
   sessionId: string

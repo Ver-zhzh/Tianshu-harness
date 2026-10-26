@@ -241,15 +241,13 @@ export function createWalkthroughRecorderHooks(deps: WalkthroughRecorderDeps): [
     },
   }
 
-  const postSession: PostSessionRuntimeHook = {
-    phase: 'postSession',
-    name: 'walkthrough-recorder-flush',
-    async run() {
-      if (persisted || steps.length === 0) return
-      const store = deps.getArtifactStore()
-      if (!store) return
-      persisted = true
-      const doc = buildWalkthroughDocument(steps, {
+  const capture = (): PostSessionRuntimeHook['run'] => {
+    const store = deps.getArtifactStore()
+    if (persisted || steps.length === 0 || !store) return () => {}
+    persisted = true
+    const capturedSteps = structuredClone(steps)
+    return async () => {
+      const doc = buildWalkthroughDocument(capturedSteps, {
         sessionId: deps.sessionId ?? 'unknown',
         createdAt: now(),
       })
@@ -265,7 +263,13 @@ export function createWalkthroughRecorderHooks(deps: WalkthroughRecorderDeps): [
         summary: `${kind}走查：${doc.summary.totalSteps} 步${failNote}${haltNote}（${doc.summary.apps.join(', ') || '无应用'}）`,
         sections: [],
       })
-    },
+    }
+  }
+  const postSession: PostSessionRuntimeHook = {
+    phase: 'postSession',
+    name: 'walkthrough-recorder-flush',
+    capture,
+    run: ctx => capture()(ctx),
   }
 
   return [postTool, postSession]

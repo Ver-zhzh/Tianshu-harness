@@ -19,13 +19,22 @@ import { _setSandboxBackendForTest, _resetSandboxBackendCache } from '../../tool
 import { isWriteGranted, _resetGrantsForTest, loadPersistedGrants, revokeGrant } from '../../tools/path-grants.js'
 import { rivetHome } from '../../config/paths.js'
 import { BASH_TOOL } from '../../tools/bash.js'
+import { RUN_TESTS_TOOL } from '../../tools/run-tests.js'
+import { openCandidateDeliveryTree } from '../candidate-delivery-tree.js'
 import { executeWithCourseProgress } from '../course-file-progress.js'
 import { EvidenceTracker } from '../evidence.js'
+import { createDestructiveGateState } from '../../tools/destructive-gate.js'
+import { createFileRepairStore } from '../file-repair-store.js'
+import { EDIT_FILE_TOOL } from '../../tools/edit.js'
+import { contentVersion } from '../file-version.js'
 import { READ_FILE_TOOL } from '../../tools/read-file.js'
+import { WRITE_FILE_TOOL } from '../../tools/write-file.js'
+import { APPLY_PATCH_TOOL } from '../../tools/apply-patch.js'
 import { SKILL_TOOL } from '../../tools/skill.js'
 import { recordConvergenceInput, replayConvergenceInput } from '../convergence-replay.js'
 import { SessionRegistry } from '../session-registry.js'
 import { resolveBetterSqlite3 } from '../../repo/native-resolver.js'
+import { ToolRegistry } from '../../tools/registry.js'
 
 import { observeRun } from '../stall-observer.js'
 const executeToolUse: typeof rawExecuteToolUse = (...args) =>
@@ -112,6 +121,231 @@ describe('executeToolUse', () => {
       ...overrides,
     }
   }
+
+  it('successful execution owns one terminal trace event instead of inflating plan and retrospective counts', async () => {
+    const result = await executeToolUse({ id: 'once-only', name: 'test_tool', input: {} }, makeDeps(), noopCallbacks as any, 1, false)
+    assert.equal(result.traceStore.events.filter(e => e.kind === 'tool').length, 1)
+    assert.equal(result.traceStore.events[0]!.id, 'once-only')
+    assert.equal(result.traceStore.events[0]!.terminal, true)
+    assert.equal(result.traceStore.events[0]!.dispatched, true)
+  })
+
+  it('version-bound batch passes the real cerebellar path without unrelated reads; missing parameters do not poison predictions', async () => {
+    const cwd = mkdtempSync(join(testTmp(), 'version-gate-')), file = join(cwd, 'a.json')
+    writeFileSync(file, '{"a":1}')
+    let predictions = 0, calls = 0
+    const deps = makeDeps({ cwd, getInterventionLevel: () => 'gate', recordPrediction: () => { predictions++ }, trajectory: { getEntries: () => [{ tool: 'read_file', target: 'other.json' }] } as any })
+    deps.config.toolRegistry.execute = async (_name: string, params: any) => { calls++; return EDIT_FILE_TOOL.execute(params) }
+    const fixed = await executeToolUse({ id: 'bound-gate', name: 'edit_file', input: { file_path: file, expected_version: contentVersion('{"a":1}'), operations: [{ old_string: '1', new_string: '2' }] } }, deps, noopCallbacks as any, 1, false)
+    assert.equal((fixed.toolResult as any).is_error, false)
+    assert.equal(calls, 1)
+    assert.equal(readFileSync(file, 'utf8'), '{"a":2}')
+    const stale = await executeToolUse({ id: 'stale-gate', name: 'edit_file', input: { file_path: file, expected_version: 'old', operations: [{ old_string: '2', new_string: '3' }] } }, deps, noopCallbacks as any, 1, false)
+    assert.equal((stale.toolResult as any).is_error, true)
+    assert.equal(calls, 1, 'reading another file cannot satisfy the gate')
+    deps.getInterventionLevel = () => 'none'
+    predictions = 0
+    const missing = await executeToolUse({ id: 'missing-version', name: 'edit_file', input: { file_path: file, operations: [{ old_string: '2', new_string: '3' }] } }, deps, noopCallbacks as any, 1, false)
+    assert.equal((missing.toolResult as any).is_error, true)
+    assert.equal(missing.errorReason, 'missing_expected_version')
+    assert.equal(predictions, 0)
+    assert.equal(readFileSync(file, 'utf8'), '{"a":2}')
+  })
+
+  it('real read receipt reaches model output even after the turn budget replaces its body', async () => {
+    const cwd = mkdtempSync(join(testTmp(), 'receipt-budget-')), file = join(cwd, 'source.txt'), content = 'fixture line\n'.repeat(600)
+    writeFileSync(file, content)
+    const deps = makeDeps({ cwd, turnBudget: createTurnBudget(1) })
+    deps.config.toolRegistry.execute = async (_name: string, params: any) => READ_FILE_TOOL.execute(params)
+    const read = await executeToolUse({ id: 'budget-read', name: 'read_file', input: { file_path: file } }, deps, noopCallbacks as any, 1, false)
+    assert.equal((read.toolResult as any).is_error, false)
+    assert.match(String((read.toolResult as any).content), /turn budget exceeded/)
+    assert.ok(String((read.toolResult as any).content).includes(`version=${contentVersion(content)}`))
+    assert.match(String((read.toolResult as any).content), /\[file-state\]/)
+  })
+
+  it('legacy single edits chain through the real cerebellar gate using the retained CRLF version', async () => {
+    const cwd = mkdtempSync(join(testTmp(), 'legacy-edit-gate-')), file = join(cwd, 'a.json')
+    writeFileSync(file, '{"n":1}\r\n')
+    const deps = makeDeps({ cwd, getInterventionLevel: () => 'gate' })
+    await READ_FILE_TOOL.execute({ cwd, sessionId: deps.config.sessionId, input: { file_path: file }, toolUseId: 'baseline' })
+    let calls = 0
+    deps.config.toolRegistry.execute = async (_name: string, params: any) => { calls++; return EDIT_FILE_TOOL.execute(params) }
+    for (const [old_string, new_string] of [['1', '2'], ['2', '200']]) {
+      const result = await executeToolUse({ id: `legacy-${new_string}`, name: 'edit_file', input: { file_path: file, old_string, new_string } }, deps, noopCallbacks as any, 1, false)
+      assert.equal((result.toolResult as any).is_error, false, String((result.toolResult as any).content))
+    }
+    assert.equal(calls, 2)
+    assert.equal(readFileSync(file, 'utf8'), '{"n":200}\r\n')
+  })
+
+  it('a successful Git patch allows a following legacy edit through the real cerebellar gate', async () => {
+    const cwd = mkdtempSync(join(testTmp(), 'patch-gate-')), file = join(cwd, 'a.txt')
+    execFileSync('git', ['init'], { cwd, stdio: 'pipe' })
+    writeFileSync(file, 'before\n')
+    execFileSync('git', ['add', 'a.txt'], { cwd, stdio: 'pipe' })
+    execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=', 'commit', '-m', 'baseline'], { cwd, stdio: 'pipe' })
+    const deps = makeDeps({ cwd, getInterventionLevel: () => 'gate' })
+    await READ_FILE_TOOL.execute({ cwd, sessionId: deps.config.sessionId, input: { file_path: file }, toolUseId: 'baseline' })
+    let calls = 0
+    deps.config.toolRegistry.execute = async (name: string, params: any) => { calls++; return name === 'apply_patch' ? APPLY_PATCH_TOOL.execute(params) : EDIT_FILE_TOOL.execute(params) }
+    const patched = await executeToolUse({ id: 'patch', name: 'apply_patch', input: { diff: 'diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-before\n+after\n' } }, deps, noopCallbacks as any, 1, false)
+    assert.equal((patched.toolResult as any).is_error, false, String((patched.toolResult as any).content))
+    const edited = await executeToolUse({ id: 'after-patch', name: 'edit_file', input: { file_path: file, old_string: 'after', new_string: 'continued' } }, deps, noopCallbacks as any, 1, false)
+    assert.equal((edited.toolResult as any).is_error, false, String((edited.toolResult as any).content))
+    assert.equal(calls, 2)
+    assert.equal(readFileSync(file, 'utf8'), 'continued\n')
+  })
+
+  it('three explicit draft appends retain versions without falsely entering structural recovery', async () => {
+    const cwd = mkdtempSync(join(testTmp(), 'append-draft-')), file = join(cwd, 'index.html')
+    const deps = makeDeps({ cwd })
+    let executions = 0
+    deps.config.toolRegistry.execute = async (_name: string, params: any) => { executions++; return WRITE_FILE_TOOL.execute(params) }
+    for (const [i, content] of ['<html><body><script>', 'const p=1;', '</script></body></html>'].entries()) {
+      const result = await executeToolUse({ id: `draft-${i}`, name: 'write_file', input: { file_path: file, mode: 'append', content } }, deps, noopCallbacks as any, i + 1, false)
+      assert.equal((result.toolResult as any).is_error, false, String((result.toolResult as any).content))
+      assert.ok(String((result.toolResult as any).content).includes(`version=${contentVersion(readFileSync(file, 'utf8'))}`))
+      assert.ok(!createFileRepairStore(cwd, deps.config.sessionId!).list().some(r => r.state === 'active'))
+    }
+    assert.equal(executions, 3)
+  })
+
+  it('replayed Git clearing is never self-authorized and denied calls have one not-started terminal audit', async () => {
+    const cwd = mkdtempSync(join(testTmp(), 'clear-audit-')), previous = process.env.RIVET_SESSION_DIR
+    process.env.RIVET_SESSION_DIR = join(cwd, 'sessions')
+    try {
+      const gate = createDestructiveGateState(), deps = makeDeps({ cwd, destructiveGate: gate })
+      deps.config.approvalMode = 'manual'
+      let executions = 0, approvals = 0, terminals = 0
+      deps.config.toolRegistry.execute = async () => { executions++; return { content: 'should not run' } }
+      for (const [i, command] of ['git checkout HEAD -- a.ts\ncat a.ts', 'git checkout HEAD -- a.ts\ncat b.ts', 'git checkout HEAD -- a.ts\ncat b.ts'].entries()) {
+        const result = await executeToolUse({ id: `clear-${i}`, name: 'bash', input: { command } }, deps, { ...noopCallbacks, onApprovalRequired: async () => { approvals++; return false }, onToolResult: (_id: string, _name: string, _content: string, isError?: boolean) => { if (isError !== undefined) terminals++ } } as any, 1, false)
+        assert.equal((result.toolResult as any).is_error, true)
+        assert.match(String((result.toolResult as any).content), /destructive-gate.*真实用户审批/)
+        assert.equal(result.traceStore.events.filter(e => e.id === `clear-${i}` && e.terminal && e.dispatched === false).length, 1)
+      }
+      assert.equal(executions, 0); assert.equal(approvals, 3); assert.equal(terminals, 3)
+      const records = readFileSync(join(cwd, 'sessions', deps.sessionId!, 'tool-result-trace.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line))
+      assert.equal(records.length, 3); assert.ok(records.every(r => r.dispatched === false))
+    } finally { if (previous === undefined) delete process.env.RIVET_SESSION_DIR; else process.env.RIVET_SESSION_DIR = previous; rmSync(cwd, { recursive: true, force: true }) }
+  })
+
+  it('a genuine approval can execute a broad destructive action once', async () => {
+    const cwd = mkdtempSync(join(testTmp(), 'clear-approved-'))
+    try {
+      const deps = makeDeps({ cwd, destructiveGate: createDestructiveGateState() })
+      deps.config.approvalMode = 'manual'
+      let executions = 0
+      deps.config.toolRegistry.execute = async () => { executions++; return { content: 'approved fixture only' } }
+      const result = await executeToolUse({ id: 'approved-clear', name: 'bash', input: { command: 'git stash' } }, deps, { ...noopCallbacks, onApprovalRequired: async () => true } as any, 1, false)
+      assert.equal(executions, 1); assert.ok(!(result.toolResult as any).is_error)
+    } finally { rmSync(cwd, { recursive: true, force: true }) }
+  })
+
+  it('outer preflight timeout emits one terminal, no dispatch or late second callback', async () => {
+    const cwd = mkdtempSync(join(testTmp(), 'outer-audit-')), original = globalThis.setTimeout
+    let release!: () => void, executions = 0, terminals = 0
+    const barrier = new Promise<void>(resolve => { release = resolve })
+    try {
+      const deps = makeDeps({ cwd }); deps.config.externalHookRuntime = { barrier: () => barrier } as any
+      deps.config.toolRegistry.execute = async () => { executions++; return { content: 'late' } }
+      globalThis.setTimeout = ((fn: (...args: any[]) => void, ms?: number, ...args: any[]) => original(fn, ms === 120_000 ? 5 : ms, ...args)) as typeof setTimeout
+      const result = await executeToolUse({ id: 'outer', name: 'edit_file', input: { file_path: 'a.ts' } }, deps, { ...noopCallbacks, onToolResult: (_id: string, _name: string, _content: string, isError?: boolean) => { if (isError !== undefined) terminals++ } } as any, 1, false)
+      assert.equal(result.errorKind, 'timeout'); assert.equal(executions, 0); assert.equal(terminals, 1)
+      release(); await new Promise(resolve => original(resolve, 20))
+      assert.equal(terminals, 1); assert.equal(executions, 0)
+    } finally { release(); globalThis.setTimeout = original; rmSync(cwd, { recursive: true, force: true }) }
+  })
+
+  it('enforces file repair at real dispatch while allowing a version-bound batch and safe delivery', async () => {
+    const cwd = mkdtempSync(join(testTmp(), 'repair-dispatch-'))
+    try {
+      const file = join(cwd, 'a.json'), source = '{"a":1}'
+      writeFileSync(file, source)
+      const deps = makeDeps({ cwd })
+      const repairs = createFileRepairStore(cwd, deps.config.sessionId!)
+      for (const toolCallId of ['bad-one', 'bad-two']) repairs.record([{ sessionId: deps.config.sessionId, toolCallId, file: 'a.json', before: { version: 'v', parse: 'valid' }, after: { version: 'x', parse: 'invalid' }, attemptedParse: 'invalid', attempted: true, restoration: 'conflict' }])
+      let executions = 0
+      deps.config.toolRegistry.execute = async (name, params) => { executions++; return name === 'edit_file' ? EDIT_FILE_TOOL.execute(params) : { content: 'delivered' } }
+      const blocked = await executeToolUse({ id: 'unsafe', name: 'write_file', input: { file_path: 'a.json', content: 'bad' } }, deps, noopCallbacks as any, 1, false)
+      assert.equal(executions, 0); assert.match(String((blocked.toolResult as any).content), /受控恢复态/)
+      const applied = await executeToolUse({ id: 'repair', name: 'edit_file', input: { file_path: 'a.json', expected_version: contentVersion(source), operations: [{ old_string: '1', new_string: '2' }] } }, deps, noopCallbacks as any, 1, false)
+      assert.ok(!(applied.toolResult as any).is_error, String((applied.toolResult as any).content))
+      assert.equal(executions, 1); assert.equal(readFileSync(file, 'utf8'), '{"a":2}')
+      assert.equal(repairs.list()[0]!.state, 'recovered')
+    } finally { rmSync(cwd, { recursive: true, force: true }) }
+  })
+
+  it('reuses a real candidate receipt at the pipeline boundary before snapshot/approval/executor work', async () => {
+    const cwd = mkdtempSync(join(testTmp(), 'reuse-boundary-')), previous = process.env.RIVET_SESSION_DIR, previousNode = process.env.NODE_TEST_CONTEXT
+    process.env.RIVET_SESSION_DIR = join(cwd, 'sessions'); delete process.env.NODE_TEST_CONTEXT
+    let snapshot: Awaited<ReturnType<typeof openCandidateDeliveryTree>> | undefined
+    try {
+      writeFileSync(join(cwd, 'package.json'), '{"type":"module","scripts":{"test":"node --test"}}')
+      writeFileSync(join(cwd, 'one.test.mjs'), "import{test}from'node:test';test('case',()=>{})")
+      writeFileSync(join(cwd, 'code.ts'), 'export const value = 1\n')
+      execFileSync('git', ['init', '-q'], { cwd })
+      execFileSync('git', ['add', 'package.json', 'one.test.mjs', 'code.ts'], { cwd })
+      execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=f@example.test', 'commit', '-qm', 'base'], { cwd })
+      writeFileSync(join(cwd, 'code.ts'), 'export const value = 2\n')
+      const input = { files: ['one.test.mjs'], deliveryFiles: ['code.ts'] }
+      snapshot = await openCandidateDeliveryTree(cwd, ['code.ts'])
+      const first = await RUN_TESTS_TOOL.execute({ cwd, sessionId: 'owner', toolUseId: 'first', input, currentVerificationFingerprint: () => 'pipeline-version',
+        verificationSnapshot: { path: snapshot.path, snapshotRef: snapshot.ref, repositoryRoot: cwd, candidateOnly: true } })
+      assert.ok(!first.isError, first.content)
+      assert.ok(first.verification?.executionId)
+      snapshot.destroy(); snapshot = undefined
+      let executions = 0, approvals = 0
+      const deps = makeDeps({ cwd, sessionId: 'owner', taskLedger: { captureVerificationFingerprint: () => 'pipeline-version', getEvents: () => [] } as any })
+      deps.config.sessionId = 'owner'
+      deps.config.toolRegistry.execute = async () => { executions++; throw Error('duplicate executor must not be reached') }
+      const result = await executeToolUse({ id: 'repeat', name: 'run_tests', input }, deps, { ...noopCallbacks, onApprovalRequired: async () => { approvals++; return false } } as any, 1, false)
+      assert.equal(executions, 0)
+      assert.equal(approvals, 0)
+      assert.match(String((result.toolResult as any).content), new RegExp(first.verification!.executionId!))
+      assert.match(String((result.toolResult as any).content), /本次未启动进程/)
+      deps.taskLedger!.captureVerificationFingerprint = () => { throw Error('query may not capture a fingerprint') }
+      const queried = await executeToolUse({ id: 'query', name: 'run_tests', input: { action: 'get', execution_id: first.verification!.executionId, deliveryFiles: ['not-a-real-file'] } }, deps, noopCallbacks as any, 1, false)
+      assert.ok(!(queried.toolResult as any).is_error, String((queried.toolResult as any).content))
+      assert.match(String((queried.toolResult as any).content), /当前版本有效性未知/)
+      assert.equal(executions, 0)
+    } finally {
+      snapshot?.destroy()
+      if (previous === undefined) delete process.env.RIVET_SESSION_DIR; else process.env.RIVET_SESSION_DIR = previous
+      if (previousNode === undefined) delete process.env.NODE_TEST_CONTEXT; else process.env.NODE_TEST_CONTEXT = previousNode
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('passes the owner review-ready callback to the actual tool executor', async () => {
+    const deps = makeDeps()
+    const notices: unknown[] = []
+    const registry = new ToolRegistry()
+    registry.register({ definition: { name: 'test_tool', description: 'fixture', input_schema: { type: 'object', properties: {} } },
+      requiresApproval: () => false, isConcurrencySafe: () => true, isEnabled: () => true,
+      execute: async params => { params.onReviewReady?.({ sessionId: 'test-session', reviewId: 'review-1' }); return { content: 'done' } } })
+    deps.config.toolRegistry = registry
+    const result = await executeToolUse({ id: 'review-ready', name: 'test_tool', input: {} }, deps,
+      { ...noopCallbacks, onReviewReady: notice => { notices.push(notice) } }, 1, false)
+    assert.ok(result.toolResult.type === 'tool_result')
+    assert.notEqual(result.toolResult.is_error, true, result.toolResult.content)
+    assert.deepEqual(notices, [{ sessionId: 'test-session', reviewId: 'review-1' }])
+  })
+
+  it('full test scope requires a user decision in auto-safe even with a general tool allow rule', async () => {
+    for (const name of ['run_tests', 'bash']) for (const approve of [false, true]) {
+      const deps = makeDeps()
+      deps.config.approvalMode = 'auto-safe'
+      deps.config.permissions = { allow: [{ tool: name }], deny: [] }
+      let executions = 0, approvals = 0
+      deps.config.toolRegistry.execute = async () => { executions++; return { content: 'explicit run' } }
+      await executeToolUse({ id: `full-${name}-${approve}`, name, input: name === 'run_tests' ? { full: true } : { command: 'node --test' } }, deps,
+        { ...noopCallbacks, onApprovalRequired: async () => { approvals++; return approve } }, 1, false)
+      assert.equal(approvals, 1, name)
+      assert.equal(executions, approve ? 1 : 0, name)
+    }
+  })
 
   it('skill runtime: real approval pipeline preserves policy, preview and execution plan', async () => {
     const cwd = mkdtempSync(join(testTmp(), 'runtime-policy-'))
@@ -391,7 +625,7 @@ describe('executeToolUse', () => {
     deps.config.approvalMode = 'manual'
     deps.config.toolRegistry.needsApproval = () => true
     let executedCommand: unknown
-    deps.config.toolRegistry.execute = async (_name, params) => { executedCommand = params.input.command; return { content: 'ok', isError: false } }
+    deps.config.toolRegistry.execute = async (_name, params) => { executedCommand = params.input.command; params.onVerificationStarted?.('approved-child'); return { content: 'ok', isError: false } }
     const callbacks = { ...noopCallbacks, onApprovalRequired: async () => {
       facts.recordFileProgress({ outcome: 'changed' })
       return { approved: true, editedInput: { command: 'npm run typecheck' } }
@@ -402,12 +636,30 @@ describe('executeToolUse', () => {
     assert.equal(facts.recentVerificationExecutions()[0]?.mutationRevisionAtStart, 1)
   })
 
-  it('VSW: injects verificationSnapshot into run_tests params when the manager returns a plan', async () => {
+  it('verification progress counts real spawns, never previews or invalid selections', async () => {
+    const cwd = mkdtempSync(join(testTmp(), 'spawn-facts-')); let starts = 0
+    try {
+      const deps = makeDeps({ cwd, onVerificationExecutionStart: () => { starts++; return starts } })
+      deps.config.toolRegistry.get = () => RUN_TESTS_TOOL
+      deps.config.toolRegistry.execute = (_name, params) => RUN_TESTS_TOOL.execute(params)
+      await executeToolUse({ id: 'preview', name: 'run_tests', input: {} }, deps, noopCallbacks as any, 1, false)
+      await executeToolUse({ id: 'invalid', name: 'run_tests', input: { files: [] } }, deps, noopCallbacks as any, 1, false)
+      assert.equal(starts, 0)
+      writeFileSync(join(cwd, 'one.test.mjs'), "import{test}from'node:test';test('case',()=>{});")
+      deps.config.toolRegistry.get = () => BASH_TOOL
+      deps.config.toolRegistry.execute = (_name, params) => BASH_TOOL.execute(params)
+      const result = await executeToolUse({ id: 'real-spawn', name: 'bash', input: { command: 'node --test one.test.mjs', run_in_background: false } }, deps, noopCallbacks as any, 1, false)
+      assert.ok(!(result.toolResult as any).is_error, String((result.toolResult as any).content))
+      assert.equal(starts, 1)
+    } finally { rmSync(cwd, { recursive: true, force: true }) }
+  })
+
+  it('ordinary run_tests never automatically materializes a session snapshot', async () => {
     let seen: any
     const deps = makeDeps({
       ownershipLedger: { getOwnedFiles: () => ['a.ts'], getCoOwnedFiles: () => ['shared.ts'], getBaselineHead: () => 'head1' } as any,
       verificationSnapshotManager: {
-        prepare: (owned: string[]) => { assert.deepEqual(owned, ['a.ts', 'shared.ts']); return { path: '/snap/dir', snapshotRef: 'head1+diffX', decision: { snapshot: true } as any, ownedFiles: owned } },
+        prepare: () => { throw new Error('automatic snapshot must not run') },
         lastDecision: () => null,
         currentSnapshotRef: () => 'head1+diffX',
         destroy: () => {},
@@ -428,7 +680,7 @@ describe('executeToolUse', () => {
       deps, noopCallbacks as any, 1, false,
     )
 
-    assert.deepEqual(seen, { path: '/snap/dir', snapshotRef: 'head1+diffX', repositoryRoot: deps.cwd })
+    assert.equal(seen, undefined)
   })
 
   it('deliveryFiles builds a current-HEAD candidate snapshot and cleans it after run_tests', async () => {
@@ -455,7 +707,7 @@ describe('executeToolUse', () => {
           needsApproval: () => false,
           resolveName: (name: string) => name,
         } } as any })
-      await executeToolUse({ id: 'candidate-run', name: 'run_tests', input: { deliveryFiles: ['selected.ts'] } }, deps, noopCallbacks as any, 1, false)
+      await executeToolUse({ id: 'candidate-run', name: 'run_tests', input: { deliveryFiles: ['selected.ts'], files: ['selected.test.ts'] } }, deps, noopCallbacks as any, 1, false)
       assert.ok(snapshotPath)
       assert.equal(existsSync(snapshotPath), false)
     } finally { rmSync(cwd, { recursive: true, force: true }) }
@@ -1819,6 +2071,37 @@ describe('executeToolUse', () => {
     assert.equal((result.toolResult as any).is_error, true)
     const conflict = readClaimConflict(approvalInput!)
     assert.match(conflict!.reason ?? '', /不可判定/, '脏态未探测时审批卡要如实渲染「缺证据」，不得谎称有改动')
+  })
+
+  it('bash write_files reaches the real executor with exclusive claims and records retained writes', async () => {
+    const cwd = mkdtempSync(join(testTmp(), 'script-wiring-')), owned: string[] = [], writes: string[] = [], claims: string[] = []
+    try {
+      writeFileSync(join(cwd, 'a.json'), '{}')
+      const deps = makeDeps({ cwd, sessionId: 'mine', sessionRegistry: {
+        acquireClaim: (_id: string, path: string) => { claims.push(path); return true },
+        checkClaim: () => ({ sessionId: 'mine', claimType: 'exclusive' }),
+      } as any, ownershipLedger: { isExternal: () => false, getOwnedFiles: () => [], getBaselineHead: () => '', registerOwned: (p: string) => owned.push(p) } as any,
+      taskLedger: { getEvents: () => [], record: (e: any) => { if (e.type === 'file_write') writes.push(e.path) }, getOwnedFiles: () => [] } as any })
+      deps.config.sessionId = 'mine'
+      deps.config.toolRegistry.get = () => BASH_TOOL
+      deps.config.toolRegistry.execute = (_name: string, params: any) => BASH_TOOL.execute(params)
+      const result = await executeToolUse({ id: 'script-real', name: 'bash', input: { command: `node -e 'require("fs").writeFileSync("a.json", "{\\"ok\\":true}")'`, write_files: ['a.json'], timeout: 5000 } }, deps, noopCallbacks as any, 1, false)
+      assert.ok(!(result.toolResult as any).is_error, String((result.toolResult as any).content))
+      assert.equal(readFileSync(join(cwd, 'a.json'), 'utf8'), '{"ok":true}')
+      assert.deepEqual(claims, ['a.json'])
+      assert.deepEqual(owned, ['a.json'])
+      assert.deepEqual(writes, ['a.json'])
+    } finally { rmSync(cwd, { recursive: true, force: true }) }
+  })
+
+  it('bash write_files never takes over peer claims or prompts a takeover', async () => {
+    let executions = 0, prompts = 0
+    const deps = makeDeps({ sessionId: 'mine', sessionRegistry: { acquireClaim: () => false, checkClaim: () => ({ sessionId: 'peer', claimType: 'exclusive' }), claimLiveness: () => { throw Error('must not attempt takeover') } } as any })
+    deps.config.toolRegistry.execute = async () => { executions++; return { content: 'ran' } }
+    const result = await executeToolUse({ id: 'script-blocked', name: 'bash', input: { command: 'echo never', write_files: ['script.json'] } }, deps, { ...noopCallbacks, onApprovalRequired: async () => { prompts++; return { behavior: 'allow' } } } as any, 1, false)
+    assert.match(String((result.toolResult as any).content), /不自动接管/)
+    assert.equal(executions, 0)
+    assert.equal(prompts, 0)
   })
 
   it('R2: allows write_file when the claim is uncontended (acquireClaim true)', async () => {
@@ -4648,7 +4931,7 @@ describe('TDD gate suggest annotation', () => {
     assert.ok(!tr.content.includes('[TDD]'), 'failed edit result is not annotated')
   })
 
-  it('meridian 快路径：写工具绝对路径先相对化（issue #61 族 Windows 死角）', async () => {
+  it('writes never query impact graphs or create automatic verification scope', async () => {
     // 写工具按工具文档恒传绝对路径——旧判据 `db && !isAbsolute(filePath)` 让
     // meridian SQLite 快路径恒不走，每次 run 首个写工具全量同步扫仓。修复后
     // 应先 relative(cwd) 再进 analyzeImpact。
@@ -4667,8 +4950,7 @@ describe('TDD gate suggest annotation', () => {
       deps, annotateNoopCallbacks as any, 1, false,
     )
     assert.equal((result.toolResult as any).is_error ?? false, false)
-    assert.ok(seen.includes('src/foo.ts'), `analyzeImpact 应收到相对化后的路径，实际记录: ${JSON.stringify(seen)}`)
-    assert.ok(!seen.some((f) => f.startsWith('/tmp/test')), '不得把绝对路径直接喂给 meridian')
+    assert.deepEqual(seen, [], '影响分析必须由用户另行选择，写工具不反向遍历')
   })
 
   it('meridian 冷库（hasFiles=false）不查空索引——落回 importGraph 兜底分支（P1-2）', async () => {

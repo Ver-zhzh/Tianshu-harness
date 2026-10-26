@@ -3,6 +3,7 @@ import { builtinModules } from 'node:module'
 import { createRequire } from 'node:module'
 import { existsSync } from 'node:fs'
 import { FORCE_BUNDLED, SCAN_ALLOWED, verifyConsistency } from './scripts/external-deps.js'
+import { buildStampPlugin } from './scripts/build-stamp.js'
 
 const require = createRequire(import.meta.url)
 const pkgJson = require('./package.json') as { version: string; scripts?: Record<string, string> }
@@ -46,7 +47,7 @@ export default defineConfig({
   // 供 loadProModule 的 dist 形态候选路径加载（桌面 sidecar 运行时）。
   // src/cli/entry.ts 是 npm bin（P0-1/P0-2）：轻量 launcher + V8 编译缓存 +
   // CLI 早期路由；未命中才动态 import main.ts。产物 dist/cli/entry.js。
-  entry: ['src/main.ts', 'src/cli/entry.ts', 'src/workers/cpu-worker.ts', 'src/workers/verification-worker.ts', 'src/agent/worker-process/child.ts', ...proEntry, ...proComputerUseEntry, ...proRuntimeEntries, ...providerUsageEntry],
+  entry: ['src/main.ts', 'src/cli/entry.ts', 'src/benchmark/recovery-cli.ts', 'src/workers/cpu-worker.ts', 'src/workers/image-worker.ts', 'src/workers/verification-worker.ts', 'src/agent/worker-process/child.ts', ...proEntry, ...proComputerUseEntry, ...proRuntimeEntries, ...providerUsageEntry],
   format: ['esm'],
   target: 'node24',
   // Inject the package version as a build-time constant so the packaged sidecar
@@ -159,7 +160,7 @@ export default defineConfig({
   // __require shim（undici 曾命中）。node: 形式由 /^node:/ 覆盖。
   external: [...SCAN_ALLOWED, /^node:/, ...builtinModules],
   noExternal: FORCE_BUNDLED,
-  esbuildPlugins: [],
+  esbuildPlugins: [buildStampPlugin(pkgVersion)],
   // platform:node makes esbuild externalize bare node builtin requires (e.g.
   // undici's internal `require('assert')`) instead of emitting a throwing
   // __require shim — required to bundle CJS node libs into the ESM output.

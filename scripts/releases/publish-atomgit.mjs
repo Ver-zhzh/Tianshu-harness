@@ -1,36 +1,21 @@
-import { createHash } from 'node:crypto'
 import { createReadStream, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { basename, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { execFileSync } from 'node:child_process'
 import { sha256 } from './generate-catalog.mjs'
 import { validateCatalog } from './catalog.mjs'
-import { writeCatalog } from './check-workspace-metadata.mjs'
+import { assertAnonymousProof, atomgitDownloadURL, probeAtomgitTag, verifyAnonymousDownload } from './anonymous-download.mjs'
 
 const BASE = 'https://api.atomgit.com/api/v5/repos/huiliyi37/Tianshu-harness'
-export const downloadURL = (tag, name) => `${BASE}/releases/${encodeURIComponent(tag)}/attach_files/${encodeURIComponent(name)}/download`
+export const downloadURL = atomgitDownloadURL
 
 /** 给脚本自造的失败打阶段标记：顶层 catch 只对它打印 message（文案只含阶段名与 HTTP 状态码，不含预签名 URL）。 */
 const staged = (message, pubStage) => Object.assign(new Error(message), { pubStage })
 
-/**
- * PUT 返回 2xx 与附件「匿名可见」之间可能有一个**秒级登记窗口**（2026-10-08 实测：
- * 95B 附件流式 PUT 后立即 HEAD 得 404，约 10s 后才转 200）。上传后需要附件可下载时
- * 给一个有界等待：**只在 404 上重试**（最多 20 次 × 3s），其他状态码立即失败。
- */
-export async function openAttachment(url, request) {
-  for (let attempt = 0; ; attempt++) {
-    const response = await request(url, { redirect: 'follow', signal: AbortSignal.timeout(30 * 60 * 1000) })
-    if (response.ok && response.body) return response
-    try { await response.body?.cancel() } catch { /* 已消费/已关闭 */ }
-    if (response.status !== 404 || attempt >= 19) return response
-    await new Promise(resolve => setTimeout(resolve, 3000))
-  }
-}
-
-/** 上传后记录到 catalog 的源条目——与 GitHub/OSS 源同级，不再有资格验证链。 */
-export function atomgitSource(version, artifact) {
-  return { url: downloadURL(`v${version}`, artifact.fileName), verified: true, anonymous: true, verifiedAt: new Date().toISOString(), sha256: artifact.sha256, size: artifact.size }
+export function atomgitSource(version, artifact, proof) {
+  const url = downloadURL(`v${version}`, artifact.fileName)
+  assertAnonymousProof(proof, { url, size: artifact.size, sha256: artifact.sha256 })
+  return { url, verified: true, anonymous: true, verifiedAt: proof.verifiedAt, sha256: artifact.sha256, size: artifact.size }
 }
 export function atomgitManifest(catalog) {
   validateCatalog(catalog)
@@ -65,23 +50,54 @@ export function atomgitClient(token, request = fetch) {
     return response.json()
   }
 }
-/** Existing attachments are never re-uploaded; a different immutable file is never overwritten. */
+
+/**
+ * Release 缺则自建——镜像仓只同步 git ref，不同步 release 对象（2026-10-24 实测：
+ * 创建接口可用，但 body 为空被 400「body不能为空」拒收，故 notes 缺省时用 GitHub
+ * 链接兜底）。tag 必须已镜像到位，否则拒绝——绝不把 release 钉到无关的 main HEAD。
+ */
+export async function ensureRelease(api, tag, notes, probeTag = probeAtomgitTag) {
+  try { return await api(`/releases/tags/${tag}`) } catch (e) {
+    if (e.status !== 404) throw e
+    if (!probeTag(tag).trim()) throw new Error('Version tag must be mirrored to AtomGit before publishing attachments')
+    const body = notes?.trim() || `完整清单见 GitHub Release：https://github.com/huiliyi37/Tianshu-harness/releases/tag/${tag}`
+    return api('/releases', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tag_name: tag, name: tag, body, release_status: 'latest' }) })
+  }
+}
+
+/**
+ * 发布完成后把「最新版本」徽章钉到当前版本——release_status 是服务端单值语义，
+ * 只读 GET 不含它；手工补建/部分重跑过的 release 缺省是 none，徽章会停在旧版
+ * （2026-10-24 事故：v3.36.1 发布一天后仓页仍显示 v3.35.0）。PATCH 必须带回
+ * name+body（缺省 400 must not be blank），先读后改保持原文。幂等：已是 latest 零写入。
+ */
+export async function markLatest(api, tag) {
+  const release = await api(`/releases/tags/${tag}`)
+  if (release.release_status === 'latest') return false
+  await api(`/releases/${tag}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: release.name || tag, body: release.body?.trim() || `完整清单见 GitHub Release：https://github.com/huiliyi37/Tianshu-harness/releases/tag/${tag}`, release_status: 'latest' }) })
+  return true
+}
+/** Existing and newly uploaded immutable attachments must both pass anonymous byte verification. */
 export async function uploadImmutable(api, tag, file, expected, request = fetch) {
   const name = basename(file), entry = downloadURL(tag, name)
-  // 存在性探测不能走 HEAD：AtomGit 的附件入口对 HEAD 恒返回 404（2026-10-08 实测，
-  // 同一 URL 的 GET/Range 正常 206、全量下载也正常）。用 1 字节 Range GET 判存，
-  // 否则每次重跑都会把已上传的几百 MB 原样重传一遍。
-  const probe = await request(entry, { headers: { Range: 'bytes=0-0' }, redirect: 'follow', signal: AbortSignal.timeout(20000) })
-  const probeOk = probe.ok || probe.status === 206
+  expected ??= { size: statSync(file).size, sha256: await sha256(file) }
+  let probe
+  try {
+    probe = await request(entry, { headers: { Range: 'bytes=0-0', 'Cache-Control': 'no-store' }, redirect: 'follow', cache: 'no-store', credentials: 'omit', signal: AbortSignal.timeout(20000) })
+  } catch {
+    throw staged('Cannot establish attachment absence: anonymous probe failed', 'attachment-probe')
+  }
+  const probeOk = probe.status === 200 || probe.status === 206
   try { await probe.body?.cancel() } catch { /* 已消费/已关闭 */ }
-  if (probeOk) return
+  if (probeOk) {
+    try { return await verifyAnonymousDownload({ url: entry, expected, request }) }
+    catch (error) { throw staged(`Existing immutable attachment verification failed: ${error.message}`, 'attachment-verify') }
+  }
   if (probe.status !== 404) throw staged(`Cannot establish attachment absence: HTTP ${probe.status}`, 'attachment-probe')
   const info = await api(`/releases/${encodeURIComponent(tag)}/upload_url?file_name=${encodeURIComponent(name)}`)
   const target = new URL(info.url)
   if (target.protocol !== 'https:' || target.username || target.password) throw staged('Unsafe upload address', 'upload-address')
-  // 预签名端点对**无 Content-Length 的 chunked PUT 返回 411 Length Required**（2026-10-08
-  // 实测：流式 body 不带长度时平台直接拒收，首次启用 AtomGit 源时每个平台都卡在这里）。
-  // 带上真实长度后同一路径立即 200 且附件匿名可见；长度取自本地文件，与实际正文一致。
+  // 预签名端点对无 Content-Length 的 chunked PUT 返回 411；长度必须与本地正文一致。
   const response = await request(target, {
     method: 'PUT',
     headers: { ...info.headers, 'Content-Length': String(statSync(file).size) },
@@ -90,6 +106,9 @@ export async function uploadImmutable(api, tag, file, expected, request = fetch)
     signal: AbortSignal.timeout(30 * 60 * 1000),
   })
   if (!response.ok) throw staged(`Attachment upload failed: HTTP ${response.status}`, 'attachment-upload')
+  try { await response.body?.cancel() } catch { /* 已消费/已关闭 */ }
+  try { return await verifyAnonymousDownload({ url: entry, expected, request, notFoundRetries: 19 }) }
+  catch (error) { throw staged(`Uploaded attachment verification failed: ${error.message}`, 'attachment-verify') }
 }
 async function main() {
   const arg = name => { const i = process.argv.indexOf(name); return i === -1 ? undefined : process.argv[i+1] }
@@ -101,7 +120,10 @@ async function main() {
     const manifest = atomgitManifest(catalog)
     if (!process.argv.includes('--publish')) { console.log(`Dry run: v${catalog.version} complete AtomGit metadata (${Object.keys(manifest.platforms).join(', ')}); package bytes will not be uploaded`); return }
     const token = credential(); if (!token) { const error = new Error('AtomGit credential unavailable'); error.code='CREDENTIAL_UNAVAILABLE'; throw error }
-    await publishMetadata(atomgitClient(token), `v${catalog.version}`, assets, catalog, fetch, readFileSync(catalogPath))
+    const api = atomgitClient(token)
+    await ensureRelease(api, `v${catalog.version}`, catalog.notes)
+    await publishMetadata(api, `v${catalog.version}`, assets, catalog, fetch, readFileSync(catalogPath))
+    await markLatest(api, `v${catalog.version}`)
     console.log(`Published AtomGit metadata: v${catalog.version}`); return
   }
   const target = catalog.artifacts.find(a => a.platform === (arg('--platform') ?? 'windows-x86_64') && a.purpose === (arg('--purpose') ?? 'update'))
@@ -116,19 +138,14 @@ async function main() {
   }
   const token = credential(); if (!token) { const error = new Error('AtomGit credential unavailable'); error.code='CREDENTIAL_UNAVAILABLE'; throw error }
   const api = atomgitClient(token), tag = `v${catalog.version}`
-  try { await api(`/releases/tags/${tag}`) } catch (e) {
-    if (e.status !== 404) throw e
-    // Existing signed version/tag is required; never silently tag unrelated main HEAD.
-    const tags = execFileSync('git', ['ls-remote', '--tags', 'https://atomgit.com/huiliyi37/Tianshu-harness.git', `refs/tags/${tag}`], { env: { ...process.env, GIT_TERMINAL_PROMPT:'0' }, stdio:['ignore','pipe','ignore'], timeout:30000, windowsHide: true }).toString()
-    if (!tags.trim()) throw new Error('Version tag must be mirrored to AtomGit before publishing attachments')
-    await api('/releases', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ tag_name: tag, name: tag, body: catalog.notes ?? '', release_status:'latest' }) })
-  }
+  await ensureRelease(api, tag, catalog.notes)
   await uploadImmutable(api, tag, file, target)
   const extra = async path => uploadImmutable(api, tag, path)
   // 安装包（macOS DMG）不参与 updater 签名，没有 .sig 文件：缺了跳过，不是错误。
   if (existsSync(file + '.sig')) await extra(file + '.sig')
   const checksumPath = join(assets,`${target.fileName}.sha256`)
   writeFileSync(checksumPath,`${target.sha256}  ${target.fileName}\n`); await extra(checksumPath)
+  if (await markLatest(api, tag)) console.log(`Marked ${tag} as latest release on AtomGit`)
   console.log(`Uploaded ${target.platform} assets to AtomGit: ${target.fileName}`)
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) main().catch(error => {

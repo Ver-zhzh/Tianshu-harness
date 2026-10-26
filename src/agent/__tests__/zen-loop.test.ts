@@ -31,7 +31,10 @@ function makeEngine() {
   return new PromptEngine({
     model: 'deepseek-v4-pro',
     maxTokens: 1024,
-    staticCtx: { tools: [READ_FILE_TOOL.definition] },
+    // 镜像生产装配：staticCtx.tools 是全量门控集。getActiveToolNames 现读线上
+    // 已发布集合（loop.ts），zen 未 arm 时不会有 updateTools 重发布——fixture 只放
+    // read_file 会让「zen disabled → 全量面」哨兵空转。
+    staticCtx: { tools: [READ_FILE_TOOL.definition, EDIT_FILE_TOOL.definition, BASH_TOOL.definition] },
     volatileCtx: { cwd: TEST_CWD },
   })
 }

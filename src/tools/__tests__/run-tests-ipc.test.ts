@@ -23,9 +23,21 @@ async function waitFor(predicate: () => boolean, label: string): Promise<void> {
 }
 const ipcError = 'Error: listen ENOTSUP: operation not supported on socket /fixture/tsx-501/42.pipe\n    at createIpcServer (tsx/dist/cli.mjs:1:1)'
 
+test('a failed test reporting EPERM never triggers a second process', async () => {
+  let spawns = 0
+  const result = await runTestCommandIn('/tmp', { type: 'run', command: 'tsx', args: ['--test', 'one.test.ts'], display: 'tsx --test one.test.ts', runner: 'node-test', scope: 'targeted' },
+    { cwd: '/tmp', input: {}, toolUseId: 'no-eperm-retry' }, undefined, 1000, {
+      spawn: () => { spawns++; const child = new Child(); queueMicrotask(() => { child.stderr.write('EPERM from the test body'); child.emit('close', 1, null) }); return child },
+      kill() {}, persist: async () => '/tmp/fixture-output', setTimeout: () => 0, clearTimeout() {},
+      createDecoder: () => ({ write: (data: Buffer) => data.toString(), end: () => '' }), prepareCompletion: async () => undefined,
+    })
+  assert.equal(spawns, 1)
+  assert.equal(result.isError, true)
+})
+
 for (const [label, stderr, code, retries, channel] of [
-  ['tsx IPC ENOTSUP', ipcError, 1, 1],
-  ['legacy EPERM', 'EPERM', 1, 1],
+  ['tsx IPC ENOTSUP', ipcError, 1, 0],
+  ['legacy EPERM', 'EPERM', 1, 0],
   ['stdout-only IPC text', ipcError, 1, 0, 'stdout'],
   ['tests already started', ipcError, 1, 0, 'started'],
   ['truncated test progress', ipcError, 1, 0, 'truncated'],
@@ -35,7 +47,7 @@ for (const [label, stderr, code, retries, channel] of [
   ['unrelated socket ENOTSUP', 'Error: listen ENOTSUP /fixture/app.pipe', 1, 0],
   ['successful diagnostic text', ipcError, 0, 0],
 ] as Array<[string, string, number, number, ('stdout' | 'stderr' | 'started' | 'truncated' | 'tail')?]>) {
-  test(`${label}: fallback preserves argv, budget and tool identity`, async () => {
+  test(`${label}: does not retry or widen the requested execution`, async () => {
     const cwd = mkdtempSync(join(tmpdir(), 'run-tests-ipc '))
     const children = [new Child(), new Child()]
     const spawns: Array<{ command: string; args: string[] }> = []

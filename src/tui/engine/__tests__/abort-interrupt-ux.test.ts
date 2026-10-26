@@ -55,7 +55,9 @@ test('普通 onAbort 收尾归档已生成 handoff、清 pending 并反馈结果
     app.callbacks.onAbort()
 
     assert.equal(app.pendingHandoffCopy, undefined, '中断 callback 必须清掉 pending')
-    assert.equal(readFileSync(request.destinationPath, 'utf8'), 'handoff before abort')
+    const archived = readFileSync(request.destinationPath, 'utf8')
+    assert.match(archived, /^交接 session-aborted \//, '归档使用事实快照结构')
+    assert.ok(archived.includes('handoff before abort'), '事实快照的 narrative 保留原始交接正文')
     assert.equal(readFileSync(request.sourcePath, 'utf8'), 'handoff before abort', '中断归档不删除项目源')
     assert.match(out.chunks.join(''), /交接请求已中断/)
     assert.match(out.chunks.join(''), /已归档至/)
@@ -85,7 +87,9 @@ test('watchdog 自动续跑期间保留 handoff 请求，最终完成后归档',
     app.callbacks.onTurnComplete({}, 1, true)
     await tick()
     assert.equal(app.pendingHandoffCopy, undefined)
-    assert.equal(readFileSync(request.destinationPath, 'utf8'), 'handoff after watchdog recovery')
+    const archived = readFileSync(request.destinationPath, 'utf8')
+    assert.match(archived, /^交接 session-watchdog \//, '归档使用事实快照结构')
+    assert.ok(archived.includes('handoff after watchdog recovery'), '事实快照的 narrative 保留恢复后的交接正文')
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

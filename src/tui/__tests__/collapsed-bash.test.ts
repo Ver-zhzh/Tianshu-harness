@@ -175,19 +175,20 @@ describe('formatCollapsedBashGroup', () => {
     assert.match(lines[0]!, / · \d+(?:\.\d+)?(?:ms|s)/, 'summary includes elapsed time')
   })
 
-  it('lists commands when <= 3 entries', () => {
+  it('collapses successful multi-entry groups to one summary line', () => {
     const group = makeGroup([
       { id: '1', command: 'pwd', completed: true },
       { id: '2', command: 'ls', completed: true },
       { id: '3', command: 'cat README', completed: true },
     ])
     const lines = formatCollapsedBashGroup({ group, theme })
-    assert.ok(lines.some(l => l.includes('pwd')))
-    assert.ok(lines.some(l => l.includes('ls')))
-    assert.ok(lines.some(l => l.includes('cat README')))
+    assert.equal(lines.length, 1)
+    assert.ok(!lines[0]!.includes('pwd'))
+    assert.ok(!lines[0]!.includes('ls'))
+    assert.ok(!lines[0]!.includes('cat README'))
   })
 
-  it('shows compact preview and ctrl+o hint when > 3 entries', () => {
+  it('keeps the expand hint on the sole summary line', () => {
     const group = makeGroup([
       { id: '1', command: 'pwd', completed: true },
       { id: '2', command: 'ls', completed: true },
@@ -195,8 +196,9 @@ describe('formatCollapsedBashGroup', () => {
       { id: '4', command: 'whoami', completed: true },
     ])
     const lines = formatCollapsedBashGroup({ group, theme })
-    assert.ok(lines.some(l => l.includes('ctrl+o 展开')))
-    assert.ok(lines.some(l => l.includes('… +1 条命令')))
+    assert.equal(lines.length, 1)
+    assert.ok(lines[0]!.includes('ctrl+o 展开'))
+    assert.ok(!lines[0]!.includes('… +1 条命令'))
   })
 
   it('marks failed entries', () => {
@@ -217,13 +219,14 @@ describe('formatCollapsedBashGroupLive', () => {
     assert.ok(lines[0]!.includes('Running 1 shell command'))
   })
 
-  it('shows tail of last completed output', () => {
+  it('keeps recent output out of the single live aggregate line', () => {
     const group = makeGroup([
       { id: '1', command: 'cat a', completed: true, content: 'line1\nline2' },
       { id: '2', command: 'cat b', completed: false },
     ])
     const lines = formatCollapsedBashGroupLive(group, theme)
-    assert.ok(lines.some(l => l.includes('line2')))
+    assert.equal(lines.length, 1)
+    assert.ok(!lines[0]!.includes('line2'))
   })
 })
 

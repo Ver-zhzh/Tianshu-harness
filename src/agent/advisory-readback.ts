@@ -1,5 +1,7 @@
 import { verificationAttempted } from './verification-activity.js'
 import { CourseCorrectionTracker } from './course-correction-tracker.js'
+import { resolve } from 'node:path'
+import { canonicalPathKey } from '../path-format.js'
 /**
  * Advisory Readback — advisory 采纳核销闭环（P1a, 2026-07-04 生命周期设计）。
  *
@@ -26,6 +28,8 @@ import type { ToolHistoryEntry } from './evidence-gate.js'
 
 /** 单条工具观察 — postTool 喂入,核销评估的证据源 */
 export interface ObservedToolEvent {
+  mutations?: import('./mutation-facts.js').MutationFact[]
+  fileStates?: import('../tools/types.js').ToolResult['fileStates']
   turn: number
   name: string
   /** bash → command;写/读类 → file_path;其余 → target 字段 */
@@ -131,6 +135,28 @@ export const MATURE_LIFT_MIN_DECIDED = 5
 export const MATURE_LIFT_MIN_SHADOW = 3
 
 export class AdvisoryReadback {
+  private fileKey(file: string): string { return canonicalPathKey(resolve(this.getCwd(), file)) }
+  private recoveryPending: Array<{ deliveryId: string; file: string; since: number; shadow: boolean }> = []
+  private recoveryOutcomes: Array<{ deliveryId: string; file: string; status: 'resolved' | 'failed' | 'unknown'; version: string | null; shadow: boolean; evaluatedTurn: number }> = []
+  drainRecoveryOutcomes() { const out = this.recoveryOutcomes; this.recoveryOutcomes = []; return out }
+  hasUsefulFileEvidence(file: string, sinceTurn: number, nowTurn: number): boolean {
+    const inWindow = this.events.filter(e => e.turn >= sinceTurn && e.turn <= nowTurn)
+    const facts = inWindow.flatMap(e => e.mutations ?? []).filter(f => this.fileKey(f.file) === this.fileKey(file) && f.attempted)
+    const latest = facts.at(-1)
+    return !!latest && latest.after.parse === 'valid' && latest.restoration !== 'conflict'
+      && (latest.before.version !== latest.after.version || latest.restoration === 'restored')
+  }
+  private settleRecoveries(turn: number, flush = false): void {
+    this.recoveryPending = this.recoveryPending.filter(p => {
+      const facts = this.events.filter(e => e.turn >= p.since && e.turn <= turn).flatMap(e => e.mutations ?? []).filter(f => this.fileKey(f.file) === p.file && f.attempted)
+      const latest = facts.at(-1)
+      const status = latest?.after.parse === 'valid' && latest.restoration !== 'conflict' ? 'resolved'
+        : latest?.after.parse === 'invalid' || latest?.restoration === 'conflict' ? 'failed' : 'unknown'
+      if (status !== 'resolved' && !flush && turn - p.since < EVENT_RETENTION_TURNS - 1) return true
+      this.recoveryOutcomes.push({ deliveryId: p.deliveryId, file: p.file, status, version: latest?.after.version ?? null, shadow: p.shadow, evaluatedTurn: turn })
+      return false
+    })
+  }
   private pending: PendingExpectation[] = []
   private sequence = 0
   private unresolved: UnresolvedExpectation[] = []
@@ -163,7 +189,7 @@ export class AdvisoryReadback {
    *  不进 getTotals/ignoredStreak(guardian meta 保持会话纯度,习惯化保持会话内) */
   private priors = new Map<string, EfficacyPriorCounts>()
   /** pattern_absent 判定用的文件读取器 — 注入以便测试;返回 null = 文件不存在 */
-  constructor(private readFile: (path: string) => string | null = defaultReadFile) {}
+  constructor(private readFile: (path: string) => string | null = defaultReadFile, private readonly getCwd: () => string = () => process.cwd()) {}
 
   /** 注入跨会话先验(会话启动时一次)。 */
   seedPriors(priors: Iterable<[string, EfficacyPriorCounts]>): void {
@@ -189,6 +215,7 @@ export class AdvisoryReadback {
         }
       }
       const deliveryId = `${this.profile}:${++this.sequence}`
+      if (d.expect.kind === 'tool_appears' && d.expect.recoveryTarget) this.recoveryPending.push({ deliveryId, file: this.fileKey(d.expect.recoveryTarget), since: turn, shadow })
       if (d.expect.kind === 'course_changed') this.courseTracker.deliver(deliveryId)
       if (d.expect.kind === 'course_changed' || ['convergence', 'turn-call-limit'].includes(d.key)) {
         this.courseKeys.add(d.key)
@@ -200,6 +227,7 @@ export class AdvisoryReadback {
 
   /** 行为观察 — postTool 喂入本轮工具事件 */
   observeTool(event: ObservedToolEvent): void {
+    if (event.mutations) event = { ...event, mutations: event.mutations.map(f => ({ ...f, file: this.fileKey(f.file) })) }
     this.events.push(event)
     this.courseTracker.observe(event)
     // 按轮跨度修剪（不按条数——重轮次 20+ 工具调用不能把窗口内证据挤掉）
@@ -211,6 +239,7 @@ export class AdvisoryReadback {
 
   /** 核销评估 — postTurn 调用。返回本轮判定数（0 = 无到期谓词）。 */
   evaluate(turn: number): number {
+    this.settleRecoveries(turn)
     if (this.pending.length === 0) return 0
     const still: PendingExpectation[] = []
     let decided = 0
@@ -280,6 +309,7 @@ export class AdvisoryReadback {
     const decided = this.evaluate(turn)
     const unresolved = [...this.drainUnresolved(), ...this.pending.map(p => this.censor(p, turn, 'session_ended'))]
     this.pending = []
+    this.settleRecoveries(turn, true)
     return { decided, unresolved }
   }
 

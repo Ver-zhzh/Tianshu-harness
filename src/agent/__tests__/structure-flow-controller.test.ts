@@ -35,6 +35,11 @@ function stableInput(overrides: Partial<StructureFlowInputs> = {}): StructureFlo
     ...overrides,
   }
 }
+it('a confirmed repair episode prevents high-flow relaxation without requiring PAL', () => {
+  const result = computeStructureFlowControl(stableInput({ repairActive: true }))
+  assert.equal(result.mode, 'tighten')
+  assert.equal(result.relaxation, 0)
+})
 
 /** 计划自检输入 #2：未知域（手推 structurePressure=.685, flowPotential=.17）。 */
 function unknownDomainInput(overrides: Partial<StructureFlowInputs> = {}): StructureFlowInputs {

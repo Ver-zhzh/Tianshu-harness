@@ -109,8 +109,7 @@ test('thinking delta 默认折叠为存在与耗时提示，正文仍保留供�
   assert.equal((app as unknown as AppState).state.thinkingText, '推理甲行\n推理乙行', '已有正文保留供详情查看')
 })
 
-test('thinking → tool use 时 commit 折叠为「已推理」摘要', async () => {
-  // collapse-on-commit：提交到 scrollback 只留一行过去式摘要。
+test('thinking → tool use 时只归档正文，不向 scrollback 写逐段摘要', async () => {
   const { app, out } = makeApp()
   const body = Array.from({ length: 12 }, (_, i) => `推理行${i}`).join('\n')
   app.callbacks.onThinkingDelta(body)
@@ -121,8 +120,11 @@ test('thinking → tool use 时 commit 折叠为「已推理」摘要', async ()
   await microtask()
   await tick()
   const committed = stripAnsi(out.chunks.join(''))
-  assert.ok(committed.includes('已推理'), `commit 应含「已推理」摘要，实际: ${committed.slice(0, 200)}`)
-  assert.ok(!committed.includes('推理行5'), 'collapse-on-commit：正文行不写入 scrollback')
+  assert.ok(!committed.includes('已推理'), `工具边界不再写「已推理」摘要，实际: ${committed.slice(0, 200)}`)
+  assert.ok(!committed.includes('推理行5'), 'thinking 正文不写入 scrollback')
+  assert.equal((app as any).thinkingReview.peek()?.text, body, '完整正文仍留存供回看')
+  assert.equal((app as unknown as AppState).state.thinkingText, '')
+  assert.equal((app as unknown as AppState).state.isThinking, false)
 })
 
 test('两轮 turn 间 streaming 状态不泄露', async () => {

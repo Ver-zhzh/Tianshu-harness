@@ -383,13 +383,11 @@ describe('AgentLoop — multi-turn tool_use', () => {
   })
 
 
-  // Prewarm consumer revived (cc2f4f33 "revive prewarm dead store — wire the
-  // consumer side"): full-file read_file calls serve from the prewarm cache
-  // again. The truncation regression that originally disabled this is fixed in
-  // prewarm-file.ts — the cache now stores FULL raw content and read-file.ts
-  // applies the active contextWindow's cap at consume time, with mtime
-  // re-verification guarding against stale serves.
-  it('serves read_file from the prewarm cache on a repeat read of an unchanged file', async () => {
+  // 重复读取的服务层几经演变：cc2f4f33 复活 prewarm 消费端 → 21a49c50d
+  // （file-version 统一）把「本会话已读文件」的重复读移交版本验证路径
+  // （重读字节 + 哈希绑证据），prewarm 收窄为未读文件的预测首读。
+  // 本用例钉住现行分层。
+  it('repeat read of an unchanged file is served by the version-verified layer, not prewarm', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'rivet-loop-prewarm-'))
     const filePath = join(dir, 'cached.txt')
     writeFileSync(filePath, 'cached content', 'utf-8')
@@ -413,11 +411,12 @@ describe('AgentLoop — multi-turn tool_use', () => {
     } as unknown as StreamClient
 
     const agent = new AgentLoop({ client, promptEngine: makeEngine(), toolRegistry: registry, maxTurns: 2, contextWindow: 1_000_000, compact: { enabled: false, autoThreshold: 800_000, autoFloor: 500_000, model: 'flash' } }, session, dir)
+    const results: string[] = []
     const callbacks = {
       onTextDelta: () => {},
       onThinkingDelta: () => {},
       onToolUse: () => {},
-      onToolResult: () => {},
+      onToolResult: (_id: string, _name: string, result?: string) => { if (result) results.push(result) },
       onTurnComplete: () => {},
       onError: (error: Error) => { throw error },
       onAbort: () => {},
@@ -428,9 +427,15 @@ describe('AgentLoop — multi-turn tool_use', () => {
     assert.equal(agent.getPrewarmStats().hits, 0)
 
     await agent.run('read again', callbacks)
-    // prewarmRecentReads() seeded cached.txt after run 1; run 2's full-file read
-    // (no offset/limit) consumes it — mtime unchanged, so it's a live hit.
-    assert.equal(agent.getPrewarmStats().hits, 1)
+    // 21a49c50d（file-version 统一）：重复读取由版本验证路径服务（重读字节 +
+    // 内容哈希绑定证据），在 prewarm 之前短路；1e1e358a6 后 consumePrewarm 自身
+    // 也全量读盘比对，prewarm 对「本会话已读文件」不再有成本优势，收窄为
+    // 从未读过的预测首读（prewarm-file.test.ts 覆盖消费端单元语义）。
+    // 这里钉住新分层：重复读内容正确、带 dedup 提醒、prewarm 零命中。
+    assert.equal(agent.getPrewarmStats().hits, 0, '重复读取不再经 prewarm 缓存')
+    const repeatResult = results.at(-1) ?? ''
+    assert.ok(repeatResult.includes('cached content'), '重复读必须返回正确内容')
+    assert.ok(repeatResult.includes('read-dedup'), '重复读必须带 dedup 提醒')
 
     await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   })
@@ -1825,9 +1830,9 @@ describe('AgentLoop — convergence emission cooldown', () => {
     let cards = 0
     const callbacks = { ...makeCallbacks(), onDecisionShift: () => cards++ }
     await agent.runConvergenceCheck(14, 'plan', true, false, callbacks)
-    const result = await agent.turnStepProducer.buildTurnRequest(14, {} as never, {} as never,
-      { ratio: 0, cvmOverheadRatio: 0, thrashing: false, shouldThrottleCvm: false } as never, true, false, callbacks)
-    assert.equal(result.action, 'abort')
+    // Request-boundary cancellation propagates its reason to the run owner.
+    await assert.rejects(agent.turnStepProducer.buildTurnRequest(14, {} as never, {} as never,
+      { ratio: 0, cvmOverheadRatio: 0, thrashing: false, shouldThrottleCvm: false } as never, true, false, callbacks), reason => reason === 'test abort')
     assert.equal(cards, 0, 'render does not imply a successfully built request')
   })
 

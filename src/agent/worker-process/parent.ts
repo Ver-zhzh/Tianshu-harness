@@ -1,3 +1,4 @@
+import { HookRpcServer } from '../../hooks/hook-host-rpc.js'
 import { deriveWorkerSessionId } from '../work-order.js'
 import { currentWorkspaceRoots } from '../../tools/workspace-context.js'
 /**
@@ -133,11 +134,13 @@ export async function runWorkerSessionOop(
     userInstructions: config.promptEngine.getUserInstructionsSnapshot(),
     proAuthorization: captureManagedProAuthorization(),
     config: {
+      hookRpc: !!config.externalHookHost,
       order: { ...config.order, allowedTools: config.toolRegistry.getDefinitions().map(tool => tool.name) },
       cwd: config.cwd,
       workspaceRoots: config.workspaceRoots ?? [...currentWorkspaceRoots(config.cwd)],
       maxTurns: config.maxTurns,
       contextWindow: config.contextWindow,
+      readConcurrency: config.readConcurrency,
       compact: config.compact,
       runtimeDecision: decision,
       providerName: config.providerName,
@@ -192,6 +195,11 @@ export async function runWorkerSessionOop(
   const stdin = child.stdin
   const stdout = child.stdout
   const stderr = child.stderr
+  const hookServer = new HookRpcServer(config.externalHookHost, { cwd: config.cwd,
+    sessionId: deriveWorkerSessionId(config.order.id, config.sessionNonce), parent: config.externalHookParent },
+    response => { stdin.write(encodeFrame(response)) })
+  child.once('exit', () => { void hookServer.close() })
+  child.once('error', () => { void hookServer.close() })
   const proChild = manageProChild(child, id => { stdin.write(encodeFrame({ t: 'pro-deny', id })) })
   stdout.setEncoding('utf8')
   stderr.setEncoding('utf8')
@@ -212,6 +220,7 @@ export async function runWorkerSessionOop(
   let detachAbort: (() => void) | undefined
 
   const cleanup = (): void => {
+    void hookServer.close()
     if (watchdogTimer) clearTimeout(watchdogTimer)
     if (killTimer) clearTimeout(killTimer)
     detachAbort?.()
@@ -303,6 +312,7 @@ export async function runWorkerSessionOop(
     const decoder = createFrameDecoder()
     stdout.on('data', (chunk: string) => {
       for (const msg of decoder.feed(chunk) as ChildMessage[]) {
+        if (msg.t === 'hook-request') { hookServer.receive(msg); continue }
         if (msg.t === 'pro-denied') { proChild.acknowledge(msg.id); continue }
         if (msg.t === 'pro-drained') { proChild.acknowledge(undefined, true); continue }
         if (settled) continue

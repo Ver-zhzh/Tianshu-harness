@@ -1,3 +1,8 @@
+import { withPlanCompletion } from '../plan/completion-view.js'
+import { activateRequiredToolsNow } from '../workflows/required-tools.js'
+import { buildStarflowWorkflowPrompt } from '../workflows/ecosystem-workflows.js'
+import { DELIVERY_CONTRACT_VERSION } from '../agent/delivery-contract.js'
+import { readPlanCompletionSummary } from '../plan/completion-summary.js'
 import { executeVisionOnboarding } from './vision-onboarding-executor.js'
 import { registerRepairPrefixCommand } from './repair-prefix.js'
 import type { AgentLoop } from '../agent/loop.js'
@@ -7,9 +12,10 @@ import { isProjectSlotSkill, resolveAppPromptInput } from './prompt-input-resolv
 import { projectSurfaceAllowed } from '../config/project-trust.js'
 import { SessionPersist, getSessionDir } from '../agent/session-persist.js'
 import { forkSession, listBranches, countMessageLines } from '../agent/session-fork.js'
-import { type StarDomainId } from '../agent/star-domain.js'
 import { starDomainRegistry } from '../agent/star-domain-registry.js'
 import { DOMAIN_SWITCH_CACHE_WARNING } from '../agent/domain-picker-entries.js'
+import { formatModelSwitchFeedback } from './model-switch-feedback.js'
+import { formatDomainListLine, formatDomainSwitch } from '../agent/domain-briefing.js'
 import { getCapsuleByStar, listCapsuleStars } from '../agent/seed-capsule-store.js'
 import { microCompactOai, estimateOaiTokens } from '../compact/micro.js'
 import { rollbackToCheckpoint, getRollbackPreview } from '../agent/checkpoint.js'
@@ -43,7 +49,7 @@ import { formatVolatilePayloadReport } from '../context/payload-diagnostic.js'
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { isFilesystemMetadata } from '../utils/file-metadata.js'
 import { basename, join, resolve } from 'node:path'
-import { buildHandoffPrompt, createHandoffRequest } from './handoff.js'
+import { runHandoffCommand } from './handoff-command.js'
 import { ensureVerifyDeclaration, renderRivetMdStack, upsertStackSection } from '../bootstrap/verify-declaration.js'
 import { exportsDir } from '../config/paths.js'
 import { listPlans, rejectPlan, resolvePlanOptionLabel, resolvePlanRef, stripCopiedTitleSuffix } from '../plan/plan-store.js'
@@ -98,10 +104,7 @@ import { detectEnv, formatEnvGuidance, recommendUvSetup, isPythonProject } from 
 import { getResolvedEnv, getResolvedPathDiff } from '../tools/resolved-env.js'
 import { detectTlsInterception, formatTlsTrustLines } from '../platform/tls-interception.js'
 import { getShellCommand } from '../platform.js'
-import { createCoordinatorReviewDeps } from '../agent/review-coordinator-deps.js'
-import { consumePendingReview, peekPendingReview } from '../agent/post-commit-review-pending.js'
-import { routeReviewWorkflow, type ReviewMode, type ReviewOutcome } from '../agent/review-router.js'
-import type { ChangeSet } from '../agent/review-discipline.js'
+import { peekPendingReview } from '../agent/post-commit-review-pending.js'
 import { HELP_TEXT } from './format/help-text.js'
 import { contractModels } from '../config/contract-models.js'
 import { handleEffortSlash, resolveActiveEffortChoices } from './effort-slash.js'
@@ -127,7 +130,7 @@ export interface SlashHandlerContext {
   model: string
   maxTokens: number
   availableModels: Array<{ id: string; supportsVision?: boolean }>
-  onModelSwitch: (modelId: string) => { ok: boolean; error?: string }
+  onModelSwitch: (modelId: string) => { ok: boolean; error?: string; changed?: boolean; modelName?: string; warnings?: string[] }
   allProviders: Record<string, ProviderConfig>
   currentProvider: string
   currentSessionId: string
@@ -189,6 +192,7 @@ export interface SlashHandlerContext {
   banditState?: import('../server/routes.js').BanditStatusEntry[]
   /** 独立审查回调——/review 不经过 deliver_task 直接调 routeReviewWorkflow。
    *  未注入时 /review fallback 到 resolveAppPromptInput → deliver_task 旧路径。 */
+  runIndependentReview?: (input: Record<string, unknown>) => Promise<import('../tools/types.js').ToolResult>
   runReview?: (change: import('../agent/review-discipline.js').ChangeSet, mode: import('../agent/review-router.js').ReviewMode, focus?: string) => Promise<import('../agent/review-router.js').ReviewOutcome>
   /** Submit a prompt directly to the agent pipeline, bypassing slash routing.
    *  Used by commands that need to transform the input before sending (e.g. /goal). */
@@ -421,6 +425,13 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
             case 'not-extended':
               pushStatic(createLogEntry({ type: 'system', content: `"${toolName}" is a CORE or already-visible tool — it's available without mounting. No change.` }))
               break
+            case 'busy':
+              pushStatic(createLogEntry({ type: 'system', content: '当前任务仍在运行，工具面未修改；请在任务结束后启用。' }))
+              break
+            case 'disabled':
+            case 'restricted':
+              pushStatic(createLogEntry({ type: 'system', content: `工具 ${toolName} 被当前会话的显式限制阻止；未启用。` }))
+              break
             case 'unknown':
               pushStatic(createLogEntry({ type: 'system', content: `Unknown tool "${toolName}". Run /tools to list available tiers.` }))
               break
@@ -430,19 +441,14 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
           }
         }
       } else {
-        // List current tool tiers
-        const { CORE_TOOLS, EXTENDED_TOOLS, isExtendedTool } = await import('../agent/tool-tiers.js')
-        const active = new Set(ctx.agent.getActiveToolNames())
-        const mountedExtras = [...active].filter(isExtendedTool)
-        const disabled = new Set(ctx.config.agent?.toolGating?.disabledTools ?? [])
-        const lines: string[] = ['Tool Gating Tiers', '═════════════════════', '', `CORE (${CORE_TOOLS.length}):`, ...CORE_TOOLS.map(t => `  ${disabled.has(t) ? '✗' : '✓'} ${t}`), '', `EXTENDED (${EXTENDED_TOOLS.length}):`, ...EXTENDED_TOOLS.map(t => `  ${disabled.has(t) ? '✗' : active.has(t) ? '✓ (mounted)' : '·'} ${t}`), '']
-        if (mountedExtras.length > 0) {
-          lines.push(`Runtime-mounted EXTENDED: ${mountedExtras.join(', ')}`, '')
+        const surface = ctx.agent.getToolSurface()
+        const labels = { visible: '当前可见', cold: '已注册、当前不可见', unregistered: '未注册', disabled: '显式禁用', restricted: '白名单限制', unavailable: '已注册、能力不可用' }
+        const lines = [`工具档位 ${surface.preset} · 装配 ${surface.registeredCount} / 主控可见 ${surface.visibleCount}`, `当前工具定义 ${surface.definitionChars} 字符（非实际 token 数）`]
+        for (const [state, label] of Object.entries(labels)) {
+          const entries = surface.tools.filter(tool => tool.state === state)
+          lines.push(`\n${label} (${entries.length})`, ...entries.map(tool => `  ${tool.name}`))
         }
-        if (disabled.size > 0) {
-          lines.push(`Disabled tools (config-level, restart to apply): ${[...disabled].join(', ')}`, '')
-        }
-        lines.push('EXTENDED tools are available to workers via delegate_task.', 'Use /tools enable <name> to mount one onto the primary agent.')
+        lines.push('使用 /tools enable <name> 显式启用冷工具；受会话白名单与禁用项约束。')
         pushStatic(createLogEntry({ type: 'system', content: lines.join('\n') }))
       }
       setIsStreaming(false)
@@ -626,7 +632,7 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
       // Pro gate（双层模式）：team max 的多视角规划 fanout 仅 Pro 可用。
       // 入口早拦免得白跑一个模型轮次；标准 /team 不受影响。
       if (parts[1]?.toLowerCase() === 'max' && !isProFeatureEnabled(ctx.config, 'teamMax')) {
-        pushStatic(createLogEntry({ type: 'system', content: 'team max（多视角规划）是 Pro 功能。Basic 可用：/team <task> 标准模式，或先 plan_task 出计划再执行。升级 Pro 解锁。' }))
+        pushStatic(createLogEntry({ type: 'system', content: 'team max（多视角规划）是 Pro 功能。Basic 可用：/team <task> 标准模式，或传 planPath/planMarkdown 执行现有计划。升级 Pro 解锁。' }))
         setIsStreaming(false)
         return true
       }
@@ -687,17 +693,9 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
         return true
       }
       if (submitToAgent) {
-        // 代码级星流：阶段流转由 starflow 工具的状态机硬门禁兜底（council→team→galaxy），
-        // 不再内嵌五阶段协议长 prompt——模型只负责需求澄清与交付叙述。
-        submitToAgent(`进入星流（Starflow）模式。任务：${task}
-
-先用大白话与我确认需求（目标/非目标/验收标准，至多一轮；任务已清楚就直接进入下一步）。需求不清时先对话澄清，不要急着调工具。
-需求清楚后调用 starflow 工具执行，阶段流转与门禁由工具状态机强制执行（council 评审 → team 波次 → galaxy 攻坚），不要手工模拟这些阶段：
-- 先 starflow({ objective, draftItems, rounds, confirm: false }) 展示执行方案；我确认后再调 confirm: true 点火。
-- draftItems 从澄清产出映射（id/title/detail/files），供 council 评审与 galaxy 维度派生；高风险任务 rounds: 2。
-- 返回 blocked 时按报告里的人话解释与下一步建议处理（修订草稿重跑 / resume: true 续跑），不要绕过门禁。
-- 工具全过后会输出交付检查清单——逐项自查后调用 deliver_task 完成交付门禁；未运行的验证就说"未验证"。
-全程用大白话同步"完成了什么/接下来什么"。`)
+        const activation = activateRequiredToolsNow(['starflow'], name => ctx.agent.enableTool(name), note => pushStatic(createLogEntry({ type: 'system', content: note })))
+        if (!activation.ok) { pushStatic(createLogEntry({ type: 'system', content: activation.error })); setIsStreaming(false); return true }
+        submitToAgent(buildStarflowWorkflowPrompt(task))
         return true
       }
       return false
@@ -726,84 +724,31 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
           // 「现在攒了多少、要不要提前审」的自然落点。
           const pend = peekPendingReview(ctx.currentSessionId)
           const pendLine = pend
-            ? `\n待终审：${pend.commits} 个提交、${pend.files.size} 个文件已累积 — 敲 /review 立即审查，或等收尾自动终审。`
+            ? `\n待终审：${pend.commits} 个提交、${pend.files.size} 个文件已累积 — 敲 /review 立即审查，处理时机由你决定。`
             : '\n待终审：无（本次会话没有累积的延迟审查）。'
           pushStatic(createLogEntry({ type: 'system', content: `审查门状态：${state}。/review off 关闭自动审查，/review on 恢复；手动 /review [max] 始终可用。${pendLine}` }))
         } else {
           gateRef.current = sub === 'off' ? 'off' : 'auto'
           pushStatic(createLogEntry({ type: 'system', content: sub === 'off'
             ? '⏸ 自动审查门已关闭（本会话）：主控照常测试/验证/提交，不再自动 spawn 审查 worker。手动 /review [max] 仍可用；/review on 恢复。'
-            : '▶ 自动审查门已恢复（本会话）：交付后将按既有规则自动路由审查。' }))
+            : '▶ 自动审查门已恢复（本会话）：此开关仅为旧客户端兼容；提交不自动触发审查，请用 /review。' }))
         }
         setIsStreaming(false)
         return true
       }
-      // /review [max|l1|l2|l3] [focus] — 独立审查入口（不经过 deliver_task）。
-      // 当 ctx.runReview 可用时直接调 routeReviewWorkflow；否则 fallback 到旧路径。
-      const levelKw = parts[1]?.toLowerCase()
-      const forceLevel = levelKw === 'max' || levelKw === 'l3' ? 'L3' as const
-        : levelKw === 'l1' ? 'L1' as const
-        : levelKw === 'l2' ? 'L2' as const
-        : undefined
-      const isMax = forceLevel === 'L3'
-      const focus = parts.slice(forceLevel ? 2 : 1).join(' ').trim()
-
-      if (!ctx.runReview) {
-        // Fallback: 让 resolveAppPromptInput 映射为 deliver_task 指令
-        return false
+      const keyword = parts[1]?.toLowerCase()
+      if (keyword === 'l1') {
+        pushStatic(createLogEntry({ type: 'system', content: 'L1 静态建议：核对改动范围与证据。本次未执行独立代码审查或测试。' }))
+        setIsStreaming(false); return true
       }
-
-      // 动态导入避免循环依赖 + 避免顶层 import 增加初始 bundle
-      const { isCrossModule, isFixContext } = await import('../agent/review-discipline.js')
-      const { reviewWorkflowBudgetMs } = await import('../agent/review-router.js')
-      type ChangeSet = import('../agent/review-discipline.js').ChangeSet
-      type ReviewMode = import('../agent/review-router.js').ReviewMode
-
-      // 从 git diff 构造 ChangeSet。defer/冷却/在飞攒下的待终审范围一并非入——
-      // formatDeferredReviewNotice 与 /review status 都承诺「敲 /review 立即审查」，
-      // 此前 /review 只看未提交改动：干净工作树下该承诺是死胡同，且 pending 不被
-      // 消费会让收尾终审对同批文件二审。pending 文件已 commit，审的是其当前内容
-      // （与 deliver_task 补审/final 消费同一语义）。
-      const dirtyFiles = await collectDirtyFiles(ctx.agent.cwd)
-      const pend = peekPendingReview(ctx.currentSessionId)
-      const files = pend ? [...new Set([...pend.files, ...dirtyFiles])].sort() : dirtyFiles
-      if (files.length === 0) {
-        pushStatic(createLogEntry({ type: 'system', content: '没有未提交的改动可以审查。' }))
-        setIsStreaming(false)
-        return true
-      }
-      // 确认有内容可审才消费——早退路径不白丢累积范围。
-      if (pend) consumePendingReview(ctx.currentSessionId)
-      const effectiveForce = forceLevel ?? (pend?.escalate ? 'L3' as const : undefined)
-
-      const change: ChangeSet = {
-        files,
-        crossModule: isCrossModule(files),
-        isFix: isFixContext(focus || ''),
-        ...(effectiveForce ? { forceLevel: effectiveForce } : {}),
-      }
-
-      const mode: ReviewMode = 'manual'
-      const budgetSec = effectiveForce === 'L1'
-        ? 0
-        : Math.round(reviewWorkflowBudgetMs(mode, effectiveForce === 'L3' ? 'L3' : effectiveForce === 'L2' ? 'L2' : undefined) / 1000)
-      const levelLabel = effectiveForce === 'L3' ? 'L3 Squadron (5 inspectors)' : effectiveForce ?? 'auto-classify'
-      const pendNote = pend ? `\n   已并入待终审累积：${pend.commits} 个提交、${pend.files.size} 个文件（收尾不再重复终审）。` : ''
-      pushStatic(createLogEntry({ type: 'system', content: `⏳ 审查启动中 (${levelLabel}, ≤${budgetSec}s)...${pendNote}\n` }))
-
+      if (!ctx.runIndependentReview) return false
+      const hasLevel = ['max', 'l2', 'l3'].includes(keyword ?? '')
+      const focus = parts.slice(hasLevel ? 2 : 1).join(' ').trim()
       try {
-        const outcome = await ctx.runReview(change, mode, focus || undefined)
-        const icon = outcome.verdict === 'verified' ? '🟢'
-                   : outcome.verdict === 'rejected' ? '🔴' : '🟡'
-        const lines = [`${icon} 审查结果 [${outcome.tier}]: ${outcome.verdict}`]
-        if (typeof outcome.rounds === 'number') lines.push(`   轮次：${outcome.rounds}`)
-        if (outcome.evidence) lines.push(`   证据：${outcome.evidence}`)
-        if (outcome.verdict === 'rejected' || outcome.escalated) {
-          lines.push('   → 请在后续提交中处理审查发现。')
-        }
-        pushStatic(createLogEntry({ type: 'system', content: lines.join('\n') }))
-      } catch (err) {
-        pushStatic(createLogEntry({ type: 'system', content: `审查失败：${(err as Error).message}` }))
+        const result = await ctx.runIndependentReview({ action: 'start', depth: keyword === 'max' || keyword === 'l3' ? 'max' : 'default', ...(focus ? { focus } : {}) })
+        pushStatic(createLogEntry({ type: 'system', content: result.content }))
+      } catch (error) {
+        pushStatic(createLogEntry({ type: 'system', content: `审查未完成：${String(error)}` }))
       }
       setIsStreaming(false)
       return true
@@ -813,7 +758,7 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
     name: '/model',
     immediate: true,
     handler(ctx) {
-      const { parts, pushStatic, setIsStreaming } = ctx
+      const { parts, pushStatic } = ctx
       const cmd = parts[0]!.toLowerCase()
       const targetModel = parts[1]
       if (!targetModel || targetModel === 'list') {
@@ -835,12 +780,11 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
       } else {
         const result = ctx.onModelSwitch(targetModel)
         if (result.ok) {
-          pushStatic(createLogEntry({ type: 'system', content: `Switched to ${targetModel}` }))
+          pushStatic(createLogEntry({ type: 'system', content: formatModelSwitchFeedback({ ...result, modelName: result.modelName ?? targetModel }) }))
         } else {
           pushStatic(createLogEntry({ type: 'system', content: result.error ?? `Model "${targetModel}" not found.` }))
         }
       }
-      setIsStreaming(false)
       return true
     },
   },
@@ -1008,24 +952,7 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
   {
     name: '/handoff',
     immediate: true,
-    async handler(ctx) {
-      const { parts, pushStatic, setIsStreaming, agent } = ctx
-      const note = parts.slice(1).join(' ').trim() || undefined
-      if (!ctx.submitToAgent) {
-        pushStatic(createLogEntry({ type: 'system', content: '当前界面不支持 /handoff（测试/无头环境）。', isError: true }))
-        setIsStreaming(false)
-        return true
-      }
-      // 项目内 .rivet/ 在工作区内（auto-safe 免审批）；会话目录在工作区外会触发路径审批。
-      // projectPath 归一正斜杠供提示词使用；底层文件系统也接受 Windows 原生路径。
-      const archivePath = join(getSessionDir(agent.cwd), `${ctx.currentSessionId}.handoff.md`)
-      const request = createHandoffRequest(agent.cwd, ctx.currentSessionId, archivePath)
-      const projectPath = request.sourcePath.replaceAll('\\', '/')
-      // 归档登记：完成、中断或失败时均清理 pending 并给出归档结果。
-      ctx.onHandoffStart?.({ ...request, sourcePath: projectPath })
-      ctx.submitToAgent(buildHandoffPrompt(projectPath, note))
-      return true
-    },
+    handler: runHandoffCommand,
   },
   {
     name: '/remember',
@@ -1472,16 +1399,14 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
         } else if (current === null) {
           pushStatic(createLogEntry({ type: 'system', content: '星域\n\n当前无星域（自动匹配未命中）。\n使用 /domain <名称> 手动指定，或 /domain auto 重置为自动检测。' }))
         } else {
-          pushStatic(createLogEntry({ type: 'system', content: `星域\n\n当前: ${current.name} (${current.id})\n座右铭: ${current.motto}\n\n${current.volatileBlock}` }))
+          const full = starDomainRegistry.get(current.id) ?? current
+          pushStatic(createLogEntry({ type: 'system', content: `星域\n\n${formatDomainSwitch(full)}\n\n${current.motto}\n\n/domain list 查看全部 · /domain auto 恢复自动匹配` }))
         }
       } else if (sub === 'list' || sub === 'ls') {
         const current = ctx.agent.getSessionDomain()
         const currentId = current?.id
-        const lines = (starDomainRegistry.list() as Array<{ id: StarDomainId; name: string; keywords: string[]; decisionStyle: string; motto: string }>).map(d => {
-          const marker = d.id === currentId ? ' ← current' : ''
-          return `  ${d.name} (${d.id}) [${d.decisionStyle}]${marker}\n    ${d.motto}\n    keywords: ${d.keywords.join(', ')}`
-        })
-        pushStatic(createLogEntry({ type: 'system', content: `星域一览\n\n${lines.join('\n\n')}\n\n使用 /domain <id|名称> 切换，/domain auto 恢复自动检测。` }))
+        const lines = starDomainRegistry.list().map(d => formatDomainListLine(d, d.id === currentId))
+        pushStatic(createLogEntry({ type: 'system', content: `星域一览\n\n${lines.join('\n')}\n\n使用 /domain <id|名称> 切换，/domain auto 恢复自动检测。` }))
       } else if (sub === 'auto') {
         const midSession = ctx.agent.getSessionTurnCount() > 0
         ctx.agent.resetSessionDomain()
@@ -1497,7 +1422,7 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
           const domain = { id: matched.id, name: matched.name, volatileBlock: matched.volatileBlock, motto: matched.motto, courageThreshold: matched.courageThreshold }
           ctx.agent.setSessionDomain(domain)
           ctx.onDomainChange?.(domain.name)
-          pushStatic(createLogEntry({ type: 'system', content: `星域切换: ${domain.name} (${domain.id})\n${domain.motto}\n\n${domain.volatileBlock}` }))
+          pushStatic(createLogEntry({ type: 'system', content: `星域切换\n\n${formatDomainSwitch(matched)}` }))
           if (midSession) pushStatic(createLogEntry({ type: 'system', content: DOMAIN_SWITCH_CACHE_WARNING }))
         } else {
           const validNames = allDomains.map(d => `${d.name}|${d.id}`).join(', ')
@@ -1935,7 +1860,7 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
       } else {
         const lines = plans.map(p => {
           const statusIcon = p.status === 'approved' ? '✅' : p.status === 'rejected' ? '❌' : p.status === 'executed' ? '🏁' : '📋'
-          return `  ${statusIcon} \`${p.slug}\` — ${p.title} (${p.status}, ${p.createdAt.toLocaleString()})`
+          return `  ${statusIcon} \`${p.slug}\` — ${p.title} (${p.status}, ${p.createdAt.toLocaleString()})${readPlanCompletionSummary(p.content, withPlanCompletion(ctx.agent.cwd, ctx.currentSessionId, p).completion) ? `\n${readPlanCompletionSummary(p.content, withPlanCompletion(ctx.agent.cwd, ctx.currentSessionId, p).completion)}` : ''}`
         })
         pushStatic(createLogEntry({ type: 'system', content: `Plans (.rivet/plans/):\n\n${lines.join('\n')}\n\nUse /plan-approve <slug> to approve, /plan-reject <slug> to reject.` }))
       }
@@ -2001,7 +1926,7 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
       const cwd = ctx.agent.cwd
       const notify = (content: string, isError?: boolean) =>
         pushStatic(createLogEntry({ type: 'system', content, isError }))
-      const kickoffDeps = { cwd, agent: ctx.agent, submitToAgent: ctx.submitToAgent, notify }
+      const kickoffDeps = { cwd, sessionId: ctx.currentSessionId, agent: ctx.agent, submitToAgent: ctx.submitToAgent, notify }
       const rawArg = parts.slice(1).join(' ').trim()
       const plans = await listPlans(cwd)
 
@@ -2180,6 +2105,7 @@ const TUI_SLASH_COMMANDS: readonly TuiSlashCommandDef[] = [
       const { parts, pushStatic, setIsStreaming } = ctx
       const cmd = parts[0]!.toLowerCase()
       const subcmd = parts[1]
+      pushStatic(createLogEntry({ type: 'system', content: `运行 buildId：${process.env.RIVET_BUILD_ID ?? '不可确认'}；交付契约：${DELIVERY_CONTRACT_VERSION}` }))
       const info = ctx.agent.getDebugInfo()
       if (subcmd === 'prompt') {
         pushStatic(createLogEntry({ type: 'system', content: `System prompt (${info.systemPromptLength} chars):\n${info.systemPromptPreview}\n\nTools (${info.toolCount}): ${info.toolNames.join(', ')}` }))
@@ -3817,12 +3743,11 @@ export function registerTuiSlashCommands(app: TuiApp, ctx: BootstrapContext): vo
       maxTokens,
       availableModels: contractModels(ctx.provider).map(m => ({ id: m.id })),
       onModelSwitch: (modelId: string) => {
-        try { ctx.agent.abort() } catch {}
         const res = switchAgentRuntime(ctx, modelId)
         if (res.ok && res.modelName) {
           app.setModelInfo(res.modelName, res.contextWindow)
         }
-        return { ok: res.ok, error: res.error }
+        return res
       },
       onSessionSwitch: (targetId: string) => {
         try { ctx.agent.abort() } catch {}
@@ -3874,16 +3799,11 @@ export function registerTuiSlashCommands(app: TuiApp, ctx: BootstrapContext): vo
       onDomainChange: (domainName: string | undefined) => {
         app.setSessionStarDomain(domainName)
       },
-      runReview: ctx.refs.coordinator
-        ? (() => {
-            const reviewDeps = createCoordinatorReviewDeps(ctx.refs.coordinator!, {
-              parentTurnId: 'slash-review',
-              reviewDepth: 0,
-            })
-            return (change: ChangeSet, mode: ReviewMode, focus?: string) =>
-              routeReviewWorkflow(change, reviewDeps, { mode, focusHint: focus })
-          })()
-        : undefined,
+      runIndependentReview: async input => {
+        const tool = ctx.agent.config.toolRegistry.get('review_changes')
+        if (!tool) return { content: '当前工具档位未接入独立审查。', isError: true }
+        return tool.execute({ input, cwd: ctx.agent.cwd, sessionId: ctx.sessionId, toolUseId: `slash-review-${Date.now()}`, reviewDepth: 0 })
+      },
       submitToAgent: (prompt: string) => { app.submitText(prompt) },
       onHandoffStart: (request) => { app.pendingHandoffCopy = request },
       goalTrackerRef: ctx.refs.goalTrackerRef,
@@ -4422,6 +4342,8 @@ export function registerTuiSlashCommands(app: TuiApp, ctx: BootstrapContext): vo
       handler: ({ app, input, trimmed }) => {
         const resolved = resolveAppPromptInput(trimmed, ctx.cwd)
         if (resolved !== null) {
+          const activation = activateRequiredToolsNow(resolved.requiredTools, name => ctx.agent.enableTool(name), note => app.commitStatic(note))
+          if (!activation.ok) { app.commitStatic(activation.error); app.setStreamingState(false); return true }
           app.submitText(resolved.prompt)
           return true
         }

@@ -32,6 +32,7 @@ import {
   type SessionRecord,
 } from '../session-manager.js'
 import type { AgentCallbacks } from '../../agent/loop-types.js'
+import { createReviewInbox } from '../../agent/review-inbox.js'
 import { ColdStartEvidenceError } from '../../api/continuation-prefix.js'
 import type { Artifact } from '../../artifact/types.js'
 import type { OaiMessage } from '../../api/oai-types.js'
@@ -48,6 +49,7 @@ class FakeAgent implements ManagedAgent {
   liveApprovalMode?: string
   /** 每次 run 收到的 prompt，按序记录（含自动续跑注入的 'continue'）。 */
   prompts: string[] = []
+  origins: Array<string | undefined> = []
   /** 累计用量快照——只有显式设值的用例才会让「中断补发」事件出现（默认
    *  undefined，避免给既有用例的事件流凭空多一条 turn_complete）。 */
   usageSnapshot?: {
@@ -64,8 +66,9 @@ class FakeAgent implements ManagedAgent {
   getEstimatedTokens() { return this.estimatedTokens }
   private resolveRun?: () => void
 
-  run(prompt: string, cb: AgentCallbacks): Promise<void> {
+  run(prompt: string, cb: AgentCallbacks, _images?: string[], options?: import('../../agent/input-origin.js').InputOptions): Promise<void> {
     this.prompts.push(prompt)
+    this.origins.push(options?.origin)
     this.callbacks = cb
     return new Promise<void>((res) => { this.resolveRun = res })
   }
@@ -137,6 +140,41 @@ function makeManager(opts: { watchdogContinueDelayMs?: number; maxEvents?: numbe
   })
   return { manager, agents }
 }
+
+test('late review-ready only notifies; the follow-up controller is retired (contract separation)', async () => {
+  const previous = process.env.RIVET_SESSION_DIR
+  const cwd = mkdtempSync(join(tmpdir(), 'sm-late-review-'))
+  process.env.RIVET_SESSION_DIR = cwd
+  const { manager, agents } = makeManager()
+  try {
+    const a = manager.createSession({ cwd, prompt: 'original A' })
+    const b = manager.createSession({ cwd, prompt: 'original B' })
+    await waitUntil(() => agents.length === 2 && !!agents[0]!.callbacks && !!agents[1]!.callbacks)
+    const originalCallback = agents[0]!.callbacks!
+    const inboxA = createReviewInbox(cwd, a.id)
+    inboxA.record('a-review', 'abcdef0123', ['src/a.ts'],
+      { tier: 'auto', verdict: 'rejected', findings: [{ severity: 'HIGH', claim: 'missing caller', evidence: 'src/a.ts:1' }] })
+    // 契约分离：onReviewReady 只通知，不自动驱动核实 run
+    const baseline = agents[0]!.prompts.length  // 初始 prompt 本身
+    originalCallback.onReviewReady!({ sessionId: a.id, reviewId: 'a-review' })
+    await settle()
+    assert.equal(agents[0]!.prompts.length, baseline, 'no automatic follow-up run is launched')
+    assert.equal(inboxA.list().length, 1, 'the persisted finding is preserved for user-initiated handling')
+    // 重复通知也不驱动执行
+    originalCallback.onReviewReady!({ sessionId: a.id, reviewId: 'a-review' })
+    await settle()
+    assert.equal(agents[0]!.prompts.length, baseline, 'repeat notices never re-drive a loop')
+    manager.abort(b.id)
+    agents[1]!.callbacks!.onReviewReady!({ sessionId: b.id, reviewId: 'b-review' })
+    await settle()
+    assert.equal(agents[1]!.prompts.length, 1, 'stop wins; only the initial prompt ever ran')
+  } finally {
+    await manager.shutdownAll()
+    if (previous === undefined) delete process.env.RIVET_SESSION_DIR
+    else process.env.RIVET_SESSION_DIR = previous
+    rmSync(cwd, { recursive: true, force: true })
+  }
+})
 
 test('createSession with prompt starts running; without prompt stays idle', async () => {
   const { manager } = makeManager()

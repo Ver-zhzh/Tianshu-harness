@@ -20,10 +20,12 @@ import {
 const MAX_CANDIDATES = 12
 
 export interface AutoCaptureHookDeps {
+  /** Resolved once at session construction. */
+  enabled?: boolean
   cwd: string
   sessionId?: string
   /** 侧路 LLM 调用（廉价路由）；实现方负责 usage 落账 + 有界返回。 */
-  complete: (prompt: string, timeoutMs: number) => Promise<string>
+  complete: (prompt: string, timeoutMs: number, signal?: AbortSignal) => Promise<string>
   /** 内层预算。默认 12s。 */
   timeoutMs?: number
 }
@@ -38,7 +40,20 @@ export interface AutoCaptureHooks {
  */
 export function createAutoCaptureHooks(deps: AutoCaptureHookDeps): AutoCaptureHooks {
   const buffer: CaptureCandidate[] = []
-  const enabled = autoCaptureEnabled()
+  const enabled = deps.enabled ?? autoCaptureEnabled()
+  const timeoutMs = deps.timeoutMs ?? 12_000
+  const capture = (): PostSessionRuntimeHook['run'] => {
+    const candidates = enabled ? buffer.splice(0) : []
+    return async ctx => {
+      if (ctx.signal?.aborted || candidates.length === 0) return
+      const prompt = buildCapturePrompt(candidates, deps.sessionId)
+      let raw: string
+      try { raw = await deps.complete(prompt, timeoutMs, ctx.signal) }
+      catch { return }
+      const verdicts = parseCaptureOutput(raw, candidates.length)
+      if (verdicts && !ctx.signal?.aborted) applyCaptureVerdicts(deps.cwd, deps.sessionId, candidates, verdicts)
+    }
+  }
 
   return {
     postTool: {
@@ -58,20 +73,9 @@ export function createAutoCaptureHooks(deps: AutoCaptureHookDeps): AutoCaptureHo
     postSession: {
       phase: 'postSession',
       name: 'memory-auto-capture',
-      async run() {
-        if (!enabled || buffer.length === 0) return
-        const candidates = buffer.splice(0)
-        const prompt = buildCapturePrompt(candidates, deps.sessionId)
-        let raw: string
-        try {
-          raw = await deps.complete(prompt, deps.timeoutMs ?? 12_000)
-        } catch {
-          return // fail-closed：LLM 不可用不写
-        }
-        const verdicts = parseCaptureOutput(raw, candidates.length)
-        if (!verdicts) return // fail-closed：输出不可解析不写
-        applyCaptureVerdicts(deps.cwd, deps.sessionId, candidates, verdicts)
-      },
+      budgetMs: timeoutMs + 5_000,
+      capture,
+      run: ctx => capture()(ctx),
     },
   }
 }

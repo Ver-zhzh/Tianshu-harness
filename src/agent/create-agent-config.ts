@@ -1,4 +1,6 @@
 import { snapshotSessionBinding } from '../model/model-binding.js'
+import { supportsLatencyReasoning } from './latency-experiments.js'
+import { clampReadConcurrency } from '../config/read-concurrency.js'
 import { createReportClientFactory } from '../api/report-client.js'
 import { resolveRequestBudgetPolicy } from '../context/request-budget.js'
 import { createProviderClient, resolveApiKey } from '../api/factory.js'
@@ -42,6 +44,8 @@ export interface ModelSpec {
 }
 
 export interface AgentConfigInput {
+  toolPreset?: import('../tools/tool-preset-names.js').ToolPreset
+  readConcurrency?: number
   userInstructions: import('../prompt/user-instructions.js').UserInstructionsSnapshot
   network?: Config['network']
   apiKey: string
@@ -59,6 +63,7 @@ export interface AgentConfigInput {
   constellationEnabled?: boolean
   companionPresenceEnabled?: boolean
   dreamEnabled?: boolean
+  memoryFormation?: AgentConfig['memoryFormation']
   runtimeLean?: boolean
   securityGuidance?: boolean
   interruptMarker?: boolean
@@ -82,6 +87,7 @@ export interface AgentConfigInput {
   /** 主控工具门控。缺省 undefined → 全量（不门控）。 */
   toolGating?: {
     enabled: boolean
+    preset?: import('../tools/tool-preset-names.js').ToolPreset
     coreOverride?: readonly string[]
     extraCore?: readonly string[]
     domainTier?: readonly string[]
@@ -119,11 +125,12 @@ export interface AgentConfigInput {
 }
 
 export interface MainAgentConfigInputParams {
+  toolPreset: import('../tools/tool-preset-names.js').ToolPreset | undefined
   userInstructions: import('../prompt/user-instructions.js').UserInstructionsSnapshot
   apiKey: string
   model: ModelSpec
   cwd: string
-  config: Pick<Config, 'agent' | 'compact' | 'runtime'> & Partial<Pick<Config, 'network'>>
+  config: Pick<Config, 'agent' | 'compact' | 'runtime'> & Partial<Pick<Config, 'network' | 'tools'>>
   sessionId: string
   toolDefinitions: ToolDefinition[]
   provider: ProviderConfig
@@ -148,6 +155,8 @@ export interface MainAgentConfigInputParams {
 
 export function createMainAgentConfigInput(params: MainAgentConfigInputParams): AgentConfigInput {
   return {
+    toolPreset: params.toolPreset,
+    readConcurrency: params.config.tools?.readConcurrency,
     userInstructions: params.userInstructions,
     apiKey: params.apiKey,
     model: params.model,
@@ -164,6 +173,7 @@ export function createMainAgentConfigInput(params: MainAgentConfigInputParams): 
     constellationEnabled: params.config.agent.constellationEnabled,
     companionPresenceEnabled: params.config.agent.companionPresenceEnabled,
     dreamEnabled: params.config.agent.dreamEnabled,
+    memoryFormation: params.config.agent.memoryFormation,
     // 域级 lean 覆盖：defaultDomain 钉定某域且 runtime.domains[域].lean 配置时
     // 用域值（如 taiyi 域默认 lean）；env 主开关恒优先。auto 域回退全局。
     runtimeLean: isRuntimeLeanForDomain(params.config.agent.defaultDomain, params.config.runtime, params.cwd),
@@ -197,6 +207,7 @@ export function createMainAgentConfigInput(params: MainAgentConfigInputParams): 
     toolGating: params.config.agent.toolGating
       ? {
           enabled: params.config.agent.toolGating.enabled,
+          preset: params.toolPreset,
           // Per-session 白名单（蒸馏回放）优先于 config coreOverride——让 LLM
           // 只看到白名单工具，收窄自动化任务的能力边界。
           coreOverride: params.allowedTools ?? params.config.agent.toolGating.coreTools,
@@ -211,7 +222,7 @@ export function createMainAgentConfigInput(params: MainAgentConfigInputParams): 
 
 export function createAgentConfig(input: AgentConfigInput): Pick<
   AgentConfig,
-  'client' | 'promptEngine' | 'contextWindow' | 'compact' | 'cwd' | 'blockPolicy' | 'providerProfile' | 'providerName' | 'compactionProfile' | 'primaryClient' | 'compactClient' | 'sessionId' | 'approvalMode' | 'autoReasoning' | 'reasoningFloor' | 'turnLevelThinking' | 'songlineEnabled' | 'constellationEnabled' | 'companionPresenceEnabled' | 'dreamEnabled' | 'runtimeLean' | 'securityGuidance' | 'interruptMarker' | 'hearthObserveEnabled' | 'crossSessionEnabled' | 'antiAnchoring' | 'intentRetrievalRouter' | 'llmSpeculation' | 'autoDelegateEnabled' | 'domainKeywordRouting' | 'defaultDomain' | 'goalJudge' | 'allProviders' | 'permissions' | 'toolGating' | 'prefixCacheStrategy' | 'supportsVision' | 'visionClient' | 'visionModelPrompt' | 'visionModelMaxTokens' | 'visionBridge' | 'onStatusLine' | 'wireContext' | 'meridianIndexer' | 'agentReconnect' | 'retryBudgetHolder' | 'budgetSummaryClient' | 'budgetSummaryMaxTokens'
+  'readConcurrency' | 'client' | 'promptEngine' | 'contextWindow' | 'compact' | 'cwd' | 'blockPolicy' | 'providerProfile' | 'providerName' | 'compactionProfile' | 'primaryClient' | 'compactClient' | 'sessionId' | 'approvalMode' | 'autoReasoning' | 'latencyReasoningSupported' | 'latencyPromptExperiment' | 'reasoningFloor' | 'turnLevelThinking' | 'songlineEnabled' | 'constellationEnabled' | 'companionPresenceEnabled' | 'dreamEnabled' | 'memoryFormation' | 'runtimeLean' | 'securityGuidance' | 'interruptMarker' | 'hearthObserveEnabled' | 'crossSessionEnabled' | 'antiAnchoring' | 'intentRetrievalRouter' | 'llmSpeculation' | 'autoDelegateEnabled' | 'domainKeywordRouting' | 'defaultDomain' | 'goalJudge' | 'allProviders' | 'permissions' | 'toolGating' | 'prefixCacheStrategy' | 'supportsVision' | 'visionClient' | 'visionModelPrompt' | 'visionModelMaxTokens' | 'visionBridge' | 'onStatusLine' | 'wireContext' | 'meridianIndexer' | 'agentReconnect' | 'retryBudgetHolder' | 'budgetSummaryClient' | 'budgetSummaryMaxTokens'
 > {
   const { model, apiKey, cwd, provider } = input
   const capabilities = resolveCapabilities(provider.name, provider.capabilities, model.capabilities)
@@ -259,7 +270,8 @@ export function createAgentConfig(input: AgentConfigInput): Pick<
   // 同进程多会话时，改完配置开新会话必须吃到新档位（文档承诺）。活会话不受
   // 影响：解析结果快照进 AgentConfig.blockPolicy，loop 内消费点只读快照。
   invalidatePromptBlocks()
-  const blockPolicy = resolvePromptBlocks(cwd)
+  const latencyPromptExperiment = !input.inheritFrozenFrom && process.env.RIVET_LATENCY_PROMPT_EXPERIMENT === '1'
+  const blockPolicy = resolvePromptBlocks(cwd, !input.inheritFrozenFrom)
 
   // 工具门控：构造期与 updateTools() 共用同一过滤（gateToolDefinitions），
   // 确保 MCP/LSP 异步注册后调用 updateTools 不会把 EXTENDED 工具整个还原。
@@ -267,6 +279,7 @@ export function createAgentConfig(input: AgentConfigInput): Pick<
   const gatedTools = input.toolGating
     ? gateToolDefinitions(input.toolDefinitions, {
         enabled: input.toolGating.enabled,
+      preset: input.toolGating.preset ?? input.toolPreset,
         coreOverride: input.toolGating.coreOverride,
         extraCore: input.toolGating.extraCore,
         domainTier: input.toolGating.domainTier,
@@ -334,6 +347,7 @@ export function createAgentConfig(input: AgentConfigInput): Pick<
     constellationEnabled: input.constellationEnabled,
     companionPresenceEnabled: input.companionPresenceEnabled,
     dreamEnabled: input.dreamEnabled,
+    memoryFormation: input.memoryFormation,
     runtimeLean: input.runtimeLean,
     securityGuidance: input.securityGuidance,
     interruptMarker: input.interruptMarker,
@@ -350,10 +364,13 @@ export function createAgentConfig(input: AgentConfigInput): Pick<
     goalJudge: input.goalJudge,
     allProviders: input.allProviders,
     autoReasoning: input.autoReasoning ?? true,
+    latencyReasoningSupported: supportsLatencyReasoning(provider, capabilities),
+    latencyPromptExperiment,
     reasoningFloor: model.reasoningEffort,
     // GLM turn-level thinking: disable thinking on tool execution turns
     // to prevent reasoning_content accumulation and context window stalls.
     turnLevelThinking: provider.name === 'glm',
+    readConcurrency: clampReadConcurrency(input.readConcurrency),
     permissions: input.permissions,
     toolGating: input.toolGating,
     prefixCacheStrategy: capabilities.prefixCacheStrategy,

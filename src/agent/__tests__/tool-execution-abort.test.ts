@@ -116,7 +116,8 @@ describe('ToolExecutionController abort-signal threading', () => {
     deps.onVerificationExecutionSettled = (sequence, result) => facts.recordVerificationExecutionSettled(sequence, result)
     let completed: ((result: any) => void) | undefined
     ;(deps.config.toolRegistry as any).execute = async (_: string, params: any) => {
-      assert.equal(facts.recentVerificationExecutions().length, 1, 'register immediately before real execution')
+      params.onVerificationStarted?.('fixture-run')
+      assert.equal(facts.recentVerificationExecutions().length, 1, 'register at actual process launch')
       completed = params.onVerificationCompleted
       return { content: 'background started', backgroundJobId: 'fixture-job' }
     }
@@ -127,7 +128,7 @@ describe('ToolExecutionController abort-signal threading', () => {
     const snapshot = facts.currentSnapshot()!
     assert.equal(snapshot.latestVerificationExecution?.settled, false, 'starting a job is not settlement')
     facts.recordFileProgress({ outcome: 'changed' })
-    completed!({ command: 'node --test a.test.ts', status: 'passed', kind: 'test', scope: 'targeted', targetFiles: ['a.test.ts'], exitCode: 0, countsReliable: true })
+    completed!({ executionId: 'fixture-run', command: 'node --test a.test.ts', status: 'passed', kind: 'test', scope: 'targeted', targetFiles: ['a.test.ts'], exitCode: 0, countsReliable: true })
     const execution = facts.recentVerificationExecutions()[0]!
     assert.equal(execution.settled, true)
     assert.equal(execution.mutationRevisionAtStart, 0, 'late completion retains launch version')
@@ -157,27 +158,29 @@ describe('ToolExecutionController abort-signal threading', () => {
     assert.equal(emitted, 0, 'callback must use the originating batch signal, not a new UI generation')
   })
 
-  it('real parallel batch waits for both FIFO approvals and executes edited input', async () => {
+  it('real read batch prepares FIFO approvals before execution and executes edited input', async () => {
     const { app, stdin } = makeApp()
     const executed: string[] = []
     const controller = makeController({}, true, true, executed)
     const input = makeInput(new AbortController().signal)
     input.toolUses = [
-      { id: 'a', name: 'demo_tool', input: { label: 'a' } },
-      { id: 'b', name: 'demo_tool', input: { label: 'b' } },
+      { id: 'a', name: 'grep', input: { label: 'a' } },
+      { id: 'b', name: 'grep', input: { label: 'b' } },
     ]
     input.callbacks = { ...app.callbacks, onToolResult: () => {} } as any
     try {
       let settled = false
       const batch = controller.executeBatch(input).then(r => { settled = true; return r })
       await new Promise(r => setImmediate(r))
-      assert.equal((app as any).approvalIntentController.approvalCount, 2)
+      assert.equal((app as any).approvalIntentController.approvalCount, 1)
       stdin.dataHandler!('e')
       ;(app as any).inputLine.setValue(JSON.stringify({ label: 'edited-a' }))
       stdin.dataHandler!('\r')
       stdin.dataHandler!('y')
       await new Promise(r => setImmediate(r))
       assert.equal(settled, false, 'batch cannot finish while the second approval is pending')
+      assert.equal((app as any).approvalIntentController.approvalCount, 1)
+      assert.deepEqual(executed, [], 'all preflights complete before read execution begins')
       stdin.dataHandler!('n')
       await batch
       assert.deepEqual(executed, ['edited-a'], 'only the approved tool runs with the reviewed input')

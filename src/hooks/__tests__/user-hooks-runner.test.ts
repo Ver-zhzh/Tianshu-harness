@@ -96,13 +96,13 @@ describe('resolveHookCommand —— Windows 按扩展名选解释器', () => {
     assert.match(r.ok ? '' : r.error, /无扩展名/)
   })
 
-  it('POSIX：保持原行为（脚本自身 + shell:true，#! 仍生效）', () => {
+  it('POSIX：参数化脚本路径并保留 shebang', () => {
     for (const platform of ['darwin', 'linux'] as NodeJS.Platform[]) {
       const r = resolveHookCommand('/proj/x.sh', { platform, env: envWith(), exists: noExists })
       assert.equal(r.ok, true, platform)
-      assert.equal(r.ok ? r.cmd : '', '/proj/x.sh', platform)
-      assert.deepEqual(r.ok ? r.args : [], [], platform)
-      assert.equal(r.ok ? r.shell : false, true, platform)
+      assert.equal(r.ok ? r.cmd : '', '/bin/sh', platform)
+      assert.deepEqual(r.ok ? r.args : [], ['-c', 'exec "$1"', 'rivet-hook', '/proj/x.sh'], platform)
+      assert.equal(r.ok ? r.shell : true, false, platform)
     }
   })
 })
@@ -118,14 +118,14 @@ describe('runHooksForEvent —— 环境隔离（issue #137 同族）', () => {
     return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) }
   }
 
-  it('不把父进程的 NODE_OPTIONS / 启动即执行类变量泄漏给 hook 子进程', () => {
+  it('不把父进程的 NODE_OPTIONS / 启动即执行类变量泄漏给 hook 子进程', async () => {
     const prev = { ...process.env }
     const { dir, cleanup } = setupDumpHook()
     process.env.RIVET_TRUST_PROJECT = '1'
     process.env.NODE_OPTIONS = '--require=/tmp/malware.js'
     process.env.LD_PRELOAD = '/tmp/evil.so'
     try {
-      const out = runHooksForEvent(dir, { event: 'preTurn', cwd: dir, turn: 1 }).map(r => r.output).join('\n')
+      const out = (await runHooksForEvent(dir, { event: 'preTurn', cwd: dir, turn: 1 })).map(r => r.output).join('\n')
       assert.doesNotMatch(out, /^NODE_OPTIONS=/m, 'NODE_OPTIONS 必须被剥离')
       assert.doesNotMatch(out, /^LD_PRELOAD=/m, 'LD_PRELOAD 必须被剥离')
     } finally {
@@ -134,13 +134,13 @@ describe('runHooksForEvent —— 环境隔离（issue #137 同族）', () => {
     }
   })
 
-  it('不把父进程的密钥类变量泄漏给 hook 子进程', () => {
+  it('不把父进程的密钥类变量泄漏给 hook 子进程', async () => {
     const prev = { ...process.env }
     const { dir, cleanup } = setupDumpHook()
     process.env.RIVET_TRUST_PROJECT = '1'
     process.env.MY_FAKE_SECRET_TOKEN = 'super-secret-value-123'
     try {
-      const out = runHooksForEvent(dir, { event: 'preTurn', cwd: dir, turn: 1 }).map(r => r.output).join('\n')
+      const out = (await runHooksForEvent(dir, { event: 'preTurn', cwd: dir, turn: 1 })).map(r => r.output).join('\n')
       assert.doesNotMatch(out, /super-secret-value-123/, '密钥值不得出现在子进程环境')
       assert.doesNotMatch(out, /^MY_FAKE_SECRET_TOKEN=/m, '密钥变量不得传出')
     } finally {
@@ -149,12 +149,12 @@ describe('runHooksForEvent —— 环境隔离（issue #137 同族）', () => {
     }
   })
 
-  it('仍向 hook 送达事件上下文（RIVET_HOOK_EVENT 等）与基础变量', () => {
+  it('仍向 hook 送达事件上下文（RIVET_HOOK_EVENT 等）与基础变量', async () => {
     const prev = { ...process.env }
     const { dir, cleanup } = setupDumpHook()
     process.env.RIVET_TRUST_PROJECT = '1'
     try {
-      const out = runHooksForEvent(dir, { event: 'preTurn', cwd: dir, turn: 7, sessionId: 's1' }).map(r => r.output).join('\n')
+      const out = (await runHooksForEvent(dir, { event: 'preTurn', cwd: dir, turn: 7, sessionId: 's1' })).map(r => r.output).join('\n')
       assert.match(out, /^RIVET_HOOK_EVENT=preTurn$/m)
       assert.match(out, /^RIVET_SESSION_ID=s1$/m)
       assert.match(out, /^RIVET_TURN=7$/m)

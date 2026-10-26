@@ -106,6 +106,23 @@ Download from [Releases](https://github.com/huiliyi37/Tianshu-harness/releases/l
 </tr>
 </table>
 
+> [!WARNING]
+> **Hard Node.js requirement (v3.36.0+):** the CLI supports only **Node 24.22.1+
+> (24.x line) or Node 26.12.1+ (26.x line)**. Node 22 / 23 / 25 / 27,
+> Node 24.x below 24.22.1, and Node 26.x below 26.12.1 are rejected at startup
+> by the security gate. `/update` may install the new package successfully while
+> the new CLI still cannot start. Run `node -v` first; if it does not match, upgrade
+> via nvm / fnm / Volta or nodejs.org before installing.
+>
+> ```bash
+> node -v   # requires v24.22.1+ or v26.12.1+
+> ```
+>
+> The desktop app bundles its own runtime; no manual Node installation is required.
+> If it still fails after the upgrade, see the
+> [installation guide](docs/guides/installation.md) and
+> [troubleshooting guide](docs/guides/troubleshooting.md).
+
 <details>
 <summary><b>One-line installers · migrating from the legacy package</b></summary>
 

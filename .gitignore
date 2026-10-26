@@ -31,7 +31,8 @@ docs/sessions/
 .claude/PRPs/reviews/
 .wolf/
 .omc/
-.github/workflows/
+.github/workflows/*
+!.github/workflows/hook-runtime.yml
 # 一次性/本地诊断脚本与评估产物
 desktop/scripts/perf-*.ts
 # 例外：perf-session-open-script.test.ts 会 spawn 这个脚本，它已经不是一次性

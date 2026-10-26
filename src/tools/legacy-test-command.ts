@@ -100,8 +100,8 @@ export async function buildLegacyTestCommand(cwd: string, filter?: string): Prom
   // append the sanitized filter as a trailing token — the convention most
   // runners accept (cargo test <name>, pytest <path>, npm test -- <path>).
   if (runner === 'declared') {
-    const safeFilter = filter?.replace(/[`$\\;"'|&<>]/g, '').trim()
-    const full = safeFilter ? `${base} ${safeFilter}` : base
+    if (filter) return { type: 'blocked', display: base, runner, scope: 'targeted', message: '声明命令没有可证明的文件筛选协议；未执行测试。请提供明确的定向命令或用户选择全量。', blockedReason: 'unknown_runner', userGuidance: '不能通过拼接参数假定任意 verify.test 会限制执行范围。' }
+    const full = base
     return {
       type: 'run',
       command: full,

@@ -3,7 +3,7 @@ import { parseImageGenRequest, parseVisionCredentials } from './endpoint-credent
 import { endpointNetworkInput, endpointFailure, assertCredentialOrigin } from './endpoint-network-input.js'
 import { EndpointNetworkError } from '../tools/net/endpoint-policy.js'
 import { buildEndpointNetworkRoutes } from './endpoint-network-routes.js'
-import { modelBindingAvailability, type ModelBindingRef } from '../model/model-binding.js'
+import { routingModelStatus } from './routing-diagnostics.js'
 /**
  * /config/* routes — provider + API key management for the desktop settings UI.
  * All routes are Bearer-gated (fail-closed).
@@ -130,6 +130,7 @@ import { buildProviderKeyRoutes } from './config-routes-keys.js'
 import { buildImageGenerationRoutes } from './image-generation-routes.js'
 import { buildProFeatureRoutes } from './pro-feature-routes.js'
 import { buildZenRoutes } from './config-routes-zen.js'
+import { buildMemoryFormationRoutes } from './config-routes-memory-formation.js'
 import { buildPermissionRoutes } from './config-routes-permissions.js'
 import { listProviderKeys } from '../config/provider-key-store.js'
 import { contractModels } from '../config/contract-models.js'
@@ -673,21 +674,12 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
     }, apiToken),
 
     // Sub-agent / review model routing (agent.review + workers blocks).
+    // 响应同时带 availability（各目标可用性）与 diagnostics（悬空来源 + 实例身份）：
+    // 设置页据此在保存后提示仍不可用的绑定，而不是把它当保存失败（PR #37）。
     'GET /config/routing': withAuth(() => {
       const cfg = loadConfig()
       const routing = getRoutingConfig()
-      const targets: ModelBindingRef[] = []
-      for (const [name, provider] of Object.entries(cfg.provider.providers)) {
-        if (provider.keys?.length) {
-          for (const key of provider.keys) for (const model of key.models) targets.push({ provider: name, model: model.id, keyId: key.id })
-        } else for (const model of provider.models) targets.push({ provider: name, model: model.id })
-      }
-      for (const target of [...Object.values(routing.review.profiles), ...Object.values(routing.workers.profiles), ...Object.values(routing.workers.routing).filter(target => typeof target !== 'string')]) {
-        if ('provider' in target) targets.push(target)
-      }
-      for (const seat of routing.council.seats) if (seat.provider && seat.model) targets.push({ provider: seat.provider, model: seat.model, keyId: seat.keyId })
-      const unique = [...new Map(targets.map(target => [JSON.stringify(target), target])).values()]
-      return { status: 200, body: { ...routing, availability: unique.map(target => modelBindingAvailability(cfg.provider.providers, target)) } }
+      return { status: 200, body: { ...routing, ...routingModelStatus(cfg, routing) } }
     }, apiToken),
 
     'PUT /config/routing': withAuth((body) => {
@@ -696,8 +688,10 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
         return { status: 400, body: { error: 'review, workers or council is required' } }
       }
       try {
+        // setRoutingConfig 已返回 zod 规范化后的三块，等价于一次 getRoutingConfig()；
+        // 再 loadConfig 一次只为拿 provider 池算可用性——不额外多跑一轮加载。
         const result = setRoutingConfig({ review, workers, council })
-        return { status: 200, body: { ok: true, ...result } }
+        return { status: 200, body: { ok: true, ...result, ...routingModelStatus(loadConfig(), result) } }
       } catch (err) {
         return endpointFailure(err)
       }
@@ -777,6 +771,7 @@ export function buildConfigRoutes(apiToken?: string, hooks?: ConfigRouteHooks): 
     // Zen Mode（禅模式 / 读专注开局）——用户显式开关，默认关（opt-in）。
     // 本文件零行预算，路由住在 config-routes-zen.ts，以 spread 接入（同多 key 池）。
     ...buildZenRoutes(apiToken),
+    ...buildMemoryFormationRoutes(apiToken),
 
     // Pro 能力矩阵（口径对齐单一查询口）——同款按接缝外提，避免巨石继续膨胀。
     ...buildProFeatureRoutes(apiToken),

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { openCandidateDeliveryTree } from '../candidate-delivery-tree.js'
+import { candidateSnapshotRef } from '../candidate-snapshot-ref.js'
 import { resolveCandidateDeliveryImpact } from '../delivery-impact.js'
 import { MeridianIndexer } from '../../repo/meridian-indexer.js'
 
@@ -92,4 +93,29 @@ test('a selected import edge expands the candidate impact through its consumer',
       } finally { tree.destroy() }
     } finally { indexer.getDb().close() }
   } finally { rmSync(indexDir, { recursive: true, force: true }); rmSync(cwd, { recursive: true, force: true }) }
+})
+
+test('CRLF 工作区与 LF 快照的候选 ref 相等（#537 A：行尾归一化）', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'candidate-crlf-'))
+  try {
+    git(cwd, 'init', '-q')
+    git(cwd, 'config', 'user.email', 'test@example.com')
+    git(cwd, 'config', 'user.name', 'Test')
+    // autocrlf=input：检出不做转换 → 快照（worktree 检出）里是 LF
+    git(cwd, 'config', 'core.autocrlf', 'input')
+    writeFileSync(join(cwd, 'Mod.kt'), 'HEAD_V1\n')
+    git(cwd, 'add', '--', 'Mod.kt')
+    git(cwd, 'commit', '-qm', 'base')
+    // 工作区被编辑器存成 CRLF：语义相同、字节形态不同
+    writeFileSync(join(cwd, 'Mod.kt'), 'WORKTREE_V2\r\n')
+
+    const tree = await openCandidateDeliveryTree(cwd, ['Mod.kt'])
+    try {
+      assert.equal(
+        candidateSnapshotRef(tree.path, ['Mod.kt']),
+        candidateSnapshotRef(cwd, ['Mod.kt']),
+        '仅行尾不同时必须同 ref，否则候选快照在 CRLF 工作区里永远「不可用」',
+      )
+    } finally { tree.destroy() }
+  } finally { rmSync(cwd, { recursive: true, force: true }) }
 })

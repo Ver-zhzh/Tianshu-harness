@@ -134,8 +134,15 @@ test('grep observations reach the actual editor consumer without a forced read_f
     assert.equal(getFileReadMtime(journal, 'long-pilot'), null, 'unseen files must not be marked observed')
     await search.execute('grep', { pattern: 'export class Journal', path: 'src', context_lines: 1 })
     assert.notEqual(getFileReadMtime(journal, 'long-pilot'), null, 'directory hits must map to the real file too')
+    // Partial grep observation no longer authorizes a blind whole-file overwrite
+    // (21a49c50d): write_file is refused without a full read…
     const write = await search.execute('write_file', { file_path: 'src/state.mjs', content: readFileSync(path, 'utf8') + '\n// retained source\n' })
-    assert.notEqual(write.isError, true, write.content)
+    assert.equal(write.isError, true, write.content)
+    assert.match(write.content, /从未读取过完整内容/)
+    // …but the grep-observed anchor feeds a targeted edit_file directly.
+    const edit = await search.execute('edit_file', { file_path: 'src/state.mjs', old_string: 'export function replay(events) { return events.reduce(reduce,new Map()); }', new_string: 'export function replay(events) { return events.reduce(reduce,new Map()); }\n// retained source' })
+    assert.notEqual(edit.isError, true, edit.content)
+    assert.match(readFileSync(path, 'utf8'), /\/\/ retained source/)
   } finally { world.close() }
 })
 test('end-to-end directory grep paths feed real read, edit, check and independent grading', { skip: process.platform !== 'darwin' }, async () => {

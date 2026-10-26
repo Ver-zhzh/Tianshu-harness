@@ -10,6 +10,7 @@ import { type P3Integration } from './p3-integration.js'
  * AgentLoop (avoids a circular dependency). Wired in loop-factory.ts.
  */
 export interface ReasoningEffortDeps {
+  adjustAutomaticEffort?: (effort: ReasoningEffort) => ReasoningEffort
   getReasoningFloor: () => string | undefined
   getConfigReasoningEffort: () => ReasoningEffort | undefined
   setConfigReasoningEffort: (effort: ReasoningEffort) => void
@@ -54,7 +55,8 @@ export class ReasoningEffortController {
     const rank: Record<string, number> = { off: 0, low: 1, medium: 2, high: 3, max: 4 }
     const effective = (floor && (rank[effort] ?? 2) < (rank[floor] ?? 0)) ? floor as ReasoningEffort : effort
     // T2-02 Track A2: apply bandit delta (no-op when flag off or gate closed)
-    const banditAdjusted = this.applyDelta(effective) as ReasoningEffort
+    const adjusted = this.applyDelta(effective) as ReasoningEffort
+    const banditAdjusted = this.deps.adjustAutomaticEffort?.(adjusted) ?? adjusted
     this.deps.setConfigReasoningEffort(banditAdjusted)
     this.deps.setClientReasoningEffort(banditAdjusted)
     this.recordAudit(effective, banditAdjusted)

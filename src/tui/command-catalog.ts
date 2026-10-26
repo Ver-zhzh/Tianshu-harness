@@ -93,7 +93,7 @@ export const COMMAND_CATALOG: readonly CommandMeta[] = [
   { name: '/scroll', description: '浏览历史输出（上下翻页查看已滚走的内容）' },
   { name: '/theme', description: '切换配色主题（暗色/亮色/nebula/sakura 等多套）', tier: 'core', hotkey: 'F5' },
   { name: '/fork', description: '把当前会话 fork 成新分支——想试另一条路又怕丢上下文时用' },
-  { name: '/handoff', description: '写结构化交接文档并归档；默认不自动注入，新会话可明确读取', argsHint: '[备注]', tier: 'core' },
+  { name: '/handoff', description: '零模型调用生成事实交接；显式选源读取，叙述按需', argsHint: '[备注] | --narrative | list | read <sessionId> [--snapshot id] [--section section]', tier: 'core' },
   { name: '/remember', description: '把一句话写进项目长期记忆（跨会话生效，新会话自动携带）；无参查看最近的用户记忆', argsHint: '<要记住的事>', tier: 'core' },
   { name: '/vim', description: '开关 vim 键位绑定（esc 进 normal 模式等）' },
   { name: '/effort', description: '切换推理强度——控成本与控质量的核心旋钮。off 最省/max 最强/auto 按任务复杂度自动选', argsHint: 'off|low|medium|high|max|auto', tier: 'core' },

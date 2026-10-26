@@ -12,9 +12,10 @@ describe('real bash verification pipeline', () => {
     assert.equal(result.pipelineResult.toolResult.type, 'tool_result')
     if (result.pipelineResult.toolResult.type !== 'tool_result') assert.fail('expected tool result')
     const content = result.pipelineResult.toolResult.content
-    assert.match(content, /可复制的单条命令：node --test good\.test\.mjs/)
+    // d3aa136bf：指引改为查询已持久化的执行回执，不再建议重跑单条命令。
+    assert.match(content, /查询执行回执或原始日志，不自动重跑/)
     assert.match(content, /不能据此认定测试失败/)
-    assert.match(result.emittedContent, /可复制的单条命令：node --test good\.test\.mjs/)
+    assert.match(result.emittedContent, /查询执行回执或原始日志，不自动重跑/)
   })
 
   it('keeps package and node queries out of the foreground verification ledger', async () => {

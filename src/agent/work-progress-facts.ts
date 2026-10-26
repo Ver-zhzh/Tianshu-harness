@@ -26,6 +26,7 @@ import type { VerificationMetadata } from '../tools/types.js'
 import type { VerificationExecutionIntent } from './verification-intent.js'
 import type { FileProgressFact } from './course-file-progress.js'
 import { resolve } from 'node:path'
+import { createFileRepairStore } from './file-repair-store.js'
 import { detectExplicitNoMutation } from './discipline-eligibility.js'
 import { deriveEditExpectation } from './edit-expectation.js'
 import type { IntentTaskKind } from './intent-retrieval-route.js'
@@ -81,6 +82,24 @@ export interface WorkFactSnapshot {
 const EXECUTION_KEEP = 20
 
 export class WorkProgressFacts {
+  private approvedImplementation = false
+  acceptApprovedImplementation(active: boolean): void {
+    if (active) this.humanConstraint = 'mutation-allowed'
+    else if (this.approvedImplementation && this.humanConstraint === 'mutation-allowed') this.humanConstraint = 'unspecified'
+    this.approvedImplementation = active; this.frozen = null
+  }
+  /** 恢复态的唯一事实源是磁盘 store（file-repair-store）；此处只读，不维护副本。
+   *  副本会带来重启分叉（store 有 active、镜像为空）与解绑双写。 */
+  private activeRepairFiles(): ReadonlySet<string> {
+    const sessionId = this.self.config?.sessionId
+    if (!sessionId) return new Set<string>()
+    const cwd = this.self.cwd ?? '.'
+    try {
+      return new Set(createFileRepairStore(cwd, sessionId).list()
+        .filter(file => file.state === 'active').map(file => resolve(cwd, file.file)))
+    } catch { return new Set<string>() } // 记录损坏时不抑制提醒：多提醒一次优于静默压掉验证提醒
+  }
+  hasActiveRepair(): boolean { return this.activeRepairFiles().size > 0 }
   /** 人类任务边界号（权威源）。 */
   private taskEpochCounter = 0
   /** 已确认真实文件变化计数 / 最近一次的执行序号。 */
@@ -160,6 +179,10 @@ export class WorkProgressFacts {
     if (fact.outcome !== 'changed') return false
     this.mutationRev++
     this.lastMutationSeq = sequence
+    if (fact.targets?.length) {
+      const active = this.activeRepairFiles()
+      if (fact.targets.some(file => active.has(resolve(this.self.cwd ?? '.', file)))) return true
+    }
     this.progressRev++
     this.lastProgressReason = 'progress:file-change'
     this.lastProgressTurn = this.self.modelObservationTurn ?? this.frozen?.modelObservationTurn ?? this.taskStartTurn

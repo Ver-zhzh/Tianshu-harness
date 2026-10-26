@@ -162,8 +162,7 @@ function buildCoordinator() {
         usage: USAGE,
       }
     },
-    // Write path: patcher tasks land here; report a real change so the review
-    // gate fires on the last wave.
+    // Write path: patcher tasks land here; report a real change on the last wave.
     runHands: async (config: HandsSessionConfig): Promise<HandsSessionRun> => ({
       result: workerResult({ workOrderId: config.order.id, status: 'passed', summary: 'applied edits to foo', changedFiles: ['src/agent/foo.ts'] }),
       usage: USAGE,
@@ -205,8 +204,8 @@ test('e2e: /team (standard) runs dispatch + review squadron + closure to complet
   assert.equal(result.isError, false, `standard run must complete, got: ${result.content}`)
   const panel = decodeTeamPanelModel(result.uiContent ?? '')
   assert.ok(panel && panel.dispatched >= 1, 'at least one worker dispatched')
-  // The review squadron actually ran (last wave + real changed files).
-  assert.match(result.content, /Review gate \[/)
+  // Review gate no longer auto-fires (a571e2d12: review is an explicit user action).
+  assert.match(result.content, /review=no-verdict/)
   // Closure fired end-to-end.
   assert.ok(telemetry.length >= 1, 'telemetry recorded')
   assert.ok(closures.length >= 1, 'reward closure recorded')
@@ -231,6 +230,6 @@ test('e2e: /team max runs planner fanout + dispatch + review + closure to comple
   assert.equal(result.isError, false, `max run must complete, got: ${result.content}`)
   const panel = decodeTeamPanelModel(result.uiContent ?? '')
   assert.ok(panel && panel.dispatched >= 1, `max should dispatch the merged plan, content: ${result.content}`)
-  assert.match(result.content, /Review gate \[/)
+  assert.match(result.content, /review=no-verdict/)
   assert.ok(telemetry.length >= 1, 'telemetry recorded for max')
 })

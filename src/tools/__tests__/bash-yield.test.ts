@@ -142,6 +142,24 @@ test('命令内联设置 RIVET_CU_YIELD_MS=0 逃生口生效（无需修改宿�
   })
   assert.equal(result, null, '内联 RIVET_CU_YIELD_MS=0 应关闭本条命令的让出护栏')
   assert.equal(probed, false, '阈值为 0 时不触发探测')
+
+  const direct = await maybeYieldForUserActivity({
+    command: `RIVET_CU_YIELD_MS=0 ${HAZARD_XDOTOOL}`,
+    probe: async () => 0,
+  })
+  assert.equal(direct, null, '命令前缀的直接环境赋值同样生效')
+})
+
+test('字符串、注释和普通参数不得伪造成内联阈值赋值', async () => {
+  const cases = [
+    `python -c 'import pyautogui; print("RIVET_CU_YIELD_MS=0"); pyautogui.click(1)'`,
+    `echo "RIVET_CU_YIELD_MS=0"; ${HAZARD_XDOTOOL}`,
+    `# RIVET_CU_YIELD_MS=0\n${HAZARD_XDOTOOL}`,
+  ]
+  for (const command of cases) {
+    const result = await maybeYieldForUserActivity({ command, probe: async () => 0 })
+    assert.ok(result, `非赋值文本不能关闭护栏：${command}`)
+  }
 })
 
 // ── 批准动作 ≠ 用户正在用本机 ──────────────────────────────────────

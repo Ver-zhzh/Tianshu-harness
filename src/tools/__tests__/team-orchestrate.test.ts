@@ -91,7 +91,7 @@ test('team_orchestrate dispatches a standard plan first wave', async () => {
   assert.equal(result.orchestration?.totalWaves, panel.totalWaves)
 })
 
-test('0 任务硬拦：设计文档形态 markdown 不再静默——isError + 改走 plan_task 指引（2026-10-09 踩坑）', async () => {
+test('0 任务拒绝提供默认档可用的 Markdown 格式修正出口', async () => {
   let dispatched = 0
   const tool = createTeamOrchestrateTool({
     delegateBatch: async () => { dispatched++; return stubRun() },
@@ -116,8 +116,8 @@ test('0 任务硬拦：设计文档形态 markdown 不再静默——isError + �
   assert.equal(result.isError, true, '解析 0 任务必须报错（改动前是 isError:false 的静默空派发）')
   assert.equal(dispatched, 0, '0 任务不得派发任何 worker')
   assert.match(String(result.content), /Task N/, '报错应说明任务行文法')
-  assert.match(String(result.content), /plan_task/, '报错应给出改走 plan_task 的指引')
-  assert.match(String(result.content), /\.rivet\/plans\//, '应带完整路径示例')
+  assert.match(String(result.content), /planMarkdown/, '报错应提供默认档可用的格式修正出口')
+  assert.match(String(result.content), /planPath/, '应提供直接计划路径参数')
 })
 
 test('0 任务 + confirm:false：proposal 仍走友好展示（不报错，守住既有行为）', async () => {
@@ -295,7 +295,7 @@ test('team_orchestrate passes fromWave through and reports the next wave value',
   assert.match(result.content, /fromWave: 2/)
 })
 
-test('team_orchestrate runs the review gate on a cross-module final wave', async () => {
+test('team_orchestrate completes cross-module implementation without an implicit review gate', async () => {
   let squadronInvoked = false
   const rewardClosures: unknown[] = []
   const tool = createTeamOrchestrateTool({
@@ -345,10 +345,10 @@ test('team_orchestrate runs the review gate on a cross-module final wave', async
   })
 
   assert.equal(result.isError, false)
-  assert.match(result.content, /Review gate/)
-  assert.equal(squadronInvoked, true)
+  assert.doesNotMatch(result.content, /Review gate/)
+  assert.equal(squadronInvoked, false)
   assert.equal(rewardClosures.length, 1)
-  assert.equal((rewardClosures[0] as any).outcome.reviewVerdict, 'verified')
+  assert.notEqual((rewardClosures[0] as any).outcome.reviewVerdict, 'verified')
 })
 
 // ── Perspective-density review gate helpers (unit) ──────────────────────────
@@ -416,7 +416,7 @@ test('teamReviewFocusHint: builds a hint from planned verification, undefined wh
 
 // ── Perspective-density review gate (integration, standard mode) ────────────
 
-test('team_orchestrate review gate fires on honest diff even when worker self-reports no changedFiles', async () => {
+test('honest worker diff does not launch an extra verifier', async () => {
   let verifierObjective = ''
   let verifyKind = ''
   const tool = createTeamOrchestrateTool({
@@ -448,12 +448,10 @@ test('team_orchestrate review gate fires on honest diff even when worker self-re
   })
 
   assert.equal(result.isError, false)
-  // L2 floor (single-module, non-structural) — review still runs, not skipped.
-  assert.match(result.content, /Review gate \[L2\]/)
-  assert.equal(verifyKind, 'verify')
-  // Planned verification reaches the reviewer as a focus hint.
-  assert.match(verifierObjective, /Planned acceptance gates/)
-  assert.match(verifierObjective, /npm test/)
+  assert.doesNotMatch(result.content, /Review gate/)
+  assert.equal(verifyKind, '')
+  assert.equal(verifierObjective, '')
+  assert.match(result.content, /派发 1/)
 })
 
 // ── formatTeamSummary: council merge ledger + whole-wave failure guard ──────
@@ -536,7 +534,7 @@ test('formatTeamSummary does not warn on the onPlanReady pre-render (run absent)
 
 // ── Scope-health wiring (advisory) ─────────────────────────────────────────
 
-test('team_orchestrate surfaces scope leak and folds leaked files into review focus', async () => {
+test('scope leak remains visible without launching review or verification', async () => {
   let verifierObjective = ''
   const persisted: Array<{ kind: string; json: string }> = []
   const tool = createTeamOrchestrateTool({
@@ -572,9 +570,7 @@ test('team_orchestrate surfaces scope leak and folds leaked files into review fo
   assert.equal(result.isError, false)
   assert.match(result.content, /Scope health \[(medium|high)\]/)
   assert.match(result.content, /src\/agent\/leak\.ts/)
-  // leaked file reaches the reviewer focus.
-  assert.match(verifierObjective, /Scope leak/)
-  assert.match(verifierObjective, /src\/agent\/leak\.ts/)
+  assert.equal(verifierObjective, '', 'scope notice must not launch an extra verifier')
   // scope-health is persisted to the reward store.
   assert.ok(persisted.some(p => p.kind.startsWith('team_scope_health:')))
 })
@@ -651,7 +647,7 @@ function impactTool(over: {
 
 const impactPlan = '### T1: tweak helper\n修改 `src/agent/x.ts`'
 
-test('team_orchestrate injects meridian blast radius into review focus and content', async () => {
+test('team_orchestrate never discovers impact or launches review after implementation', async () => {
   let verifierObjective = ''
   const tool = impactTool({ capture: o => { verifierObjective = o } })
   const result = await tool.execute({
@@ -661,12 +657,8 @@ test('team_orchestrate injects meridian blast radius into review focus and conte
   })
 
   assert.equal(result.isError, false)
-  // Reaches the reviewer focus.
-  assert.match(verifierObjective, /Blast radius/)
-  assert.match(verifierObjective, /src\/consumer\.ts/)
-  assert.match(verifierObjective, /src\/__tests__\/consumer\.test\.ts/)
-  // And the returned content.
-  assert.match(result.content, /Blast radius \[meridian\]/)
+  assert.equal(verifierObjective, '')
+  assert.doesNotMatch(result.content, /Blast radius|Review gate/)
 })
 
 test('team_orchestrate emits no blast-radius noise when impact is empty', async () => {
@@ -695,17 +687,18 @@ test('team_orchestrate review survives a null/missing meridian indexer', async (
   })
 
   assert.equal(result.isError, false)
-  assert.match(result.content, /Review gate \[L2\]/)
+  assert.doesNotMatch(result.content, /Review gate/)
   assert.doesNotMatch(result.content, /Blast radius/)
 })
 
-test('team_orchestrate injects typecheck breakage into review content, ahead of blast radius', async () => {
-  const brokenRunner: import('../../agent/typecheck-gate.js').TypecheckRunner = async () => ({
+test('team_orchestrate does not invoke automatic typecheck or impact analysis', async () => {
+  let calls = 0
+  const brokenRunner: import('../../agent/typecheck-gate.js').TypecheckRunner = async () => { calls++; return ({
     diagnostics: [{ file: 'src/agent/x.ts', line: 7, col: 1, severity: 'error', message: 'TS2300: duplicate identifier' }],
     formatted: '',
     ranOk: true,
-  })
-  const tool = impactTool({ getTypecheckRunner: () => brokenRunner })
+  }) }
+  const tool = impactTool({ getTypecheckRunner: () => brokenRunner, impact: () => { calls++; throw Error('unexpected impact discovery') } })
   const result = await tool.execute({
     input: { mode: 'standard', objective: 'force: small single-module tweak', planMarkdown: impactPlan, fromWave: 0 },
     cwd: process.cwd(),
@@ -713,13 +706,8 @@ test('team_orchestrate injects typecheck breakage into review content, ahead of 
   })
 
   assert.equal(result.isError, false)
-  assert.match(result.content, /Typecheck broken \[tsc\]/)
-  assert.match(result.content, /src\/agent\/x\.ts/)
-  // Typecheck note precedes the meridian blast-radius note in the content.
-  assert.ok(
-    result.content.indexOf('Typecheck broken [tsc]') < result.content.indexOf('Blast radius [meridian]'),
-    result.content,
-  )
+  assert.equal(calls, 0, 'automatic checks and impact discovery are not part of team completion')
+  assert.doesNotMatch(result.content, /Typecheck broken|Blast radius/)
 })
 
 test('team_orchestrate emits no typecheck noise when the runner is clean', async () => {
@@ -771,7 +759,7 @@ test('team_orchestrate review survives a throwing impact analyzer', async () => 
   })
 
   assert.equal(result.isError, false)
-  assert.match(result.content, /Review gate \[L2\]/)
+  assert.doesNotMatch(result.content, /Review gate/)
   assert.doesNotMatch(result.content, /Blast radius/)
 })
 
@@ -903,7 +891,7 @@ test('team_orchestrate max mode blocked without plan when teamMax Pro gate off',
   })
   assert.equal(result.isError, true)
   assert.match(result.content, /Pro 功能/)
-  assert.match(result.content, /plan_task/)
+  assert.match(result.content, /planMarkdown/)
 })
 
 test('team_orchestrate max mode downgrades to standard with existing plan when teamMax gate off', async () => {
@@ -1348,4 +1336,22 @@ test('team_orchestrate planJson 带 nonGoals/obligations → 派发 request 携�
   assert.ok(constraints.includes('[计划反目标] 不做运行时动态挂载'), JSON.stringify(constraints))
   assert.ok(constraints.includes('[计划约束] 暂缓项「备选方案B」——交付前需有着落'), JSON.stringify(constraints))
   assert.ok(!constraints.some(c => c.includes('npx tsc')), 'advisory_gate 不应注入 constraints（走 verification 通道）')
+})
+
+test('explicit Markdown and planPath supersede stale stored plans without dispatching old files', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'team-explicit-current-'))
+  const markdown = '### Task 1: implement current scope\nModify `src/current.ts`'
+  writeFileSync(join(cwd, 'current.md'), markdown)
+  try {
+    for (const field of ['planMarkdown', 'planPath']) {
+      const sessionId = `explicit-current-${field}`
+      storePlan(JSON.stringify(sealablePlan()), sessionId)
+      const captured: DelegationRequest[] = []
+      const tool = createTeamOrchestrateTool({ delegateBatch: async requests => { captured.push(...requests); return stubRun('current') } })
+      const result = await tool.execute({ cwd, sessionId, toolUseId: field, input: { objective: 'force: implement the current approved plan', mode: 'standard', [field]: field === 'planPath' ? 'current.md' : markdown } })
+      assert.ok(!result.isError, result.content); assert.equal(captured.length, 1)
+      assert.match(captured[0]!.objective, /current\.ts/); assert.doesNotMatch(captured[0]!.objective, /foo\.ts/)
+      assert.equal(getStoredPlan(sessionId), null)
+    }
+  } finally { const { rmSync } = await import('node:fs'); rmSync(cwd, { recursive: true, force: true }) }
 })

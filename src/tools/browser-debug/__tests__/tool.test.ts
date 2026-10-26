@@ -17,6 +17,8 @@ import type { ToolCallParams } from '../../types.js'
 import type { SaveArtifactInput } from '../../../artifact/store.js'
 
 class FakeDriver implements BrowserDebugDriver {
+  private navigation = 0
+  currentDiagnosticScope() { return { pageId: 'page-1', navigationId: `fixture-nav-${this.navigation}` } }
   static last?: FakeDriver
   static lastLaunchOpts?: DriverLaunchOptions
   url = 'about:blank'
@@ -32,18 +34,21 @@ class FakeDriver implements BrowserDebugDriver {
     FakeDriver.last = this
   }
   async goto(url: string) {
+    this.navigation++
     this.url = url
-    this.events.onRequestStart('r1', 'GET', url, 'document')
+    const scope = this.currentDiagnosticScope()
+    this.events.onRequestStart('r1', 'GET', url, 'document', undefined, undefined, scope)
     this.events.onResponse('r1', 200, 'document')
     this.events.onRequestStart(
       'r2', 'POST', `${url.replace(/\/$/, '')}/api/data`, 'fetch',
       { Authorization: 'Bearer tok-abcd1234', 'Content-Type': 'application/json' },
       '{"q":"x"}',
+      scope,
     )
     this.events.onResponse('r2', 500, 'fetch', { 'x-request-id': 'req-7' })
     this.events.onResponseBody('r2', '{"error":"server"}', 'application/json')
-    this.events.onConsole('error', 'Uncaught boom')
-    this.events.onConsole('log', 'hello world')
+    this.events.onConsole('error', 'Uncaught boom', scope)
+    this.events.onConsole('log', 'hello world', scope)
   }
   async evaluate(expr: string) {
     return `eval:${expr}`
@@ -474,7 +479,8 @@ test('clear_logs wipes captured buffers', async () => {
   await tool.execute(params({ action: 'open', url: 'http://localhost:3000/' }))
   await tool.execute(params({ action: 'clear_logs' }))
   const consoleRes = await tool.execute(params({ action: 'console' }))
-  assert.equal(consoleRes.content, '（无控制台输出）')
+  assert.ok(consoleRes.content.startsWith('（无控制台输出）'))
+  assert.match(consoleRes.content, /诊断范围=current/)
   await tool.execute(params({ action: 'close' }))
 })
 

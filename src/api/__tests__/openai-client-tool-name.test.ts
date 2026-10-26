@@ -195,6 +195,26 @@ test('name diagnostics record lengths without argument content', async () => {
   const text = readFileSync(join(dir, '.rivet', 'tool-stream-name-fixture.jsonl'), 'utf8')
   assert.ok(text.includes('name-repeat'))
   assert.ok(!text.includes('fixture-do-not-log'))
+  const event = text.trim().split('\n').map(line => JSON.parse(line)).find(item => item.phase === 'name-repeat')
+  assert.match(event.requestId, /^[0-9a-f-]{36}$/)
+  assert.ok(event.attemptId.startsWith(`${event.requestId}:`))
+})
+
+test('unknown-name diagnostics distinguish first-fragment mismatch from later fragment drift', async () => {
+  await run(['bash'], [delta([call('not_declared', '{}', 0, 'first')], 'tool_calls')],
+    new OpenAIClient({ ...config, sessionId: 'name-first-mismatch' }))
+  await run(['bash'], [delta([call('ba', '{}', 0, 'later')]), delta([call('zz', '')], 'tool_calls')],
+    new OpenAIClient({ ...config, sessionId: 'name-later-mismatch' }))
+  const read = (session: string) => readFileSync(join(dir, '.rivet', `tool-stream-${session}.jsonl`), 'utf8')
+    .trim().split('\n').map(line => JSON.parse(line)).find(event => event.phase === 'name-rejected')
+  const first = read('name-first-mismatch')
+  const later = read('name-later-mismatch')
+  assert.equal(first.failureStage, 'first-fragment')
+  assert.equal(later.failureStage, 'continuation-fragment')
+  assert.equal(first.declaredToolCount, 1)
+  assert.equal(later.declaredToolCount, 1)
+  assert.ok(first.requestId && first.attemptId)
+  assert.ok(later.requestId && later.attemptId)
 })
 
 test('repeated-name diagnostics are bounded per call', async () => {

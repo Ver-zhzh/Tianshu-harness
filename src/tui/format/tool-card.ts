@@ -12,7 +12,7 @@
  * - diff 检测：write/edit 族结果经 isDiffContent() 检测后走红绿渲染
  */
 
-import { color, fileLink } from '../engine/ansi.js'
+import { ANSI_SEQ_RE, color, fileLink } from '../engine/ansi.js'
 import { classifyBrowserDebugLine } from '../../tools/browser-debug/log-capture.js'
 import type { RivetTheme } from '../theme.js'
 import { getToolFamily, isKnownTool } from '../tool-family.js'
@@ -48,8 +48,10 @@ export interface FormatToolCardInput {
   streaming?: boolean
   /** 工具输入参数（用于标题参数摘要） */
   toolInput?: Record<string, unknown>
-  /** 完整展开（ctrl+o），不截断 */
+  /** 完整展开（ctrl+o），不截断；优先于 compact */
   expanded?: boolean
+  /** 成功输出紧凑投影，错误保留末尾诊断 */
+  compact?: boolean
   showParameters?: boolean
   columns?: number
   expandHint?: string
@@ -59,6 +61,8 @@ const DEFAULT_MAX_LINES = 4
 const READ_HEAD_LINES = 3
 const READ_TAIL_LINES = 5
 const DIFF_MAX_LINES = 20
+const COMPACT_MAX_LINES = 2
+const COMPACT_ERROR_MAX_LINES = 4
 
 /** 按工具家族给不同默认展开高度，避免所有工具都挤在 4 行内。 */
 export function getDefaultMaxLines(toolName: string): number {
@@ -137,11 +141,27 @@ function toolHeader(toolName: string, object: string, glyph: string, status: str
  */
 export function formatToolCard(input: FormatToolCardInput, theme: RivetTheme): string[] {
   const rows = formatToolCardRows(input, theme)
-  if (input.columns === undefined) return rows
+  if (input.columns === undefined || input.expanded === true) return rows
   const width = Math.max(0, input.columns - 1)
   return rows.map(row => displayWidth(row, WIDE) > width
     ? `${truncateToDisplayWidth(row, Math.max(0, width - displayWidth('…', WIDE)), WIDE)}${width >= displayWidth('…', WIDE) ? '…' : ''}`
     : row)
+}
+
+export function formatCollapsedToolDetailLine(line: string, expandHint: string, theme: RivetTheme, columns?: number): string {
+  const width = Math.max(2, (columns ?? 80) - 1)
+  const hint = displayWidth(expandHint, WIDE) > width && expandHint.startsWith('/pager') ? '/pager' : expandHint
+  const suffix = ` · ${hint}`
+  if (displayWidth(line + suffix, WIDE) <= width) {
+    return `${line}${color(suffix, theme.muted)}`
+  }
+  const contentBudget = width - displayWidth(suffix, WIDE)
+  if (contentBudget <= 0) return color(hint, theme.muted)
+  const ellW = displayWidth('…', WIDE)
+  const clipped = displayWidth(line, WIDE) > contentBudget
+    ? `${truncateToDisplayWidth(line, Math.max(0, contentBudget - ellW), WIDE)}${contentBudget >= ellW ? '…' : ''}`
+    : line
+  return `${clipped}${color(suffix, theme.muted)}`
 }
 
 function truncationRows(omitted: number, range: string, total: number, input: FormatToolCardInput, theme: RivetTheme): string[] {
@@ -149,6 +169,33 @@ function truncationRows(omitted: number, range: string, total: number, input: Fo
     color(`${truncationHint(omitted, '行', input.expandHint)} · 显示 ${range} / 共 ${total} 行`, theme.secondary),
     color(input.rawPath ? `全文来源: ${input.rawPath}` : '全文不可用（没有原始来源）', theme.muted),
   ]
+}
+
+function compactEnabled(input: Pick<FormatToolCardInput, 'compact' | 'expanded' | 'streaming'>): boolean {
+  return input.compact === true && input.expanded !== true && input.streaming !== true
+}
+
+/** 先给详情键留宽度，再缩短计数；窄屏不能把可操作的入口裁成半截。 */
+function compactTruncationHint(omitted: number, input: FormatToolCardInput, prefix: string): string {
+  const full = truncationHint(omitted, '行', input.expandHint)
+  if (input.columns === undefined) return full
+  const budget = Math.max(0, input.columns - 1 - displayWidth(prefix, WIDE))
+  if (displayWidth(full, WIDE) <= budget) return full
+
+  let hint = input.expandHint ?? EXPAND_HINT
+  if (hint.startsWith('/pager')) hint = '/pager'
+  const count = `… +${omitted} 行`
+  let separator = ' · '
+  if (displayWidth(`…${separator}${hint}`, WIDE) > budget) separator = ' '
+  const countBudget = Math.max(0, budget - displayWidth(separator + hint, WIDE))
+  const shortCount = `… +${omitted}`
+  const bareCount = `+${omitted}`
+  const clippedCount = displayWidth(count, WIDE) <= countBudget ? count
+    : displayWidth(shortCount, WIDE) <= countBudget ? shortCount
+      : displayWidth(bareCount, WIDE) <= countBudget ? bareCount
+        : displayWidth('…', WIDE) <= countBudget ? '…' : ''
+  if (clippedCount) return `${clippedCount}${separator}${hint}`
+  return displayWidth(hint, WIDE) <= budget ? hint : truncateToDisplayWidth(hint, budget, WIDE)
 }
 
 function formatToolCardRows(input: FormatToolCardInput, theme: RivetTheme): string[] {
@@ -167,6 +214,7 @@ function formatToolCardRows(input: FormatToolCardInput, theme: RivetTheme): stri
   const family = getToolFamily(toolName)
   const indent = depth > 0 ? '  '.repeat(depth) : ''
   const isQuestion = toolName === 'ask_user_question'
+  const compact = compactEnabled(input)
 
   // ── Header: 状态标记 + 动作 + 对象 + 状态/耗时 ───────────────
   // Bullet 形色双通道：状态不能只靠颜色编码——16 色终端与红绿色觉障碍下
@@ -181,12 +229,20 @@ function formatToolCardRows(input: FormatToolCardInput, theme: RivetTheme): stri
     ?? (typeof toolInput?.path === 'string' ? toolInput.path : undefined)
     ?? (typeof toolInput?.file_path === 'string' ? toolInput.file_path : undefined)
   const status = isError ? '失败' : isQuestion ? '等待回答' : streaming ? '运行中' : '完成'
-  const header = toolHeader(toolName, toolObject(toolName, toolInput, rawPath), bulletGlyph, status, elapsedMs, theme, input.columns, depth, linkPath)
+  const object = toolObject(toolName, toolInput, rawPath)
+  const header = toolHeader(toolName, object, bulletGlyph, status, elapsedMs, theme, input.columns, depth, linkPath)
+  const rawPathInTitle = rawPath !== undefined && header.replace(ANSI_SEQ_RE, '').includes(rawPath)
 
   const lines: string[] = [header]
   if (input.showParameters && toolInput) {
     lines.push(`${indent}${BODY_CONT_PREFIX}${color('参数', theme.secondary)}`)
     lines.push(...indentBody(JSON.stringify(toolInput, null, 2).split('\n').map(line => color(line, theme.muted)), indent, theme))
+  }
+  const finish = (): string[] => {
+    if (expanded && !streaming && rawPath && !rawPathInTitle) {
+      lines.push(`${indent}${BODY_CONT_PREFIX}${color(`全文来源: ${rawPath}`, theme.muted)}`)
+    }
+    return lines
   }
 
   // ── Streaming delegation preview ──────────────────────────────
@@ -199,14 +255,28 @@ function formatToolCardRows(input: FormatToolCardInput, theme: RivetTheme): stri
     const preview = renderDelegationPreview(toolName, toolInput, theme, indent)
     if (preview.length > 0) {
       lines.push(...preview)
-      return lines
+      return finish()
     }
   }
 
   const trimmed = content.replace(/\n+$/, '')
   if (!trimmed) {
-    lines.push(`${indent}${color(BODY_FIRST_PREFIX, theme.dim)}${color('(无输出)', theme.muted)}`)
-    return lines
+    if (!compact || isError || isQuestion) {
+      lines.push(`${indent}${color(BODY_FIRST_PREFIX, theme.dim)}${color('(无输出)', theme.muted)}`)
+    }
+    return finish()
+  }
+
+  if (compact && isError && !isQuestion) {
+    const contentLines = trimmed.split('\n')
+    const shown = contentLines.slice(-COMPACT_ERROR_MAX_LINES)
+    const omitted = contentLines.length - shown.length
+    const body = [
+      ...(omitted > 0 ? [color(compactTruncationHint(omitted, input, `${indent}${BODY_FIRST_PREFIX}`), theme.secondary)] : []),
+      ...shown.map(line => color(line, theme.error)),
+    ]
+    lines.push(...indentBody(body, indent, theme))
+    return finish()
   }
 
   // ── Diff 分支：write/edit 族 + diff 内容 → 红绿渲染 ─────────
@@ -226,20 +296,21 @@ function formatToolCardRows(input: FormatToolCardInput, theme: RivetTheme): stri
       lines.push(`${indent}${color(BODY_FIRST_PREFIX, theme.dim)}${color(summary, theme.muted)}`)
       lines.push(`${indent}${BODY_CONT_PREFIX}${color(input.expandHint ? `${input.expandHint} · 完整 diff` : `${EXPAND_HINT}完整 diff`, theme.secondary)}`)
     }
-    return lines
+    return finish()
   }
 
   // ── browser_debug 分支：console/network 行按前缀分级着色 ───────
   if (toolName === 'browser_debug') {
     const allLines = trimmed.split('\n')
-    const maxLines = input.maxLines ?? getDefaultMaxLines(toolName)
+    const maxLines = compact ? COMPACT_MAX_LINES : (input.maxLines ?? getDefaultMaxLines(toolName))
     const shown = expanded || allLines.length <= maxLines ? allLines : allLines.slice(0, maxLines)
     const body = shown.map((l) => colorBrowserDebugLine(l, theme))
     if (!expanded && allLines.length > maxLines) {
-      body.push(...truncationRows(allLines.length - maxLines, `1-${maxLines}`, allLines.length, input, theme))
+      if (compact) body.push(color(compactTruncationHint(allLines.length - maxLines, input, `${indent}${BODY_CONT_PREFIX}`), theme.secondary))
+      else body.push(...truncationRows(allLines.length - maxLines, `1-${maxLines}`, allLines.length, input, theme))
     }
     lines.push(...indentBody(body, indent, theme))
-    return lines
+    return finish()
   }
 
   // ── 普通输出分支 ─────────────────────────────────────────────
@@ -254,13 +325,28 @@ function formatToolCardRows(input: FormatToolCardInput, theme: RivetTheme): stri
 
   const renderLine = (l: string) => color(l, bodyColor)
 
+  if (compact && !isQuestion) {
+    if (family.family === 'read' || family.family === 'find') return finish()
+    const shown = family.family === 'run'
+      ? contentLines.slice(-COMPACT_MAX_LINES)
+      : contentLines.slice(0, COMPACT_MAX_LINES)
+    const omitted = totalLines - shown.length
+    const markerPrefix = `${indent}${family.family === 'run' ? BODY_FIRST_PREFIX : BODY_CONT_PREFIX}`
+    const marker = omitted > 0 ? [color(compactTruncationHint(omitted, input, markerPrefix), theme.secondary)] : []
+    const body = family.family === 'run'
+      ? [...marker, ...shown.map(renderLine)]
+      : [...shown.map(renderLine), ...marker]
+    lines.push(...indentBody(body, indent, theme))
+    return finish()
+  }
+
   // ask_user_question 必须完整展示问题和所有选项，禁止截断。
   if (expanded || isQuestion || totalLines <= maxLines) {
     lines.push(...indentBody(contentLines.map(renderLine), indent, theme))
     if (rawPath && !expanded) {
       lines.push(`${indent}${BODY_CONT_PREFIX}${color(`raw: ${basenamePortable(rawPath)}`, theme.muted)}`)
     }
-    return lines
+    return finish()
   }
 
   // 截断：read 族用头+尾预览，其他工具用头 N 行
@@ -276,7 +362,7 @@ function formatToolCardRows(input: FormatToolCardInput, theme: RivetTheme): stri
       ...tail.map(renderLine),
     ]
     lines.push(...indentBody(body, indent, theme))
-    return lines
+    return finish()
   }
 
   const head = contentLines.slice(0, maxLines)
@@ -286,20 +372,26 @@ function formatToolCardRows(input: FormatToolCardInput, theme: RivetTheme): stri
     ...truncationRows(omitted, `1-${maxLines}`, totalLines, input, theme),
   ]
   lines.push(...indentBody(body, indent, theme))
-  return lines
+  return finish()
 }
 
 /** 判断该工具结果在折叠渲染下是否被截断（供 ctrl+o 展开记录用） */
-export function isToolCardTruncated(input: Pick<FormatToolCardInput, 'toolName' | 'content' | 'maxLines'>): boolean {
-  // ask_user_question is always rendered in full; no expand action needed.
-  if (input.toolName === 'ask_user_question') return false
+export function isToolCardTruncated(input: Pick<FormatToolCardInput, 'toolName' | 'content' | 'maxLines' | 'compact' | 'isError' | 'expanded' | 'streaming'>): boolean {
+  // Expanded results and ask_user_question are rendered in full; no expand action needed.
+  if (input.expanded === true || input.toolName === 'ask_user_question') return false
   const trimmed = input.content.replace(/\n+$/, '')
   if (!trimmed) return false
   const totalLines = trimmed.split('\n').length
   const family = getToolFamily(input.toolName)
+  const compact = compactEnabled(input)
+  if (compact && input.isError) return totalLines > COMPACT_ERROR_MAX_LINES
   if (family.family === 'write' && isDiffContent(trimmed)) {
     const stats = computeDiffStats(trimmed)
     return (stats.adds + stats.dels) > 10
+  }
+  if (compact) {
+    if (family.family === 'read' || family.family === 'find') return true
+    return totalLines > COMPACT_MAX_LINES
   }
   return totalLines > (input.maxLines ?? getDefaultMaxLines(input.toolName))
 }

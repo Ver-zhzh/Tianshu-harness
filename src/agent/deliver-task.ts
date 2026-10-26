@@ -1,39 +1,31 @@
-import type { DeliveryImpact } from './delivery-impact.js'
-import { assessImpactedTestCoverage, getEffectiveVerifications } from './verification-attribution.js'
-import { captureCommitVersionAsync } from './commit-version-async.js'
-import { recordRuntimeDiagnostic } from '../utils/runtime-diagnostics.js'
-import { gitCommand } from '../tools/git-command.js'
-import { buildDeliveryVerificationPlanAsync, renderDeliveryVerificationPlan } from './delivery-verification-plan.js'
-import { deliveryCandidateScope } from './delivery-candidate-scope.js'
-import { diagnoseCandidateEvidence, renderCandidateDiagnostics } from './delivery-candidate-diagnostics.js'
-import { createDeliveryNoProgressTracker, deliveryNextAction } from './delivery-no-progress.js'
-import { scanDeliveryFilesAsync, type scanDeliveryFiles } from './delivery-readonly.js'
 /**
  * deliver_task — 语义化交付工具 (B1-8)
  *
  * 从低层 git commit 升级到语义化工程交付原语。
  *
+ * 契约分离（2026-10-25「提交、审查、测试彻底分离」）：本工具收敛为纯安全提交——
+ * 只做文件归属、范围校验与 Git 安全保护，然后提交。它不再执行验证（run_tests
+ * 独立）、不再触发审查（review_changes 独立）、不再物化候选快照或影响分析。
+ * 成功回执明确「本次未执行测试或审查」——提交保存工作成果，质量义务由独立入口表达。
+ *
  * 行为：
- * - 读取 TaskLedger + OwnershipLedger + DeliveryGate v2
- * - 如果 RED（owned failures / unverified），拒绝交付
- * - 如果 YELLOW（external blockers），说明但不阻塞
- * - 如果 GREEN，输出结构化交付报告
- *
- * 默认只输出交付门报告。
- * 当 commit=true 且 approval 通过时，会执行 ownership-scoped commit。
- *
- * HEARTH 兼容：交付报告可沉积为 cycle_close 的 durable evidence。
- * Songline 兼容：交付状态是 obligation fulfillment 信号，可沉积 pheromone。
+ * - 读取 TaskLedger + OwnershipLedger + DeliveryGate v2（台账状态仅用于披露）
+ * - commit=true 且 approval 通过时执行 ownership-scoped commit
+ * - 保留：归属/adopt/force 范围覆盖、半暂存/版本一致/index 锁/敏感路径保护、
+ *   真实 SHA 回执、内聚性提示、恢复日志、跨会话 claim 冲突
  *
  * @module deliver-task
  * @task B1-8
  */
 
-import { existsSync, readFileSync, statSync } from 'node:fs'
-import { parseVerifyCommand, spawnVerifyArgv } from './verify-command.js'
-import { join, isAbsolute, relative, resolve } from 'node:path'
-import type { Tool, ToolCallParams, ToolResult, DelegationActivity } from '../tools/types.js'
-import { createDelegationActivityMapper } from '../tools/worker-activity-stream.js'
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
+import type { Tool, ToolCallParams, ToolResult } from '../tools/types.js'
+import { captureCommitVersionAsync } from './commit-version-async.js'
+import { recordRuntimeDiagnostic } from '../utils/runtime-diagnostics.js'
+import { gitCommand } from '../tools/git-command.js'
+import { deliveryCandidateScope } from './delivery-candidate-scope.js'
+import { createDeliveryNoProgressTracker, deliveryNextAction } from './delivery-no-progress.js'
 import type { TaskLedger } from './task-ledger.js'
 import type { OwnershipLedger } from './ownership-ledger.js'
 import { debugLog } from '../utils/debug.js'
@@ -53,72 +45,14 @@ export function createStageMarker(prefix: string, correlationId?: string, sessio
   }
 }
 
-/** 义务账 gate 的默认异步执行器（2026-08-09 楔子清理）：60s 超时不阻塞事件循环，
- *  摘要尾部 3 行 / 300 字符。H4 收口：gate 命令源是议事会席位输出，先过
- *  parseVerifyCommand，解析失败按不可执行收口，绝不退回字符串拼 shell。 */
-function runGateAsync(command: string, cwd: string): Promise<{ ok: boolean; detail?: string }> {
-  const argv = parseVerifyCommand(command)
-  if (!argv) return Promise.resolve({ ok: false, detail: '非白名单 gate 命令形状——拒绝 shell 执行' })
-  return new Promise((resolvePromise) => {
-    let stdout = ''
-    let stderr = ''
-    let settled = false
-    const tail = (): string => `${stdout}\n${stderr}`.trim().split('\n').slice(-3).join('\n').slice(0, 300)
-    const settle = (r: { ok: boolean; detail?: string }): void => {
-      if (!settled) { settled = true; resolvePromise(r) }
-    }
-    try {
-      const child = spawnVerifyArgv(cwd, argv, { stdio: ['ignore', 'pipe', 'pipe'] })
-      child.stdout?.on('data', (d: Buffer) => { stdout += d.toString() })
-      child.stderr?.on('data', (d: Buffer) => { stderr += d.toString() })
-      const timer = setTimeout(() => {
-        try { child.kill('SIGKILL') } catch { /* already gone */ }
-        settle({ ok: false, detail: tail() })
-      }, 60_000)
-      child.on('close', (code) => {
-        clearTimeout(timer)
-        if (code === 0) settle({ ok: true })
-        else settle({ ok: false, detail: tail() })
-      })
-      child.on('error', (err) => {
-        clearTimeout(timer)
-        settle({ ok: false, detail: err.message })
-      })
-    } catch (err) {
-      settle({ ok: false, detail: err instanceof Error ? err.message : String(err) })
-    }
-  })
-}
 import { filterExternalNoise, type DeliveryGateV2 } from './delivery-gate-v2.js'
 import { summarizeOwnershipHealth } from './ownership-health.js'
-import { classifyChange, createGitDiffProviderAsync, isMechanicalFastPathEnabled } from './change-classification.js'
 import { commitScopedFiles, type ScopedCommitResult } from './scoped-git-commit.js'
-import { buildReviewPrincipleChecklist } from './review-principle-checklist.js'
 import { checkCommitCohesion } from './commit-cohesion.js'
-import { isCrossModule, isFixContext, shouldRouteReviewWorkflow, GENERAL_DEV_DISCIPLINES, LARGE_FILE_WARN_THRESHOLD, type ChangeSet, type ReviewScale } from './review-discipline.js'
-import { routeReviewWorkflow, reviewWorkflowBudgetMs, formatPatcherArtifacts, type ReviewRouterDeps, type ReviewOutcome, type ReviewMode } from './review-router.js'
-import { isReviewDisciplineEnabled } from '../config/review-discipline-config.js'
-import type { ReviewConfig } from '../config/schema.js'
-import { recordAutoReviewRun } from './review-health.js'
-import { detectWroteButNeverRead, formatWroteButNeverRead, detectReadButNeverProduced, formatReadButNeverProduced } from './wiring-nudge.js'
+import { recordDeliveryReceipt } from './delivery-receipt.js'
 import { readUnacknowledged, acknowledgeAll, type RecoveryEntry } from './recovery-journal.js'
-import { analyzeImpact } from '../repo/meridian-impact.js'
-import { evaluateTestPresence, testPresenceGateEnabled } from './test-presence.js'
-import { auditDeliveryClaims, claimAuditEnabled } from './claim-audit.js'
-import { formatProbeHits, type ProbeHit } from './probe-detector.js'
-import { checkStructureGate } from './structure-gate.js'
-import { findApprovedPlanInventory, verifyRegressionInventoryAsync, formatInventoryReport, type InventorySearcher } from './regression-inventory.js'
-import { verifyObligations, formatObligationReport, type GateRunner, type PlanWithObligations } from './council/council-obligations.js'
-import { declaredVerificationCommands, reconcileVerificationCommands, formatVerificationReconcileReport } from './verification-reconcile.js'
-import { getStoredPlan } from './plan-store.js'
-import { deserializeUnifiedPlan } from './unified-plan.js'
-import { enqueuePostCommitReviewOutcome } from './post-commit-review-queue.js'
-import { addPendingReviewFiles, consumePendingReview, formatDeferredReviewNotice, __resetPostCommitReviewPending } from './post-commit-review-pending.js'
-import { isUiFilePath, isVisualVerifyTool } from './hooks/render-verify-hook.js'
-import { findUnverifiedClaimRefs } from './hooks/external-claim-tracking-hook.js'
-import { isScoutFirewallEnabled } from '../config/scout-firewall-config.js'
-import { appendMemoryEntry, countSimilarMemoryEntries } from '../memory/unified-memory.js'
-import { openCandidateDeliveryTree, type CandidateDeliveryTree } from './candidate-delivery-tree.js'
+import { collectCurrentDirtyFiles, parseLearnedEntries } from './delivery-report.js'
+export { formatReviewOutcomeLines, detectSymptomPatch, collectCurrentDirtyFiles, detectMissingVisualVerify, parseLearnedEntries, type LearnedPattern } from './delivery-report.js'
 
 export interface B1Context {
   continuityStatus?: string
@@ -135,285 +69,54 @@ export interface B1Context {
    *  不完整时由硬门现场重采，仓库现在可用则原地换基线并返回 true。缺省 → 无
    *  恢复路径（保持硬阻断，现状行为不变）。 */
   recaptureBaseline?: (cwd: string) => boolean
-  /** Test hook / alternate runtime source for project memory markdown. */
-  getProjectMemoryContent?: (cwd: string) => string | undefined
   /** Test hook / alternate runtime executor for scoped commits. */
   commitOwnedFiles?: (cwd: string, files: string[], message: string) => ScopedCommitResult | Promise<ScopedCommitResult>
-  /** Review router entry point. Defaults to routeReviewWorkflow when reviewDeps is provided. */
-  routeReviewWorkflow?: typeof routeReviewWorkflow
-  /** Dependencies used by the review router to spawn verifier/patcher/squadron workers. */
-  reviewDeps?: ReviewRouterDeps
-  /** Re-entrancy guard: child review contexts must not recursively trigger review routing. */
-  reviewDepth?: number
-  /** Task dependency depth — upgrades review scale for wiring/system tasks.
-   *  Accept a getter so the value is resolved at review-time, not context-creation time. */
-  getDepthLayer?: () => import('../context/task-contract.js').TaskDepthLayer | undefined
-  /** Test hook for the wrote-but-never-read static check. */
-  detectWroteButNeverRead?: typeof detectWroteButNeverRead
-  /** Test hook for the read-but-never-produced (虚假绿灯) static check. */
-  detectReadButNeverProduced?: typeof detectReadButNeverProduced
-  /** VSW: current active snapshotRef. When provided, the gate drops verifications
-   *  whose snapshotRef is stale (owned diff changed since they ran). Absent →
-   *  no supersession (unchanged default). */
-  getCurrentSnapshotRef?: () => string | undefined
-  /** Candidate-specific VSW snapshot for deliver_task(files=...). A full-session
-   *  snapshot is not interchangeable with a selected commit scope. */
-  getCurrentSnapshotRefForFiles?: (files: string[]) => string | undefined
-  /** Injectable candidate materializer; production uses an isolated Git worktree. */
-  prepareCandidateTree?: (cwd: string, files: readonly string[], signal?: AbortSignal) => Promise<CandidateDeliveryTree>
-  /** True when a goal tracker is actively driving auto-continuation.
-   *  When active, post-commit auto-review is suppressed (L1 nudge-only)
-   *  to prevent child review workers from stalling the goal loop. */
-  isGoalActive?: () => boolean
-  /** True when the goal tracker deactivated with reason='achieved'.
-   *  Signals deliver_task to auto-upgrade the final commit review to L3. */
-  isGoalAchieved?: () => boolean
-  /** Last goal judge verdict stored on the tracker, for surfacing in the
-   *  delivery report. Null when the judge hasn't run (e.g. judge disabled
-   *  or goal completed before the judge had a chance to run). */
-  getLastVerdict?: () => import('./goal-tracker.js').StoredGoalJudgeVerdict | null
-  /** Review configuration snapshot (subset of agent.review). Used for per-config
-   *  gating of auto review (review.skipAuto) without re-reading the full Config.
-   *  Optional: absent → no-skip (preserves current behavior). */
-  reviewConfig?: ReviewConfig
-  /** 会话级运行时开关（TUI `/review off` 写入）：true 时抑制系统自动审查。
-   *  显式 review_level（手动 /review）是用户明确意图，不受此开关影响。 */
-  isAutoReviewOff?: () => boolean
-  /** Meridian indexer — when available, blast radius is injected into review
-   *  focusHint so verifier/inspector know which downstream consumers to check. */
-  meridianIndexer?: import('../repo/meridian-indexer.js').MeridianIndexer | null
-  /** Injectable typecheck runner for the review-gate backstop. Absent → the
-   *  real `tsc --noEmit` is used (covers worker/headless). Tests pass a mock. */
-  typecheckRunner?: import('./typecheck-gate.js').TypecheckRunner
-  /** Injectable runner for the non-TS declared verify.typecheck/build backstop
-   *  (A2). Absent → the real bash spawn is used. Tests pass a mock. */
-  declaredCheckRunner?: import('./typecheck-gate.js').DeclaredCommandRunner
-  /** Injectable probe scanner for the probe-residue gate. Absent → the real
-   *  scanFilesForProbes with readFileSync is used. Tests pass a mock. */
-  scanProbes?: (files: string[], cwd: string) => import('./probe-detector.js').ProbeHit[]
-  /** Injectable structure-ratchet checker for the advisory structure gate
-   *  (行数棘轮预警). Absent → the real checkStructureGate (fs reads) is used.
-   *  Tests pass a mock. */
-  checkStructure?: typeof checkStructureGate
-  /** 层3 重构回归契约：当前主控任务契约 getter。契约带 regressionInventory
-   *  时交付前逐项核验；缺失时回退到最近 APPROVED 计划的「回归清单」章节。 */
-  getTaskContract?: () => import('../context/task-contract.js').TaskContract | undefined
-  /** 层3 测试钩子：注入清单锚点搜索器（默认 git grep -F）。 */
-  inventorySearcher?: InventorySearcher
-  /** Norns 义务账：advisory_gate 白名单命令执行器（默认 sh -c，60s 超时）。
-   *  测试注入 mock 免真实 spawn。 */
-  obligationGateRunner?: GateRunner
-  /** 星河收编 #2：运行时证据义务 store 入口。提供时，声明了 redundancy 的
-   *  义务未达 k 个独立证据会阻断交付（不静默降级为 satisfied）。缺省 →
-   *  冗余门禁关闭（现状行为不变）。 */
-  getObligationStore?: () => import('./evidence-obligation.js').ObligationStore
-  /** 证据防火墙 Phase 2：external-claim tracker 入口。提供且防火墙开启时，
-   *  commit 引用未核验 scout 断言会被拦截。缺省 → 门禁关闭（现状行为不变）。 */
-  getClaimTracker?: () => import('./hooks/external-claim-tracking-hook.js').ClaimTracker | undefined
-  /** config agent.scoutEvidenceFirewall 值（env RIVET_SCOUT_FIREWALL 优先，
-   *  判定走 isScoutFirewallEnabled）。 */
-  scoutFirewallConfig?: boolean
-  /** W1 回归防线: Meridian blast-radius tests (EvidenceTracker.impactedTests).
-   *  Absent → coverage check disabled (unchanged behavior). */
-  getImpactedTests?: () => string[]
-  resolveDeliveryImpact?: (cwd: string, files: readonly string[], typecheckProof?: import('../repo/type-only-import.js').TypecheckProof) => Promise<DeliveryImpact>
-  /** P4 收束闸：PAL 收敛案件快照（bootstrap 闭包现读 store）。收敛假设的
-   *  targets 完全没进本次交付范围 → 弱 advisory 提示，绝不阻断。 */
-  getPalConvergedCases?: () => import('./problem-attack-loop.js').ConvergedCaseEntry[]
-  /** 遗产回收 W-A1：PAL needs_user 案件快照（minimalQuestion 由 store 预计算）。
-   *  交付时卡在等用户裁决的案件必须披露为遗留项 → 弱 advisory，绝不阻断。 */
-  getPalNeedsUserCases?: () => Array<{ caseId: string; problem: string; minimalQuestion: string }>
-  /** config.agent.delivery.autoCommit。false 时即使 commit=true 也不实际
+  /** config agent.delivery.autoCommit。false 时即使 commit=true 也不实际
    *  执行 git commit，仅输出交付报告。 */
   autoCommit?: boolean
 }
 
-// ── Post-commit review batching ──
-// When multiple deliver_task commits fire in quick succession (e.g. splitting
-// a large changeset into area-scoped commits), each would trigger a separate
-// review worker — wasteful when one review can cover the whole session's work.
-// Two layers of batching:
-// 1. Cooldown: after a review launches, skip subsequent launches within this
-//    window — but RECORD the commit scope into post-commit-review-pending so
-//    the next launched review covers it (previously it went unreviewed).
-// 2. In-flight singleton: at most one system-triggered review worker at a
-//    time. Commits arriving while one runs (e.g. a git-lock retry landing
-//    40s later, inside the 180s review budget) merge into the pending scope
-//    instead of spawning an overlapping worker; the in-flight review's
-//    completion chains ONE follow-up review over the accumulated scope.
-const POST_COMMIT_REVIEW_COOLDOWN_MS = 30_000
-let lastPostCommitReviewAt = 0
-let postCommitReviewInFlight = false
-
-/** Test-only: reset the module-level batching state (cooldown, in-flight
- *  flag, pending scope) so it does not leak across cases. */
-export function resetPostCommitReviewCooldown(): void {
-  lastPostCommitReviewAt = 0
-  postCommitReviewInFlight = false
-  __resetPostCommitReviewPending()
-}
-
-/** Test-only: expire ONLY the time cooldown, keeping the in-flight flag and
- *  pending scope — needed to exercise the in-flight merge branch (a commit
- *  landing >30s after a still-running review launched). */
-export function __expirePostCommitReviewCooldown(): void {
-  lastPostCommitReviewAt = 0
-}
-
-/** Format a review outcome into report lines. Shared by the synchronous path
- *  (explicit review_level → lines go into the tool result) and the detached
- *  path (system-triggered review → lines flow through the advisory queue). */
-export function formatReviewOutcomeLines(outcome: ReviewOutcome): string[] {
-  const lines: string[] = []
-  if (outcome.verdict === 'rejected' || outcome.escalated) {
-    // Advisory: the commit has already landed. Surface the finding
-    // as a strong warning + follow-up recommendation, not a block.
-    lines.push(`⚠️ 审查门发现问题 (${outcome.tier})：${outcome.evidence ?? '对抗性审查未验证此交付'}`)
-    if (typeof outcome.rounds === 'number') lines.push(`   轮次：${outcome.rounds}`)
-    lines.push('   → 提交已落地。请在后续提交中处理审查发现。')
-    lines.push('   ⚠ 以上审查意见来自 worker，未经主控独立核验。汇报用户前请用 grep/read 确认每条声称的文件:行号真实存在。')
-  } else if (outcome.verdict === 'verified') {
-    if (outcome.infraFailures && outcome.infraFailures.length > 0) {
-      lines.push(`⚠️ 审查门 YELLOW (${outcome.tier})：审查基础设施有注意事项，交付已通过可用证据验证。`)
-      lines.push(`   ${outcome.evidence ?? '已通过审查基础设施注意事项验证'}`)
-    } else {
-      lines.push(`✅ 审查通过 (${outcome.tier})：${outcome.evidence ?? '已验证'}`)
+/** 被动风险提示（契约分离 Wave 2）：仅依据本次 diff 的既有事实，纯函数无 IO。
+ *  最多 3 项、总长 ≤600 字符；纯注释/格式变化不提示；未评估不冒充确定。
+ *  不扫描全仓、不查询影响图、不加载编译器、不启动 worker。 */
+export function passivelyAssessRisk(files: readonly string[]): string | undefined {
+  if (files.length === 0) return undefined
+  const hints: string[] = []
+  const add = (line: string): void => {
+    const candidate = ['⚠️ 风险提示（仅基于本次 diff；独立审查可用 review_changes）：', ...hints, line].join('\n')
+    if (candidate.length <= 600) hints.push(line)
+  }
+  for (const f of files) {
+    if (f === 'package.json' || f === 'package-lock.json' || f === 'pnpm-lock.yaml') {
+      add(`- ${f}：依赖/脚本变化——注意协议兼容与安装路径`)
+    } else if (/\/migration|\/schema|\.sql$/.test(f)) {
+      add(`- ${f}：数据迁移/结构面——注意可回滚与存量数据`)
+    } else if (/(^|\/)(permission|auth|security|sandbox|guardrail|firewall)/i.test(f)) {
+      add(`- ${f}：权限/安全边界——注意 fail-closed 与授权边界`)
+    } else if (/^\.rivet-config\.json$|^tsconfig.*\.json$|\/\.rivet-config\.json$/.test(f)) {
+      add(`- ${f}：配置结构——注意旧配置读取兼容`)
     }
-  } else if (outcome.verdict === 'inconclusive') {
-    lines.push(`⚠️ 审查未决 (${outcome.tier})：${outcome.evidence ?? '提交后审查未运行（基础设施故障）'}`)
-    lines.push('   → 此变更未经审查。运行 /review max 进行完整编队审查。')
-  } else if (outcome.verdict === 'nudge') {
-    lines.push(`⚠️ 审查提醒 (${outcome.tier})：请在后续工作中应用审查纪律。`)
-    lines.push('通用开发方法论：')
-    for (const directive of GENERAL_DEV_DISCIPLINES) lines.push(`  - ${directive}`)
+    if (hints.length >= 3) break
   }
-  lines.push(...formatPatcherArtifacts(outcome.patcherArtifacts))
-  return lines
+  return hints.length > 0 ? ['⚠️ 风险提示（仅基于本次 diff；独立审查可用 review_changes）：', ...hints].join('\n') : undefined
 }
 
-function parseNulFileList(output: string): string[] {
-  return output.split('\0').filter(Boolean)
+/** 提示用文件集：commit 用实际提交范围，只读用报告范围。 */
+function filesToCommitForHint(reportDirty: string[] | undefined, commit: boolean, scope: readonly string[]): readonly string[] {
+  if (commit) return scope
+  return reportDirty ?? []
 }
 
-function readProjectMemory(cwd: string): string | undefined {
-  try { return readFileSync(join(cwd, '.rivet', 'knowledge', 'project-memory.md'), 'utf-8') } catch { return undefined }
-}
-
-/** Collect files exceeding the large-file threshold so review workers can avoid
- *  reading them in full (use offset/limit instead). Best-effort — stat failures
- *  are silently skipped. */
-function collectLargeFiles(cwd: string, filePaths: readonly string[]): Array<{ path: string; sizeBytes: number }> | undefined {
-  const large: Array<{ path: string; sizeBytes: number }> = []
-  for (const p of filePaths) {
-    try {
-      const st = statSync(join(cwd, p))
-      if (st.size >= LARGE_FILE_WARN_THRESHOLD) {
-        large.push({ path: p, sizeBytes: st.size })
-      }
-    } catch { /* best-effort: missing / broken symlink / permission denied → skip */ }
-  }
-  return large.length > 0 ? large : undefined
-}
-
-async function gitNameList(cwd: string, args: string[]): Promise<string[] | null> {
-  const result = await gitCommand(cwd, ['-c', 'core.quotePath=false', ...args], { timeoutMs: 5000 })
-  if (result.status !== 0) return null
-  return parseNulFileList(result.stdout)
-}
-
-/**
- * Detect a "symptom-patch": a tiny single-file change touching only fallback
- * operators (`??` `||` default values). These are the shape of the trained-mode
- * reflex — patch the last hop, not the root. Returns a stance hint, or null.
- */
-export async function detectSymptomPatch(cwd: string): Promise<string | null> {
-  const res = await gitCommand(cwd, ['-c', 'core.quotePath=false', 'diff', '--numstat', 'HEAD'], { timeoutMs: 5000 })
-  if (res.status !== 0) return null
-  const rows = res.stdout.split(/\r?\n/).filter(Boolean)
-    .map(l => l.split('\t'))
-    .filter(c => c.length === 3 && !(c[2] ?? '').includes('test'))
-  if (rows.length !== 1) return null
-  const row = rows[0]!
-  const added = Number(row[0]) || 0
-  if (added > 2) return null
-  const patch = await gitCommand(cwd, ['-c', 'core.quotePath=false', 'diff', 'HEAD', '--', row[2]!], { timeoutMs: 5000 })
-  if (patch.status !== 0) return null
-  const addedLines = patch.stdout.split(/\r?\n/).filter(l => l.startsWith('+') && !l.startsWith('+++'))
-  const fallbackOnly = addedLines.length > 0 && addedLines.every(l => /\?\?|\|\||=\s*['"`]?\w*['"`]?\s*$|fallback|default/.test(l))
-  if (!fallbackOnly) return null
-  return '⚖️  这是症状处的 fallback 补丁(单行、改默认值)。是源头修复还是就近打补丁？数据流追到源头了吗？(清醒锚点，不阻塞)'
-}
-
-export async function collectCurrentDirtyFiles(cwd: string): Promise<string[] | undefined> {
-  const unstaged = await gitNameList(cwd, ['diff', '--name-only', '-z'])
-  const staged = await gitNameList(cwd, ['diff', '--cached', '--name-only', '-z'])
-  const untracked = await gitNameList(cwd, ['ls-files', '--others', '--exclude-standard', '-z'])
-  if (!unstaged || !staged || !untracked) return undefined
-
-  const files = new Set<string>()
-  for (const file of [...unstaged, ...staged, ...untracked]) {
-    files.add(file)
-  }
-  return [...files].sort()
-}
-
-/**
- * W5 (render-verify): check whether the delivery includes UI file changes
- * without any visual verification action (browser/computer_use/browser_debug).
- * Returns a warning line, or null if no issue.
- */
-export function detectMissingVisualVerify(
-  ownedFiles: readonly string[],
-  getEvents?: () => ReadonlyArray<import('./task-ledger.js').TaskLedgerEvent>,
-): string | null {
-  const uiFiles = ownedFiles.filter(f => isUiFilePath(f))
-  if (uiFiles.length === 0) return null
-
-  const events = getEvents?.() ?? []
-  const hasVisualVerify = events.some(
-    e => e.type === 'tool_exec' && e.tool && isVisualVerifyTool(e.tool),
-  )
-  if (hasVisualVerify) return null
-
-  return `⚠️ 渲染未验证：UI 文件已修改（${uiFiles.slice(0, 2).join(', ')}${uiFiles.length > 2 ? ' 等' : ''}），但未见 browser_debug/computer_use 视觉验证。交付前用 browser_debug open → navigate → screenshot 检查渲染结果。`
-}
-
-// ── 虚空仓库 P0：learned 参数解析 ──────────────────────────────────────────
-
-export interface LearnedPattern {
-  text: string
-  evidence: string
-  tags: string[]
-  topic?: string
-}
-
-/** 解析 deliver_task `learned` 数组。约定格式："模式描述——证据：文件路径或复现步骤"。
- *  分隔符容忍 "——证据："/"--证据:" 等变体；缺分隔符时整条入 text、evidence 为空。
- *  topic 从 evidence 里提取第一个带扩展名的路径样 token（供召回结构化预过滤）。 */
-export function parseLearnedEntries(raw: unknown): LearnedPattern[] {
-  if (!Array.isArray(raw)) return []
-  const out: LearnedPattern[] = []
-  for (const item of raw) {
-    if (typeof item !== 'string') continue
-    const trimmed = item.trim()
-    if (!trimmed) continue
-    const sep = trimmed.match(/[—–-]{1,2}\s*证据\s*[:：]/)
-    let text = trimmed
-    let evidence = ''
-    if (sep && sep.index !== undefined) {
-      text = trimmed.slice(0, sep.index).trim()
-      evidence = trimmed.slice(sep.index + sep[0].length).trim()
-    }
-    if (!text) continue
-    const pathLike = evidence.match(/[\w@./-]+\.[A-Za-z]{1,8}\b/)
-    out.push({
-      text,
-      evidence,
-      tags: ['agent-learned'],
-      topic: pathLike?.[0],
-    })
-  }
-  return out
+/** 旧混合参数 → 精简迁移错误。在归属校验、台账读取、commit 之前返回，
+ *  不启动任何质量任务，不把它解释为验证失败后重试。 */
+const LEGACY_FIELD_ROUTES: Record<string, string> = {
+  verification_policy: '验证策略已随提交义务一并移除；开发中定向验证直接用 run_tests(files/filter)',
+  review_level: '审查深度参数已移除；用 review_changes(action="start", depth=...) 或 TUI /review',
+  review_policy: '提交后审查分批已移除；审查由 review_changes 独立承接',
+  skipAutoReview: '自动审查开关已移除；审查由 review_changes 独立承接，提交路径不再触发任何审查',
+  review_findings: '审查发现处理已移交 review_changes(action="list"/"update")',
+  checklist: '任务完成度清单参数已移除；在最终回复中自行披露完成/未完成项，验证用 run_tests 表达',
+  learned: '知识收割参数已移除；用 memory 工具的 remember 直接持久化',
 }
 
 export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) => B1Context): Tool {
@@ -421,26 +124,21 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
   return {
     definition: {
       name: 'deliver_task',
-      description: `基于 B1 归属与验证台账检查任务交付就绪度。
+      description: `基于 B1 归属台账检查任务交付就绪度，并执行归属范围的安全提交。
 
 ### 用法
-- 用 deliver_task 检查当前任务是否可交付/提交
-- 报告 GREEN（就绪）、YELLOW（就绪但附外部注意事项）或 RED（阻塞）
-- 包含已归属文件、外部文件与验证状态
-- 默认只报告就绪度，不执行提交
-- commit=true 时，在审批通过后执行一次归属范围限定的提交
+- 用 deliver_task 检查当前任务是否可交付（只读报告：归属文件、外部文件、台账验证状态）
+- commit=true 时执行归属范围限定提交：只受所有权、跨会话冲突、版本一致性检查约束
+- 提交与验证、审查彻底分离：提交成功不代表验证通过——回执明确「本次未执行测试或审查」
+- 开发中的定向验证用 run_tests(files/filter)；独立审查用 review_changes 或 /review
+- 验证缺口（零验证/失败/超时/过期）如实披露，不阻断安全提交，也不为取得提交许可扩大测试
 
 ### 参数
-- commit: 设为 true 以请求限定范围提交的审批（默认：false）
+- commit: 设为 true 以请求限定范围提交的审批（默认：false，只读报告）
 - message: 提交信息（commit=true 时必填）
-- files: 可选，本次交付候选的已归属文件路径数组（子集）。影响分析、验证门禁、报告和提交都按该集合计算；省略时仍使用当前全部已归属 dirty 文件。验证候选时把同一数组传给 run_tests(deliveryFiles=...)；纯 TypeScript 候选可先调用 run_tests(deliveryFiles=..., check="typecheck") 取得同树类型证明。
-- adopt: 提交前要认领归属的外部或共同归属文件路径数组。用于接管崩溃/冻结会话的工作。用户明确要求提交这些跨会话改动即足够，不要求用户说“接管”；文档或历史日志不是授权。要求 commit=true。被认领的文件会强制加入已归属集合，并纳入提交范围。
-- force: 设为 true 可在跨多个区域提交大量文件时覆盖内聚性门禁。谨慎使用。
-- learned: 本次会话确认的可复用模式数组（每条格式："模式描述——证据：路径或复现步骤"）。持久化到项目知识库，未来会话自动注入。只提交已验证的模式。
-- review_policy: 长任务的提交后审查分批。each（默认）每次提交都审查；defer 不审查，把提交累积进会话待审范围；final 对所有累积提交做一次审查。相比大量小提交，优先 defer+final，避免每次提交都消耗一个 review worker。
-
-### 复杂 spec 交付清单
-对复杂 spec 或跨模块集成，清单条目要包含：事实流图已验证、条件矩阵已验证、反例测试已验证。`,
+- files: 可选，本次交付候选的已归属文件路径数组（子集）。省略时使用当前全部已归属 dirty 文件。
+- adopt: 提交前要认领归属的外部或共同归属文件路径数组。用于接管崩溃/冻结会话的工作。要求 commit=true。
+- force: 已独立核实跨会话接管安全时显式覆盖 claim 冲突；不豁免路径、索引、半暂存或版本安全。`,
       input_schema: {
         type: 'object',
         properties: {
@@ -449,7 +147,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
           files: {
             type: 'array',
             items: { type: 'string' },
-            description: '可选，本次交付候选的已归属文件子集；影响分析、门禁、报告和提交均使用该范围。省略时使用当前全部已归属 dirty 文件。',
+            description: '可选，已归属文件子集，报告和提交使用该范围。省略时使用当前全部已归属 dirty 文件。',
           },
           adopt: {
             type: 'array',
@@ -458,41 +156,10 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
           },
           force: {
             type: 'boolean',
-            description: '覆盖内聚性门禁。仅在提交尽管跨多个区域、但确实是一个逻辑单元时使用。',
-          },
-          checklist: {
-            type: 'array',
-            items: {
-              type: 'object',
-              properties: {
-                item: { type: 'string' },
-                done: { type: 'boolean' },
-                files: { type: 'array', items: { type: 'string' } },
-              },
-              required: ['item', 'done'],
-            },
-            description: '任务完成度审计条目。对复杂 spec，要包含事实流图已验证、条件矩阵已验证、反例测试已验证/已延期。',
-          },
-          review_level: {
-            type: 'string',
-            enum: ['L2', 'L3'],
-            description: '显式设置审查工作流深度。L2 = 单个对抗式验证器。L3 = Review Squadron（5 个检查员）。省略时按变更结构自动分级（默认：L1 仅提醒）。用于对高风险或关键路径变更手动触发更深的审查。',
-          },
-          skipAutoReview: {
-            type: 'boolean',
-            description: '抑制提交后的自动审查。goal tracker 激活时（目标驱动的自动续跑）自动设置。对琐碎或紧急变更可手动设置以绕过审查。',
-          },
-          review_policy: {
-            type: 'string',
-            enum: ['each', 'defer', 'final'],
-            description: '长任务的提交后审查分批。each（默认）：每次提交都审查。defer：跳过即时审查，把本次提交累积进会话待审范围。final：对所有累积的延迟提交连同本次做一次审查。设置 review_level 时忽略此参数。',
-          },
-          learned: {
-            type: 'array',
-            items: { type: 'string' },
-            description: '本次 session 确认的可复用知识（每条格式："模式描述——证据：文件路径或复现步骤"）。只在交付时提交经过验证的模式：诊断方法/架构边界/工具链事实/已验证修复。不确定的不要写。',
+            description: '仅在独立核实接管安全后覆盖跨会话 claim 冲突；不豁免 Git 安全保护。',
           },
         },
+        required: [],
       },
     },
 
@@ -500,7 +167,16 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
       const mark = createStageMarker('deliver-task', params.toolUseId, params.sessionId)
       mark('execute:start')
       const ctx = getB1Context(params)
-      const reviewDepth = params.reviewDepth ?? ctx.reviewDepth ?? 0
+      // ── 旧混合参数无副作用退回（契约分离）：在任何台账/归属/提交副作用之前 ──
+      for (const field of Object.keys(LEGACY_FIELD_ROUTES)) {
+        if (params.input[field] !== undefined) {
+          return {
+            content: `❌ deliver_task 不再接受 "${field}"：${LEGACY_FIELD_ROUTES[field]}。本次调用未产生任何副作用（未读取台账、未提交）；请拆分为独立调用。`,
+            isError: true,
+            errorKind: 'format_error',
+          }
+        }
+      }
       ctx.ownership.autoOwnFromLedger()
       const currentDirtyFiles = ctx.getCurrentDirtyFiles?.(params.cwd) ?? await collectCurrentDirtyFiles(params.cwd)
       if (currentDirtyFiles) ctx.ownership.autoOwnFromBaseline(currentDirtyFiles)
@@ -537,50 +213,13 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
       if (commit && scopeFiles.length === 0) return { content: '❌ No dirty files in the delivery candidate.', isError: true, errorKind: 'delivery_gate' }
       const adopted = adoptFiles?.length ? ctx.ownership.adoptFiles(adoptFiles) : []
       const reportDirtyFiles = requestedFiles || commit ? scopeFiles : currentDirtyFiles
-      let candidateTree: CandidateDeliveryTree | undefined
-      if (requestedFiles || commit && scopeFiles.length > 0) {
-        try {
-          candidateTree = await (ctx.prepareCandidateTree ?? openCandidateDeliveryTree)(params.cwd, scopeFiles, params.abortSignal)
-          mark('candidate:snapshot-ready')
-        } catch (error) {
-          return { content: `❌ 候选快照不可用，交付未验证：${error instanceof Error ? error.message : String(error)}`, isError: true, errorKind: 'delivery_gate' }
-        }
-      }
-      try {
-      const currentSnapshotRef = candidateTree
-        ? candidateTree!.ref
-        : ctx.getCurrentSnapshotRef?.()
-      // W1 回归防线: feed Meridian blast radius into the gate. existsSync filters
-      // deleted/renamed tests (static-analysis false positives) into "uncoverable".
-      const impactFiles = candidateTree ? scopeFiles : [...new Set([...scopeFiles, ...ctx.ownership.getCoOwnedFiles()])].filter(file => !dirtySet || dirtySet.has(file))
-      const typecheckReceipt = candidateTree && currentSnapshotRef !== 'candidate-ref-unavailable'
-        ? getEffectiveVerifications(ctx.taskLedger.getVerifications(), currentSnapshotRef, true).effective.find(evidence =>
-            evidence.kind === 'typecheck' && evidence.status === 'passed' && evidence.scope === 'full'
-            && evidence.candidateTypecheckComplete === true && evidence.snapshotRef === currentSnapshotRef
-            && JSON.stringify([...(evidence.candidateFiles ?? [])].sort()) === JSON.stringify(scopeFiles))
-        : undefined
-      const typecheckProof = typecheckReceipt && currentSnapshotRef ? { candidateRef: currentSnapshotRef, verifiedRef: typecheckReceipt.snapshotRef!, passed: true, complete: true, candidateFiles: scopeFiles } : undefined
-      const impactRoot = candidateTree?.path ?? params.cwd
-      if (candidateTree && !ctx.resolveDeliveryImpact) {
-        return { content: `❌ 提交候选 ${candidateTree.ref} 的影响分析不可用；验证义务未确认。`, isError: true, errorKind: 'delivery_gate' }
-      }
-      const impactStarted = Date.now()
-      const impact = ctx.resolveDeliveryImpact ? await ctx.resolveDeliveryImpact(impactRoot, impactFiles, typecheckProof) : undefined
-      if (impact && !impact.resolved) return { content: `❌ 提交候选 ${candidateTree?.ref ?? ''} 影响分析未完成：${impact.reason ?? 'impact_unresolved'}；未取得交付证明。`, isError: true, errorKind: 'delivery_gate' }
-      const impactMs = Date.now() - impactStarted
-      mark('candidate:impact-done')
-      const impactedTests = impact?.requiredTests ?? ctx.getImpactedTests?.() ?? []
-      const moduleCoverage = impactedTests.length > 0
-        ? {
-            impactedTests,
-            repositoryRoot: params.cwd,
-            testExists: (p: string) => existsSync(isAbsolute(p) ? p : join(impactRoot, p)),
-          }
-        : undefined
-      const report = ctx.gate.getReport([], reportDirtyFiles, currentSnapshotRef, moduleCoverage, Boolean(candidateTree))
+
+      // ── 只读报告（台账状态仅用于披露，不驱动任何门禁）──
+      const rawVerifications = ctx.taskLedger.getVerifications()
+      const report = ctx.gate.getReport([], reportDirtyFiles, undefined, undefined, false)
       mark('report:done')
 
-      // Cap file lists and filter external noise to keep the GREEN/YELLOW signal readable.
+      // Cap file lists and filter external noise to keep the signal readable.
       const FILE_LIST_CAP = 5
       const renderFileList = (files: string[], extraHiddenCount = 0): string[] => {
         if (files.length === 0 && extraHiddenCount === 0) return ['  (none)']
@@ -590,28 +229,9 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
         return shown
       }
       const externalSplit = filterExternalNoise(report.externalFiles, params.cwd)
-      const pendingTests = assessImpactedTestCoverage(impactedTests, getEffectiveVerifications(ctx.taskLedger.getVerifications(), currentSnapshotRef, Boolean(candidateTree)).effective, path => existsSync(join(impactRoot, path)), params.cwd).uncovered
-      const planStarted = Date.now()
-      const verificationPlan = await buildDeliveryVerificationPlanAsync(params.abortSignal, impactRoot, impactedTests, pendingTests, impact?.advisoryTests.length ?? 0, ctx.taskLedger.getVerifications(), currentSnapshotRef, candidateTree ? scopeFiles : undefined, candidateTree?.ref)
-      const planMs = Date.now() - planStarted
-      if (candidateTree) {
-        // Structured plans outlive the temporary worktree. Keep only live-root
-        // display paths; run_tests rebuilds the executable plan in its own snapshot.
-        verificationPlan.batches = verificationPlan.batches.map(batch => ({ ...batch, cwd: resolve(params.cwd, relative(candidateTree!.path, batch.cwd)), packageRoot: resolve(params.cwd, relative(candidateTree!.path, batch.packageRoot)) }))
-        if (!candidateTree.isCurrent()) {
-          return { content: '❌ 候选文件或 HEAD 在影响分析期间变化；旧验证与计划已失效，请重新运行 deliver_task。', isError: true, errorKind: 'delivery_gate' }
-        }
-      }
-      const candidateDiagnostics = candidateTree
-        ? diagnoseCandidateEvidence(ctx.taskLedger.getVerifications(), candidateTree.ref, scopeFiles, verificationPlan.batches[0])
-        : undefined
-      if (candidateDiagnostics) verificationPlan.candidateDiagnostics = candidateDiagnostics
-      mark('candidate:plan-done')
       const lines: string[] = [
-        `Delivery Gate: ${report.state}`,
+        `Ledger verification: ${report.state}（台账状态披露，本次交付不执行验证）`,
         `Task: ${report.taskId}`,
-        ...(candidateTree ? [`Candidate: ${candidateTree.ref} · ${scopeFiles.length} files · snapshot ${candidateTree.buildMs}ms · impact ${impactMs}ms · plan ${planMs}ms`] : []),
-        ...(candidateDiagnostics ? renderCandidateDiagnostics(candidateDiagnostics) : []),
         '',
         `Owned files (${report.ownedFileCount}):`,
         ...renderFileList(report.ownedFiles),
@@ -626,23 +246,12 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
         ...renderFileList(externalSplit.files, externalSplit.noiseCount),
         '',
         report.verificationCount > 0
-          ? `Verifications: ${report.verificationCount}`
-          // stale 判废把有效验证清空时，"no tests were run" 是误诊——跑过但被丢弃。
-          // 说出真实形态；越界类病因的修复指引见下方 outOfRootFingerprintPaths 段（L4）。
-          : report.staleFingerprintDropped > 0
-            ? `Verifications: none usable — ${report.staleFingerprintDropped} run(s) were dropped as stale (验证跑过，但验证后工作区/指纹又发生了变化)`
-            : candidateTree && report.staleSnapshotDropped > 0
-              ? `Verifications: none applicable — ${report.staleSnapshotDropped} run(s) belong to another candidate or lack a candidate ref`
-            : 'Verifications: none (no tests were run for this task)',
+          ? `Verifications: ${report.verificationCount}（台账记录，未经本次提交复核）`
+          : 'Verifications: none (no tests were run for this task)',
       ]
-      const blockedCommit = (reason: string, errorKind: 'delivery_gate' | 'format_error' = 'delivery_gate'): ToolResult => noProgress.rejected(report.taskId, candidateTree?.ref, reason,
-        ctx.taskLedger.getVerifications(), deliveryNextAction(reason, candidateDiagnostics),
-        { verificationPlan, content: lines.join('\n'), isError: true, errorKind })
-      if (impact) {
-        lines.push(`Impact policy ${impact.policyVersion ?? 1}: ${impact.requiredTests.length} required, ${impact.advisoryTests.length} advisory test(s).`)
-        for (const test of impact.requiredTests.slice(0, 5)) lines.push(`  ${test}: ${(impact.reasons?.[test] ?? []).map(step => `${step.from} → ${step.to} (${step.kind}/${step.confidence})`).join('; ') || 'modified test'}`)
-        if (impact.advisoryTests.length) lines.push(`  Advisory: ${impact.advisoryTests.slice(0, 5).join(', ')}`)
-      }
+      const blockedCommit = (reason: string, errorKind: 'delivery_gate' | 'format_error' = 'delivery_gate'): ToolResult => noProgress.rejected(report.taskId, undefined, reason,
+        rawVerifications, deliveryNextAction(reason, undefined),
+        { content: lines.join('\n'), isError: true, errorKind })
       if (ctx.continuityStatus) lines.push(`Session evidence continuity: ${ctx.continuityStatus}${ctx.continuityStatus === 'baseline_missing' ? '（启动时无历史任务状态，与当前验证结果分开）' : ''}`)
 
       // Echo producer facts; incomplete counts must remain visibly incomplete.
@@ -650,67 +259,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
         const v = report.latestVerificationTotals
         lines.push(`  Latest: ${v.passed ?? '未确认'} pass ${v.countsReliable !== true && !v.failed ? '未确认' : v.failed ?? '未确认'} fail ${v.skipped ?? '未确认'} skip${v.countsReliable !== true ? '（已确认计数，非全量；失败数量未确认时须补证据）' : ''} — ${v.command}`)
         if (v.executionId) lines.push(`  Execution: ${v.executionId} · ${v.timestamp ? new Date(v.timestamp).toISOString() : '时间未确认'} · ${v.durationMs ?? '未确认'}ms`)
-      } else if (report.verificationCount === 0 && report.staleFingerprintDropped === 0 && report.staleSnapshotDropped === 0) {
-        // stale 判废清空有效验证时不说 "no test suite was executed"——同 L4，跑过但被丢弃。
-        lines.push('  (Typecheck passed, but no test suite was executed. Run tests before claiming "verified".)')
       }
-
-      // L4 指引（交付门指纹治理，4251eea67 审查 P2）：stale 判废 + 越界 owned 路径
-      // 并存时输出修复指引。gate 只在两个条件同时成立时给该字段，此处只负责呈现。
-      if (report.outOfRootFingerprintPaths && report.outOfRootFingerprintPaths.length > 0) {
-        lines.push(`  ⚠️ owned 路径在仓库根之外：${report.outOfRootFingerprintPaths.join(', ')}`)
-        lines.push(`  指引：越界路径不可交付、不参与交付指纹——若这 ${report.staleFingerprintDropped} 条 stale 判废源于旧的越界指纹毒化（4251eea67 前的台账形态：owned 路径在仓库根之外 → 指纹不可计算），把需交付的内容移入仓库内（如 .rivet/scratch/）后重跑验证，新证据会替代 "no tests were run" 的误判。`)
-      }
-
-      // 测试存在性警告（advisory 不阻断）：交付物含 ≥3 个源文件却零测试文件。
-      // 主会话有人看着，硬拦交给 wave-gate 管无人值守场景。
-      if (testPresenceGateEnabled()) {
-        const presence = evaluateTestPresence(report.ownedFiles)
-        if (!presence.ok) {
-          lines.push('', `⚠️ 零测试交付：${presence.detail}`)
-          lines.push('  交付报告中不要宣称"已验证"——这批源文件没有任何测试背书。')
-        }
-      }
-
-      // W5 (render-verify): warn when UI files were changed without visual verification.
-      if (ctx.taskLedger && process.env.RIVET_RENDER_VERIFY !== '0') {
-        const visualWarn = detectMissingVisualVerify(
-          report.ownedFiles,
-          () => ctx.taskLedger.getEvents(),
-        )
-        if (visualWarn) lines.push('', visualWarn)
-      }
-
-      const hasVerificationDiagnostics = report.currentBlockingFailure
-        || report.supersededFailures > 0
-      if (hasVerificationDiagnostics) {
-        lines.push('')
-        if (report.currentBlockingFailure) {
-          lines.push(`  阻断项：${report.currentBlockingFailure}`)
-        }
-        if (report.staleFailureCandidates > 0) {
-          lines.push(`  已取代失败：${report.supersededFailures} 条（后续同类验证已成功，不证明其他失败为预存量）`)
-        }
-        // no_test_infra: project lacks testing infrastructure entirely.
-        // Give user-facing guidance rather than generic "run tests" advice.
-        if (report.attributionClass === 'no_test_infra') {
-          lines.push('', '  ⚠️ 测试基础设施缺失 — 项目没有可自动检测的测试框架或测试文件。')
-          lines.push('  run_tests 每次都会以同样原因受阻，继续重试不会改变结果。')
-          lines.push('  建议向用户报告：')
-          lines.push('    1. 当前项目缺少什么（package.json 中的 test 脚本 / pytest / vitest 等）')
-          lines.push('    2. 用户是否需要协助搭建测试框架')
-          lines.push('    3. 或者用 bash 运行替代验证（编译检查/手动测试/脚本输出检查）后交付')
-          lines.push('  ⚠ 不要只说"请运行测试"——项目根本没有测试可以运行。')
-        }
-      }
-
-      // Memory-driven review checklist (non-blocking, informational only).
-      // Deferred: only append after commit determination so it doesn't
-      // clutter the primary gate output.
-      const projectMemory = ctx.getProjectMemoryContent?.(params.cwd) ?? readProjectMemory(params.cwd)
-      const reviewChecklist = projectMemory
-        ? buildReviewPrincipleChecklist({ knowledgeMarkdown: projectMemory, changedFiles: report.ownedFiles })
-        : []
 
       const health = summarizeOwnershipHealth({
         ownedFiles: report.ownedFiles,
@@ -734,9 +283,8 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
         lines.push('', 'Ownership caveats:')
         lines.push(...health.infoLines.map(line => `  ${line}`))
       }
-
       if (report.blockingReason) {
-        lines.push('', `⚠️  Blocking: ${report.blockingReason}`)
+        lines.push('', `⚠️  台账验证待办（不阻断提交，交付报告须披露）: ${report.blockingReason}`)
       }
 
       // P2 cross-session signal: detect claim conflicts with other sessions
@@ -759,17 +307,9 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
       }
 
       lines.push('', `Attribution: ${report.attributionSummary}`)
-      if (verificationPlan.pending.length > 0 || report.attributionClass === 'module_unverified' && report.state === 'YELLOW') lines.push(...renderDeliveryVerificationPlan(verificationPlan, params.cwd))
-      // Failure attribution summary: distinguish "my fault" vs "not my fault" failures.
-      // Helps the agent understand: which failures should I fix, which are external?
-      {
-        const parts: string[] = []
-        if (report.currentBlockingFailure) parts.push(`1 条阻断失败（你需处理）`)
-        if (report.supersededFailures > 0) parts.push(`${report.supersededFailures} 条已被后续成功取代`)
-        if (parts.length > 0) {
-          lines.push(`失败归因：${parts.join(' | ')}`)
-          lines.push('→ 根据阻断项的实际证据处理；没有基线对照，不能认定失败由本次改动引入或属于预存量。')
-        }
+      if (report.currentBlockingFailure) {
+        lines.push('', `验证遗留项（不阻断提交，须披露）: ${report.currentBlockingFailure}`)
+        lines.push('→ 根据实际证据处理；没有基线对照，不能认定失败由本次改动引入或属于预存量。')
       }
 
       // Recovery journal: detect files that were restored (undo/git checkout) during this session.
@@ -788,180 +328,6 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
 
       const message = params.input.message as string | undefined
 
-      // Task completion audit: surface incomplete items prominently.
-      // Prevents silent omissions where the agent claims X is done but only Y was implemented.
-      const auditList = params.input.checklist as Array<{ item: string; done: boolean; files?: string[] }> | undefined
-      if (auditList && Array.isArray(auditList) && auditList.length > 0) {
-        const incomplete = auditList.filter(entry => !entry.done)
-        const complete = auditList.filter(entry => entry.done)
-        lines.push('', '--- Task Completion Audit ---')
-        for (const entry of complete) {
-          lines.push(`  ✅ ${entry.item}` + (entry.files?.length ? ` (${entry.files.join(', ')})` : ''))
-        }
-        for (const entry of incomplete) {
-          lines.push(`  ⚠️  NOT DONE: ${entry.item}`)
-        }
-        if (incomplete.length > 0) {
-          // P2: wave-split detection — when a large plan has been partially executed,
-          // suggest finishing the current wave before starting the next batch.
-          const totalCount = auditList.length
-          const doneCount = complete.length
-          // Threshold: >=4 — a plan with 4+ tasks executed in one unbroken batch
-          // is the exact failure mode for missing task-level commits.
-          if (totalCount >= 4) {
-            const remainingRatio = incomplete.length / totalCount
-            if (remainingRatio > 0.4) {
-              lines.push('', `  💡 ${incomplete.length}/${totalCount} tasks remaining (${Math.round(remainingRatio * 100)}%). Consider pausing after this wave — typecheck+test the completed batch, then continue with the next ${Math.min(incomplete.length, 3)} tasks.`)
-            } else {
-              lines.push('', `  ⚠️  ${incomplete.length} of ${totalCount} tasks incomplete. Verify these are intentionally deferred to the next wave, not forgotten.`)
-            }
-          } else {
-            lines.push('', '  ⚠️  Incomplete tasks detected. Verify these are intentionally deferred, not forgotten.')
-          }
-        }
-      }
-
-      // ── 层3: 重构行为等价契约 — 回归清单逐项核验（advisory，绝不阻断交付）──
-      // 重构类交付且零清单 → 按 YELLOW 处理并留痕，防止重构丢失功能。
-      try {
-        const { isRefactorObjective } = await import('../context/task-contract.js')
-        const contract = ctx.getTaskContract?.()
-        const inventory = contract?.regressionInventory && contract.regressionInventory.length > 0
-          ? contract.regressionInventory
-          : findApprovedPlanInventory(params.cwd)
-        const refactorish = isRefactorObjective(contract?.objective ?? '')
-          || isRefactorObjective(typeof params.input.message === 'string' ? params.input.message : '')
-        if (inventory && inventory.length > 0) {
-          const results = await verifyRegressionInventoryAsync(params.cwd, inventory, ctx.inventorySearcher)
-          lines.push(...formatInventoryReport(results))
-        } else if (refactorish) {
-          lines.push('', '⚠️ 重构类交付缺少回归清单（task contract regressionInventory / 计划「回归清单」章节均为空）。')
-          lines.push('   行为等价未核验 → 按 YELLOW 处理：交付报告必须说明哪些既有功能（路由/导航/导出/命令入口）已人工确认仍在。')
-        }
-      } catch {
-        // advisory: 回归契约核验绝不让交付本身失败
-      }
-
-      // ── Norns 义务账: 议事会契约随附的未偿义务，交付前逐项核验（advisory）──
-      // 义务账随 UnifiedPlan JSON 存活在会话 plan-store（多波续跑期间 re-store）。
-      // advisory_gate 白名单命令真实执行；暂缓项/缓解承诺列账要求报告逐项披露。
-      try {
-        const storedJson = getStoredPlan(params.sessionId)
-        const storedPlan = storedJson ? (deserializeUnifiedPlan(storedJson) as PlanWithObligations | null) : null
-        // ── 验证命令对账（advisory）：计划声明的验证命令逐条核销 ──
-        // 覆盖"选择性报绿"：命令挂死/未跑时报告只列跑通的套件也能穿过
-        // 诚实门禁——对账把 passed/failed/blocked/not_run 四态机械披露。
-        if (storedPlan && ctx.taskLedger) {
-          const declared = declaredVerificationCommands(storedPlan)
-          if (declared.length > 0) {
-            const reconciled = reconcileVerificationCommands(declared, ctx.taskLedger.getVerifications())
-            lines.push(...formatVerificationReconcileReport(reconciled))
-          }
-        }
-        if (storedPlan?.obligations && storedPlan.obligations.length > 0) {
-          // 默认 runner 异步化（2026-08-09）：spawnSync 会把整个 sidecar 事件循环
-          // 冻结至 60s 超时——/health、SSE 全灭，桌面端探针误判 hung。改 spawnHidden
-          // 异步执行，摘要语义不变（尾部 3 行 / 300 字符）。
-          const runGate: GateRunner = ctx.obligationGateRunner ?? ((command) => runGateAsync(command, params.cwd))
-          const results = await verifyObligations(storedPlan.obligations, runGate)
-          lines.push(...formatObligationReport(results))
-        }
-      } catch {
-        // advisory: 义务账核验绝不让交付本身失败
-      }
-
-      // ── P4 收束闸: PAL 收敛假设 ↔ 交付范围一致性（弱 advisory，绝不阻断）──
-      // 攻坚案件收敛出了 selectedHypothesis，但其 targets 完全没出现在本次
-      // 交付文件里 → 大概率"诊断收敛了、修复没落地"或改错了地方。只提示。
-      try {
-        const converged = ctx.getPalConvergedCases?.() ?? []
-        if (converged.length > 0) {
-          const deliveredFiles = [
-            ...report.ownedFiles, ...report.coOwnedFiles,
-            ...(reportDirtyFiles ?? []),
-          ]
-          for (const c of converged) {
-            const fileTargets = c.targets.filter(t => t.includes('/') || t.includes('.'))
-            if (fileTargets.length === 0) continue
-            const touched = fileTargets.some(t =>
-              deliveredFiles.some(f => f.includes(t) || t.includes(f)))
-            if (!touched) {
-              lines.push('', `⚠️ 攻坚案件 ${c.caseId} 已收敛（假设 ${c.selectedHypothesisId}，targets: ${fileTargets.slice(0, 3).join(', ')}${fileTargets.length > 3 ? ' …' : ''}），但这些 targets 不在本次交付文件中——确认修复真的落在了收敛假设指向的位置。`)
-            }
-          }
-        }
-      } catch {
-        // advisory: PAL 收束闸绝不让交付本身失败
-      }
-
-      // ── 遗产回收 W-A1: needs_user 案件披露（弱 advisory，绝不阻断）──
-      // 卡在等用户裁决的攻坚案件在交付时静默消失 = 违反交付报告"必须覆盖
-      // 遗留项"纪律。只提示：列为遗留项并附最小决策问题。
-      try {
-        const needsUser = ctx.getPalNeedsUserCases?.() ?? []
-        for (const c of needsUser) {
-          lines.push('', `⚠️ 攻坚案件 ${c.caseId} 卡在等用户裁决（needs_user）：${c.problem} —— 交付报告必须把它列为遗留项，并附最小决策问题：${c.minimalQuestion}`)
-        }
-      } catch {
-        // advisory: PAL 披露绝不让交付本身失败
-      }
-
-      // ── 虚空仓库 P0: 知识收割邀请（弱 advisory，绝不阻断）──
-      // 条件展示控 token：本次调用未带 learned，且 session 有实质工作量
-      // （存在 PAL 案件，或交付 ≥3 个文件）。agent 看到邀请后在 commit
-      // 调用（或下一次调用）里经 learned 参数提交。
-      try {
-        const learnedProvided = Array.isArray(params.input.learned) && params.input.learned.length > 0
-        const palActivity = (ctx.getPalConvergedCases?.() ?? []).length > 0
-          || (ctx.getPalNeedsUserCases?.() ?? []).length > 0
-        if (!learnedProvided && (palActivity || report.ownedFileCount >= 3)) {
-          lines.push(
-            '',
-            '### 知识收割（虚空仓库）',
-            '本次 session 若确认了可复用模式（诊断方法/架构边界/工具链事实/已验证修复），',
-            '在 commit 调用时通过 learned 参数提交（每条："模式描述——证据：路径或复现步骤"）。不确定的不要写。',
-          )
-        }
-      } catch {
-        // advisory: 收割邀请绝不让交付本身失败
-      }
-
-      // ── 冗余义务门禁（星河收编 #2）──────────────────────────────
-      // 声明了 redundancy 的义务未达 k 个独立证据时交付 blocked——不静默
-      // 降级为 satisfied。force 不豁免：这是当前任务的证据义务，不是预存量
-      // 失败。未提供 store 入口时门禁关闭（现状行为不变）。
-      let redundancyBlocked = false
-      const obligationStore = ctx.getObligationStore?.()
-      if (obligationStore) {
-        const unsatisfied = obligationStore.obligations.filter(o =>
-          o.redundancy && o.state !== 'satisfied' && o.state !== 'superseded'
-        )
-        if (unsatisfied.length > 0) {
-          redundancyBlocked = true
-          lines.push('', '❌ 冗余验证未达 quorum（blocked，不静默降级）：')
-          for (const ob of unsatisfied) {
-            lines.push(`  - 义务「${ob.claim}」需要 ${ob.redundancy!.k} 个独立证据，当前 ${ob.satisfyCount ?? 0} 个（状态 ${ob.state}）`)
-          }
-          lines.push('  提供额外的独立证据（DP 副本验证、独立工具复现）后再次 deliver。')
-        }
-      }
-
-      // ── 证据防火墙 Phase 2（jidoka）──────────────────────────────
-      // 位置 A：报告组装段——commit 与否都算好未核验引用，警示行恒开。
-      // 扫描面与宣称-证据对账同源（message + checklist items）。
-      const firewallTracker = ctx.getClaimTracker?.()
-      const deliveryText = [
-        typeof params.input.message === 'string' ? params.input.message : '',
-        ...(auditList ?? []).map(e => e.item),
-      ].join('\n')
-      const firewallRefs = firewallTracker
-        ? findUnverifiedClaimRefs(firewallTracker, deliveryText)
-        : []
-      if (firewallRefs.length > 0) {
-        lines.push('', `⚠ 证据防火墙：交付文本引用了 delegate 报告的路径，但本会话未独立核验：${firewallRefs.join('、')}`)
-        lines.push('  worker 的 file:line 是待核验假设——read_file/grep 确认后再作为交付结论，或标注 [待核] 降级为线索。')
-      }
-
       if (commit) {
         // Manual commit mode — user wants to review before committing.
         // Still run the full gate report, just skip the actual git commit.
@@ -972,7 +338,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
             '以上交付报告与门禁状态仅供参考——变更未提交。',
             '审查完成后由用户手动执行 git commit。',
           )
-          return { verificationPlan, content: lines.join('\n') }
+          return { content: lines.join('\n') }
         }
         if (!ctx.ownership.isBaselineComplete()) {
           // 恢复路径：基线只在会话启动时采集一次——会话开始后目录才变成 git 仓库
@@ -994,112 +360,18 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
           '提交前只确认本次一个逻辑单元：',
           '1. 是否只包含当前任务文件？',
           '2. 是否混入外部/他人改动？',
-          '3. 测试与 typecheck 是否对应本逻辑单元？',
+          '3. 提交范围是否与用户要求一致？',
           '4. commit message 是否描述一个原子变更？',
           '</atomic-commit-reminder>',
         )
 
         const forceGate = params.input.force === true
-        // 位置 B：commit 硬拦——在 RED 判定之前，作为独立拦截条件并列
-        // （不与 delivery gate 的 RED 语义混合，防火墙有自己的 Recovery 文案）。
-        // force 不豁免：这是当前交付的证据债，不是预存量失败。
-        if (commit && firewallRefs.length > 0 && isScoutFirewallEnabled(ctx.scoutFirewallConfig)) {
-          lines.push('', '❌ Cannot commit: evidence firewall — 交付引用了未经独立核验的 scout/delegate 断言。')
-          lines.push('   （force 不豁免：这是当前交付的证据义务，不是预存量失败。）')
-          lines.push('', 'Recovery:')
-          lines.push(`  → 用 read_file / grep 逐一核验：${firewallRefs.join('、')}，然后重跑 deliver_task`)
-          lines.push('  → 或从提交信息/清单中移除该引用，或为该行添加 [待核] 标注（诚实降级为线索）。')
-          return blockedCommit(`evidence-firewall:${firewallRefs.join(',')}`)
-        }
 
-        // Mechanical-change classification (computed once, reused for gate bypass
-        // and post-commit review). Only meaningful when fast-path is enabled.
-        let mechanicalClass: import('./change-classification.js').ChangeClassification | undefined
-        if (isMechanicalFastPathEnabled(ctx.reviewConfig)) {
-          mechanicalClass = classifyChange(
-            report.ownedFiles,
-            await createGitDiffProviderAsync(params.cwd, report.ownedFiles, reportDirtyFiles ?? undefined, params.abortSignal),
-          )
-        }
-
-        if (report.state === 'RED' || redundancyBlocked) {
-          if (redundancyBlocked) {
-            // 冗余义务未达 quorum：当前任务的证据义务，force 不豁免。
-            lines.push('', '❌ Cannot commit: redundancy obligations not met — quorum evidence insufficient.')
-            lines.push('', 'Recovery:')
-            lines.push('  → 提供额外的独立证据满足冗余义务（DP 副本验证、独立工具复现、')
-            lines.push('    第二条 file:line 证据链），或显式 supersede 该义务后重试。')
-            return blockedCommit('redundancy-obligation')
-          } else if (
-            report.attributionClass === 'unverified'
-            && mechanicalClass?.skipVerification
-          ) {
-            lines.push('', `✅ 机械式变更 (${mechanicalClass.class})，免验证交付：${mechanicalClass.reason}`)
-          } else {
-            lines.push('', '❌ Cannot commit: delivery gate is RED.')
-            if (report.supersededFailures > 0) {
-              lines.push('   (Superseded failures were already removed; force does not waive the remaining blockers.)')
-            }
-            lines.push('', 'Recovery:')
-            if (report.blockingReason) {
-              lines.push(`  Reason: ${report.blockingReason}`)
-            }
-            if (report.currentBlockingFailure) {
-              lines.push(`  Detail: ${report.currentBlockingFailure}`)
-            }
-            lines.push('')
-            // Unverified: guide to targeted verification instead of full suite
-            if (report.ownedFiles.length > 0 && report.verificationCount === 0) {
-              lines.push('  → Files are unverified. Run TARGETED tests first:')
-              lines.push('    Use run_tests with filter="test-file-name" for each changed file.')
-              lines.push('    Use related_tests(sourceFile) to find the right test file.')
-              lines.push('')
-              lines.push('    Do NOT run the full test suite as first step — it may timeout.')
-            } else {
-              lines.push('  → Fix the blocking issue above, then re-run deliver_task.')
-              lines.push('    If tests keep timing out, run them in smaller batches by directory.')
-            }
-            return blockedCommit(`delivery:${report.attributionClass}:${report.currentBlockingFailure ?? report.blockingReason ?? ''}`)
-          }
-        }
-        const effectiveEvidence = getEffectiveVerifications(ctx.taskLedger.getVerifications(), currentSnapshotRef, Boolean(candidateTree)).effective
-        if (report.ownedFileCount > 0 && !mechanicalClass?.skipVerification
-          && !effectiveEvidence.some(verification => verification.status === 'passed' && verification.scope !== 'unknown')) {
-          lines.push('', '❌ Cannot commit: no applicable successful verification. Unknown or blocked checks do not prove validation; force=true does not waive this obligation.')
-          return blockedCommit('missing-applicable-verification')
-        }
-        // W1 回归防线: module_unverified 在 assess 层是 YELLOW（可带条件交付），
-        // commit=true 必须有覆盖证明；force 不豁免缺失验证。
-        if (report.state === 'YELLOW' && report.attributionClass === 'module_unverified') {
-          lines.push('', '❌ Cannot commit: impacted tests were never covered by a passed verification. force=true does not waive missing verification.')
-          return blockedCommit('module-unverified')
-        }
-        if (report.state === 'YELLOW') {
-          const stanceHint = await detectSymptomPatch(params.cwd)
-          if (stanceHint) lines.push('', stanceHint)
-        }
         if (!message) {
           lines.push('', '❌ Commit requires a "message" parameter.')
           return blockedCommit('missing-commit-message', 'format_error')
         }
 
-        // 宣称-证据对账（复现即证明）：commit message / checklist 里宣称测试绿，
-        // 但 ledger 里最后一次文件变更后零条 passed 验证记录 → RED 硬拦；
-        // 宣称的 N/N 与最新验证记录对不上 → 软警不阻断。
-        if (claimAuditEnabled()) {
-          const checklistText = (auditList ?? []).map(e => e.item).join('\n')
-          const audit = auditDeliveryClaims({
-            claimText: `${message}\n${checklistText}`,
-            events: ctx.taskLedger.getEvents(),
-          })
-          if (audit.status === 'block') {
-            lines.push('', ...audit.lines)
-            return blockedCommit('claim-audit')
-          }
-          if (audit.status === 'warn') {
-            lines.push('', ...audit.lines)
-          }
-        }
         if (adopted.length > 0) {
           const wasCoOwned = adopted.filter(file => adoptableCoOwned.has(file))
           const wasExternal = adopted.filter(file => adoptableExternal.has(file))
@@ -1111,10 +383,6 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
         }
 
         const filesToCommit = scopeFiles
-        if (candidateTree && !candidateTree.isCurrent()) {
-          lines.push('', '❌ Cannot commit: 候选文件或 HEAD 已变化；原候选验证和执行计划失效，请重新运行 deliver_task。')
-          return blockedCommit('candidate-changed')
-        }
         const commitVersion = await captureCommitVersionAsync(params.cwd, filesToCommit, { signal: params.abortSignal })
         lines.push('', `Commit scope (${report.state}): ${filesToCommit.join(', ') || '(none)'}`)
         const commitConflictFiles = new Set(filesToCommit)
@@ -1128,80 +396,12 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
           lines.push('', '⚠️ Cross-session claim conflicts overridden with force=true. Verify the other session has finished or approved the takeover.')
         }
 
-        // ── PRE-COMMIT GATES (blocking) ──────────────────────────────────
-        // Static checks that don't need worker API calls — run before commit.
-        let fileChecks: Partial<ReturnType<typeof scanDeliveryFiles>> = {}
-        try { fileChecks = await scanDeliveryFilesAsync(params.cwd, filesToCommit, params.abortSignal) }
-        catch {
-          params.abortSignal?.throwIfAborted()
-          lines.push('', '⚠ 静态提示检查进程不可用或超时；未在服务线程重算，请独立审查布线、探针和结构。')
-        }
-
-        // D-fix: cheap static wrote-but-never-read check. Mechanically catches
-        // the modelOverride class of dead wiring (field/symbol added, zero
-        // read-side consumers) at the moment of delivery. YELLOW, non-blocking.
-        try {
-          const deadSymbols = ctx.detectWroteButNeverRead ? ctx.detectWroteButNeverRead(params.cwd, filesToCommit) : fileChecks.dead ?? []
-          lines.push(...formatWroteButNeverRead(deadSymbols))
-        } catch {
-          // best-effort: never let the nudge break delivery
-        }
-
-        // 虚假绿灯对偶检查：字段被生产代码读取，却只有测试 fixture 赋值、生产无写入点
-        // = fixture 伪造了真实系统不产出的形状。YELLOW，非阻断。仅抓子型A（生产零写入）；
-        // 子型B（写入点存在但运行时永空）是 review 门的职责。
-        try {
-          const falseGreen = ctx.detectReadButNeverProduced ? ctx.detectReadButNeverProduced(params.cwd, filesToCommit) : fileChecks.falseGreen ?? []
-          lines.push(...formatReadButNeverProduced(falseGreen))
-        } catch {
-          // best-effort: never let the nudge break delivery
-        }
-
-        // Probe-residue gate: scan owned files for leftover debug probes
-        // (console.log/debugger/.only etc.). YELLOW, non-blocking — the model
-        // may have intentionally added logging. fs re-scan is authoritative:
-        // probes already cleaned by a later edit won't be in the file.
-        try {
-          const probeHits = ctx.scanProbes ? ctx.scanProbes(filesToCommit, params.cwd) : fileChecks.probes ?? []
-          if (probeHits.length > 0) {
-            lines.push(...formatProbeHits(probeHits))
-          }
-        } catch {
-          // best-effort: never let probe scanning break delivery
-        }
-
-        // Structure gate（行数棘轮预警）: committed files over their named
-        // ceiling or the new-file redline get an actionable split nudge.
-        // YELLOW, non-blocking — the hard stop is architecture-guards in
-        // npm test; this surfaces the ratchet before CI does.
-        try {
-          const structure = ctx.checkStructure ? ctx.checkStructure(filesToCommit, params.cwd) : fileChecks.structure
-          if (structure?.needsWarning) {
-            lines.push('', ...structure.warningLines.map(l => `  ${l}`))
-          }
-        } catch {
-          // best-effort: never let the structure nudge break delivery
-        }
-
-        // Cohesion gate: RED if files span too many areas (unless force=true)
-        // When files were adopted (cross-session takeover), auto-override cohesion
-        // since the adoption scope is intentional.
-        const cohesionOverride = forceGate
-          || (adoptFiles && Array.isArray(adoptFiles) && adoptFiles.length > 0)
         const cohesion = checkCommitCohesion(filesToCommit)
-        mark('cohesion:done')
-        if (cohesion.needsWarning && !cohesionOverride) {
-          lines.push('', ...cohesion.warningLines.map(l => `  ${l}`))
-          mark('cohesion:denied')
-          return blockedCommit('cohesion')
-        }
-        if (cohesion.needsWarning && cohesionOverride) {
-          lines.push('', '  ⚠️ Cohesion gate overridden with force=true. Verify this is truly one logical unit.')
-        }
+        if (cohesion.needsWarning) lines.push('', 'ℹ️ 本次提交涉及多个文件或区域；建议按逻辑单元审查，文件数量不阻断安全提交。')
 
-        // ── COMMIT (no longer blocked by review) ─────────────────────────
-        // Review is post-commit (advisory) — the commit must land first so
-        // the main loop never stalls on a slow/timeout review worker.
+        // ── COMMIT ─────────────────────────────────────────────────────────
+        // 提交与审查/验证彻底分离：commit 就是 commit——落地工作成果。
+        // 验证走 run_tests，审查走 review_changes，都不在本路径。
 
         // A lock's age cannot prove that its owner has exited.
         const lockPath = join(params.cwd, '.git', 'index.lock')
@@ -1211,414 +411,47 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
           return blockedCommit('git-index-lock')
         }
 
-        // Capture HEAD before the commit so the result carries verifiable
-        // evidence that a new commit actually landed (vs. agent guessing from
-        // a possibly-stale git status snapshot).
-        const headBefore = await gitCommand(params.cwd, ['rev-parse', '--short', 'HEAD'], { signal: params.abortSignal, timeoutMs: 5000 })
         mark('commit:before')
-        const headBeforeHash = headBefore.status === 0 ? headBefore.stdout.trim() : null
 
-        if (candidateTree && !candidateTree.isCurrent()) {
-          lines.push('', '❌ Cannot commit: 提交前候选版本变化，已停止；请重新验证当前候选。')
-          return blockedCommit('candidate-changed')
-        }
         const executor = ctx.commitOwnedFiles ?? ((cwd, files, msg) => commitScopedFiles({ cwd, files, message: msg, expectedVersion: commitVersion ?? undefined, signal: params.abortSignal }))
         const commitResult = await executor(params.cwd, filesToCommit, message)
         if (!commitResult.ok) {
-          const afterVersion = commitVersion && candidateTree?.isCurrent()
-            ? await captureCommitVersionAsync(params.cwd, filesToCommit, { signal: params.abortSignal }) : null
-          const indexOnlyConflict = afterVersion && commitVersion && afterVersion.head === commitVersion.head
-            && afterVersion.files === commitVersion.files && afterVersion.index !== commitVersion.index
-          if (indexOnlyConflict) lines.push('', 'Git index 在提交期间变化；候选源码和同树验证仍有效。处理暂存区冲突后重试，无需因此重跑测试。')
           lines.push('', `❌ Scoped commit failed: ${commitResult.output}`)
-          return blockedCommit(indexOnlyConflict ? 'git-index-changed' : 'git-commit-failed')
+          if (commitResult.reason === 'version-unavailable' && commitResult.detail) {
+            lines.push(`   Baseline diagnostics: ${commitResult.detail}`)
+          }
+          return blockedCommit('scoped-commit-failed')
         }
         noProgress.clear(report.taskId)
         lines.push('', `✅ Scoped commit created with message: "${message}"`)
         lines.push(`   Files: ${filesToCommit.join(', ') || '(none)'}`)
         if (commitResult.output) lines.push(`   ${commitResult.output}`)
-        // Post-commit truth readback: verify HEAD actually moved + surface hash.
-        const headAfter = await gitCommand(params.cwd, ['rev-parse', '--short', 'HEAD'], { signal: params.abortSignal, timeoutMs: 5000 })
-        mark('commit:after')
-        const headAfterHash = headAfter.status === 0 ? headAfter.stdout.trim() : null
-        if (headBeforeHash && headAfterHash) {
-          if (headBeforeHash !== headAfterHash) {
-            lines.push(`   VERIFIED: HEAD moved ${headBeforeHash} → ${headAfterHash}. The commit is real — do NOT re-attempt it.`)
-          } else {
-            lines.push(`   ⚠️ WARNING: HEAD did not move (still ${headAfterHash}). The commit may not have landed — verify with git log before retrying.`)
+        lines.push('', 'ℹ️ 本次未执行测试或审查——提交只保存工作成果；质量义务由 run_tests / review_changes 独立表达。')
+        const sha = commitResult.commitSha
+        if (sha) {
+          lines.push(`   VERIFIED: 本次提交 ${sha}。The commit is real — do NOT re-attempt it.`)
+          ctx.taskLedger.record({ type: 'git_action', command: 'deliver_task commit', meta: { commitSha: sha } })
+          if (recoverySessionId) {
+            try { recordDeliveryReceipt(params.cwd, recoverySessionId, sha) }
+            catch (error) { lines.push(`⚠️ 提交已完成，归属回执未持久化：${String(error)}；不要重复提交。`) }
           }
-        }
-        const readback = await gitCommand(params.cwd, ['-c', 'core.quotePath=false', 'show', '--stat', '--format=%h%d', 'HEAD'], { signal: params.abortSignal })
+        } else lines.push('⚠️ 提交命令已成功，但未取到本次 SHA；先核对命令输出，不要用当前 HEAD 代替或重复提交。')
+        mark('commit:after')
+        const readback = sha ? await gitCommand(params.cwd, ['-c', 'core.quotePath=false', 'show', '--stat', '--format=%H', sha], { signal: params.abortSignal }) : { status: -1, stdout: '' }
         if (readback.status === 0 && readback.stdout.trim()) {
           lines.push('', '--- actual changes (git show --stat) ---')
           lines.push(readback.stdout.trim())
         }
         // Acknowledge recovery journal entries — the commit confirms intent was preserved.
         if (recoveries.length > 0) acknowledgeAll(params.cwd, recoverySessionId)
-
-        // ── POST-COMMIT REVIEW (advisory, non-blocking) ──────────────────
-        // Review runs AFTER the commit so a slow/timeout worker never stalls
-        // the main loop or blocks delivery. Findings are surfaced as warnings;
-        // the commit has already landed and cannot be un-done by review.
-        // The reviewDepth guard prevents verifier/patcher child contexts from
-        // recursively reviewing themselves.
-        // RIVET_REVIEW_DISCIPLINE=0 / false / off / no disables the gate (default: enabled).
-        const explicitReviewLevel = params.input.review_level as ReviewScale | undefined
-        // 只抑制「系统自动」审查（auto / defer / final / goal-achieved L3）。
-        // 显式 review_level（手动 /review）是用户明确意图，永远绕过本抑制。
-        const skipAutoReview = params.input.skipAutoReview === true
-          || ctx.isGoalActive?.() === true
-          || ctx.reviewConfig?.skipAuto === true
-          || ctx.isAutoReviewOff?.() === true
-        const goalAchieved = ctx.isGoalAchieved?.() === true
-        const goalVerdict = ctx.getLastVerdict?.() ?? null
-        // review_policy（长任务审查批处理）：'each' 默认逐 commit；'defer'
-        // 跳过即时审查并累积进会话 pending；'final' 对累积范围一次终审。
-        // 显式 review_level 优先——组合传入时 review_policy 被忽略。
-        const reviewPolicyRaw = params.input.review_policy
-        const reviewPolicy: 'each' | 'defer' | 'final' =
-          reviewPolicyRaw === 'defer' || reviewPolicyRaw === 'final' ? reviewPolicyRaw : 'each'
-
-        // Goal-achieved commit: auto-upgrade to L3 for final review sweep.
-        // Best-effort — if review deps are unavailable the commit still lands.
-        const effectiveReviewLevel: ReviewScale | undefined = goalAchieved && !explicitReviewLevel
-          ? 'L3'
-          : explicitReviewLevel
-
-        const change: ChangeSet = {
-          files: filesToCommit,
-          crossModule: isCrossModule(filesToCommit),
-          isFix: isFixContext(message),
-          goalActive: ctx.isGoalActive?.() === true,
-          largeFiles: collectLargeFiles(params.cwd, filesToCommit),
-          commitMessage: typeof message === 'string' ? message : undefined,
-          ...(effectiveReviewLevel ? { forceLevel: effectiveReviewLevel } : {}),
-          ...(mechanicalClass ? { changeClass: mechanicalClass } : {}),
-        }
-
-        // Inject meridian blast radius into focusHint so verifier/inspector
-        // know which downstream consumers to verify. Absolute paths filtered
-        // (repo-relative LIKE silently returns empty on absolute paths).
-        const meridianDb = ctx.meridianIndexer?.getDb()
-        const relChangeFiles = change.files.filter(f => !isAbsolute(f))
-        if (meridianDb && relChangeFiles.length > 0) {
-          const impact = analyzeImpact(meridianDb, relChangeFiles)
-          const parts: string[] = []
-          if (impact.direct.length > 0)
-            parts.push(`downstream consumers: ${impact.direct.slice(0, 8).join(', ')}${impact.direct.length > 8 ? ` (+${impact.direct.length - 8} more)` : ''}`)
-          if (impact.tests.length > 0)
-            parts.push(`related tests: ${impact.tests.slice(0, 8).join(', ')}${impact.tests.length > 8 ? ` (+${impact.tests.length - 8} more)` : ''}`)
-          if (parts.length > 0) {
-            const blast = `Blast radius — ${parts.join('; ')}`
-            change.focusHint = change.focusHint ? `${change.focusHint} | ${blast}` : blast
-          }
-        }
-
-        // Surface the judge verdict alongside the delivery report so L3 review
-        // Surface the judge verdict alongside the delivery report so L3 review
-        // can focus on code quality — the judge already established functional
-        // completeness. When verdict is null, the judge didn't run (disabled,
-        // no coordinator, or goal completed before first judge invocation).
-        if (goalVerdict) {
-          const v = goalVerdict
-          if (v.overall === 'verified') {
-            lines.push('', `✅ Goal judge: verified (${v.criteriaMet}/${v.criteriaTotal} criteria met). L3 review can focus on code quality.`)
-          } else if (v.overall === 'rejected') {
-            lines.push('', `⚠️ Goal judge: rejected (${v.criteriaUnmet} unmet of ${v.criteriaTotal}). Accepted at judge cap — residual: ${v.summary}`)
-          } else {
-            lines.push('', `⚠️ Goal judge: inconclusive. Accepted unverified — ${v.summary}`)
-          }
-        }
-
-        // Suppress auto review when goal is active OR caller explicitly skips.
-        // Goal-driven auto-continuation can't afford child review worker stalls.
-        // 显式 review_level（手动 /review）是用户明确意图，绕过一切自动审查抑制——
-        // off 模式关闭的是「自动审查」，不是「禁止用户手动审」。
-        if (skipAutoReview && !explicitReviewLevel) {
-          lines.push('', '⏭ 自动审查已跳过（goal 模式 / skipAuto / /review off）。手动 /review [max] 审查不受影响。')
-        } else if (reviewDepth === 0 && shouldRouteReviewWorkflow(change) && isReviewDisciplineEnabled()) {
-          // review_policy=defer：长任务声明"过程不审、收尾终审"——commit 范围
-          // 累积进会话级 pending（typecheck 升级标记一并记录），由 final /
-          // goal-achieved L3 / 下一次换审统一消费，本轮不起 worker。
-          if (reviewPolicy === 'defer' && !explicitReviewLevel) {
-            const scope = addPendingReviewFiles(ctx.sessionId, filesToCommit, { escalate: change.forceLevel === 'L3' })
-            lines.push('', ...formatDeferredReviewNotice(scope.commits, scope.files.size))
-          } else {
-            // 批量约束只作用于系统触发的审查。显式 review_level（手动 /review）
-            // 与 goal-achieved L3 终审是明确意图，不被冷却/在飞单例跳过；
-            // final 绕过冷却但在在飞时仍并入 pending（重叠审查比延迟更浪费）。
-            const bypassCooldown = explicitReviewLevel !== undefined || reviewPolicy === 'final' || goalAchieved
-            const bypassInFlight = explicitReviewLevel !== undefined || goalAchieved
-            const now = Date.now()
-            if (!bypassCooldown && now - lastPostCommitReviewAt < POST_COMMIT_REVIEW_COOLDOWN_MS) {
-              const sinceSec = Math.round((now - lastPostCommitReviewAt) / 1000)
-              const windowSec = Math.round(POST_COMMIT_REVIEW_COOLDOWN_MS / 1000)
-              addPendingReviewFiles(ctx.sessionId, filesToCommit, { escalate: change.forceLevel === 'L3' })
-              lines.push('', `⏭ 提交后审查跳过：距上轮审查仅 ${sinceSec}s（<${windowSec}s 冷却窗口）。本轮变更已记入待审范围，下次审查自动覆盖，也可 /review 手动立即审查。`)
-            } else if (!bypassInFlight && postCommitReviewInFlight) {
-              const scope = addPendingReviewFiles(ctx.sessionId, filesToCommit, { escalate: change.forceLevel === 'L3' })
-              lines.push('', `⏭ 已有在飞审查：本轮 commit 并入待审范围（会话累计 ${scope.commits} 个 commit），在飞审查完成后统一补审，不重复起 worker。`)
-            } else {
-              const route = ctx.routeReviewWorkflow ?? (ctx.reviewDeps ? routeReviewWorkflow : undefined)
-              if (!route || !ctx.reviewDeps) {
-                // Advisory: review deps unavailable is a caveat, not a blocker.
-                lines.push('', '⚠️ 提交后审查跳过：审查依赖不可用（ReviewRouter 未接入）。')
-              } else {
-                // Fold the session's accumulated pending scope (cooldown-skipped /
-                // in-flight-merged / deferred commits) into this launch — recorded
-                // commits must be covered by the next review, never stranded.
-                const accumulated = consumePendingReview(ctx.sessionId)
-                let reviewChange: ChangeSet = change
-                if (accumulated && accumulated.files.size > 0) {
-                  const mergedFiles = [...new Set([...accumulated.files, ...change.files])]
-                  reviewChange = {
-                    ...change,
-                    files: mergedFiles,
-                    crossModule: isCrossModule(mergedFiles),
-                    largeFiles: collectLargeFiles(params.cwd, mergedFiles),
-                    ...(accumulated.escalate && !change.forceLevel
-                      ? {
-                          forceLevel: 'L3' as ReviewScale,
-                          focusHint: change.focusHint
-                            ? `Deferred commits escalated by typecheck/declared-check failure | ${change.focusHint}`
-                            : 'Deferred commits escalated by typecheck/declared-check failure',
-                        }
-                      : {}),
-                  }
-                  lines.push('', reviewPolicy === 'final'
-                    ? `🔍 终审（review_policy=final）：覆盖 ${accumulated.commits} 个延迟 commit + 本次提交，共 ${mergedFiles.length} 个文件。`
-                    : `📎 本次审查一并覆盖此前累积的 ${accumulated.commits} 个未审 commit（共 ${mergedFiles.length} 个文件）。`)
-                } else if (reviewPolicy === 'final') {
-                  lines.push('', '🔍 终审（review_policy=final）：无累积的延迟 commit，仅审查本次提交。')
-                }
-                const reviewMode: ReviewMode = reviewChange.forceLevel ? 'manual' : 'auto'
-                const REVIEW_TIMEOUT_MS = reviewWorkflowBudgetMs(reviewMode, reviewChange.forceLevel)
-                const reviewAbort = new AbortController()
-                if (params.abortSignal) {
-                  if (params.abortSignal.aborted) {
-                    lines.push('', '⚠️ 提交后审查跳过：工具已取消。')
-                  } else {
-                    params.abortSignal.addEventListener('abort', () => reviewAbort.abort(), { once: true })
-                  }
-                }
-                if (!params.abortSignal?.aborted) {
-                  const budgetSec = Math.round(REVIEW_TIMEOUT_MS / 1000)
-                  const reviewDeps = ctx.reviewDeps
-                  // 审查门 UI 可见性：复用会话级 DelegationActivity 通道把审查
-                  // worker 进度上行到子代理面板（tool 完成后该回调仍有效）。
-                  // 真实审查 worker（wo_<uuid>）只经 mapper 发 running、没有任何
-                  // 终态事件源（phantom review-gate-* 行才有）——记录本轮出现过
-                  // 的真实 worker id，审查 round 结束时逐个补发终态，否则它们
-                  // 永远挂在子代理面板 running（deliver_task 非委派工具，走不到
-                  // clearGroup）。
-                  const reviewTerminalOf = (outcome: ReviewOutcome) => {
-                    // rejected = 审查正常走完并发现问题（已落地，不是系统失败）
-                    const terminalStatus: DelegationActivity['status'] =
-                      outcome.verdict === 'verified' || outcome.verdict === 'nudge'
-                        ? 'completed'
-                        : outcome.verdict === 'rejected'
-                          ? 'completed'
-                          : 'failed'
-                    const failureReason = outcome.verdict === 'rejected' ? 'review-findings'
-                      : outcome.verdict === 'inconclusive' ? 'review-infra' : undefined
-                    const lines0 = formatReviewOutcomeLines(outcome)
-                    const progressLine = outcome.verdict === 'nudge'
-                      ? '审查门完成 (nudge)：变更琐碎，免深审'
-                      : (lines0[0] ?? `审查门完成 (${outcome.verdict})`)
-                    const summary = outcome.verdict === 'rejected' || outcome.verdict === 'inconclusive'
-                      ? lines0.join('\n')
-                      : undefined
-                    return { terminalStatus, failureReason, progressLine, summary }
-                  }
-                  const settleReviewWorkers = (
-                    outcome: ReviewOutcome,
-                    activityMapper: ReturnType<typeof createDelegationActivityMapper> | undefined,
-                    latestByWorker: Map<string, DelegationActivity>,
-                  ): void => {
-                    if (!activityMapper || latestByWorker.size === 0) return
-                    const { terminalStatus, failureReason, progressLine, summary } = reviewTerminalOf(outcome)
-                    for (const [wid, latest] of latestByWorker) {
-                      activityMapper.finish({
-                        ...latest,
-                        workOrderId: wid,
-                        parentToolId: params.toolUseId,
-                        profile: 'reviewer',
-                        status: terminalStatus,
-                        progressLine,
-                        ...(failureReason ? { failureReason } : {}),
-                        ...(summary ? { summary } : {}),
-                      })
-                    }
-                    latestByWorker.clear()
-                  }
-                  const runReviewOnce = async (
-                    targetChange: ChangeSet,
-                    runMode: ReviewMode,
-                    timeoutMs: number,
-                    controller: AbortController,
-                    activityMapper: ReturnType<typeof createDelegationActivityMapper> | undefined,
-                  ): Promise<ReviewOutcome> => {
-                    const fallbackTier = runMode === 'auto' ? 'auto' as const : (targetChange.forceLevel ?? effectiveReviewLevel ?? 'L2')
-                    let reviewTimer: NodeJS.Timeout | undefined
-                    let outcome: ReviewOutcome
-                    try {
-                      const timeoutPromise = new Promise<never>((_, reject) => {
-                        reviewTimer = setTimeout(() => {
-                          controller.abort()
-                          reject(new Error('Review workflow timed out'))
-                        }, timeoutMs)
-                      })
-                      outcome = await Promise.race([
-                        route(targetChange, reviewDeps, { abortSignal: controller.signal, mode: runMode, depthLayer: ctx.getDepthLayer?.(), onActivity: activityMapper }),
-                        timeoutPromise,
-                      ])
-                    } catch (err) {
-                      const reason = err instanceof Error ? err.message : String(err)
-                      // Review is best-effort post-commit: a timeout/crash never blocks
-                      // delivery — the commit already landed. Report honestly.
-                      outcome = {
-                        tier: fallbackTier,
-                        verdict: 'inconclusive',
-                        rounds: 0,
-                        evidence: `post-commit review DID NOT run (${reason.includes('timed out') ? 'timed out' : 'infra failure'}: ${reason})`,
-                        infraFailures: [{ kind: reason.includes('timed out') ? 'timeout' : 'crash', claim: reason }],
-                      }
-                    } finally {
-                      if (reviewTimer) clearTimeout(reviewTimer)
-                    }
-                    // Review infra health observability (/status): auto runs only.
-                    if (runMode === 'auto' && outcome.rounds !== undefined && outcome.verdict !== 'nudge') {
-                      if (outcome.verdict === 'inconclusive') {
-                        recordAutoReviewRun({ ran: false, failureKinds: (outcome.infraFailures ?? []).map(f => f.kind) })
-                      } else {
-                        recordAutoReviewRun({ ran: true, ...(outcome.recoveredByRetry ? { recoveredByRetry: true } : {}) })
-                      }
-                    }
-                    return outcome
-                  }
-
-                  // Detached launcher — shared by the initial system-triggered
-                  // review and the in-flight follow-up sweep. Owns the in-flight
-                  // singleton: commits landing while a review runs merge into the
-                  // session pending scope (see the inFlight branch above) instead
-                  // of spawning an overlapping worker, and the completion chain
-                  // below consumes that scope with ONE follow-up review.
-                  const launchDetached = (targetChange: ChangeSet, runMode: ReviewMode, commitRef: string): void => {
-                    lastPostCommitReviewAt = Date.now()
-                    postCommitReviewInFlight = true
-                    const controller = new AbortController()
-                    if (params.abortSignal) {
-                      if (params.abortSignal.aborted) {
-                        postCommitReviewInFlight = false
-                        return
-                      }
-                      params.abortSignal.addEventListener('abort', () => controller.abort(), { once: true })
-                    }
-                    const timeoutMs = reviewWorkflowBudgetMs(runMode, targetChange.forceLevel)
-                    const runBudgetSec = Math.round(timeoutMs / 1000)
-                    // Each detached review owns one mapper lifecycle. A follow-up
-                    // review must not reuse a mapper that has already been sealed.
-                    const latestByWorker = new Map<string, DelegationActivity>()
-                    const trackedUpstream = params.onWorkerActivity
-                      ? (activity: DelegationActivity) => {
-                          latestByWorker.set(activity.workOrderId, activity)
-                          params.onWorkerActivity!(activity)
-                        }
-                      : undefined
-                    const activityMapper = trackedUpstream
-                      ? createDelegationActivityMapper(params.toolUseId, trackedUpstream)
-                      : undefined
-                    // 审查门 UI 可见性（detached 路径此前对用户完全隐形）：
-                    // 启动行走 onOutput；「审查门自身」发 phantom running/终态事件
-                    // （独立于 worker 事件，保证 nudge/超时也至少有始有终）；
-                    // worker 实时进度由上面的 activityMapper 上行。
-                    params.onOutput?.(`\n⏳ 提交后审查启动中 (${runMode}${targetChange.forceLevel ? ' ' + targetChange.forceLevel : ''}, ≤${runBudgetSec}s)——审查 worker 进度见子代理面板...\n`)
-                    const reviewRunId = `review-gate-${String(commitRef).slice(0, 7)}-${Math.random().toString(36).slice(2, 7)}`
-                    params.onWorkerActivity?.({ workOrderId: reviewRunId, parentToolId: params.toolUseId, profile: 'reviewer', status: 'running', progressLine: `审查门启动 (${runMode}…)` })
-                    void runReviewOnce(targetChange, runMode, timeoutMs, controller, activityMapper).then(outcome => {
-                      enqueuePostCommitReviewOutcome({
-                        lines: [`提交 ${commitRef} 的提交后审查完成：`, ...formatReviewOutcomeLines(outcome)],
-                        verdict: outcome.verdict,
-                        tier: String(outcome.tier),
-                      })
-                      const { terminalStatus, failureReason, progressLine, summary } = reviewTerminalOf(outcome)
-                      params.onWorkerActivity?.({
-                        workOrderId: reviewRunId,
-                        parentToolId: params.toolUseId,
-                        profile: 'reviewer',
-                        status: terminalStatus,
-                        progressLine,
-                        ...(failureReason ? { failureReason } : {}),
-                        ...(summary ? { summary } : {}),
-                      })
-                      // 真实审查 worker（wo_<uuid>）补终态——它们只发过 running，
-                      // 不补会永远挂在子代理面板（deliver_task 不走 clearGroup）。
-                      settleReviewWorkers(outcome, activityMapper, latestByWorker)
-                    }).catch(() => { /* runReviewOnce never rejects; double guard */ }).finally(() => {
-                      activityMapper?.dispose()
-                      postCommitReviewInFlight = false
-                      if (params.abortSignal?.aborted) return
-                      // 补审：在飞期间到达的 commit 已并入会话 pending（inFlight
-                      // 分支与冷却分支），统一一轮覆盖，不再逐 commit 起 worker。
-                      // （defer 累积的范围也可能被提前消费——审查是 advisory，
-                      // 提前覆盖不违反交付语义，final 时只会看到更小的范围。）
-                      const followUp = consumePendingReview(ctx.sessionId)
-                      if (!followUp || followUp.files.size === 0) return
-                      const mergedFiles = [...followUp.files]
-                      const followChange: ChangeSet = {
-                        files: mergedFiles,
-                        crossModule: isCrossModule(mergedFiles),
-                        isFix: false,
-                        goalActive: false,
-                        largeFiles: collectLargeFiles(params.cwd, mergedFiles),
-                        ...(followUp.escalate ? { forceLevel: 'L3' as ReviewScale } : {}),
-                      }
-                      const followMode: ReviewMode = followChange.forceLevel ? 'manual' : 'auto'
-                      launchDetached(followChange, followMode, 'HEAD（合并补审）')
-                    })
-                  }
-
-                  const commitRef = headAfterHash ?? 'HEAD'
-                  mark('review:dispatch-start')
-
-                  if (explicitReviewLevel) {
-                    // Explicit review_level (补丁 1 方案 A): unified with
-                    // system-triggered path — review runs detached so it never
-                    // blocks the commit return. Verdict flows through
-                    // post-commit-review-queue → AdvisoryBus in a later turn.
-                    lastPostCommitReviewAt = Date.now()
-                    launchDetached(reviewChange, reviewMode, String(commitRef))
-                    lines.push('', `⏳ 提交后审查已转后台 (${reviewMode} ${explicitReviewLevel}, ≤${budgetSec}s)——审查结论将通过 system 通道注入后续对话，本次交付不等待。`)
-                  } else {
-                    // System-triggered review (auto wiring inspector / typecheck-
-                    // escalated L3 / goal-achieved L3): detach. The 240s-timeout
-                    // incident chain (2026-07-07) showed a synchronous 180s review
-                    // await drives models to bypass deliver_task for raw git
-                    // commit — the review is advisory, the commit has already
-                    // landed, so the main loop must not stall on it. Outcome
-                    // flows through post-commit-review-queue → runtime hook →
-                    // AdvisoryBus into a later turn.
-                    lastPostCommitReviewAt = Date.now()
-                    launchDetached(reviewChange, reviewMode, String(commitRef))
-                    lines.push('', `⏳ 提交后审查已转后台 (${reviewMode}${reviewChange.forceLevel ? ' ' + reviewChange.forceLevel : ''}, ≤${budgetSec}s)——进度见子代理面板，结论将以 system 通道注入后续对话并汇总到面板，本次交付不等待。`)
-                  }
-                }
-              }
-            }
-          }
-        }
       }
 
-      // Append review principle checklist at end (non-blocking, informational)
-      if (reviewChecklist.length > 0) {
-        lines.push('', '审查原则清单：')
-        for (const item of reviewChecklist.slice(0, 2)) {
-          lines.push(`  - ${item.question}`)
-        }
-        if (reviewChecklist.length > 2) {
-          lines.push(`  ... 还有 ${reviewChecklist.length - 2} 条原则`)
-        }
-      }
+      // ── 被动风险提示（轻量：仅本次 diff 的既有事实，≤3 项/600 字符，不扫全仓/不动影响图）──
+      // 触及权限边界/协议兼容/配置结构/数据迁移面的改动值得点名；同一 diff 不重复。
+      try {
+        const riskHints = passivelyAssessRisk(filesToCommitForHint(reportDirtyFiles, commit, scopeFiles))
+        if (riskHints) lines.push('', riskHints)
+      } catch { /* 提示绝不让交付失败 */ }
 
       // ── 交付后自检（硬性，不替代人工审查，但减少静默带偏）─────────────
       // 每次交付结束时提醒 agent 核验两件事：① 提交的文件是否就是本次要交的
@@ -1626,45 +459,11 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
       // 上一步操作意外写入的临时文件/缓存/构件产物）。
       lines.push('',
         '交付后自检（提交后 10 秒内看一眼）：',
-        '  1. 刚才的提交文件列表是否符合「本次改动的文件」——是的话继续，有陌生的立刻 revert',
-        '  2. 项目目录下有没有不该出现的新文件（git status 里的 ?? 行）——有的话加 gitignore 或清理',
+        '  1. 刚才的提交文件列表是否符合「本次改动的文件」——发现陌生文件先核对归属并报告，不自动还原他会话改动',
+        '  2. 项目目录下有没有不该出现的新文件（git status 里的 ?? 行）——先确认归属与用途，不自动清理他会话文件',
       )
 
-      // ── 虚空仓库 P0: learned 收割 → memory.jsonl 直写 ──────────────────
-      // 改为 fire-and-forget：不阻塞 commit 返回。I/O 失败由 .catch 防御，
-      // 不崩进程（unhandled rejection guard）。
-      // 只在成功路径执行（错误分支已早退，交付被拦时不收割）。
-      setImmediate(() => {
-        try {
-          const entries = parseLearnedEntries(params.input.learned)
-          let written = 0
-          for (const lp of entries) {
-            // 写前相似去重：上一次 learned 重提 / 第四层 PAL 自动收割同结论 → 跳过
-            if (countSimilarMemoryEntries(params.cwd, lp.text) > 0) continue
-            appendMemoryEntry(params.cwd, {
-              text: lp.text,
-              kind: 'verified_pattern',
-              confidence: 0.95,
-              source: 'agent-crafted',
-              status: 'verified',
-              evidence: lp.evidence || undefined,
-              sessionId: ctx.sessionId,
-              tags: lp.tags,
-              transferableTo: ['all'],
-              topic: lp.topic,
-            })
-            written++
-          }
-          // Fire-and-forget: no lines.push — the return has already been sent.
-        } catch {
-          // 收割失败绝不阻断交付；.catch 防止 unhandled rejection
-        }
-      })
-
-      return { verificationPlan, content: lines.join('\n') }
-      } finally {
-        candidateTree?.destroy()
-      }
+      return { content: lines.join('\n') }
     },
 
     requiresApproval(params: ToolCallParams): boolean {
@@ -1674,9 +473,8 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
     isConcurrencySafe: () => true,
     isEnabled: () => true,
 
-    // Budget: typecheck and review are now agent-owned steps (run before
-    // calling deliver_task), not internal stages. commit=false is a fast
-    // ownership query; commit=true does file I/O + git.
+    // Default commits perform local reporting + scoped Git operations. Full
+    // checks / strict commits retain candidate analysis; reviews run detached.
     //
     // commit 预算 60s→180s（2026-07-21 事故）：多会话共享工作区（几十个外部
     // 改动文件）+ 并发 tsc/test 满载 CPU 时，所有权扫描 + claim 审计 + git
@@ -1684,7 +482,7 @@ export function createDeliverTaskTool(getB1Context: (params?: ToolCallParams) =>
     // 半成品 tracked 改动卷进提交、漏掉 untracked 依赖文件（损毁提交
     // 7b0c2936）。提交是终态动作，宁可慢不可断。
     timeoutMs: (params) => {
-      if (params?.input?.commit !== true) return 60_000    // 门禁查询：ownership + cohesion + claim audit
+      if (params?.input?.commit !== true) return 60_000    // 门禁查询：ownership + cohesion
       return 180_000                                       // commit：文件读写 + git 操作（满载机器留余量）
     },
   }

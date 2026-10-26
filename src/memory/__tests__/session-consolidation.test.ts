@@ -47,8 +47,10 @@ describe('session consolidation', () => {
     assert.equal(procedure?.kind, 'reusable_design_pattern')
   })
 
-  it('enabled by default, opt-out via env', () => {
-    assert.equal(consolidationEnabled(undefined), true)
+  it('disabled by default, explicitly enabled via env', () => {
+    assert.equal(consolidationEnabled(''), false)
+    assert.equal(consolidationEnabled('on'), true)
+    assert.equal(consolidationEnabled('unknown'), false)
     assert.equal(consolidationEnabled('off'), false)
   })
 })

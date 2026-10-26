@@ -34,7 +34,7 @@ import { createUserHooksBridge, type UserHooksBridgeDeps } from './hooks/user-ho
 import { createCompanionHeartbeatHook } from './hooks/companion-heartbeat-hook.js'
 import { createCcrHook, type CcrTriggerEvent } from './hooks/cognitive-capsule-router.js'
 import { createSelfVerifyHook } from './hooks/self-verify-hook.js'
-import { createPostCommitReviewPreTurnHook, createPostCommitReviewPostToolHook } from './hooks/post-commit-review-hook.js'
+import { createPostCommitReviewHooks } from './hooks/post-commit-review-hook.js'
 import { createTypecheckReminderHook } from './hooks/typecheck-reminder-hook.js'
 import { createTodoReminderHook } from './hooks/todo-reminder-hook.js'
 import { createBackgroundJobsHook } from './hooks/background-jobs-hook.js'
@@ -92,6 +92,8 @@ import type { PhysarumShadowStats } from '../repo/physarum-shadow-stats.js'
 import { createProblemAttackHooks, palMode } from './hooks/problem-attack-hook.js'
 
 export interface RuntimeHookDeps {
+  getReadonlyTaskConstraint?: () => boolean | undefined
+  hasActiveRepair?: () => boolean
   getTodoTask?: () => { key: number; multiStep: boolean; startTurn?: number; initialSignature?: string }
   adviceFacts?: import('./runtime-advice-facts.js').RuntimeAdviceFacts
   stigmergyDeposit: (deposit: any) => Promise<void>
@@ -578,18 +580,17 @@ export function createDefaultRuntimeHooks(deps: RuntimeHookDeps): RuntimeHook[] 
     }))
   }
 
-  // Self-Verify: postTurn hook — when a turn uses only read-class tools
-  // with no ground-truth verification, inject a reminder for the next turn
-  // to self-verify before building on the conclusions.
+  // Self-verify yields to active structural repair; it never requests a quality continuation.
   if (deps.advisoryBus) {
     hooks.push(createSelfVerifyHook({
+      getReadonlyTaskConstraint: deps.getReadonlyTaskConstraint,
+      recordReadonlyAdvice: event => deps.telemetryWriter?.write({ kind: 'advice-relevance', ...event }),
+      hasActiveRepair: deps.hasActiveRepair,
       advisoryBus: deps.advisoryBus,
       getEvidenceState: deps.getEvidenceState,
-      // 结构化 verification 信号 + 同义 advisory supersede（义务在场时义务块
-      // 是唯一声音，泛化 self-verify advisory 不再叠发）。
+      // Existing obligations keep a single model-visible voice.
       submitControlSignal: deps.submitControlSignal,
       obligations: deps.obligations,
-      // W3 债龄阶梯：债连续在场越久，advisory priority 越高（债越陈越贵）
       getVerificationDebt: deps.getVerificationDebt,
     }))
   }
@@ -598,8 +599,7 @@ export function createDefaultRuntimeHooks(deps: RuntimeHookDeps): RuntimeHook[] 
   // 把系统触发的提交后审查分离到后台跑（240s 超时事故链修复 2026-07-07），
   // 结论经 post-commit-review-queue 在这里投递回对话。
   if (deps.advisoryBus) {
-    hooks.push(createPostCommitReviewPreTurnHook({ advisoryBus: deps.advisoryBus }))
-    hooks.push(createPostCommitReviewPostToolHook({ advisoryBus: deps.advisoryBus }))
+    hooks.push(...createPostCommitReviewHooks({ advisoryBus: deps.advisoryBus, sessionId: deps.sessionId, cwd: deps.cwd }))
   }
 
   // Edit-Tool Advisory: postTool hook — detects consecutive hash_edit calls

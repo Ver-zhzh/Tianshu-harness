@@ -7,7 +7,7 @@ for (const row of rows) {
   const result = Object.hasOwn(sources,row.source) ? sources[row.source] : undefined; if (!result) continue
   if (row.event === 'selected') result.selected++
   else if (row.event === 'fallback') result.fallback++
-  else if (['download_complete','network_failure','no_progress_30s','integrity_failed','cancelled'].includes(row.event)) {
+  else if (['download_complete','network_failure','no_progress_30s','slow_download','integrity_failed','download_failed','cancelled'].includes(row.event)) {
     if (row.event === 'download_complete') result.completed++
     else if (row.event === 'cancelled') result.cancelled++
     else result.failed++

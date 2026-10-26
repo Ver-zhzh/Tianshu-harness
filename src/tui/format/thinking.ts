@@ -19,7 +19,7 @@ export interface FormatThinkingInput {
   header?: boolean
   /** 展开正文内容。默认 false。 */
   expanded?: boolean
-  /** 正文最大行数。默认 8。commit 时可加大。 */
+  /** 正文最大行数。默认 8。详情展示时可加大。 */
   maxLines?: number
   /**
    * 正文最大**显示**行数（wrap 之后）。给定时取代 `maxLines`。
@@ -35,7 +35,7 @@ export interface FormatThinkingInput {
   maxRows?: number
   /** 终端列数，`maxRows` 生效时用于度量 wrap。 */
   columns?: number
-  /** 推理已完成（提交到 scrollback）。头部用过去式「✶ 已推理」而非进行时「◐ 凝思中…」。默认 false。 */
+  /** 推理已完成（如详情视图）。头部用过去式「✶ 已推理」而非进行时「◐ 凝思中…」。默认 false。 */
   done?: boolean
   /** done 头部附带回看提示（如 `· ctrl+t 回看`）——仅在调用方确实留存了正文时传。 */
   reviewHint?: string

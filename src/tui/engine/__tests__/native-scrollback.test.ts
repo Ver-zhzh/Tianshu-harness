@@ -13,7 +13,7 @@ let originalTerm: string | undefined
 beforeEach(() => { originalTerm = process.env.TERM; process.env.TERM = 'xterm-256color' })
 afterEach(() => { if (originalTerm === undefined) delete process.env.TERM; else process.env.TERM = originalTerm })
 
-test('自动模式保留原生主屏，完成正文只提交一次并保留预览，第二条消息正常发送', async () => {
+test('自动模式保留原生主屏，完成正文只显示一次，第二条消息正常发送', async () => {
   const saved = process.env.TERM_PROGRAM
   process.env.TERM_PROGRAM = 'Apple_Terminal'
   const { app, out, stdin } = makeApp({ renderer: 'auto' })
@@ -37,7 +37,7 @@ test('自动模式保留原生主屏，完成正文只提交一次并保留预�
     assert.deepEqual(sent, ['第一条', '第二条 j/k 路径 /src'])
     const output = out.chunks.join('')
     assert.doesNotMatch(output, /\x1b\[2J|\x1b\[\?(?:1049|1002|1006)h/)
-    assert.match(stripAnsi(output), /NativeReplyOnce/, 'the completed answer remains visible in the read-only viewport')
+    assert.doesNotMatch(stripAnsi(output), /NativeReplyOnce/, 'new input must not replay a committed answer')
     assert.ok(app.getScrollbackContent().startsWith(committedAfterFirst), 'redrawing must preserve the committed history prefix')
     assert.equal(stripAnsi(app.getScrollbackContent()).split('NativeReplyOnce').length - 1, 1, 'previewing must not commit the answer again')
     assert.equal(frontendOf(app).isFullscreen, false)
@@ -51,6 +51,7 @@ test('自动模式保留原生主屏，完成正文只提交一次并保留预�
 
 test('原生模式历史面板可折叠、鼠标选择，返回后关闭鼠标捕获且预览不重复提交正文', async () => {
   const { app, out, stdin } = makeApp({ renderer: 'classic' })
+  app.setFrontendPreferences({ ...app.getFrontendPreferences(), copyOnSelect: false })
   const frontend = frontendOf(app)
   try {
     await tick()
@@ -94,7 +95,7 @@ test('原生模式历史面板可折叠、鼠标选择，返回后关闭鼠标�
     assert.match(output, /\x1b\[\?1006l/)
     assert.equal(output.split('\x1b[?1049l').length - 1, 1)
     assert.doesNotMatch(output, /\x1b\[\?(?:1049|1002|1006)h/)
-    assert.match(stripAnsi(output), /CopyableReply/, 'leaving history restores the committed answer preview')
+    assert.doesNotMatch(stripAnsi(output), /CopyableReply/, 'leaving history must not replay the committed answer')
     assert.equal(app.getScrollbackContent(), committedBeforeHistory, 'opening, copying and closing history must not append formal output')
     assert.equal(stripAnsi(app.getScrollbackContent()).split('CopyableReply').length - 1, 1)
   } finally { app.dispose() }

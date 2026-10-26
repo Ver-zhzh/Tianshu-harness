@@ -1,4 +1,5 @@
-import { describe, it } from 'node:test'
+import { ExternalHookHost } from '../../hooks/external-hook-host.js'
+import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -6,6 +7,14 @@ import { join } from 'node:path'
 import { RuntimeHookPipeline, createRuntimeHookContext } from '../runtime-hooks.js'
 import { createUserHooksBridge, runOnErrorHooks, type UserHooksBridgeDeps } from '../hooks/user-hooks-bridge.js'
 import type { HookResult } from '../../hooks/user-hooks-runner.js'
+
+const hosts: ExternalHookHost[] = []
+afterEach(async () => { await Promise.all(hosts.splice(0).map(host => host.shutdown())) })
+function attachHost(deps: UserHooksBridgeDeps): void {
+  const host = new ExternalHookHost(); hosts.push(host)
+  deps.runtime = host.createRuntime({ cwd: deps.cwd, sessionId: deps.sessionId, emitResult: deps.emitHookResult, getPluginHooks: deps.getPluginHooks })
+  deps.runtime.beginRun('test'); deps.getRunId = () => 'test'
+}
 
 function makeCtx(turn = 1) {
   return createRuntimeHookContext({
@@ -47,6 +56,7 @@ describe('createUserHooksBridge', () => {
         emitHookResult: (results, meta) => emissions.push({ results, meta: { ...meta } }),
       }
 
+      attachHost(deps)
       const pipeline = new RuntimeHookPipeline(createUserHooksBridge(deps))
       // 500b5136 起 hook 调用推迟到微任务——必须与生产调用点一样 await。
       await pipeline.runPostTool(makeCtx(2), { name: 'write_file', success: true })
@@ -84,6 +94,7 @@ describe('createUserHooksBridge', () => {
         emitHookResult: (_results, meta) => events.push(meta.event),
       }
 
+      attachHost(deps)
       const pipeline = new RuntimeHookPipeline(createUserHooksBridge(deps))
       const ctx = makeCtx(1)
       await pipeline.runPreTurn(ctx)
@@ -96,7 +107,7 @@ describe('createUserHooksBridge', () => {
     }
   })
 
-  it('runOnErrorHooks runs onError hooks and emits results', () => {
+  it('runOnErrorHooks runs onError hooks and emits results', async () => {
     const cwd = mkdtempSync(join(tmpdir(), 'rivet-hooks-bridge-'))
     try {
       mkdirSync(join(cwd, '.rivet'))
@@ -113,7 +124,8 @@ describe('createUserHooksBridge', () => {
         emitHookResult: (results, meta) => emissions.push({ results, meta: { ...meta } }),
       }
 
-      runOnErrorHooks(deps, 'something broke')
+      attachHost(deps)
+      await runOnErrorHooks(deps, 'something broke')
 
       assert.equal(emissions.length, 1)
       assert.equal(emissions[0]!.meta.event, 'onError')

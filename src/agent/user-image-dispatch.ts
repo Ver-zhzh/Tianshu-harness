@@ -17,8 +17,10 @@
 import type { StreamClient } from '../api/stream-client.js'
 import { describeImages, visionCacheKey } from './vision-service.js'
 import { debugLog } from '../utils/debug.js'
+import { prepareVisionImages } from './vision-image-preparation.js'
 
 export interface UserImageDispatchConfig {
+  artifactStore?: import('../artifact/store.js').ArtifactStore
   /** 主模型是否接受图片输入（见 loop-types.ts 的 supportsVision）。 */
   supportsVision?: boolean
   /** 专用多模态客户端；缺省 = 无识图桥。 */
@@ -59,6 +61,13 @@ export async function dispatchUserImages(
 ): Promise<UserImageDispatchResult> {
   if (!images || images.length === 0) return { userInput, images }
   // ① 多模态主控：原生识图，什么都不做（图片进 oaiMessages；registry 已寄存供 ask_image 复用）。
+  if (config.artifactStore) {
+    const prepared = await prepareVisionImages(config.artifactStore, images, {
+      signal: config.signal, original: !config.supportsVision && !config.visionClient,
+    })
+    userInput += prepared.notice ? `\n${prepared.notice}` : ''
+    images = prepared.images
+  }
   if (config.supportsVision) return { userInput, images }
 
   // ③ 无桥：图片没有任何去处——丢弃并说明。放在桥接之前判，避免「先登记再丢弃」的错觉。

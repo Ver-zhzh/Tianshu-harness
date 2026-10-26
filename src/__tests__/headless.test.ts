@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { parseCliArgs, runHeadless } from '../headless.js'
+import { parseCliArgs, runHeadless, type HeadlessAgent } from '../headless.js'
 import { GoalTracker, buildGoalModePrompt } from '../agent/goal-tracker.js'
 import type { AgentCallbacks } from '../agent/loop-types.js'
 import type { SessionEvent } from '../server/protocol.js'
@@ -43,6 +43,14 @@ describe('headless CLI parsing', () => {
 })
 
 describe('runHeadless', () => {
+  it('prints structured user questions instead of silently ending a zero-text turn', async () => {
+    const agent: HeadlessAgent = { run: async (_prompt: string, callbacks: AgentCallbacks) => {
+      agent.onAskUserQuestionRequested?.({ requestId: 'question', questions: [{ id: 'choice', prompt: '选择哪个目录？', options: ['目录 A','目录 B'], allowMultiple: false }] })
+      callbacks.onTurnComplete({}, 1)
+    } }
+    const result = await runHeadless({ prompt: 'needs a user decision', json: true, streamJson: false, createAgent: () => agent })
+    assert.match(result.json!.text, /选择哪个目录/); assert.match(result.json!.text, /目录 A/)
+  })
   it('returns stdout-friendly text output', async () => {
     const result = await runHeadless({
       prompt: 'hello',

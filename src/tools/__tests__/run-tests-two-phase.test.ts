@@ -77,7 +77,7 @@ describe('run_tests VSW two-phase', () => {
     // with child startup or competing sessions. Phase B must not spawn at all.
     Date.now = () => clock() + elapsed
     try {
-      const result = await runTool(params(dir, { input: { filter: 'src/__tests__/sample.test.js', timeout: 5000 }, verificationSnapshot: { path: dir, snapshotRef: 'total-budget' }, onOutput: text => { if (/(?:ℹ|#) pass/.test(text)) elapsed = 5001 } }))
+      const result = await runTool(params(dir, { input: { filter: 'src/__tests__/sample.test.js', timeout: 5000, environment: 'compare' }, verificationSnapshot: { path: dir, snapshotRef: 'total-budget' }, onOutput: text => { if (/(?:ℹ|#) pass/.test(text)) elapsed = 5001 } }))
       assert.equal(elapsed, 5001, 'real output must advance the budget clock')
       assert.equal(result.verification?.status, 'passed', result.content)
       assert.equal(result.extraVerifications?.[0]?.failureKind, 'timeout', result.content)
@@ -110,20 +110,20 @@ describe('run_tests VSW two-phase', () => {
     assert.equal(retries, 0)
   })
 
-  it('snapshot preparation consumes the C3 budget and an unstarted retry is not called FAILED', async () => {
-    const dir = makeProject(FAILING), snapshot = makeProject(PASSING)
-    const clock = Date.now
-    let elapsed = 0, retries = 0
-    Date.now = () => clock() + elapsed
-    try {
-      const result = await runTool(params(dir, { input: { filter: 'src/__tests__/sample.test.js', timeout: 5000 }, prepareRetrySnapshot: async () => { retries++; elapsed = 5001; return { path: snapshot, snapshotRef: 'budget-retry' } } }))
-      assert.equal(retries, 1)
-      assert.equal(result.isError, true)
-      assert.equal(result.extraVerifications?.[0]?.status, 'blocked')
-      assert.equal(result.extraVerifications?.[0]?.failureKind, 'timeout')
-      assert.match(result.content, /C3 归因重试.*未完成.*总预算已耗尽/s)
-      assert.doesNotMatch(result.content, /隔离快照中也 FAILED/)
-    } finally { Date.now = clock }
+  it('ordinary failure never invokes legacy snapshot retries', async () => {
+    const dir = makeProject(FAILING)
+    let retries = 0
+    const result = await runTool(params(dir, { prepareRetrySnapshot: async () => { retries++; throw new Error('unexpected retry') } }))
+    assert.equal(result.isError, true)
+    assert.equal(retries, 0)
+    assert.equal(result.extraVerifications, undefined)
+  })
+
+  it('an explicit snapshot runs once by default even when it passes', async () => {
+    const dir = makeProject(PASSING)
+    const result = await runTool(params(dir, { verificationSnapshot: { path: dir, snapshotRef: 'single' } }))
+    assert.equal(result.verification?.status, 'passed')
+    assert.equal(result.extraVerifications, undefined)
   })
 
   it('mid-flight cancellation produces blocked evidence and skips integration', async () => {
@@ -139,6 +139,7 @@ describe('run_tests VSW two-phase', () => {
   it('tags Phase A isolated + Phase B integration with the snapshotRef when both pass', async () => {
     const dir = makeProject(PASSING)
     const result = await runTool(params(dir, {
+      input: { filter: 'src/__tests__/sample.test.js', environment: 'compare' },
       verificationSnapshot: { path: dir, snapshotRef: 'head+diff123' },
     }))
 

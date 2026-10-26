@@ -1,3 +1,9 @@
+import { activateRequiredTools } from '../workflows/required-tools.js'
+import { buildToolSurfaceRoutes } from './tool-surface-routes.js'
+import { buildHandoffRoutes } from './handoff-routes.js'
+import { mkdir as mkdirAsync } from 'node:fs/promises'
+import { validHookTimeout } from '../hooks/hooks-config.js'
+import { writeFileAtomicDurableAsync } from '../fs-atomic.js'
 import { buildContinuityRecoveryRoutes } from './continuity-recovery-routes.js'
 import { withWorkspaceRoots } from '../tools/workspace-context.js'
 import { NonRepositoryError } from '../agent/repository-capability.js'
@@ -214,6 +220,7 @@ function decodeSlug(raw: string): string {
 function planSummary(p: PlanDocument) {
   return {
     slug: p.slug,
+    completion: p.completion,
     title: p.title,
     status: p.status,
     path: p.path,
@@ -306,15 +313,13 @@ export function buildSessionRoutes(
     ...buildSkillCreationRoutes(manager, apiToken),
     ...buildApprovalRoutes(manager, apiToken),
     ...buildContinuityRecoveryRoutes(manager, apiToken),
+    ...buildToolSurfaceRoutes(manager, apiToken),
     ...buildGitWorkbenchRoutes(manager, apiToken),
     ...buildGitPrRoutes(manager, apiToken),
     ...buildGitReviewRoutes(manager, apiToken),
     // 技能 Python 运行时（issue #523）：preview→confirm 两段式 + operationId 落盘。
     ...buildSkillRuntimeRoutes(manager, apiToken),
     'POST /sessions': withAuth(async (body) => {
-      // DEBUG instrumentation (RIVET_DEBUG_RENDER=1): logs createSession latency
-      // so we can tell session-creation bottlenecks (loadConfig, worktree setup)
-      // from SSE/stream issues. See docs/dev/render-debug-playbook.md.
       const __dbg = process.env.RIVET_DEBUG_RENDER === '1'
       const __t0 = __dbg ? Date.now() : 0
       const data = (body ?? {}) as { cwd?: string; workspaceRoots?: unknown; workspaceMode?: unknown; title?: string; prompt?: string; missionId?: string; approvalMode?: unknown; isolatedWorktree?: unknown; model?: string; domain?: string; reasoningEffort?: unknown; planMode?: unknown; askMode?: unknown; planAutoApproveUi?: unknown; images?: unknown; documents?: unknown; archives?: unknown }
@@ -392,7 +397,8 @@ export function buildSessionRoutes(
         if (error instanceof SlashPromptError) return { status: 400, body: { error: error.message } }
         throw error
       }
-      for (const toolName of requiredTools) await manager.enableTool(rec.id, toolName)
+      const activation = await activateRequiredTools(requiredTools, name => manager.enableTool(rec.id, name))
+      if (!activation.ok) return { status: 409, body: { error: activation.error, id: rec.id } }
       if (prompt && /@computer\b/i.test(prompt)) await manager.enableTool(rec.id, 'computer_use')
       // 压缩包在 createSession 后才有 sessionId 可落盘——持久化失败即 400
       // （会话已建但未启动任何 run，与抽取失败降级语义不同：没有句柄就没有注入形态）。
@@ -766,6 +772,8 @@ export function buildSessionRoutes(
 
     // Write — auto=恢复系统自动审查；off=抑制自动审查省 token（手动 /review 不受影响，
     // 交付门的测试/验证/提交环节不受影响）。
+    // 契约分离（2026-10-25）：提交路径不再触发任何自动审查——auto 与 off 均为
+    // 兼容性 no-op（保留读写以兼容旧客户端；语义收敛为「审查由用户独立发起」）。
     'POST /sessions/:id/review-gate': withAuth((body, params) => {
       const data = (body ?? {}) as { mode?: unknown }
       if (data.mode !== 'auto' && data.mode !== 'off') {
@@ -774,7 +782,7 @@ export function buildSessionRoutes(
       if (!manager.setReviewGate(params!.id!, data.mode)) {
         return { status: 404, body: { error: 'Session not found' } }
       }
-      return { status: 200, body: { id: params!.id!, mode: data.mode } }
+      return { status: 200, body: { id: params!.id!, mode: data.mode, note: 'contract separation: commits no longer trigger automatic review; this toggle is a compatibility no-op. Use /review or review_changes for independent review.' } }
     }, apiToken),
 
     // ── Skills install (from .claude/skills) ──
@@ -932,26 +940,13 @@ export function buildSessionRoutes(
     // 临时会话目录此前只增不减、没有应用内清理路径。占用判定要读存活会话，
     // 故与 /storage 同族挂在这里（体量在 scratch-cleanup.ts）。
     ...buildScratchRoutes(manager, apiToken),
+    ...buildHandoffRoutes(manager, apiToken),
     ...buildDocumentRoutes(manager, apiToken),
 
     'GET /sessions/:id': withAuth((_body, params) => {
       const rec = manager.getSession(params!.id!)
       if (!rec) return { status: 404, body: { error: 'Session not found' } }
       return { status: 200, body: rec }
-    }, apiToken),
-
-    // /handoff（桌面 plus 面板入口）——登记归档任务后发起交接 run：
-    // agent 写项目内 .rivet/HANDOFF.md，run 收尾自动归档 <id>.handoff.md
-    // （loadPrevHandoff 注入管线认的位置，与 TUI /handoff 同语义）。
-    'POST /sessions/:id/handoff': withAuth((body, params) => {
-      const data = (body ?? {}) as { note?: unknown }
-      const note = typeof data.note === 'string' && data.note.trim() ? data.note.trim() : undefined
-      const res = manager.requestHandoff(params!.id!, note)
-      if (!res.ok) {
-        const status = res.error === 'Session not found' ? 404 : 409
-        return { status, body: { error: res.error } }
-      }
-      return { status: 200, body: manager.getSession(params!.id!) }
     }, apiToken),
 
     'GET /sessions/:id/requests/:requestId': withAuth(async (_body, params) => {
@@ -965,6 +960,10 @@ export function buildSessionRoutes(
       if (!data.prompt || typeof data.prompt !== 'string' || !data.prompt.trim()) {
         return { status: 400, body: { error: 'Missing or empty "prompt" field' } }
       }
+      const handoff = /^\/handoff(?:\s|$)/.test(data.prompt.trim()) ? manager.prepareHandoffInput(params!.id!, data.prompt) : undefined
+      if (handoff?.error) return { status: 400, body: { error: handoff.error } }
+      if (handoff && !handoff.prompt) return { status: 200, body: { ...manager.getSession(params!.id!), ...(handoff.handoff ? { handoff: handoff.handoff } : {}) } }
+      if (handoff?.prompt) data.prompt = handoff.prompt
       // Validate images: array of provider-safe base64 data URLs (shared helper,
       // same rules as POST /sessions create-with-images).
       const imagesCheck = validateImagesPayload(data.images)
@@ -1007,10 +1006,8 @@ export function buildSessionRoutes(
             throw error
           }
           prompt = resolved.prompt; skillInvoked = resolved.skillInvoked
-          // 桌面端也需挂载 workflow 声明的 EXTENDED 工具（与 TUI main.ts 对齐）。
-          for (const toolName of resolved.requiredTools ?? []) {
-            await manager.enableTool(params!.id!, toolName)
-          }
+          const activation = await activateRequiredTools(resolved.requiredTools, name => manager.enableTool(params!.id!, name))
+          if (!activation.ok) return { status: 409, body: { error: activation.error } }
         }
       }
 
@@ -2039,21 +2036,22 @@ export function buildSessionRoutes(
     }, apiToken),
 
     // I4 — read user-defined .rivet/hooks.json for this session.
-    'GET /sessions/:id/hooks': withAuth((_body, params) => {
+    'GET /sessions/:id/hooks': withAuth(async (_body, params) => {
       const rec = manager.getSession(params!.id!)
       if (!rec) return { status: 404, body: { error: 'Session not found' } }
-      const config = loadHooksConfig(rec.cwd)
+      const config = await loadHooksConfig(rec.cwd)
       return { status: 200, body: config }
     }, apiToken),
 
     // I4 — write user-defined .rivet/hooks.json for this session.
-    'PUT /sessions/:id/hooks': withAuth((body, params) => {
+    'PUT /sessions/:id/hooks': withAuth(async (body, params) => {
       const rec = manager.getSession(params!.id!)
       if (!rec) return { status: 404, body: { error: 'Session not found' } }
       const data = (body ?? {}) as { hooks?: unknown }
       if (!Array.isArray(data.hooks)) {
         return { status: 400, body: { error: 'Missing or invalid "hooks" array' } }
       }
+      if (data.hooks.length > 128 || Buffer.byteLength(JSON.stringify(data)) > 262_144) return { status: 400, body: { error: 'Hook configuration exceeds its size limit' } }
       const hooks: HookEntry[] = []
       for (const entry of data.hooks) {
         if (!entry || typeof entry !== 'object') {
@@ -2066,7 +2064,8 @@ export function buildSessionRoutes(
         if (typeof e.script !== 'string' || !e.script.trim()) {
           return { status: 400, body: { error: 'Each hook must have a non-empty "script"' } }
         }
-        const timeoutMs = typeof e.timeoutMs === 'number' ? e.timeoutMs : undefined
+        if (!validHookTimeout(e.timeoutMs)) return { status: 400, body: { error: 'timeoutMs must be a positive integer' } }
+        const timeoutMs = e.timeoutMs
         hooks.push({ event: e.event as HookEvent, script: e.script.trim(), ...(timeoutMs !== undefined ? { timeoutMs } : {}) })
       }
       const dir = join(rec.cwd, '.rivet')
@@ -2076,8 +2075,8 @@ export function buildSessionRoutes(
       } catch {
         return { status: 400, body: { error: 'Invalid hooks path' } }
       }
-      mkdirSync(dir, { recursive: true })
-      writeFileSync(path, JSON.stringify({ hooks }, null, 2), 'utf-8')
+      await mkdirAsync(dir, { recursive: true })
+      await writeFileAtomicDurableAsync(path, JSON.stringify({ hooks }, null, 2))
       return { status: 200, body: { hooks } }
     }, apiToken),
 

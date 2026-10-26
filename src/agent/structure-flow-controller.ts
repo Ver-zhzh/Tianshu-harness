@@ -33,6 +33,7 @@ export type StructureFlowReason =
   | 'user-intervened'
 
 export interface StructureFlowInputs {
+  repairActive?: boolean
   efe: EFEComponents
   /** P1 computeFlowBeacon 的 score；无数据时 null。 */
   flowScore: number | null
@@ -132,7 +133,7 @@ export function computeStructureFlowControl(input: StructureFlowInputs): Structu
   // hardTighten：一切放松归零。consecutiveFailures 阈值为 ≥2——单次偶发失败
   // 只通过 structurePressure 的 0.15 权重项软性加压，不硬收紧。
   const palUncertain = input.palNeedsUser || input.palStalled
-  const hardTighten = input.userIntervened
+  const hardTighten = input.repairActive === true || input.userIntervened
     || input.hasVerificationDebt
     || input.consecutiveFailures >= 2
     || palUncertain

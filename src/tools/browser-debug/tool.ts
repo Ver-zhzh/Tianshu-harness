@@ -1,4 +1,5 @@
 import { browserOperation } from './control.js'
+import { diagnosticQuery, diagnosticSummary } from './diagnostic-query.js'
 /**
  * browser_debug — persistent browser for local frontend/backend联调 (CDP route).
  */
@@ -297,8 +298,8 @@ API 联调技巧：
 
 操作：
 - open / navigate {url}
-- console {level?}
-- network {failed_only?, url_filter?, api_only?, include_body?}
+- console {level?, scope?:current|session, navigation_id?} — 默认当前导航；scope=session 查看含归属未知的历史。
+- network {failed_only?, url_filter?, api_only?, include_body?, scope?, navigation_id?} — 旧错误按导航保留，修复后无需清日志。
 - network_detail {request_id} — 状态、耗时、请求头+载荷、响应头+响应体（Authorization/Cookie 等密钥已遮蔽）。
 - snapshot / eval / screenshot / click
 - screenshot — 视觉模型（或已配置的 vision 桥）会直接看到截图；改完 UI 用它自查，别只看 DOM。
@@ -327,6 +328,8 @@ API 联调技巧：
       input_schema: {
         type: 'object',
         properties: {
+          scope: { type: 'string', enum: ['current', 'session'], description: 'console/network 默认 current；session 保留并查询历史及归属未知记录。' },
+          navigation_id: { type: 'string', description: 'console/network：显式读取本浏览器会话内某次导航，使用导航回执中的 ID。' },
           action: {
             type: 'string',
             enum: [
@@ -469,13 +472,14 @@ API 联调技巧：
               s.driver.goto(rawUrl, signal),
             )
             const finalUrl = s.driver.currentUrl()
-            const netCount = s.log.getNetwork().length
-            const errCount = s.log.getConsole('error').length
+            const query = diagnosticQuery(s, {})
+            const netCount = s.log.getNetwork(query).length
+            const errCount = s.log.getConsole('error', query).length
             const modeHint = s.mode === 'connect' ? '（已通过 CDP 连接）' : ''
             return {
               content:
                 // URL 后用 ASCII `. ` 分隔——browser-mirror / walkthrough 的 \S+ 提取依赖此边界。
-                `${BROWSER_NAVIGATED_PREFIX} ${finalUrl}${modeHint}. 已捕获 ${netCount} 条网络请求、${errCount} 条控制台错误。` +
+                `${BROWSER_NAVIGATED_PREFIX} ${finalUrl}${modeHint}. ${query.navigationId ? `当前导航已捕获 ${netCount} 条网络请求、${errCount} 条控制台错误。` : '当前导航诊断未知。'}${diagnosticSummary(s, query)}\n` +
                 `使用 network 并设 url_filter="/api/" failed_only=true include_body=true 可查看 API 错误。`,
             }
           })
@@ -519,32 +523,35 @@ API 联调技巧：
       const runAction = async (session: BrowserDebugSession): Promise<ToolResult> => {
         switch (action) {
           case 'console': {
+            await session.driver.flushDiagnostics?.()
             const level = params.input.level as ConsoleLevel | undefined
-            const raw = session.log.getConsole(level)
-            if (raw.length === 0) return { content: '（无控制台输出）' }
+            const query = diagnosticQuery(session, params.input), summary = diagnosticSummary(session, query)
+            const raw = session.log.getConsole(level, query)
+            if (raw.length === 0) return { content: `${query.scope === 'current' && !query.navigationId ? '（当前导航未知，未判断控制台结果）' : '（无控制台输出）'}\n${summary}` }
             // Over ~20 lines the model loses the signal in the noise — cluster
             // by error signature so "15× same TypeError" is one actionable line.
             const useClusters = raw.length > 20
             if (useClusters) {
-              const clusters = session.log.getConsoleClusters(level)
+              const clusters = session.log.getConsoleClusters(level, query)
               const lines = clusters.map((c) => {
                 const prefix = c.count > 1 ? `${c.count}× ` : ''
                 const sample = c.sample.replace(/\s+$/, '')
                 return `[${c.level}] ${prefix}${sample}`
               })
-              return { content: lines.join('\n') + `\n（共 ${raw.length} 条，按签名聚类为 ${clusters.length} 组）` }
+              return { content: lines.join('\n') + `\n（共 ${raw.length} 条，按签名聚类为 ${clusters.length} 组）\n${summary}` }
             }
             const entries = raw.slice(-CONSOLE_TAIL)
-            return { content: entries.map(formatConsoleLine).join('\n') }
+            return { content: entries.map(formatConsoleLine).join('\n') + `\n${summary}` }
           }
           case 'network': {
-            const query = buildNetworkQuery(params.input)
+            await session.driver.flushDiagnostics?.()
+            const query = { ...buildNetworkQuery(params.input), ...diagnosticQuery(session, params.input) }
             const includeBody = params.input.include_body === true
             const entries = session.log.getNetwork(query).slice(-NETWORK_TAIL)
             if (entries.length === 0) {
-              return { content: query.failedOnly ? '（无匹配的失败请求）' : '（无匹配的网络活动）' }
+              return { content: (query.failedOnly ? '（无匹配的失败请求）' : '（无匹配的网络活动）') + `\n${diagnosticSummary(session, query)}` }
             }
-            return { content: formatNetworkResults(entries, includeBody) }
+            return { content: formatNetworkResults(entries, includeBody) + `\n${diagnosticSummary(session, query)}` }
           }
           case 'network_detail': {
             const requestId = params.input.request_id as string | undefined
@@ -687,7 +694,7 @@ API 联调技巧：
             }
             if (go === 'reload') {
               await withLiveLogs(session, params.onOutput, () => session.driver.reload(signal))
-              return { content: `已重新加载 ${session.driver.currentUrl()}。` }
+              return { content: `已重新加载 ${session.driver.currentUrl()}。\n${diagnosticSummary(session, diagnosticQuery(session, {}))}` }
             }
             const moved = await withLiveLogs(session, params.onOutput, () =>
               go === 'back' ? session.driver.goBack(signal) : session.driver.goForward(signal),

@@ -26,6 +26,7 @@ import type { AdvisoryLedgerDelta, DeliveredAdvisory } from './advisory-bus.js'
 import type { WorkerEpisode } from './worker-episode.js'
 import type { WorkerResult } from './work-order.js'
 import type { EvidenceObligation, ObligationStore } from './evidence-obligation.js'
+import { isIndependentVerification } from './evidence-obligation.js'
 
 export type ControlPlaneMode = 'off' | 'shadow' | 'active'
 
@@ -275,7 +276,7 @@ export function signalsFromObligations(store: ObligationStore): ControlSignal[] 
     if (ob.state === 'satisfied' || ob.state === 'superseded') continue
     if (ob.risk === 'low') continue
     const focusVerb = VERIFY_FAMILIES.has(ob.family) ? 'verify' : 'inspect'
-    if (ob.risk === 'high' && (ob.state === 'open' || ob.state === 'attempted')) {
+    if (ob.risk === 'high' && !isIndependentVerification(ob.family) && (ob.state === 'open' || ob.state === 'attempted')) {
       signals.push({
         key: `obligation:${focusVerb}:${ob.id}`,
         kind: 'obligation',
@@ -303,7 +304,7 @@ export function signalsFromObligations(store: ObligationStore): ControlSignal[] 
         key: `obligation:${focusVerb}:${ob.id}`,
         kind: 'obligation',
         severity: 'attention',
-        summary: `未证断言 [${ob.family}] ${ob.claim} → 下一步 ${ob.requiredAction}`,
+        summary: isIndependentVerification(ob.family) ? `验证记录尚未核销 [${ob.family}] ${ob.claim}；仅披露，时机由用户决定` : `未证断言 [${ob.family}] ${ob.claim} → 下一步 ${ob.requiredAction}`,
         routeHint: 'status',
         requiresDecision: false,
         ttlTurns: 2,

@@ -5,6 +5,7 @@
  * sidecar 内核；本文件只做 sidecar 生命周期 + 座舱视图装配。
  */
 import * as vscode from 'vscode'
+import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { launchSidecar, SidecarLaunchError, type DisposeSidecarOptions, type SidecarHandle } from './sidecar/launcher.js'
 import { SidecarClient } from './sidecar/client.js'
@@ -43,6 +44,8 @@ let globalStorageDir = ''
  */
 let sidecarDataDir = ''
 let hasWorkspaceStorage = false
+let pendingLaunchDisposeForceKill = true
+let pendingLaunchReattach = false
 /** 崩溃自动重拉：连续尝试计数（进程稳定运行超过窗口即清零）。 */
 let restartAttempts = 0
 let restartTimer: ReturnType<typeof setTimeout> | undefined
@@ -148,6 +151,9 @@ export function activate(context: vscode.ExtensionContext): void {
 
   provider.onSessionActivity = (kind, sessionId) => {
     if (kind === 'attach') {
+      runSummary = createInitialSessionRunSummary()
+      statusBar?.setSessionStatus(runSummary.status)
+      statusBar?.setPendingApprovals(0)
       changesTree.setSession(sessionId)
       scmChanges.setSession(sessionId)
       void delegation?.attachSession(sessionId)
@@ -262,17 +268,17 @@ async function ensureClient(provider: CockpitProvider, cwd: string | undefined):
         if (generation !== sidecarGeneration) throw new Error('sidecar 启动已取消')
         const controller = new AbortController()
         launchController = controller
+        pendingLaunchDisposeForceKill = true
         const keepAliveOnReload = Boolean(cfg.get<boolean>('sidecar.keepAliveOnReload'))
-        const leaseFile = hasWorkspaceStorage && keepAliveOnReload
-          ? join(sidecarDataDir, 'ide-daemon-lease.json')
-          : undefined
+        const leaseFile = hasWorkspaceStorage ? join(sidecarDataDir, 'ide-daemon-lease.json') : undefined
+        pendingLaunchReattach = Boolean(leaseFile && existsSync(leaseFile))
         const launching = launchSidecar({
           cwd,
           cliPath,
           port: cfg.get<number>('serverPort') || 0,
           desktopDir: sidecarDataDir,
           leaseFile,
-          keepAliveOnDispose: Boolean(leaseFile),
+          keepAliveOnDispose: keepAliveOnReload,
           onLog: (line) => output?.appendLine(line),
           signal: controller.signal,
         })
@@ -283,7 +289,7 @@ async function ensureClient(provider: CockpitProvider, cwd: string | undefined):
           launchController = undefined
         }
         if (generation !== sidecarGeneration) {
-          await launched.dispose({ forceKill: true })
+          await launched.dispose({ forceKill: pendingLaunchDisposeForceKill })
           throw new Error('sidecar 启动已取消')
         }
         sidecar = launched
@@ -349,10 +355,13 @@ function disposeSidecar(opts?: DisposeSidecarOptions): Promise<void> {
     restartTimer = undefined
   }
   restartAttempts = 0
-  launchController?.abort()
+  const forceKill = opts?.forceKill ?? true
+  pendingLaunchDisposeForceKill = pendingLaunchDisposeForceKill && forceKill
+  if (forceKill && !pendingLaunchReattach) launchController?.abort()
   const launching = pendingLaunch
   launchController = undefined
   pendingLaunch = undefined
+  pendingLaunchReattach = false
   delegation?.detach()
   const stopping = sidecar?.dispose(opts)
   sidecar = undefined
@@ -360,9 +369,9 @@ function disposeSidecar(opts?: DisposeSidecarOptions): Promise<void> {
   liveClient = undefined
   cliPathPromise = undefined
   cleanupPromise = Promise.all([
-    cleanupPromise,
+    cleanupPromise.catch(() => {}),
     stopping,
-    launching?.then((handle) => handle.dispose({ forceKill: true }), (err) => {
+    launching?.then((handle) => handle.dispose({ forceKill }), (err) => {
       if (err instanceof SidecarLaunchError && err.reason === 'cleanup-failed') throw err
     }),
   ]).then(() => {})

@@ -111,7 +111,14 @@ import type { ToolDefinition } from '../../api/types.js'
 // buildSystemPrompt({tools: []}) 的输出但漏更新本守卫（HEAD 上即红，worktree 基线
 // 实测 HEAD sha 已是 bd1b80…）；本次按守卫设计显式确认新基线——代价同前几笔：
 // 所有会话前缀缓存冷启动一次。
-const MAIN_PROMPT_SHA256 = 'bd1b80499336f9c807d5d527e3d06d2bb13da9949a2d841632baef0396a9ad93'
+// 2026-10-25: default advisory scoped commits, opt-in strict proof, independent post-delivery review.
+// Static prefix intentionally changes; resumed frozen snapshots keep their existing boundary semantics.
+// Contract separation intentionally removes implicit typecheck/review gates.
+// 2026-10-26（3.37 发版）：常量又落后于实际输出——10-22 注释声称对齐 bd1b80…，
+// 但常量写的是 6d8238e9…（3.36.1 worktree 实测输出即 bd1b80…，发版时已红）。
+// 本周期静态前缀另有 332ed9a8c 并行纪律措辞等有意识演进；按守卫设计显式再基线
+// 到 c2a8f034…（3.37 实测输出）。前缀缓存冷启动一次，同前。
+const MAIN_PROMPT_SHA256 = 'c2a8f034ab3de285c6e7399f6c96c69ca705407ef3e16277d5c5b7e06864d8ea'
 
 function tool(name: string): ToolDefinition {
   return { name, description: '', input_schema: { type: 'object', properties: {} } } as ToolDefinition

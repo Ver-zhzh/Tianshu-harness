@@ -185,7 +185,8 @@ test('serve.ts：listen 后不再裸 `void loadServeAgent()`，预热走 schedul
   assert.match(warmBlock, /warmPluginToolsCache\(ctx\.config\.plugins, process\.cwd\(\)\)/)
   assert.match(warmBlock, /void loadServeAgent\(\)/)
   assert.match(warmBlock, /timing\.mark\('serve-agent-loaded'\)/)
-  assert.match(serveSrc, /close: \(cb\) => \{\s*warmup\?\.cancel\(\)/)
+  // close 里必须取消预热（允许先做外部 hooks 关停等其他排空动作，不强钉首行）。
+  assert.match(serveSrc, /close: \(cb\) => \{[\s\S]{0,300}?warmup\?\.cancel\(\)/)
   // runServe 入口不再点火暖场
   const runServeAt = serveSrc.indexOf('export async function runServe(')
   assert.doesNotMatch(serveSrc.slice(runServeAt, listenAt), /^\s*warmPluginToolsCache\(/m)

@@ -12,6 +12,8 @@ import type { AuthProvider } from '../auth/types.js'
 import { profileRegistry } from './profile-registry.js'
 
 export interface HeadlessCoordinatorInput {
+  getExternalHookParent?: () => { runtimeId: string; runId: string } | undefined
+  externalHookHost?: import('../hooks/external-hook-types.js').ExternalHookHostPort
   getUserInstructions: () => import('../prompt/user-instructions.js').UserInstructionsSnapshot
   toolRegistry: ToolRegistry
   provider: ProviderConfig
@@ -37,6 +39,8 @@ export function createHeadlessCoordinator(input: HeadlessCoordinatorInput): Dele
     ? { provider: input.providerName, model: input.currentModelId, keyId: input.keyId, baseUrl: input.provider.baseUrl }
     : snapshotSessionBinding(input.provider, input.currentModelId, input.apiKey, input.providerName)
   const runtime = createWorkerRuntimeFactory(() => ({
+    externalHookHost: input.externalHookHost,
+    externalHookParent: input.getExternalHookParent?.(),
     getUserInstructions: input.getUserInstructions,
     config: input.config ?? loadConfig({ cwd: input.cwd }), cwd: input.cwd,
     provider: input.provider, apiKey: input.apiKey, auth: input.auth,

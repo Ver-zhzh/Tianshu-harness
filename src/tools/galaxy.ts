@@ -123,8 +123,8 @@ const galaxyInputSchema = z.object({
   dimensions: z.array(dimensionSchema).min(2).max(5).describe(
     '至少 2 个维度，最多 5 个。每个维度由指定星域的分子 Agent 独立执行。',
   ),
-  autoReview: z.boolean().default(true).describe(
-    '执行完成后自动追加审查维度（瑶光审查者）。默认开启。',
+  autoReview: z.boolean().default(false).describe(
+    '执行完成后自动追加审查维度（瑶光审查者）。默认关闭（契约分离：审查独立发起）。',
   ),
   confirm: z.boolean().default(false).describe(
     '用户已确认集群方案。首次调用不带此参数以展示方案并请求确认。',
@@ -585,7 +585,7 @@ export function createGalaxyTool(coordinator: GalaxyCoordinator): Tool {
 ## 硬性约束
 - 可写维度必须拆成文件范围不重叠的单 authority 维度
 - 多 authority 仅用于独立只读视角（不共享实时上下文）；写任务禁止多 authority
-- parallelism=data 只读副本；autoReview 默认追加瑶光审查；policy 默认 all_required`,
+- parallelism=data 只读副本；autoReview 默认关闭（审查独立发起）；policy 默认 all_required`,
       input_schema: {
         type: 'object',
         properties: {
@@ -616,7 +616,7 @@ export function createGalaxyTool(coordinator: GalaxyCoordinator): Tool {
             maxItems: 5,
             description: '至少 2 个维度，最多 5 个。每个维度由指定星域的分子 Agent 独立执行。',
           },
-          autoReview: { type: 'boolean', default: true, description: '执行完成后自动追加审查维度（瑶光）。默认开启。' },
+          autoReview: { type: 'boolean', default: false, description: '执行完成后自动追加审查维度（瑶光）。默认关闭（契约分离：审查独立发起）。' },
           confirm: { type: 'boolean', default: false, description: '用户已确认集群方案。首次调用不带此参数以展示方案并请求确认。' },
           policy: { type: 'string', enum: [...aggregationPolicyKinds], description: '聚合策略。默认：all_required。' },
           planPath: { type: 'string', description: '可选，计划文件路径。维度 worker 会自动继承该计划的反目标与待验证假设。' },
@@ -1172,7 +1172,7 @@ export function createGalaxyTool(coordinator: GalaxyCoordinator): Tool {
       // 加在执行预算之后，而不是混进 profiles 一起算：混入会让 allHands 判定
       // 失效（reviewer 非写工），写工续跑倍率被拉低，总预算反而变小，外层可能
       // 在审查跑到一半时硬杀，丢掉全部 partial 打捞。
-      const autoReview = (params?.input?.autoReview as boolean | undefined) ?? true
+      const autoReview = (params?.input?.autoReview as boolean | undefined) ?? false
       const hasExplicitReview = dims.some(d => d.name !== undefined && isReviewGalaxyDimension(d.name))
       const execMs = delegationToolTimeoutMs(
         params?.sessionTurnCount,

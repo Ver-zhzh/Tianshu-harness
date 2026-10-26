@@ -1,3 +1,4 @@
+import { liveHandoffInput } from '../agent/live-handoff.js'
 import { createSkillDraftWriter, SKILL_CREATION_TOOLS } from '../skills/skill-creation.js'
 import { previewContinuityRecovery, applyContinuityRecovery, withContinuityAvailable } from '../agent/continuity-recovery.js'
 /**
@@ -22,7 +23,7 @@ import { FileHistory } from '../agent/file-history.js'
 import { makeOwnershipGuard } from '../agent/checkpoint.js'
 import { loadProjectRules } from '../context/rules-loader.js'
 import { createDefaultToolRegistry } from '../tools/default-registry.js'
-import { pluginToolsSnapshot, partitionPluginTools } from './plugin-session-cache.js'
+import { pluginHooksSnapshot, pluginToolsSnapshot, partitionPluginTools } from './plugin-session-cache.js'
 import { AgentLoop } from '../agent/loop.js'
 import type { ApprovalMode } from '../agent/loop-types.js'
 import { resolveMaxTurns } from '../agent/turn-budget-policy.js'
@@ -112,6 +113,7 @@ export interface BuiltAgent {
  * 未来候选：bandit gates evaluation 结果缓存（避免 switchModel 重算）。
  */
 export interface SharedRuntime {
+  externalHookHost?: import('../hooks/external-hook-types.js').ExternalHookHostPort
   providerHealth: ProviderHealthTracker
   // per-cwd 资源统一用 Map<string, X> 模式（镜像 domainStores），防模式漂移。
   domainStores: Map<string, DomainKnowledgeStore>
@@ -569,6 +571,9 @@ function assembleAgentLoop(
     sharedProviderHealth: shared?.providerHealth,
     // I4: user hook results → desktop event stream via the session manager.
     inheritFrozenFrom,
+    externalHookHost: shared?.externalHookHost,
+    getPluginHooks: pluginHooksSnapshot,
+    emitHookCleanup: meta => shared?.sessions?.emitHookCleanup(sessionId, meta),
     emitHookResult: (results, meta) => shared?.sessions?.emitHookResult(sessionId, results, meta),
     // #463: 每轮 goal 迭代推进后重发 goal_state SSE——否则桌面端步数计数器
     // 恒停在创建快照（0/100），因为 advanceIteration 后从不重发。
@@ -781,16 +786,19 @@ export function buildManagedAgent(
   let agent = assembleAgentLoop(ctx, cwd, sessionId, stores, spec, approvalMode, registry, shared, allowedTools, reload)
   // Rebuild the loop on a new spec, preserving conversation + stores. Shared
   // by switchModel and the run pre-flight self-heal below.
+  let runtimeNoticeHandler: ((message: string) => void) | undefined
   const rebuildOnSpec = (next: ResolvedModelSpec, explicitModelChange = false) => {
     const oldAgent = agent
     const liveApprovalMode = oldAgent.config.approvalMode
     const candidate = buildReplacementAgent(oldAgent, stores.refs, stores.deepRecallAgentRef, explicitModelChange,
-      inherited => assembleAgentLoop(ctx, cwd, sessionId, stores, next, liveApprovalMode, registry, shared, allowedTools, reload, inherited, oldAgent.config.promptEngine.getUserInstructionsSnapshot()))
+      inherited => assembleAgentLoop(ctx, cwd, sessionId, stores, next, liveApprovalMode, registry, shared, allowedTools, reload, inherited, oldAgent.config.promptEngine.getUserInstructionsSnapshot()),
+      text => { if (runtimeNoticeHandler) runtimeNoticeHandler(text); else process.stderr.write(text + '\n') })
     spec = next
     agent = candidate
     return oldAgent
   }
   return {
+    setRuntimeNoticeHandler: handler => { runtimeNoticeHandler = handler },
     run: (prompt, callbacks, images, options) => {
       // Auth pre-flight: if this session's model has no usable key (e.g. an
       // apiKeyEnv provider after a sidecar restart lost its env), fail with a
@@ -825,6 +833,7 @@ export function buildManagedAgent(
     previewContinuityRecovery: () => previewContinuityRecovery(agent),
     applyContinuityRecovery: recoveryId => applyContinuityRecovery(agent, recoveryId),
     getMessages: () => agent.session.getMessages(),
+    getHandoffInput: () => liveHandoffInput(agent),
     getHistoryRestore: () => stores.historyRestore,
     replaceMessages: (msgs) => { agent.session.replaceMessages(msgs); agent.config.promptEngine.resetAppendixBaseline() },
     rewindToMessages: (msgs) => rewindAgentSession(agent, msgs, () => agent),
@@ -904,6 +913,7 @@ export function buildManagedAgent(
     // goalHandles 兜底，一并转发以免守卫里留豁免名单。
     enterAskMode: () => agent.enterAskMode(),
     enableTool: (name) => agent.enableTool(name),
+    getToolSurface: () => agent.getToolSurface(),
     getActivePlanFilePath: () => agent.getActivePlanFilePath(),
     getGoalTracker: () => agent.getGoalTracker(),
     setGoalTracker: (tracker) => agent.setGoalTracker(tracker),
@@ -945,7 +955,9 @@ export function buildManagedAgent(
     getRecoverySnapshot: () => ({ messages: agent.session.getMessages(),
       frozen: agent.config.promptEngine.exportFrozenSnapshot(), usage: agent.session.getTotalUsage(),
     }),
+    retireExternalHooks: () => agent.config.externalHookRuntime?.close().then(() => true, () => false) ?? Promise.resolve(true),
     shutdown: async () => {
+      const hookDrain = agent.config.externalHookRuntime?.close().then(() => true, () => false) ?? Promise.resolve(true)
       let persistenceError: unknown
       try { await waitForAgentRewind(agent); await agent.drainPersistWrites() } catch (error) { persistenceError = error }
       // config 热载 watcher 是 AgentLoop 级句柄：sidecar 空闲回收/归档 agent 时必须
@@ -954,6 +966,7 @@ export function buildManagedAgent(
       try { agent.stopConfigWatcher() } catch { /* best-effort */ }
       try { void agent.cancelIdleCompaction() } catch { /* best-effort */ }
       // 中止路径的 postSession 在后台链上（memory/consolidation 写入）；进程关停前有界收口。
+      const hooksSettled = await hookDrain
       try { await agent.drainPostSession(5_000) } catch { /* best-effort */ }
       // agent-16：claim-store 是内存 pending + 异步写链（write-behind）——会话末
       // 撞上短暂文件锁（AV/EDR）时滞留行会随进程退出丢失；收口显式排空（有界）。
@@ -971,7 +984,7 @@ export function buildManagedAgent(
       }
       shared?.sessions?.clearCoordinatorRef(sessionId)
       if (persistenceError) throw persistenceError
-      return settled
+      return settled && hooksSettled
     },
     // I1: 桌面端议事会入口，直接评审 artifact 中的 council-plan-json。
     conveneCouncil: (input) => withContinuityAvailable(agent, () => conveneCouncilOnCoordinator(agent, stores.refs.coordinator, stores.refs, input)),

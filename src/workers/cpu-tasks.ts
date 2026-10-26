@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import type { DelegationSnapshot } from './delegation-state.js'
 // @ts-ignore Native development workers load TypeScript directly.
 import { TailAccumulator } from './events-tail.ts'
@@ -265,6 +266,9 @@ export interface AstScanArgs {
 }
 
 export interface AstScanMatch {
+  startIndex?: number
+  endIndex?: number
+  fileVersion?: string
   file: string
   line: number
   column: number
@@ -338,6 +342,7 @@ export async function astScanRaw(args: AstScanArgs): Promise<AstScanResult> {
       continue
     }
     const source = buf.toString('utf-8')
+    const fileVersion = createHash('sha256').update(source).digest('hex')
 
     result.filesScanned++
 
@@ -368,6 +373,8 @@ export async function astScanRaw(args: AstScanArgs): Promise<AstScanResult> {
       if (result.matches.length >= args.limit) break
       const range = node.range()
       const match: AstScanMatch = {
+        startIndex: range.start.index, endIndex: range.end.index,
+        fileVersion,
         file: filePath,
         line: range.start.line + 1,
         column: range.start.column + 1,

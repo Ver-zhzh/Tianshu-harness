@@ -4,6 +4,7 @@ import { CommittedHistoryViewport, layoutPinnedViewport, projectCommittedHistory
 import { LiveEngine, type LiveRegionLine } from '../live-engine.js'
 import { displayWidth } from '../../width.js'
 import { makeApp } from './_harness.js'
+import { liveMaxRowsFor } from '../app.js'
 
 const chrome: LiveRegionLine[] = [
   { text: 'mode', region: 'mode' },
@@ -161,12 +162,18 @@ test('a tall side panel cannot enlarge the fixed main viewport after a height re
 
   for (const rows of [8, 4, 12, 24]) {
     out.rows = rows
+    app.setSidePanelOpen(false)
+    app.forceRedraw()
+    const mainRows = frames.at(-1)!.length
+    app.setSidePanelOpen(true)
     app.forceRedraw()
     const frame = frames.at(-1)!
-    assert.equal(frame.length, rows, 'a side panel must fit the main viewport rather than add rows beneath it')
-    assert.equal(frame[0]?.livePart, 'pinned', 'the side panel must not push the fixed prompt out of the row budget')
-    assert.ok(frame.findIndex(line => line.caretCol !== undefined) >= rows - 4)
+    assert.ok(frame.length <= Math.max(mainRows, liveMaxRowsFor(rows)), 'a side panel must fit the bounded main region rather than add rows beneath it')
+    assert.ok(!frame.some(line => line.livePart === 'pinned' || line.text.includes('keep this command at the top')),
+      'the side panel must not restore a second copy of the committed prompt')
+    assert.equal(app.getScrollbackContent().split('keep this command at the top').length - 1, 1)
+    assert.ok(frame.findIndex(line => line.caretCol !== undefined) >= frame.length - 4)
     const bottomComposer = frame.map(line => line.region).lastIndexOf('composer')
-    assert.ok(rows - bottomComposer <= 2, 'only the normal prompt footer may follow the bottom composer')
+    assert.ok(frame.length - bottomComposer <= 2, 'only the normal prompt footer may follow the bottom composer')
   }
 })

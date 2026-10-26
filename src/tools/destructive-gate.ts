@@ -1,111 +1,73 @@
-/**
- * Destructive Gate — 破坏性命令 pre-execution 闸门(会话级状态)。
- *
- * 补 git-clear-after-fail hook 的时机缺口:hook 是 postTool 事后检测,
- * advisory 发出时清场命令已执行完。本闸门在 tool-pipeline 执行前切面
- * (TDD gate 之后、PreToolUse hook 之前)同步拦截。
- *
- * 耦合设计(天枢复核 2026-07-04):失败判据不经 hook 中转——tool-pipeline
- * 本身就是失败检测第一现场(bash 测试命令与 run_tests 两处 trackVerification
- * 调用点)。pipeline 做唯一写者(noteVerification/noteToolExecuted)兼唯一
- * 读者(evaluate),全同步、零跨模块隐式耦合。hook 自己的 failWindow 保留,
- * 判据同源(GIT_CLEAR_RE 来自 destructive-patterns.ts、同窗口语义)但状态独立。
- *
- * 语义:首次拦截、重复放行——同一命令在拦截后再次原样提交视为显式坚持,
- * 放行。避免死锁,保留人/模型的最终决定权(与 TDD gate 的纯阻断不同,
- * 这里拦的是"压力状态下的第一反应",不是"永远不许做")。
- */
-
+import { resolve } from 'node:path'
+import { spawnGitSync } from './spawn-git.js'
+import { createHash } from 'node:crypto'
 import { GIT_CLEAR_RE } from './destructive-patterns.js'
+import { verificationArgv } from './verification-command.js'
+import { currentFileVersion } from '../agent/file-version.js'
 
-/** 失败后窗口大小(工具调用数)——与 git-clear-after-fail hook 的 WINDOW_SIZE 同语义 */
-const WINDOW_SIZE = 3
-
-export type DestructiveGateDecision =
-  | { block: false }
-  | { block: true; message: string }
-
+export type DestructiveGateDecision = { block: false } | { block: true; message: string; actions: string[] }
 export interface DestructiveGateState {
-  /** 写入点:pipeline 两处 trackVerification 旁。failed/blocked 开窗,passed 关窗。 */
   noteVerification(status: 'passed' | 'failed' | 'blocked'): void
-  /** 写入点:每个工具实际执行完成处(被拦截的调用不计数,窗口保持)。 */
   noteToolExecuted(): void
-  /** P1 压力信号源：advisory 被忽略累计 ≥ threshold 时开窗（threshold 由调用方判断）。 */
   noteAdvisoryPressure(): void
-  /** 读取点:bash 执行前。返回 block 时调用方应以 is_error tool_result 短路。 */
-  evaluate(toolName: string, input: Record<string, unknown>): DestructiveGateDecision
+  evaluate(toolName: string, input: Record<string, unknown>, cwd?: string): DestructiveGateDecision
+  /** Only the pipeline's actual user approval may grant version-bound actions. */
+  approve(toolName: string, input: Record<string, unknown>, cwd: string): void
 }
 
-function normalizeCommand(cmd: string): string {
-  return cmd.trim().replace(/\s+/g, ' ')
-}
-
-/** 安全调用 getVirtueCredit，回调抛异常时返回 undefined（fallback 到无信任轨迹） */
-function safeGetVirtueCredit(getter?: () => number): number | undefined {
-  try {
-    return getter?.()
-  } catch {
-    return undefined
+function actions(command: string, cwd: string): Array<{ key: string; label: string; reusable: boolean }> {
+  // Parse only literal Git segments. Opaque scripts remain subject to approval on every call.
+  const result: Array<{ key: string; label: string; reusable: boolean }> = []
+  for (const segment of command.split(/\n|;|&&|\|\|/)) {
+    if (!GIT_CLEAR_RE.test(segment)) continue
+    const start = segment.search(/\bgit\s/), text = segment.slice(Math.max(0, start)).trim()
+    const argv = verificationArgv(text)
+    const op = argv?.findIndex(a => ['checkout', 'restore', 'reset', 'stash', 'clean'].includes(a)) ?? -1
+    const separator = argv?.indexOf('--', op + 1) ?? -1
+    let root = cwd, knownGlobals = true
+    if (argv) for (let i = 1; i < op; i++) {
+      if (argv[i] === '-C' && argv[i + 1]) root = resolve(root, argv[++i]!)
+      else if (argv[i]?.startsWith('-C')) root = resolve(root, argv[i]!.slice(2))
+      else if (argv[i] !== '--no-pager') knownGlobals = false
+    }
+    const targets = separator >= 0 ? [...new Set(argv!.slice(separator + 1))] : []
+    const versions = targets.map(target => {
+      const file = resolve(root, target)
+      try { return { file, version: currentFileVersion(file) } } catch { return { file, version: undefined } }
+    }).sort((a, b) => a.file.localeCompare(b.file))
+    const direct = /^(?:rtk(?:\s+proxy)?\s+)?git\s/.test(segment.trimStart()) && command.trimStart().startsWith(segment.trimStart())
+    const reusable = direct && knownGlobals && !!argv && op > 0 && targets.length > 0 && targets.every(target => !/[?*\[\]]/.test(target) && !target.startsWith(':')) && versions.every(v => v.version !== undefined) && !/[`$<>|]/.test(text)
+    // Include the source/ref and flags before --; never grant a different restore operation.
+    let head: string | null = null
+    if (reusable) { try { const probe = spawnGitSync(['rev-parse', '--verify', 'HEAD'], { cwd: root, encoding: 'utf8', timeout: 1000 }); if (probe.status === 0) head = String(probe.stdout).trim() } catch { /* Unknown source stays visible in the identity. */ } }
+    const identity = reusable ? [argv!.slice(0, op).filter((_, i) => i === 0), root, head, argv!.slice(op, separator), versions] : [root, text, versions, command.slice(0, command.indexOf(segment))]
+    result.push({ key: createHash('sha256').update(JSON.stringify(identity)).digest('hex'), label: `${argv?.[op] ?? 'git clear'}: ${targets.length ? versions.map(v => v.file).join(', ') : text}`, reusable })
   }
+  if (!result.length && GIT_CLEAR_RE.test(command)) result.push({ key: 'opaque', label: '无法精确解析的 Git 清场操作', reusable: false })
+  return result
 }
 
-function buildBlockMessage(cmd: string, virtueCredit?: number): string {
-  const lines = [
-    '⛔ 已拦截(destructive-gate):测试刚失败,你正在执行 git 清场命令。',
-    `  命令:${cmd.slice(0, 160)}`,
-    '  为什么拦:验证失败后立即 stash/reset/checkout/restore/clean 会丢改动,',
-    '  且本仓库多会话共享工作区,可能误伤其他会话的改动。失败根因(测试非隔离、',
-    '  共享临时路径、外部改动)未定位前,清场只是把问题藏起来。',
-    '  正确路径:先用 read_file/grep 检查失败的测试与相关文件,定位根因。',
-    '  如果你确认必须清场:原样重发同一命令即放行(拦截仅一次)。',
-  ]
-  if (virtueCredit !== undefined && virtueCredit >= 0.7) {
-    lines.push(`  本会话美德轨迹良好(信任分 ${virtueCredit.toFixed(2)}),若确认必须清场请原样重发。`)
-  }
-  return lines.join('\n')
-}
-
-export function createDestructiveGateState(options?: { windowSize?: number; getVirtueCredit?: () => number }): DestructiveGateState {
-  const windowSize = options?.windowSize ?? WINDOW_SIZE
-  const getVirtueCredit = options?.getVirtueCredit
-  /** 失败后经过的(实际执行的)工具调用计数;null = 窗口关闭 */
-  let toolCallsSinceFail: number | null = null
-  /** 已拦截过一次的命令(归一化)——再次提交视为显式坚持,放行 */
-  const blockedOnce = new Set<string>()
-
+export function createDestructiveGateState(_options?: { windowSize?: number; getVirtueCredit?: () => number }): DestructiveGateState {
+  const authorized = new Set<string>()
+  let verification: 'passed' | 'failed' | 'blocked' | 'unknown' = 'unknown'
   return {
-    noteVerification(status) {
-      if (status === 'failed' || status === 'blocked') {
-        toolCallsSinceFail = 0
-      } else if (status === 'passed') {
-        toolCallsSinceFail = null
-      }
-      // blocked 和 failed 对 agent 的压力等价——都意味着"我遇到了验证障碍"，
-      // 后续的 git 清场命令需要被拦截。
+    noteVerification(status) { verification = status },
+    noteToolExecuted() {},
+    noteAdvisoryPressure() {},
+    approve(name, input, cwd) {
+      if (name !== 'bash' || typeof input.command !== 'string') return
+      for (const action of actions(input.command, cwd)) if (action.reusable) authorized.add(action.key)
     },
-
-    noteToolExecuted() {
-      if (toolCallsSinceFail === null) return
-      toolCallsSinceFail++
-      if (toolCallsSinceFail > windowSize) toolCallsSinceFail = null
-    },
-
-    noteAdvisoryPressure() {
-      toolCallsSinceFail = 0
-    },
-
-    evaluate(toolName, input) {
-      if (toolName !== 'bash') return { block: false }
-      if (toolCallsSinceFail === null) return { block: false }
-      const cmd = typeof input.command === 'string' ? input.command : ''
-      if (!GIT_CLEAR_RE.test(cmd)) return { block: false }
-
-      const key = normalizeCommand(cmd)
-      if (blockedOnce.has(key)) return { block: false }
-
-      blockedOnce.add(key)
-      const credit = safeGetVirtueCredit(getVirtueCredit)
-      return { block: true, message: buildBlockMessage(cmd, credit) }
+    evaluate(name, input, cwd = process.cwd()) {
+      if (name !== 'bash' || typeof input.command !== 'string') return { block: false }
+      const pending = actions(input.command, cwd).filter(action => !action.reusable || !authorized.has(action.key))
+      if (!pending.length) return { block: false }
+      return { block: true, actions: pending.map(a => a.key), message: [
+        'destructive-gate: Git 清场需要真实用户审批或已有许可策略；模型重复调用不会授权。',
+        `验证事实：${verification}。本次尚未执行。`,
+        ...pending.map(a => `目标：${a.label} [${a.key.slice(0, 12)}]`),
+        '恢复出口：读取当前文件，使用绑定 expected_version 的 edit_file.operations 或 bash.write_files 精确捕获事务；缺少捕获或有版本冲突时保留现场。Git 内容只作差异对照。',
+      ].join('\n') }
     },
   }
 }

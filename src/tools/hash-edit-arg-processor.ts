@@ -34,5 +34,5 @@ export const hashEditArgProcessor = createFileContentArgProcessor({
     return typeof fp === 'string' && fp.length > 0 ? fp : null
   },
   render: ({ path, lines, chars }) =>
-    `${HASH_EDIT_POINTER_PREFIX} ${path} — new block ${lines} lines, ${chars} chars. 已成功落盘，勿重做——历史正常截断，查看用 read_file。${POINTER_INTERNAL_TAG} display-only pointer]`,
+    `${HASH_EDIT_POINTER_PREFIX} ${path} — new block ${lines} lines, ${chars} chars. 请求内容已折叠；执行状态以工具结果为准，按需 read_file。${POINTER_INTERNAL_TAG} display-only pointer]`,
 })

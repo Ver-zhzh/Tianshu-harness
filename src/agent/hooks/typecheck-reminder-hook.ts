@@ -16,9 +16,8 @@ import type { AdvisoryBus } from '../advisory-bus.js'
  *   ∧ !sawTypecheckThisTask   — no real `tsc`/typecheck has run since that edit
  *   ∧ run_tests in window     — the agent just verified via tests (a "done" moment)
  *
- * On trigger, submits a one-turn operational advisory. The authoritative
- * guarantee is the review-gate backstop (Component B); this is the cheap
- * per-turn reminder (Component C) that runs no tsc.
+ * On trigger, discloses the missing check once. It never requests a check
+ * as a prerequisite for committing or finishing and runs no tsc.
  */
 export interface TypecheckReminderHookDeps {
   /** Only `submit` is used — narrowed for testability (interface segregation). */
@@ -26,26 +25,27 @@ export interface TypecheckReminderHookDeps {
 }
 
 export function createTypecheckReminderHook(deps: TypecheckReminderHookDeps): PostTurnRuntimeHook {
+  let notified = false
   return {
     phase: 'postTurn',
     name: 'typecheck-reminder',
     run(ctx: RuntimeHookContext) {
       const { snapshot } = ctx
       if (!snapshot.touchedTsFiles) return
-      if (snapshot.sawTypecheckThisTask) return
+      if (snapshot.sawTypecheckThisTask) { notified = false; return }
+      if (notified) return
 
       const ranTests = snapshot.recentToolHistory.some(h => h.tool === 'run_tests')
       if (!ranTests) return
 
+      notified = true
       deps.advisoryBus.submit({
         key: 'typecheck-reminder',
         priority: 0.6,
         category: 'typecheck',
-        tier: 'operational',
-        content: '【天梁】你改了 TS 文件、跑了测试,但没跑类型检查。esbuild/tsx 只转译不查类型——重复键/重复成员/悬空引用都不会报。交付前跑 `npm run typecheck`(或 `tsc --noEmit`)再声明完成。',
+        tier: 'informational',
+        content: '【天梁】你改了 TS 文件、跑了测试,但没跑类型检查。esbuild/tsx 只转译不查类型——重复键/重复成员/悬空引用都不会报。当前类型检查尚未执行，请如实披露；需要时由用户选择独立运行，不追加检查或阻止提交。',
         ttl: 1,
-        // P1a 核销 + Phase 2 挂起观察：下一轮自发跑 typecheck → 自愈撤销
-        expect: { kind: 'verify_attempted', withinTurns: 2 },
         observe: { turns: 1 },
       })
     },

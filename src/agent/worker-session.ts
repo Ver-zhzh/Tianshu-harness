@@ -1,4 +1,5 @@
 import { WorkerTerminalPolicy } from './worker-terminal-policy.js'
+import { clampReadConcurrency } from '../config/read-concurrency.js'
 import { reportFailureKind, isReportChannelError, type ReportDiagnostic, recordReportFailure } from './worker-report-repair.js'
 import { isLocalWorkerPolicyError, type ContinuationPrefixProof } from '../api/continuation-prefix.js'
 import { withExecutionContinuity } from '../api/execution-continuity.js'
@@ -85,6 +86,8 @@ export interface WorkerRuntimeDecision {
 }
 
 export interface WorkerSessionConfig {
+  externalHookParent?: { runtimeId: string; runId: string }
+  externalHookHost?: import('../hooks/external-hook-types.js').ExternalHookHostPort
   routeReason?: string
   workspaceRoots?: string[]
   order: WorkOrder
@@ -94,6 +97,7 @@ export interface WorkerSessionConfig {
   continuationSource?: string
   promptEngine: PromptEngine
   toolRegistry: ToolRegistry
+  readConcurrency?: number
   cwd: string
   maxTurns: number
   contextWindow: number
@@ -737,10 +741,13 @@ async function runWorkerSessionImpl(config: WorkerSessionConfig): Promise<Worker
   }, usageEvidence)
   const agent = new AgentLoop({
     inputOrigin: 'worker_task',
+    externalHookHost: config.externalHookHost,
+    externalHookParent: config.externalHookParent,
     client: loopClient,
     providerName: config.providerName,
     promptEngine: config.promptEngine,
     toolRegistry,
+    readConcurrency: clampReadConcurrency(config.readConcurrency),
     // R3.1: honor the per-profile turn budget even for direct callers — the
     // coordinator already clamps, this guards runWorkerSession used standalone.
     maxTurns: clampWorkerMaxTurns(config.maxTurns, config.order.budget.maxTurns),
@@ -1015,6 +1022,7 @@ async function runWorkerSessionImpl(config: WorkerSessionConfig): Promise<Worker
       usage: sessionUsage(),
     }
   } finally {
+    await agent.config.externalHookRuntime?.close()
     clearTimeout(timer)
     if (softTimer) clearTimeout(softTimer)
     if (onParentAbort && config.abortSignal) {

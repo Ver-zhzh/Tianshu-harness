@@ -1,3 +1,5 @@
+import type { AgentCallbacks } from './loop-types.js'
+
 /**
  * Turn-level heartbeat watchdog.
  *
@@ -178,5 +180,34 @@ export class TurnHeartbeat {
   /** Test-only: query whether the first heartbeat has fired since last tick. */
   hasFiredSinceTick(): boolean {
     return this.firstFired
+  }
+}
+
+export function wrapCallbacksWithHeartbeat(
+  cb: AgentCallbacks,
+  hb: TurnHeartbeat,
+  _getSessionId?: () => string | undefined,
+): AgentCallbacks {
+  // #334：静默恢复补报——心跳上报过静默后，首个可见事件补发 working 相位（防客户端静默显示粘滞到下次相位切换）。
+  const resumeIfSilent = (): void => { if (hb.hasFiredSinceTick()) cb.onPhaseChange?.('working', { reason: 'resumed — activity detected' }) }
+  return {
+    ...cb,
+    onToolInputProgress: progress => { resumeIfSilent(); hb.tick('generating tool input'); cb.onToolInputProgress?.(progress) },
+    onTextDelta: (text) => { resumeIfSilent(); hb.tick('streaming text'); cb.onTextDelta(text) },
+    onThinkingDelta: (thinking) => { resumeIfSilent(); hb.tick('thinking'); cb.onThinkingDelta(thinking) },
+    onToolUse: (id, name, input) => { resumeIfSilent(); hb.tick(`calling ${name}`); cb.onToolUse(id, name, input) },
+    onToolResult: (id, name, result, isError, rawPath, uiContent, evidence) => {
+      resumeIfSilent(); hb.tick(`${name} returned`)
+      cb.onToolResult(id, name, result, isError, rawPath, uiContent, evidence)
+    },
+    onTurnComplete: (usage, turnNumber, isFinal, evidenceSummary, continuationReason, stopReason) => {
+      resumeIfSilent(); hb.tick(`turn ${turnNumber} complete`)
+      cb.onTurnComplete(usage, turnNumber, isFinal, evidenceSummary, continuationReason, stopReason)
+    },
+    onPhaseChange: (phase, detail) => {
+      // Heartbeat-emitted phases must NOT recursively reset the clock.
+      if (phase !== 'heartbeat') { resumeIfSilent(); hb.tick(`phase: ${phase}`) }
+      cb.onPhaseChange?.(phase, detail)
+    },
   }
 }

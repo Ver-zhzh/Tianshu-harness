@@ -86,7 +86,7 @@ describe('ecosystem workflow helpers', () => {
 
     assert.equal(resolved?.command, '/team')
     assert.ok(resolved?.prompt.includes('团队模式核心骨架'))
-    assert.ok(resolved?.prompt.includes('plan_task'))
+    assert.ok(resolved?.prompt.includes('planMarkdown'))
     assert.ok(resolved?.prompt.includes('team_orchestrate'))
     assert.ok(resolved?.prompt.includes('patcher workers as 天梁 executors'))
     assert.ok(resolved?.prompt.includes('deliver_task'))
@@ -268,7 +268,7 @@ describe('ecosystem workflow helpers', () => {
     assert.ok(resolved?.prompt.includes('exit code'))
     // 只读契约：不写文件、不走 team 编排、修复走 plan_task 交接。
     assert.ok(resolved?.prompt.includes('不写文件'))
-    assert.ok(resolved?.prompt.includes('plan_task'))
+    assert.ok(resolved?.prompt.includes('planMarkdown'))
     // 出口按规模分流：中小修复走 plan_task；大型多维改造映射 starflow draftItems。
     assert.ok(resolved?.prompt.includes('先问用户是否修复'))
     assert.ok(resolved?.prompt.includes('starflow 的 draftItems'))

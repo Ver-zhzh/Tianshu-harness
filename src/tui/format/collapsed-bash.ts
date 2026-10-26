@@ -11,7 +11,7 @@
 import { color } from '../engine/ansi.js'
 import type { RivetTheme } from '../theme.js'
 import { ambiguousWideEnabled, displayWidth, truncateToDisplayWidth } from '../width.js'
-import { formatToolCard } from './tool-card.js'
+import { formatCollapsedToolDetailLine, formatToolCard } from './tool-card.js'
 import { EXPAND_HINT } from '../truncation-marker.js'
 
 // ── Types ──────────────────────────────────────────────────────
@@ -129,6 +129,7 @@ export interface FormatCollapsedBashGroupInput {
   expandHint?: string
 }
 
+/** 成功组默认只留摘要或单条标题；错误保留标题和尾部诊断，完整卡片仅在 expanded 渲染。 */
 export function formatCollapsedBashGroup(input: FormatCollapsedBashGroupInput): string[] {
   const { group, expanded, theme } = input
   const width = Math.max(2, (input.columns ?? 80) - 1)
@@ -138,40 +139,37 @@ export function formatCollapsedBashGroup(input: FormatCollapsedBashGroupInput): 
   const elapsed = Math.max(0, Date.now() - group.startMs)
   const elapsedStr = elapsed > 1000 ? (elapsed / 1000).toFixed(1) + 's' : elapsed + 'ms'
   const completed = group.entries.filter(entry => entry.completed)
+  const expandHint = input.expandHint ?? EXPAND_HINT
+  const summary = color(buildBashSummaryText(group, false) + ' · ' + elapsedStr, theme.muted)
   const lines = group.entries.length > 1
-    ? [fit(color(buildBashSummaryText(group, false) + ' · ' + elapsedStr, theme.muted))] : []
+    ? [expanded ? fit(summary) : formatCollapsedToolDetailLine(summary, expandHint, theme, input.columns)] : []
   if (!completed.length) return [fit(color('Run · 等待结果', theme.muted))]
-  const shown = expanded ? completed : completed.filter((entry, index) => index < 3 || entry.isError)
+  const shown = expanded ? completed : completed.filter(entry => entry.isError || group.entries.length === 1)
   for (const entry of shown) {
-    const allLines = (entry.content ?? '').replace(/\n+$/, '').split('\n')
     const card = formatToolCard({
-      toolName: 'bash', toolInput: { command: entry.command }, content: entry.content ?? '', rawPath: entry.rawPath, isError: entry.isError,
+      toolName: 'bash', toolInput: { command: entry.command }, content: entry.content ?? '', rawPath: expanded ? entry.rawPath : undefined, isError: entry.isError,
       columns: input.columns, maxLines: 3, expanded, expandHint: input.expandHint,
     }, theme)
     if (expanded) lines.push(...card)
     else {
-      lines.push(card[0]!)
-      if (entry.rawPath) lines.push(fit(color(`  全文来源: ${entry.rawPath}`, theme.muted)))
-      if (entry.isError || completed.length === 1) {
-        const preview = entry.isError ? allLines.slice(-3) : allLines.slice(0, 2)
-        lines.push(...preview.filter(Boolean).map(row => fit(`  ${color(row, entry.isError ? theme.error : theme.muted)}`)))
+      lines.push(group.entries.length === 1 ? formatCollapsedToolDetailLine(card[0]!, expandHint, theme, input.columns) : card[0]!)
+      if (entry.isError) {
+        const rows = (entry.content ?? '').replace(/\n+$/, '').split('\n')
+        lines.push(...rows.slice(-3).filter(Boolean).map(row => fit(`  ${color(row, theme.error)}`)))
       }
     }
-  }
-  if (!expanded && (completed.length > 1 || completed.some(entry => (entry.content ?? '').split('\n').length > 2))) {
-    lines.push(fit(color(`  ${shown.length < completed.length ? `… +${completed.length - shown.length} 条命令 · ` : ''}${input.expandHint ?? EXPAND_HINT} · 工具详情`, theme.muted)))
   }
   return lines
 }
 
 // ── Rendering: live region ─────────────────────────────────────
 
+/** 进行中的命令只显示一条聚合标题，不附带结果预览。 */
 export function formatCollapsedBashGroupLive(
   group: CollapsedBashGroup,
   theme: RivetTheme,
   columns?: number,
 ): string[] {
-  const lines: string[] = []
   const summary = buildBashLiveSummaryText(group)
   const elapsed = Date.now() - group.startMs
   const elapsedStr = elapsed > 1000 ? `${(elapsed / 1000).toFixed(0)}s` : `${elapsed}ms`
@@ -179,19 +177,7 @@ export function formatCollapsedBashGroupLive(
   const widthOptions = { ambiguousAsWide: ambiguousWideEnabled() }
   const stats = computeBashGroupStats(group)
   const header = `● ${summary} · ${elapsedStr}`
-  lines.push(color(displayWidth(header, widthOptions) <= width ? header : `● ${stats.pending ? `运行中 ${stats.pending}` : `完成 ${stats.completed}`} · ${elapsedStr}`, theme.muted))
-
-  const lastCompleted = [...group.entries].reverse().find(e => e.content && e.completed && !e.isError)
-  if (lastCompleted?.content) {
-    const maxWidth = Math.max(0, width - 2)
-    const tailLines = lastCompleted.content.replace(/\n+$/, '').split('\n').slice(-2)
-    for (const line of tailLines) {
-      const trimmed = displayWidth(line, widthOptions) > maxWidth ? truncateToDisplayWidth(line, maxWidth - displayWidth('…', widthOptions), widthOptions) + '…' : line
-      lines.push(`  ${color(trimmed, theme.muted)}`)
-    }
-  }
-
-  return lines
+  return [color(displayWidth(header, widthOptions) <= width ? header : `● ${stats.pending ? `运行中 ${stats.pending}` : `完成 ${stats.completed}`} · ${elapsedStr}`, theme.muted)]
 }
 
 // ── Buffer ─────────────────────────────────────────────────────

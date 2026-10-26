@@ -65,6 +65,7 @@ function progressTargetCandidates(name: string, input: Record<string, unknown>):
   if (name === 'apply_patch' && typeof input.diff === 'string') {
     return extractPatchTargetPathsFromDiff(input.diff, { includeDeleted: true })
   }
+  if (name === 'bash' && Array.isArray(input.write_files)) return input.write_files.filter((p): p is string => typeof p === 'string')
   return extractWriteFilePaths(name, input)
 }
 
@@ -112,9 +113,11 @@ export async function executeWithCourseProgress(deps: import('./tool-execution.j
   const { executeToolUse } = await import('./tool-pipeline.js')
   const [tu] = args
   const monitor = deps.onCourseFileChange ? await captureCourseFileProgress(tu.name, tu.input, deps.cwd) : null
-  const result = await executeToolUse(tu, { ...args[1], onVerificationExecutionStart: deps.onVerificationExecutionStart ?? args[1].onVerificationExecutionStart }, args[2], args[3], args[4])
+  const result = await executeToolUse(tu, { ...args[1], onRepairDisposition: deps.onRepairDisposition ?? args[1].onRepairDisposition, onMutationFacts: deps.onMutationFacts ?? args[1].onMutationFacts, onVerificationExecutionStart: deps.onVerificationExecutionStart ?? args[1].onVerificationExecutionStart }, args[2], args[3], args[4])
   if (monitor && result.toolResult.type === 'tool_result') {
-    deps.onCourseFileChange!(await monitor.finish({ isError: result.toolResult.is_error === true }))
+    const fact = await monitor.finish({ isError: result.toolResult.is_error === true })
+    if (result.mutations?.some(m => m.after.parse === 'invalid' || m.after.parse === 'unknown' && /\.html?$/i.test(m.file) || m.restoration === 'conflict')) fact.outcome = 'unknown'
+    deps.onCourseFileChange!(fact)
   }
   return result
 }

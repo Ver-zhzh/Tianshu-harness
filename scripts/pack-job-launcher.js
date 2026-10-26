@@ -12,7 +12,7 @@ export function packJobLauncher(repoRoot, target = resolveTargetPlatform(), { ho
   let source
   if (host.os === 'win32') {
     const native = join(repoRoot, 'native')
-    for (const file of ['job-launch.c', 'build-windows.bat']) {
+    for (const file of ['job-launch.c', 'job-hook-supervisor.h', 'build-windows.bat']) {
       if (!existsSync(join(native, file))) throw new Error(`pack-job-launcher: missing tracked native/${file}`)
     }
     const output = `win32-${target.arch}`

@@ -116,6 +116,7 @@ export type SessionEventType =
   | 'text_delta'
   | 'thinking_delta'
   | 'tool_use'
+  | 'tool_input_progress'
   | 'tool_result'
   | 'turn_complete'
   | 'phase'
@@ -178,6 +179,7 @@ export type SessionEventType =
   | 'skills_changed'
   // I4 — user-defined .rivet/hooks.json script results.
   | 'hook_result'
+  | 'hook_cleanup'
   // Background jobs (bash run_in_background) — started / output / exit.
   | 'job'
   | 'done'
@@ -528,4 +530,13 @@ export interface ImageGenerationRecord {
   height?: number
   error?: { stage: string; message: string; code?: string }
   recordSaved?: boolean
+}
+
+export interface ToolSurfaceSnapshot {
+  preset: string
+  registeredCount: number
+  visibleCount: number
+  definitionChars: number
+  definitionBytes: number
+  tools: Array<{ name: string; state: 'visible' | 'cold' | 'unregistered' | 'disabled' | 'restricted' | 'unavailable' }>
 }

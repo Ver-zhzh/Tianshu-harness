@@ -33,7 +33,7 @@ export const writeFileArgProcessor = createFileContentArgProcessor({
     return typeof fp === 'string' && fp.length > 0 ? toPosixPath(fp) : null
   },
   render: ({ path, lines, chars }) =>
-    `${WRITE_FILE_POINTER_PREFIX} ${path} — ${lines} lines, ${chars} chars. 已成功落盘，勿重写——历史正常截断，查看用 read_file。${POINTER_INTERNAL_TAG} display-only pointer]`,
+    `${WRITE_FILE_POINTER_PREFIX} ${path} — ${lines} lines, ${chars} chars. 请求内容已折叠；执行状态以工具结果为准，按需 read_file。${POINTER_INTERNAL_TAG} display-only pointer]`,
 })
 
 /**

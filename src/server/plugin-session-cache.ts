@@ -28,6 +28,7 @@ export interface PluginToolsSnapshot {
 }
 
 let cache: PluginToolsSnapshot | null = null
+let hookConfig: PluginConfig | undefined
 let loading: Promise<PluginToolsSnapshot> | null = null
 /** 在飞暖场期间到达的最新一次暖场请求——飞行落定后补跑（覆盖式：只关心终态）。 */
 let pendingWarm: { config: PluginConfig | undefined; cwd: string } | null = null
@@ -62,6 +63,7 @@ async function buildSnapshot(config: PluginConfig | undefined, cwd: string): Pro
 
 /** 启动/失效后暖场（幂等，fire-and-forget）。完成后 pluginToolsSnapshot 非 null。 */
 export function warmPluginToolsCache(config: PluginConfig | undefined, cwd: string): void {
+  hookConfig = config
   if (cache) return
   if (loading) {
     // 在飞：记下最新请求，飞行落定后补跑。旧实现直接 return——于是「装插件 →
@@ -98,6 +100,10 @@ export function pluginToolsSnapshot(): PluginToolsSnapshot | null {
   return cache
 }
 
+export function pluginHooksSnapshot(): PluginHookEntry[] {
+  return cache?.hooks.filter(hook => hookConfig?.enabled?.[hook.pluginName] !== false) ?? []
+}
+
 /**
  * 在飞暖场的落定信号（永不 reject）：已有缓存或没有在飞 → 立即 resolve。
  * 桌面性能阶段 3 把启动暖场延后到 listen 之后，createAgent 用它做有界等待，
@@ -115,12 +121,14 @@ export function isPluginWarmStarted(): boolean {
 
 /** 安装/启停/卸载后调用——清缓存并（给了 cwd 就）立即重建，下一个新会话拿到新集合。 */
 export function invalidatePluginToolsCache(config?: PluginConfig, cwd?: string): void {
+  hookConfig = config
   cache = null
   if (cwd) warmPluginToolsCache(config, cwd)
 }
 
 /** 测试专用：重置全部状态（避免用例间经模块级缓存串台）。 */
 export function __resetPluginToolsCacheForTests(): void {
+  hookConfig = undefined
   cache = null
   loading = null
   pendingWarm = null

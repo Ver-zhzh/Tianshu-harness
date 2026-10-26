@@ -2,6 +2,7 @@ import { describe, it, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { writeFileSync, rmSync, mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { RUN_TESTS_TOOL, parseOutput } from '../run-tests.js'
 import { invalidateVerifyConfig } from '../../config/verify-config.js'
 import { makeTestDir } from './_test-tmp.js'
@@ -39,7 +40,7 @@ function setupDeclaredProject(testCommand: string): string {
 describe('run_tests declared verify.test (A2)', () => {
   it('runs the declared command via shell and passes on exit 0', async () => {
     const dir = setupDeclaredProject('node -e "console.log(\'declared ok\')"')
-    const result = await RUN_TESTS_TOOL.execute(makeParams({}, dir) as never)
+    const result = await RUN_TESTS_TOOL.execute(makeParams({ full: true }, dir) as never)
     assert.equal(result.isError, false, `expected pass, got: ${String(result.content).slice(0, 300)}`)
     assert.equal(result.verification?.status, 'passed')
     assert.match(result.verification?.command ?? '', /node -e/)
@@ -47,7 +48,7 @@ describe('run_tests declared verify.test (A2)', () => {
 
   it('fails on non-zero exit from the declared command', async () => {
     const dir = setupDeclaredProject('node -e "process.exit(3)"')
-    const result = await RUN_TESTS_TOOL.execute(makeParams({}, dir) as never)
+    const result = await RUN_TESTS_TOOL.execute(makeParams({ full: true }, dir) as never)
     assert.equal(result.isError, true)
     assert.equal(result.verification?.status, 'failed')
   })
@@ -55,48 +56,23 @@ describe('run_tests declared verify.test (A2)', () => {
   it('declared command beats package.json auto-detection', async () => {
     const dir = setupDeclaredProject('node -e "console.log(\'from declaration\')"')
     writeFileSync(join(dir, 'package.json'), JSON.stringify({ scripts: { test: 'exit 1' } }))
-    const result = await RUN_TESTS_TOOL.execute(makeParams({}, dir) as never)
+    const result = await RUN_TESTS_TOOL.execute(makeParams({ full: true }, dir) as never)
     assert.equal(result.isError, false)
     assert.match(result.verification?.command ?? '', /from declaration/)
   })
 
-  it('C3: retries in a snapshot on in-place failure without attributing pollution', async () => {
-    // Live dir fails (no marker file); snapshot dir passes (marker present).
-    const liveDir = setupDeclaredProject('node -e "require(\'node:fs\').accessSync(\'marker.txt\')"')
-    const snapDir = makeTestDir('run-tests-snapshot-')
-    writeFileSync(join(snapDir, '.rivet-config.json'), JSON.stringify({
-      verify: { test: 'node -e "require(\'node:fs\').accessSync(\'marker.txt\')"' },
-    }))
-    writeFileSync(join(snapDir, 'marker.txt'), 'present')
-
-    const params = {
-      ...makeParams({}, liveDir),
-      prepareRetrySnapshot: async () => ({ path: snapDir, snapshotRef: 'test-ref' }),
-    }
-    const result = await RUN_TESTS_TOOL.execute(params as never)
-    assert.equal(result.isError, false, 'snapshot-pass should override live-fail')
-    assert.match(String(result.content), /C3 归因重试/)
-    // 归因文案纪律（设计 §5.2 / §6.2）：未经基线或隔离证明，不得把 A/B 结果不一致
-    // 断言成“工作区污染 / 其他会话引入”的因果结论。哨兵钉住当前的中性措辞与留存语义。
-    assert.match(String(result.content), /保留失败记录并检查失败位置或隔离对照/)
-    assert.match(String(result.content), /不能仅据此认定由其他会话引入/)
-    assert.doesNotMatch(String(result.content), /工作区污染/)
-  })
-
-  it('C3: both-fail keeps the failure and confirms code attribution', async () => {
+  it('失败只运行一次，不调用旧归因重试回调', async () => {
     const liveDir = setupDeclaredProject('node -e "process.exit(1)"')
-    const snapDir = makeTestDir('run-tests-snapshot-')
-    writeFileSync(join(snapDir, '.rivet-config.json'), JSON.stringify({
-      verify: { test: 'node -e "process.exit(1)"' },
-    }))
-    const params = {
-      ...makeParams({}, liveDir),
-      prepareRetrySnapshot: async () => ({ path: snapDir, snapshotRef: 'test-ref' }),
-    }
-    const result = await RUN_TESTS_TOOL.execute(params as never)
+    let retries = 0
+    const result = await RUN_TESTS_TOOL.execute({ ...makeParams({ full: true }, liveDir),
+      prepareRetrySnapshot: async () => { retries++; throw new Error('must not retry') },
+    } as never)
     assert.equal(result.isError, true)
-    assert.match(String(result.content), /在隔离快照中也 FAILED/)
+    assert.equal(result.verification?.status, 'failed')
+    assert.equal(retries, 0)
+    assert.equal(result.extraVerifications, undefined)
   })
+
 })
 
 describe('parseOutput declared formats', () => {
@@ -122,5 +98,20 @@ describe('parseOutput declared formats', () => {
     const r = parseOutput('some random build log', 'declared')
     assert.equal(r.passed, 0)
     assert.equal(r.failed, 0)
+  })
+})
+
+describe('scope is selected independently of commands and environments', () => {
+  it('empty, blank, projects, shard, candidate and declared defaults never imply full', async () => {
+    const dir = setupDeclaredProject('node -e "process.exit(99)"')
+    for (const input of [{}, {filter:''}, {filter:'   '}, {projects:[]}, {shard:false}, {deliveryFiles:['a.ts']}]) {
+      const result = await RUN_TESTS_TOOL.execute({ ...makeParams(input, dir),
+        verificationSnapshot: { candidateOnly: true, path: dir, snapshotRef: 'fixture' } } as never)
+      assert.equal(result.isError, true, JSON.stringify(input))
+      assert.equal(result.verification, undefined, 'a preview must not create execution evidence')
+      assert.match(result.content, /未指定测试范围/)
+    }
+    assert.equal(RUN_TESTS_TOOL.requiresApproval(makeParams({full:true},dir) as never),true)
+    assert.equal(RUN_TESTS_TOOL.requiresApproval(makeParams({files:['a.test.ts']},dir) as never),false)
   })
 })

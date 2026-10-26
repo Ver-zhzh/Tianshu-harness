@@ -7,6 +7,8 @@
  * 前未钉定 → 状态栏落 glance-bar 的「天枢」兜底。显示层与运行时不一致。
  */
 
+import type { ReasoningEffort } from '../agent/auto-reasoning.js'
+
 export interface InitialModelSpec {
   id: string
   alias?: string
@@ -47,6 +49,22 @@ export function resolveInitialModelName(
     ? (configuredModel?.alias ?? displayRef)
     : (currentModel?.alias ?? currentModel?.id ?? 'unknown')
   return { modelName, currentModel }
+}
+
+export interface ResolveInitialEffortDisplayInput {
+  /** 当前已生效的 effort（agent.getReasoningEffort()） */
+  current?: ReasoningEffort
+  /** 用户显式配置（config.reasoningEffort） */
+  configured?: ReasoningEffort
+  /** 模型初始档位（config.reasoningFloor） */
+  floor?: ReasoningEffort
+  normalize?: (effort: ReasoningEffort) => ReasoningEffort | undefined
+}
+
+/** 当前生效值 → 显式配置 → 模型初始 floor；缺失时不虚构档位。 */
+export function resolveInitialEffortDisplay(input: ResolveInitialEffortDisplayInput): ReasoningEffort | undefined {
+  const effort = input.current ?? input.configured ?? input.floor
+  return effort === undefined ? undefined : input.normalize ? input.normalize(effort) : effort
 }
 
 export interface ResolveInitialDomainNameInput {

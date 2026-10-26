@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { createFileRepairStore } from '../agent/file-repair-store.js'
 import type { Tool } from './types.js'
 import { TodoStore, TODO_EMPTY_RESULT } from './todo-store.js'
 import type { TodoItem, TodoRegressionStats } from './todo-store.js'
@@ -6,6 +7,9 @@ import { detectDependencies, assessScopeRisk, buildScopeNotice } from './todo-de
 import { writeFileAtomicSync } from '../fs-atomic.js'
 import { existsSync, readFileSync } from 'node:fs'
 import { getSessionDir } from '../agent/session-persist.js'
+import { recordCompletionEvidence, readCompletionEvidence } from '../plan/completion-evidence.js'
+import { decisionSchema, openItemSchema, recordContinuity } from '../plan/continuity-records.js'
+import { zodToJsonSchema } from 'zod-to-json-schema'
 
 const VALID_STATUSES = ['pending', 'in_progress', 'completed'] as const
 
@@ -18,8 +22,14 @@ const todoItemSchema = z.object({
 })
 
 const acceptanceItemSchema = z.object({
+  id: z.string().min(1).optional(),
+  kind: z.enum(['implementation', 'verification', 'review']).optional(),
+  stepId: z.string().min(1).optional(),
+  consumerBoundary: z.string().min(1).optional(),
+  evidenceRefs: z.array(z.string().min(1)).optional(),
+  reason: z.string().min(1).optional(),
   criterion: z.string().min(1),
-  status: z.enum(['pending', 'met', 'blocked']),
+  status: z.enum(['pending', 'met', 'blocked', 'deferred']),
   evidence: z.string().optional(),
 })
 
@@ -29,6 +39,11 @@ const todoActionSchema = z.discriminatedUnion('action', [
     action: z.literal('write'),
     todos: z.array(todoItemSchema),
     acceptance: z.array(acceptanceItemSchema).optional(),
+    plan_ref: z.string().optional(),
+    decisions: z.array(decisionSchema).optional(),
+    open_items: z.array(openItemSchema).optional(),
+    repairs: z.array(z.object({ file: z.string().min(1), state: z.enum(['blocked', 'deferred']), reason: z.string().trim().min(1) })).optional(),
+    findings: z.array(z.object({ findingId: z.string(), stepId: z.string(), disposition: z.enum(['adopted', 'excluded', 'deferred', 'unverified']), reason: z.string().optional(), reportRef: z.string().optional(), resolutionEvidenceRefs: z.array(z.string()).optional() })).optional(),
   }),
 ])
 
@@ -132,11 +147,16 @@ TDD 纪律：
       input_schema: {
         type: 'object',
         properties: {
+          decisions: zodToJsonSchema(z.array(decisionSchema), { target: 'openApi3' }),
+          open_items: zodToJsonSchema(z.array(openItemSchema), { target: 'openApi3' }),
           action: {
             type: 'string',
             enum: ['read', 'write'],
             description: 'read 读当前清单；write 写新清单',
           },
+          repairs: { type: 'array', description: '如实结束文件恢复事件；只记录受阻/延后及原因，不声称结构修复', items: { type: 'object', properties: { file: { type: 'string' }, state: { type: 'string', enum: ['blocked', 'deferred'] }, reason: { type: 'string' } }, required: ['file', 'state', 'reason'] } },
+          plan_ref: { type: 'string', description: '验收项所属计划路径，避免关联其他计划' },
+          findings: { type: 'array', description: '关联本会话审查发现和步骤，不复制报告全文', items: { type: 'object', properties: { findingId: { type: 'string' }, stepId: { type: 'string' }, disposition: { type: 'string', enum: ['adopted', 'excluded', 'deferred', 'unverified'] }, reason: { type: 'string' }, reportRef: { type: 'string', description: '已登记的 worker 原始 artifact ID' }, resolutionEvidenceRefs: { type: 'array', items: { type: 'string' }, description: '实施证据；不自动证明验证通过' } }, required: ['findingId', 'stepId', 'disposition'] } },
           todos: {
             type: 'array',
             description: '完整 todo 清单（仅 write 用）',
@@ -161,7 +181,13 @@ TDD 纪律：
               type: 'object',
               properties: {
                 criterion: { type: 'string', description: '用户做什么动作 → 看到什么可观察结果' },
-                status: { type: 'string', enum: ['pending', 'met', 'blocked'] },
+                status: { type: 'string', enum: ['pending', 'met', 'blocked', 'deferred'] },
+                id: { type: 'string', description: '稳定验收 ID；省略则按定义生成' },
+                kind: { type: 'string', enum: ['implementation', 'verification', 'review'] },
+                stepId: { type: 'string' },
+                consumerBoundary: { type: 'string', description: '实际消费边界，如 sidecar 路由→agent 包装→执行器' },
+                evidenceRefs: { type: 'array', items: { type: 'string' }, description: 'execution:<id>、review:<id> 或 source:<仓内文件>:<行>；文本声明不等于证据' },
+                reason: { type: 'string', description: '延后、受阻的原因' },
                 evidence: { type: 'string', description: 'met：实际做了什么、观察到什么；blocked：为何执行不了' },
               },
               required: ['criterion', 'status'],
@@ -182,10 +208,32 @@ TDD 纪律：
 
       if (data.action === 'read') {
         const todos = store.read()
+        if (params.sessionId) {
+          try { return { content: `${TodoStore.formatList(todos)}\n验收证据：${JSON.stringify(readCompletionEvidence(params))}\n恢复事件：${JSON.stringify(createFileRepairStore(params.cwd, params.sessionId).list())}` } }
+          catch (error) { return { content: `读取验收证据失败：${String(error)}`, isError: true } }
+        }
         if (todos.length === 0) {
           return { content: TODO_EMPTY_RESULT }
         }
         return { content: TodoStore.formatList(todos) }
+      }
+
+      if (data.repairs?.length) {
+        if (!params.sessionId) return { content: '恢复事件需要会话归属', isError: true, errorKind: 'format_error' }
+        try {
+          const repairs = createFileRepairStore(params.cwd, params.sessionId)
+          for (const repair of data.repairs) if (!repairs.list().some(r => r.file === repair.file)) throw Error(`没有恢复事件：${repair.file}`)
+          for (const repair of data.repairs) { repairs.resolve(repair.file, repair.state, repair.reason); params.onRepairDisposition?.(repair.file) }
+        } catch (error) { return { content: String(error), isError: true, errorKind: 'format_error' } }
+      }
+      let acceptance = data.acceptance
+      if (data.decisions?.length || data.open_items?.length) {
+        try { recordContinuity(params, data.decisions, data.open_items, data.plan_ref ?? params.activePlanFilePath ?? undefined) }
+        catch (error) { return { content: `交接记录错误：${String(error)}`, isError: true, errorKind: 'format_error' } }
+      }
+      if (params.sessionId && (acceptance?.length || data.findings?.length)) {
+        try { acceptance = recordCompletionEvidence(params, acceptance ?? [], data.findings, data.plan_ref ?? params.activePlanFilePath ?? undefined) }
+        catch (error) { return { content: `验收证据错误：${String(error)}`, isError: true, errorKind: 'format_error' } }
       }
 
       // v2 检测（主控可靠性闭环）：删除完成项 = 主动退休（波次切换的正常形态），
@@ -200,17 +248,17 @@ TDD 纪律：
       // ordered descriptions to the loop, which seeds the PlanExecutionTrace
       // 同步到 PlanExecutionTrace：首次写入会 seed，后续写入会同步状态。
       if (params.onPlanSteps && data.todos.length > 0) {
-        params.onPlanSteps(data.todos.map(t => ({ id: t.id, content: t.content, status: t.status })))
+        params.onPlanSteps(data.todos.map(t => ({ id: t.id, content: t.content, status: t.status, acceptanceIds: acceptance?.filter(a => a.stepId === t.id).flatMap(a => a.id ? [a.id] : []) })))
       }
 
       // 用户级验收面：声明与核销共用这一个字段。loop 侧写 successCriteria 并
       // satisfy/block acceptance 义务——这是该义务唯一的核销入口。
-      if (params.onAcceptance && data.acceptance && data.acceptance.length > 0) {
-        params.onAcceptance(data.acceptance)
+      if (params.onAcceptance && acceptance && acceptance.length > 0) {
+        params.onAcceptance(acceptance)
       }
 
       const summary = TodoStore.formatSummary(data.todos)
-      let content = summary
+      let content = summary + (acceptance?.length ? `\n验收：${acceptance.map(a => `${a.id ?? a.criterion}[${a.kind ?? '未分类'}/${a.status}]`).join('；')}` : '')
 
       // Scope gate (protective net for non-tianquan models): assess whether
       // the task is large/deeply-chained and, if so, surface a notice nudging

@@ -3,14 +3,23 @@
  */
 
 export type ConsoleLevel = 'log' | 'info' | 'warn' | 'error' | 'debug'
+export interface DiagnosticScope { pageId: string | null; navigationId: string | null; committedAt?: number; diagnosticsSettled?: boolean }
+export interface DiagnosticQuery { scope?: 'current' | 'session'; pageId?: string | null; navigationId?: string | null }
+interface DiagnosticRecord { pageId?: string | null; navigationId?: string | null; seq?: number }
+function matchesScope(entry: DiagnosticRecord, query?: DiagnosticQuery): boolean {
+  return !query || query.scope === 'session' || !!query.navigationId && entry.navigationId === query.navigationId && (query.pageId == null || entry.pageId === query.pageId)
+}
+function scopeLabel(entry: DiagnosticRecord): string {
+  return entry.seq === undefined ? '' : ` [page=${entry.pageId ?? 'unknown'} navigation=${entry.navigationId ?? 'unknown'} seq=${entry.seq}]`
+}
 
-export interface ConsoleEntry {
+export interface ConsoleEntry extends DiagnosticRecord {
   level: ConsoleLevel
   text: string
   ts: number
 }
 
-export interface NetworkEntry {
+export interface NetworkEntry extends DiagnosticRecord {
   requestId: string
   method: string
   url: string
@@ -32,7 +41,7 @@ export interface NetworkEntry {
   responseHeaders?: Record<string, string>
 }
 
-export interface NetworkQuery {
+export interface NetworkQuery extends DiagnosticQuery {
   failedOnly?: boolean
   urlFilter?: string
   apiOnly?: boolean
@@ -64,7 +73,7 @@ export function normalizeConsoleLevel(raw: string): ConsoleLevel {
 /** `[error] Uncaught TypeError…` — prefix drives TUI severity colouring. */
 export function formatConsoleLine(entry: ConsoleEntry): string {
   const text = entry.text.replace(/\s+$/, '')
-  return `[${entry.level}] ${text}`
+  return `[${entry.level}] ${text}${scopeLabel(entry)}`
 }
 
 /** Stable signature for console clustering. Strips line:column references,
@@ -154,6 +163,7 @@ export function formatNetworkLine(entry: NetworkEntry, includeBody = false): str
     if (hint) line += ` ${hint}`
   }
   if (entry.resourceType) line += ` [${entry.resourceType}]`
+  line += scopeLabel(entry)
   if (includeBody && entry.responseBody) {
     const suffix = entry.responseBodyTruncated ? ' …(body truncated)' : ''
     line += `\n  body: ${entry.responseBody}${suffix}`
@@ -162,7 +172,7 @@ export function formatNetworkLine(entry: NetworkEntry, includeBody = false): str
 }
 
 /** A network line parsed back into fields, for structured (desktop) rendering. */
-export interface ParsedNetworkRow {
+export interface ParsedNetworkRow extends DiagnosticRecord {
   dir: 'ok' | 'pending' | 'failed'
   method: string
   url: string
@@ -180,6 +190,9 @@ export interface ParsedNetworkRow {
  */
 export function parseNetworkLine(line: string): ParsedNetworkRow | null {
   let rest = line.replace(/\s+$/, '')
+  const scope = rest.match(/ \[page=([^\s]+) navigation=([^\s]+) seq=(\d+)\]$/)
+  const diagnostic: DiagnosticRecord = scope ? { pageId: scope[1] === 'unknown' ? null : scope[1], navigationId: scope[2] === 'unknown' ? null : scope[2], seq: Number(scope[3]) } : {}
+  if (scope) rest = rest.slice(0, -scope[0].length)
   let resourceType: string | undefined
   const typeMatch = rest.match(/ \[(\w+)\]$/)
   if (typeMatch) {
@@ -199,13 +212,13 @@ export function parseNetworkLine(line: string): ParsedNetworkRow | null {
     }
     const sp = rest.indexOf(' ')
     if (sp < 0) return null
-    return { dir: 'failed', method: rest.slice(0, sp), url: rest.slice(sp + 1), errorText, resourceType }
+    return { ...diagnostic, dir: 'failed', method: rest.slice(0, sp), url: rest.slice(sp + 1), errorText, resourceType }
   }
   if (rest.startsWith('→ ')) {
     rest = rest.slice(2)
     const sp = rest.indexOf(' ')
     if (sp < 0) return null
-    return { dir: 'pending', method: rest.slice(0, sp), url: rest.slice(sp + 1), resourceType }
+    return { ...diagnostic, dir: 'pending', method: rest.slice(0, sp), url: rest.slice(sp + 1), resourceType }
   }
   if (rest.startsWith('← ')) {
     rest = rest.slice(2)
@@ -223,6 +236,7 @@ export function parseNetworkLine(line: string): ParsedNetworkRow | null {
     const secondSp = afterStatus.indexOf(' ')
     if (secondSp < 0) return null
     return {
+      ...diagnostic,
       dir: 'ok',
       status,
       method: afterStatus.slice(0, secondSp),
@@ -339,6 +353,7 @@ function appendHeaderBlock(lines: string[], label: string, headers?: Record<stri
 export function formatNetworkDetail(entry: NetworkEntry): string {
   const lines = [
     `id: ${entry.requestId}`,
+    `page: ${entry.pageId ?? 'unknown'}; navigation: ${entry.navigationId ?? 'unknown'}; seq: ${entry.seq ?? 'unknown'}`,
     `method: ${entry.method}`,
     `url: ${entry.url}`,
   ]
@@ -382,14 +397,19 @@ export function truncateResponseBody(text: string): { body: string; truncated: b
 }
 
 export class LogCapture {
+  private seq = 0
+  omittedConsole = 0
+  omittedOpening = 0
+  omittedNetwork = 0
   private consoleEntries: ConsoleEntry[] = []
   private readonly network = new Map<string, NetworkEntry>()
   private networkOrder: string[] = []
 
-  addConsole(level: ConsoleLevel, text: string, ts: number = Date.now()): ConsoleEntry {
-    const entry: ConsoleEntry = { level, text, ts }
+  addConsole(level: ConsoleLevel, text: string, ts: number = Date.now(), scope?: DiagnosticScope): ConsoleEntry {
+    const entry: ConsoleEntry = { level, text, ts, seq: ++this.seq, pageId: scope?.pageId ?? null, navigationId: scope?.navigationId ?? null }
     this.consoleEntries.push(entry)
     if (this.consoleEntries.length > MAX_CONSOLE) {
+      this.omittedConsole++
       this.consoleEntries = this.consoleEntries.slice(-MAX_CONSOLE)
     }
     return entry
@@ -403,6 +423,7 @@ export class LogCapture {
     resourceType?: string,
     headers?: Record<string, string>,
     postData?: string,
+    scope?: DiagnosticScope,
   ): NetworkEntry {
     const prev = this.network.get(requestId)
     let requestBody = prev?.requestBody
@@ -413,6 +434,7 @@ export class LogCapture {
       requestBodyTruncated = truncated
     }
     const entry: NetworkEntry = {
+      seq: prev?.seq ?? ++this.seq, pageId: prev?.pageId ?? scope?.pageId ?? null, navigationId: prev?.navigationId ?? scope?.navigationId ?? null,
       requestId,
       method,
       url,
@@ -443,6 +465,7 @@ export class LogCapture {
   ): NetworkEntry {
     const prev = this.network.get(requestId)
     const entry: NetworkEntry = {
+      seq: prev?.seq ?? ++this.seq, pageId: prev?.pageId ?? null, navigationId: prev?.navigationId ?? null,
       requestId,
       method: prev?.method ?? 'GET',
       url: prev?.url ?? '',
@@ -472,6 +495,7 @@ export class LogCapture {
   ): NetworkEntry {
     const prev = this.network.get(requestId)
     const entry: NetworkEntry = {
+      seq: prev?.seq ?? ++this.seq, pageId: prev?.pageId ?? null, navigationId: prev?.navigationId ?? null,
       requestId,
       method: prev?.method ?? method,
       url: prev?.url ?? url,
@@ -511,22 +535,23 @@ export class LogCapture {
       this.networkOrder.push(entry.requestId)
       if (this.networkOrder.length > MAX_NETWORK) {
         const evicted = this.networkOrder.shift()
+        this.omittedNetwork++
         if (evicted) this.network.delete(evicted)
       }
     }
     this.network.set(entry.requestId, entry)
   }
 
-  getConsole(level?: ConsoleLevel): ConsoleEntry[] {
-    return level ? this.consoleEntries.filter((e) => e.level === level) : [...this.consoleEntries]
+  getConsole(level?: ConsoleLevel, query?: DiagnosticQuery): ConsoleEntry[] {
+    return this.consoleEntries.filter(e => (!level || e.level === level) && matchesScope(e, query))
   }
 
   /** Cluster console entries by a stable signature so the model sees
    *  "4× Uncaught TypeError: …" instead of four identical bare errors.
    *  Signature strips line:column, URLs, and numeric values that vary per
    *  occurrence while keeping the error shape recognisable. */
-  getConsoleClusters(level?: ConsoleLevel): { signature: string; count: number; sample: string; level: ConsoleLevel }[] {
-    const entries = level ? this.consoleEntries.filter((e) => e.level === level) : this.consoleEntries
+  getConsoleClusters(level?: ConsoleLevel, query?: DiagnosticQuery): { signature: string; count: number; sample: string; level: ConsoleLevel }[] {
+    const entries = this.getConsole(level, query)
     const clusters = new Map<string, { count: number; sample: string; level: ConsoleLevel }>()
     for (const e of entries) {
       const sig = consoleSignature(e.text)
@@ -543,6 +568,7 @@ export class LogCapture {
   getNetwork(query: NetworkQuery | boolean = false): NetworkEntry[] {
     const opts: NetworkQuery = typeof query === 'boolean' ? { failedOnly: query } : query
     let all = this.networkOrder.map((id) => this.network.get(id)).filter((e): e is NetworkEntry => !!e)
+    all = all.filter(e => matchesScope(e, opts.scope || opts.navigationId !== undefined ? opts : undefined))
     if (opts.failedOnly) {
       all = all.filter((e) => e.failed || (e.status !== undefined && e.status >= 400))
     }

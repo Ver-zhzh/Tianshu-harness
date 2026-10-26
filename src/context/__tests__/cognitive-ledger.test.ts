@@ -152,7 +152,7 @@ describe('verification gap projection', () => {
     const ledger = createCognitiveLedger({ evidence: makeEvidence(), trace: makeTrace(), turn: 1 })
     const gap = buildVerificationGapProjection(ledger)
     assert.match(gap, /<verification-gap status="unverified" modified="1">/)
-    assert.match(gap, /Run relevant verification before claiming done/)
+    assert.match(gap, /不阻止安全提交或收尾/)
     assert.ok(gap.length < 160, `Gap projection too long: ${gap.length}`)
   })
 

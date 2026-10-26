@@ -127,26 +127,37 @@ export class BrowserDebugSession {
   static async open(opts: OpenSessionOptions): Promise<BrowserDebugSession> {
     const mode: BrowserSessionMode = opts.connectUrl ? 'connect' : 'launch'
     let self: BrowserDebugSession | null = null
+    const early: Array<() => void> = []
+    let openingDropped = 0
+    const publish = (work: () => void) => { if (self) work(); else if (early.length < 500) early.push(work); else openingDropped++ }
     const events: DriverEvents = {
-      onConsole: (rawLevel, text) => {
+      onConsole: (rawLevel, text, scope) => {
+        publish(() => {
         const level = normalizeConsoleLevel(rawLevel)
-        const entry = self!.log.addConsole(level, text)
+        const entry = self!.log.addConsole(level, text, Date.now(), scope)
         self!.emit(formatConsoleLine(entry))
+        })
       },
-      onRequestStart: (id, method, url, resourceType, headers, postData) => {
-        const entry = self!.log.startRequest(id, method, url, Date.now(), resourceType, headers, postData)
+      onRequestStart: (id, method, url, resourceType, headers, postData, scope) => {
+        publish(() => {
+        const entry = self!.log.startRequest(id, method, url, Date.now(), resourceType, headers, postData, scope)
         self!.emit(formatNetworkLine(entry))
+        })
       },
       onResponse: (id, status, resourceType, headers) => {
+        publish(() => {
         const entry = self!.log.completeRequest(id, status, Date.now(), resourceType, headers)
         self!.emit(formatNetworkLine(entry))
+        })
       },
       onRequestFailed: (id, method, url, errorText, resourceType) => {
+        publish(() => {
         const entry = self!.log.failRequest(id, method, url, errorText, Date.now(), resourceType)
         self!.emit(formatNetworkLine(entry))
+        })
       },
       onResponseBody: (id, body, contentType) => {
-        self!.log.attachResponseBody(id, body, contentType)
+        publish(() => { self!.log.attachResponseBody(id, body, contentType) })
       },
     }
     const factory = opts.driverFactory ?? defaultDriverFactory
@@ -166,6 +177,8 @@ export class BrowserDebugSession {
       log: opts.log,
       frames: opts.frames,
     })
+    for (const work of early) work()
+    self.log.omittedOpening += openingDropped
     return self
   }
 

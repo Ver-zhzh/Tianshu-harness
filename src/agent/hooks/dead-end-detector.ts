@@ -105,7 +105,7 @@ export function createDeadEndDetectorHook(
     phase: 'postTool',
     name: 'dead-end-detector',
     getCycleCount(file: string) { return files.get(file)?.cycles ?? 0 },
-    async run(_ctx: RuntimeHookContext, tool: RuntimeToolEvent): Promise<void> {
+    async run(ctx: RuntimeHookContext, tool: RuntimeToolEvent): Promise<void> {
       // ── 编辑:标记所有被修改文件进入"等待验证"───────────────
       if (WRITE_TOOL_NAMES.has(tool.name) && tool.success) {
         for (const file of extractWriteFilePaths(tool.name, tool.input as Record<string, unknown> | undefined)) {
@@ -124,6 +124,7 @@ export function createDeadEndDetectorHook(
           try {
             await deps.deposit?.({ path: file, signal: 'dead-end', strength: 0 })
           } catch { /* best-effort: 残留不影响正确性，仅失去一次性清除机会 */ }
+          ctx.signal?.throwIfAborted()
         }
         files.clear()
         return
@@ -179,6 +180,7 @@ export function createDeadEndDetectorHook(
           try {
             await deps.deposit?.({ path: file, signal: 'dead-end', strength: 0.8 })
           } catch { /* stigmergy 沉积 best-effort */ }
+          ctx.signal?.throwIfAborted()
         }
       }
     },

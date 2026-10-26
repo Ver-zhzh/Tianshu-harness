@@ -1,4 +1,6 @@
 import { currentWorkspaceRoots } from '../tools/workspace-context.js'
+import { clampReadConcurrency } from '../config/read-concurrency.js'
+import { reviewSnapshotCwd } from './review-snapshot.js'
 import { parseUserInstructionsSnapshot, type UserInstructionsSnapshot } from '../prompt/user-instructions.js'
 import type { ModelCapabilityCard } from '../model/capability.js'
 import type { Config, ProviderConfig } from '../config/schema.js'
@@ -21,6 +23,8 @@ import { workerModelPolicy, type WorkerModelPolicy } from './worker-model-policy
 import { resolveModelBinding, sessionProviderKey, snapshotSessionBinding, ModelBindingUnavailable, type ModelBindingRef, type ModelUnavailableReason } from '../model/model-binding.js'
 
 export interface WorkerRuntimeDeps {
+  externalHookParent?: { runtimeId: string; runId: string }
+  externalHookHost?: import('../hooks/external-hook-types.js').ExternalHookHostPort
   getUserInstructions: () => import('../prompt/user-instructions.js').UserInstructionsSnapshot
   rootSessionId?: string
   rootSessionBinding?: ModelBindingRef
@@ -77,7 +81,10 @@ export function createWorkerRuntimeFactory(getDeps: () => WorkerRuntimeDeps) {
       const selected = get(order)
       return selected.binding ? buildModelCards({ models: [selected.binding.spec] })[0] : undefined
     },
-    runtimeFactory: ((order, card, registry) => assembleWorkerRuntime(get(order), order, card, registry)) as WorkerRuntimeFactory,
+    runtimeFactory: ((order, card, registry) => {
+      const model = get(order)
+      return assembleWorkerRuntime(order.scope.reviewSnapshot ? { ...model, deps: { ...model.deps, cwd: reviewSnapshotCwd(order.scope.reviewSnapshot) } } : model, order, card, registry)
+    }) as WorkerRuntimeFactory,
   }
 }
 
@@ -118,6 +125,7 @@ function assembleWorkerRuntime(prepared: PreparedModel, _order: WorkOrder, card:
   const workerCapabilities = resolveCapabilities(workerProvider.name, workerProvider.capabilities, workerModelSpec?.capabilities)
   const expectedPrincipal = 'strategy' in policy.target && policy.target.strategy === 'session' ? root.credentialPrincipal : undefined
   return {
+    readConcurrency: clampReadConcurrency(config.tools?.readConcurrency),
     order: _order,
     runtimeDecision: {
       ...selectionMetadata,
@@ -156,6 +164,8 @@ function assembleWorkerRuntime(prepared: PreparedModel, _order: WorkOrder, card:
     }),
     toolRegistry: workerRegistry,
     blockPolicy: blocks,
+    externalHookHost: deps.externalHookHost,
+    externalHookParent: deps.externalHookParent,
     cwd,
     workspaceRoots: [...currentWorkspaceRoots(cwd)],
     maxTurns: 100,

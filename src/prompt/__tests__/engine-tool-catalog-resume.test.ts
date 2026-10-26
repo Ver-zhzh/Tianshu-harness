@@ -90,3 +90,14 @@ describe('工具表构造期锁死（issue #500）', () => {
     )
   })
 })
+
+it('explicit activation adds one published tool while late registration remains frozen', () => {
+  const engine = mkEngine([mkTool('base')]); commitProof(engine)
+  engine.updateTools([mkTool('base'), mkTool('late')])
+  assert.equal(engine.activateExplicitTool(mkTool('requested')), true)
+  assert.deepEqual(engine.getTools().map(t => t.name), ['base','requested'])
+  assert.equal(engine.activateExplicitTool(mkTool('requested')), false)
+  engine.updateTools([mkTool('base'),mkTool('requested'),mkTool('late')])
+  assert.deepEqual(engine.getTools().map(t => t.name), ['base','requested'])
+  assert.throws(() => engine.activateExplicitTool({ ...mkTool('base'), description: 'altered contract' }), /cannot replace/)
+})

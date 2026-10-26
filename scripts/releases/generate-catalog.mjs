@@ -5,13 +5,14 @@ import { pathToFileURL } from 'node:url'
 import { validateCatalog, chooseCatalog } from './catalog.mjs'
 import { validateReleaseNotes } from './release-notes.mjs'
 import { writeCatalog } from './check-workspace-metadata.mjs'
+import { assertAnonymousProof, atomgitDownloadURL, verifyAnonymousDownload } from './anonymous-download.mjs'
 
 export async function sha256(path) {
   const hash = createHash('sha256')
   for await (const chunk of createReadStream(path)) hash.update(chunk)
   return hash.digest('hex')
 }
-export async function generateCatalog({ manifest, assets, revision = 1, githubAssets = [], evidence = {}, previousCatalog, releaseNotes, atomgit: atomgitEnabled = false }) {
+export async function generateCatalog({ manifest, assets, revision = 1, githubAssets = [], evidence = {}, previousCatalog, releaseNotes, atomgit: atomgitEnabled = false, verifyAtomgit = verifyAnonymousDownload }) {
   if (previousCatalog) validateCatalog(previousCatalog)
   if (releaseNotes) validateReleaseNotes(releaseNotes, manifest.version)
   const artifacts = []
@@ -29,17 +30,17 @@ export async function generateCatalog({ manifest, assets, revision = 1, githubAs
     // OSS remains a manual backup source (auto routing never selects it).
     const sources = { ...previous?.sources, github }
     sources.oss ??= { url: `https://tianshu-update.oss-cn-hangzhou.aliyuncs.com/tianshu/v${manifest.version}/${fileName}`, verified: false }
-    // --atomgit：AtomGit 资产已上传（收口脚本的前置步骤），源直接记为 verified——与 GitHub/OSS 同级，无资格验证链。
     if (atomgitEnabled && purpose === 'update') {
+      const url = atomgitDownloadURL(`v${manifest.version}`, fileName)
+      const proof = await verifyAtomgit({ url, expected: { size, sha256: digest } })
+      assertAnonymousProof(proof, { url, size, sha256: digest })
       const prior = previous?.sources.atomgit
-      sources.atomgit = prior?.sha256 === digest && prior?.size === size && prior.verified
-        ? prior
-        : { url: `https://api.atomgit.com/api/v5/repos/huiliyi37/Tianshu-harness/releases/v${manifest.version}/attach_files/${fileName}/download`, verified: true, anonymous: true, verifiedAt: new Date().toISOString(), sha256: digest, size }
+      const verifiedAt = prior?.verified && prior.anonymous && prior.url === url && prior.sha256 === digest && prior.size === size ? prior.verifiedAt : proof.verifiedAt
+      sources.atomgit = { url, verified: true, anonymous: true, verifiedAt, sha256: digest, size }
     }
-    for (const source of ['atomgit', 'oss']) {
-      const proof = evidence[fileName]?.[source]
-      if (proof) sources[source] = proof
-    }
+    if (evidence[fileName]?.atomgit) throw new Error(`AtomGit proof must come from live anonymous verification: ${fileName}`)
+    const proof = evidence[fileName]?.oss
+    if (proof) sources.oss = proof
     artifacts.push({ platform, purpose, fileName, size, sha256: digest, ...(signature ? { signature } : {}), sources })
   }
   for (const [platform, entry] of Object.entries(manifest.platforms)) {

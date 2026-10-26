@@ -19,6 +19,9 @@ export interface BrowserCookie {
 }
 
 export interface PwRequest {
+  isNavigationRequest?(): boolean
+  frame?(): unknown
+  redirectedFrom?(): PwRequest | null
   method(): string
   url(): string
   resourceType(): string
@@ -41,6 +44,7 @@ export interface PwKeyboard {
   press(key: string): Promise<void>
 }
 export interface PwPage {
+  mainFrame?(): unknown
   close?():Promise<void>
   setInputFiles?(selector:string,files:string[]|Array<{name:string;mimeType:string;buffer:Buffer}>):Promise<void>
   goto(url: string, opts: Record<string, unknown>): Promise<unknown>

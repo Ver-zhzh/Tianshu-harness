@@ -1,5 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { ActionIntentNudges } from '../action-intent-detector.js'
 import {
   hasActionIntent,
   hasImperativeActionTail,
@@ -8,6 +9,22 @@ import {
 } from '../action-intent-detector.js'
 
 describe('hasActionIntent', () => {
+  it('replays Flash goal paraphrase without treating it as a current write commitment', () => {
+    const flash = '我来理解任务：把桌面端的默认主题从当前默认改为「纯白圣殿」，并确保打包分发后首次启动的默认主题也是它。先探查主题系统结构。'
+    assert.equal(hasWriteActionIntent(flash), false)
+    assert.equal(hasActionIntent(flash), false)
+    assert.equal(hasWriteActionIntent('方案：现在修改默认主题，然后构建。'), false)
+    assert.equal(hasWriteActionIntent('如果用户确认，我来修改默认主题。'), false)
+    assert.equal(hasWriteActionIntent('现在修改默认主题。'), true)
+    assert.equal(hasWriteActionIntent('我来理解任务：把默认主题改好。现在修改主题配置。'), true)
+  })
+  it('reminds once for the same commitment across rounds, without blocking a different action', () => {
+    const nudges = new ActionIntentNudges()
+    assert.equal(nudges.claim('现在修改 theme.ts。'), true)
+    assert.equal(nudges.claim('接下来修改 theme.ts。'), false)
+    assert.equal(nudges.claim('现在修改 other.ts。'), true)
+    assert.equal(nudges.claim('我来理解任务：把默认主题改好。先探查结构。'), false)
+  })
   // ── True positives: 行动承诺 + 工具动词 ──
   it('检测"让我 grep 一下"', () => {
     assert.ok(hasActionIntent('让我 grep 一下 loop.ts 看看调用链'))

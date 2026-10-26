@@ -57,11 +57,11 @@ describe('注入点申报表 · 基线', () => {
 
   it('规模与通道数符合当前实现', () => {
     const { stats } = runChecks()
-    // 27 个普通 appendix 块 + 2 个受保护块 + 17 个通道级条目（含星域职责边界）。
+    // 27 个普通 appendix 块 + 2 个受保护块 + 23 个通道级条目。
     assert.equal(stats.appendix, 27)
     assert.equal(stats.appendixProtected, 2)
-    assert.equal(stats.surfaces, 46)
-    assert.equal(stats.channels, 8)
+    assert.equal(stats.surfaces, 52)
+    assert.equal(stats.channels, 9)
     // CvmInjectionSource 七源全部被认领
     assert.equal(stats.metered, 7)
     // 每个锚点都真在源码里找到了

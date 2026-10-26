@@ -84,6 +84,10 @@ export function tapAgentCallbacks(
   const tapped: AgentCallbacks & EventTapHandle = {
     ...inner,
     flush,
+    onToolInputProgress: progress => {
+      emit('tool_input_progress', { ...progress })
+      inner.onToolInputProgress?.(progress)
+    },
 
     onTextDelta: (text) => {
       delta('text_delta', redactText(text))

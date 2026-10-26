@@ -5,6 +5,8 @@ import type { OaiChatRequest } from '../api/oai-types.js'
 import type { ContentBlock, Usage } from '../api/types.js'
 import { stripIntraTurnRepetition } from './dedup.js'
 import type { StreamCacheObservability } from './cache-log-observability.js'
+import { RequestObservation } from '../api/request-observability.js'
+import { ToolInputProgressEmitter, type ToolInputProgress } from '../api/tool-input-progress.js'
 
 export interface StreamRule {
   /** Regex pattern matched against a bash tool-call's `command` argument.
@@ -28,6 +30,7 @@ export const DEFAULT_STREAM_RULES: readonly StreamRule[] = [
 ]
 
 export interface TurnStreamCallbacks {
+  onToolInputProgress?: (progress: ToolInputProgress) => void
   onContextBudget?: StreamCallbacks['onContextBudget']
   onTextDelta: (text: string) => void
   onThinkingDelta: (thinking: string) => void
@@ -86,6 +89,8 @@ export interface TurnStreamDeps {
 }
 
 export interface TurnStreamInput {
+  runStartedAt?: number
+  preRequestMs?: number
   request: OaiChatRequest
   turn: number
   lastTurnTextFingerprint: string
@@ -139,6 +144,14 @@ export class TurnStreamController {
     const now = this.deps.now ?? Date.now
     let streamStartMs: number | undefined
     let ttftMs: number | undefined
+    let observation = new RequestObservation()
+    let runFirstTextMs: number | undefined
+    const progress = new Map<string, ToolInputProgress>()
+    const progressEmitter = new ToolInputProgressEmitter(p => input.callbacks.onToolInputProgress?.(p))
+    const clearProgress = () => {
+      for (const p of progress.values()) progressEmitter.push({ ...p, state: 'aborted' })
+      progress.clear(); progressEmitter.close()
+    }
     const markFirstProviderOutput = () => {
       if (streamStartMs === undefined || ttftMs !== undefined) return
       ttftMs = Math.max(0, now() - streamStartMs)
@@ -157,6 +170,9 @@ export class TurnStreamController {
       collectedBlocks.reduce((sum, block) => sum + (block.type === 'text' ? block.text.length
         : block.type === 'thinking' ? block.thinking.length : block.type === 'tool_use' ? JSON.stringify(block.input).length : 0), 0))
     const discardAttempt = () => {
+      clearProgress()
+      observation = new RequestObservation()
+      runFirstTextMs = undefined
       collectedBlocks.length = 0
       toolUses.length = 0
       thinkingAccum = turnDisplayBuffer = stopReason = ''
@@ -173,6 +189,8 @@ export class TurnStreamController {
     }
     const streamCallbacks: StreamCallbacks = {
       onTextDelta: (text) => {
+        if (text && input.runStartedAt !== undefined) runFirstTextMs ??= Math.max(0, Date.now() - input.runStartedAt)
+        if (text) observation.output('text')
         if (text.length > 0) markFirstProviderOutput()
         this.deps.appendStreamedText(text)
         if (this.deps.getStreamedTextLength() - this.deps.getLastPrewarmAt() >= 500) {
@@ -195,6 +213,7 @@ export class TurnStreamController {
         input.callbacks.onTextDelta(text)
       },
       onThinkingDelta: (thinking) => {
+        if (thinking) observation.output('thinking')
         if (thinking.length > 0) markFirstProviderOutput()
         thinkingAccum += thinking
         // Duplicate-chunk guard for thinking content (mirrors text dedup above).
@@ -211,6 +230,7 @@ export class TurnStreamController {
         input.callbacks.onThinkingDelta(thinking)
       },
       onContentBlock: (block) => {
+        if (block.type === 'tool_use') observation.output('tool')
         if (
           block.type === 'tool_use'
           || (block.type === 'text' && block.text.length > 0)
@@ -256,7 +276,7 @@ export class TurnStreamController {
             output_tokens: usage.output_tokens ?? 0,
             cache_read_input_tokens: usage.cache_read_input_tokens ?? 0,
             cache_creation_input_tokens: usage.cache_creation_input_tokens ?? 0,
-          }, ttftMs !== undefined ? { ttftMs } : undefined)
+          }, { ...observation.snapshot(), ...(runFirstTextMs !== undefined ? { runFirstTextMs } : {}), ...(input.preRequestMs !== undefined ? { preRequestMs: input.preRequestMs } : {}), ...(ttftMs !== undefined ? { ttftMs } : {}) })
         }
       },
       onError: (error) => {
@@ -293,12 +313,21 @@ export class TurnStreamController {
           : info.usage
         // Settle each failed attempt separately, including explicit provider zero.
         // Keep fields unchanged: local estimates are not provider observations.
-        if (this.deps.recordStreamAttemptAborted) this.deps.recordStreamAttemptAborted({ ...info, turn: input.turn, usage })
+        if (this.deps.recordStreamAttemptAborted) this.deps.recordStreamAttemptAborted({ ...info, measurements: observation.snapshot(), turn: input.turn, usage })
         else if (usage) this.deps.addUsage(usage)
         discardAttempt()
       },
       onToolCallDelta: () => {
+        observation.output('tool')
         markFirstProviderOutput()
+      },
+      onToolInputProgress: p => {
+        observation.output('tool')
+        markFirstProviderOutput()
+        const key = `${p.attemptId ?? ''}:${p.toolCallId}`
+        if (p.state === 'generating') progress.set(key, p)
+        else progress.delete(key)
+        progressEmitter.push(p)
       },
       onToolCallHint: (toolName, partialArgs) => {
         markFirstProviderOutput()
@@ -327,7 +356,7 @@ export class TurnStreamController {
         toolUses.length = 0
         streamError = err as Error
       }
-    }
+    } finally { clearProgress() }
 
     // Tool hints may stream early; actionable tool notifications belong only
     // to a completed attempt, after safety rules and transport checks pass.

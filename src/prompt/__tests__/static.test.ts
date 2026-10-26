@@ -54,6 +54,21 @@ describe('buildSystemPrompt', () => {
     assert.ok(prompt.includes('不要让提交记录或文件清单代替结果说明'))
   })
 
+  it('separates default scoped commits from strict verification and independent review', () => {
+    const prompt = buildSystemPrompt({ tools: [] })
+    const shared = prompt.match(/<shared-worktree>([\s\S]*?)<\/shared-worktree>/)![1]!
+    assert.ok(shared.includes('默认提交=安全提交'))
+    assert.ok(shared.includes('本次未执行测试或审查'))
+    assert.ok(shared.includes('旧混合参数（verification_policy/review_level/review_policy/skipAutoReview/checklist/learned/review_findings）已移除'))
+    assert.ok(shared.includes('独立审查由用户发起'))
+    assert.doesNotMatch(prompt, /提交前硬闸门|typecheck[^\n]*exit code ≠ 0 硬拦/)
+    assert.ok(prompt.includes('开发验证与提交分离'))
+    assert.doesNotMatch(prompt, /不运行测试不交付|跑全量类型检查（typecheck exit 0）/)
+    assert.ok(shared.includes('不必先调用一次只读门禁'))
+    assert.ok(!shared.includes('己方文件须验证通过'))
+    assert.ok(!shared.includes('typecheck 和 review 由你在调用前独立完成'))
+  })
+
   it('teaches parallel fan-out of independent探索 tools', () => {
     const prompt = buildSystemPrompt({ tools: [] })
     assert.ok(prompt.includes('并行'), '应含并行指令')
@@ -80,13 +95,13 @@ describe('buildSystemPrompt', () => {
 
   it('scopes fan-out to read-only tools — serial tools sent one at a time', () => {
     const prompt = buildSystemPrompt({ tools: [] })
-    assert.ok(prompt.includes('只读工具可一批发'), '应限定只读工具可批发')
+    assert.ok(prompt.includes('独立读取同轮发出') || prompt.includes('只读工具仍可一批发'), '应限定只读工具可批发')
     assert.ok(
-      prompt.includes('run_tests') && prompt.includes('git'),
-      '应点名 run_tests/git 等串行工具（防过度泛化）',
+      prompt.includes('测试') && prompt.includes('Git'),
+      '应点名 测试/Git 等串行工具（防过度泛化）',
     )
     assert.ok(
-      prompt.includes('逐个串行'),
+      prompt.includes('串行屏障'),
       '应要求串行工具逐个执行',
     )
   })

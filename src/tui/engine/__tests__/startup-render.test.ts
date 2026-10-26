@@ -71,3 +71,47 @@ test('start() first frame is a clean append (no stale moveToTop after pre-start 
   assert.ok(startOutput.includes('╭') || startOutput.includes('─'), 'start() 首帧应含顶边框')
   assert.equal(startOutput.replace(/\x1b\[[\d;]*m/g, '').split('\n').filter(row => /^(?:[─━┄-]{3,}|[─━┄-] .+ [─━┄-]{2,})\s*$/.test(row)).length, 2, 'start has one complete open composer with two writing rules')
 })
+
+test('workspace welcome commits once before startup notices and command results', () => {
+  const out = new MockOut()
+  const app = new TuiApp({
+    stdout: out as unknown as WriteStream,
+    stdin: new MockIn() as unknown as ReadStream,
+    cols: 100, rows: 40, modelName: 'test',
+  })
+  app.setWorkspaceWelcome(['', 'WELCOME_BANNER'])
+
+  app.start()
+  app.commitStatic('STELLAR_IDENTITY')
+  app.commitStatic('Reasoning effort set to: Max')
+
+  const output = out.chunks.join('')
+  const welcomeAt = output.indexOf('WELCOME_BANNER')
+  const identityAt = output.indexOf('STELLAR_IDENTITY')
+  const effortAt = output.indexOf('Reasoning effort set to: Max')
+  assert.ok(welcomeAt >= 0, 'welcome must be committed')
+  assert.ok(identityAt > welcomeAt, `identity must follow welcome: ${output}`)
+  assert.ok(effortAt > identityAt, `command result must follow startup notices: ${output}`)
+  assert.equal(output.split('WELCOME_BANNER').length - 1, 1, 'welcome must not be reintroduced by later live redraws')
+})
+
+test('returning from fullscreen to classic also commits welcome before later notices', () => {
+  const out = new MockOut()
+  const app = new TuiApp({
+    stdout: out as unknown as WriteStream,
+    stdin: new MockIn() as unknown as ReadStream,
+    cols: 100, rows: 40, modelName: 'test',
+  })
+  app.setFrontendPreferences({ ...app.getFrontendPreferences(), renderer: 'fullscreen' })
+  app.setWorkspaceWelcome(['', 'WELCOME_BANNER'])
+  app.start()
+
+  ;(app as any).switchFrontendRenderer('classic')
+  app.commitStatic('NOTICE_AFTER_SWITCH')
+
+  const history = app.getScrollbackContent()
+  const welcomeAt = history.indexOf('WELCOME_BANNER')
+  const noticeAt = history.indexOf('NOTICE_AFTER_SWITCH')
+  assert.ok(welcomeAt >= 0, 'classic history must include workspace welcome after a renderer switch')
+  assert.ok(noticeAt > welcomeAt, 'notice must be appended after welcome')
+})

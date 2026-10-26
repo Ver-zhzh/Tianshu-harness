@@ -231,8 +231,9 @@ describe('SelfVerifyHook — scope mismatch advisory (W5)', () => {
     ]))
     const mismatch = submitted.filter(e => e.key === 'self-verify-scope-mismatch')
     assert.equal(mismatch.length, 1)
-    assert.match(mismatch[0]!.content, /跨 3 个模块/)
-    assert.match(mismatch[0]!.content, /full-scope/)
+    assert.match(mismatch[0]!.content, /涉及 3 个模块/)
+    assert.match(mismatch[0]!.content, /不要自动追加全量测试/)
+    assert.equal(mismatch[0]!.tier, 'informational')
   })
 
   it('does not repeat the advisory for the same module count (nag 抑制)', () => {

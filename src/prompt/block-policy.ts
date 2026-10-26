@@ -171,8 +171,10 @@ function applyBlockOverrides(base: PromptBlockToggles, raw: Record<string, unkno
 
 const memo = new Map<string, PromptBlockPolicy>()
 
-export function resolvePromptBlocks(cwd: string): PromptBlockPolicy {
-  const cached = memo.get(cwd)
+export function resolvePromptBlocks(cwd: string, allowLatencyExperiment = true): PromptBlockPolicy {
+  const experimental = allowLatencyExperiment && process.env.RIVET_LATENCY_PROMPT_EXPERIMENT === '1'
+  const memoKey = `${cwd}\0${experimental}`
+  const cached = memo.get(memoKey)
   if (cached) return cached
 
   // 低优先级在前，逐层覆盖：用户配置 → 项目配置 → env。
@@ -213,7 +215,13 @@ export function resolvePromptBlocks(cwd: string): PromptBlockPolicy {
     capsuleIndexLimit: baseline.capsuleIndexLimit,
   }
 
-  memo.set(cwd, policy)
+  if (experimental && profile === null && resolved === 'standard') {
+    // Reference-only ablation: keep user rules and the published tool catalog intact.
+    policy.caps = { ...PROFILE_BASELINE.lean.caps }
+    policy.blocks = applyBlockOverrides(PROFILE_BASELINE.lean.blocks, blockOverrides)
+    policy.capsuleIndexLimit = PROFILE_BASELINE.lean.capsuleIndexLimit
+  }
+  memo.set(memoKey, policy)
   return policy
 }
 

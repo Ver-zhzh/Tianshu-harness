@@ -52,6 +52,7 @@ export function createKickRuntimeHook(deps: KickRuntimeHookDeps): PreTurnRuntime
 
       for (const path of kickActions.deadEndPaths) {
         await deps.deposit({ path, signal: 'dead-end', strength: 0.9 })
+        ctx.signal?.throwIfAborted()
       }
 
       const fullMessage = kickActions.alternativeFrameworks.length > 0

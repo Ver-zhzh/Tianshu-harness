@@ -208,22 +208,23 @@ it('receipt persists and deduplicates without runId, and commits exactly once on
     let calls = 0, required = ['src/alpha.test.ts', 'src/beta.test.ts']
     const tool = createDeliverTaskTool(() => ({ ...restored, gate, getCurrentDirtyFiles: () => ['feature.js'], getImpactedTests: () => required, resolveDeliveryImpact: async () => ({ resolved: true, requiredTests: required, advisoryTests: [] }), detectWroteButNeverRead: () => [], commitOwnedFiles: () => { calls++; return { ok: true, output: 'mock commit' } } }))
     const params = { cwd: f.cwd, toolUseId: 'completion-commit', input: { commit: true, message: 'fix: fixture', force: true } }
-    assert.equal((await tool.execute(params)).isError, true, 'legacy unbound completion cannot authorize a candidate')
-    assert.equal(calls, 0)
+    // 契约分离：验证状态不再授权/阻断提交——unbound completion 下提交照常发生（披露语义）
+    const first = await tool.execute(params)
+    assert.notEqual(first.isError, true, first.content)
+    assert.equal(calls, 1, 'commit proceeds regardless of verification binding')
     const snapshotRef = candidateSnapshotRef(f.cwd, ['feature.js'])
     assert.ok(snapshotRef)
     restored.taskLedger.record({ type: 'verification', command: 'node --test', status: 'passed', meta: { ...meta, snapshotRef, candidateFiles: ['feature.js'] } })
-    const delivered = await tool.execute(params)
-    assert.notEqual(delivered.isError, true, delivered.content)
-    assert.equal(calls, 1)
+    await tool.execute(params)
+    assert.equal(calls, 2)
     required = [...required, 'src/missing.test.ts']
-    assert.equal((await tool.execute(params)).isError, true)
-    assert.equal(calls, 1)
+    await tool.execute(params)
+    assert.equal(calls, 3, 'missing coverage no longer blocks commit')
     required = ['src/alpha.test.ts']
     const failed = { ...meta.coverage!, runId: 'failed', complete: false, totals: undefined, files: [{ path: 'src/alpha.test.ts', outcome: 'failed' as const, tests: 1, skipped: 0, cancelled: 0 }] }
     restored.taskLedger.record({ type: 'verification', command: 'node --test src/alpha.test.ts', status: 'failed', meta: { kind: 'test', scope: 'full', exitCode: 1, coverage: failed, snapshotRef } })
     const failedDelivery = await tool.execute(params)
-    assert.equal(failedDelivery.isError, true, failedDelivery.content)
-    assert.equal(calls, 1)
+    assert.notEqual(failedDelivery.isError, true, failedDelivery.content)
+    assert.equal(calls, 4, 'failed verification no longer blocks commit')
   } finally { if (previous === undefined) delete process.env.RIVET_SESSION_DIR; else process.env.RIVET_SESSION_DIR = previous; f.dispose() }
 })

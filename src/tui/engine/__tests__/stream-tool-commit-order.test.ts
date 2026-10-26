@@ -113,3 +113,46 @@ test('尾段落盘后不重复出现', () => {
   const occurrences = text.split(TAIL).length - 1
   assert.equal(occurrences, 1, `尾段不得重复 commit，实际出现 ${occurrences} 次`)
 })
+
+for (const kind of ['read', 'bash'] as const) {
+  test(`${kind} 结果先于后续回答落盘——文本流开始前结算工具组`, async () => {
+    const { app } = makeApp()
+    if (kind === 'read') {
+      app.callbacks.onToolUse('r1', 'read_file', { file_path: 'answer-order.ts' })
+      app.callbacks.onToolResult('r1', 'read_file', 'content', false)
+    } else {
+      app.callbacks.onToolUse('b1', 'bash', { command: 'pwd' })
+      app.callbacks.onToolResult('b1', 'bash', '/workspace', false)
+    }
+
+    app.callbacks.onTextDelta(LONG_TEXT)
+    await app.callbacks.onTurnComplete({}, 1, true)
+
+    const text = stripAnsi(app.getScrollbackContent())
+    const toolAt = kind === 'read' ? text.search(/Read\s+answer-order\.ts · 完成/) : text.search(/Run\s+pwd · 完成/)
+    const answerAt = text.indexOf('提交 abc1234。')
+    assert.ok(toolAt >= 0, `${kind} 摘要应落盘：${JSON.stringify(text.slice(0, 400))}`)
+    assert.ok(answerAt >= 0, '回答应完整落盘')
+    assert.ok(toolAt < answerAt, `${kind} 摘要必须排在回答之前：${JSON.stringify(text.slice(0, 400))}`)
+  })
+}
+
+test('交替工具族只提交一条统一过程摘要且先于回答', async () => {
+  const { app } = makeApp()
+  app.callbacks.onToolUse('r1', 'read_file', { file_path: 'a.ts' })
+  app.callbacks.onToolResult('r1', 'read_file', 'READ_A', false)
+  app.callbacks.onToolUse('b1', 'bash', { command: 'pwd' })
+  app.callbacks.onToolResult('b1', 'bash', 'BASH_B', false)
+  app.callbacks.onToolUse('r2', 'read_file', { file_path: 'c.ts' })
+  app.callbacks.onToolResult('r2', 'read_file', 'READ_C', false)
+
+  app.callbacks.onTextDelta(LONG_TEXT)
+  await app.callbacks.onTurnComplete({}, 1, true)
+
+  const text = stripAnsi(app.getScrollbackContent())
+  const processAt = text.indexOf('执行过程 · 3 工具')
+  const answerAt = text.indexOf('提交 abc1234。')
+  assert.ok(processAt >= 0, `统一过程摘要应落盘：${JSON.stringify(text.slice(0, 400))}`)
+  assert.equal(text.split('执行过程 ·').length - 1, 1, '混合工具族只能产生一条过程摘要')
+  assert.ok(answerAt > processAt, '统一过程摘要必须先于回答')
+})

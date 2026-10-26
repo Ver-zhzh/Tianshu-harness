@@ -54,7 +54,7 @@ import { presetIncludes, resolveToolPreset, type ToolPreset } from './tool-prese
 
 export interface DefaultRegistryOptions {
   /** T8 桌面化办公工具（create_document/spreadsheet/image/presentation/pdf + export_file/open_path）。
-   *  默认关闭：EXTENDED 层（工具预算由 tool-preset 四档控制，具体数字见
+   *  默认关闭：EXTENDED 层（工具预算由 tool-preset 五档控制，具体数字见
    *  tool-preset.ts 的档位说明与 tool-preset.test.ts 的 totalCount 断言——
    *  此处不复写，避免随档位演进再次 stale；文案改动需同步 settings.json 与 README）。 */
   desktopTools?: boolean
@@ -85,8 +85,8 @@ export interface DefaultRegistryOptions {
 }
 
 export function createDefaultToolRegistry(extraTools: Tool[] = [], options: DefaultRegistryOptions = {}): ToolRegistry {
-  const registry = new ToolRegistry()
   const preset = options.preset ?? resolveToolPreset(process.cwd())
+  const registry = new ToolRegistry({ preset })
   // apply_patch moved to EXTENDED layer (interactive/bootstrap) — overlap with
   // hash_edit covers >90% of use cases; keep in interactive for edge cases.
   // import_resource / leave_mark 等冷门工具由 preset 控制（full 才含，

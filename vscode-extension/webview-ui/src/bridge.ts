@@ -1,30 +1,9 @@
 import type { TokenLedgerSnapshot } from '../../src/sidecar/token-ledger.js'
+import type { SessionEvent, SessionRecord } from '../../src/sidecar/protocol.js'
 export type { TokenLedgerSnapshot, TokenLedgerSettings, TokenLedgerTotals, TokenLedgerReceipt } from '../../src/sidecar/token-ledger.js'
+export type { SessionEvent, SessionRecord } from '../../src/sidecar/protocol.js'
 
 /** webview ↔ 扩展宿主 postMessage 桥（webview 侧）。 */
-
-export interface SessionEvent {
-  seq: number
-  ts: number
-  type: string
-  data: Record<string, unknown>
-}
-
-export interface SessionRecord {
-  id: string
-  status: string
-  createdAt: number
-  updatedAt: number
-  cwd: string
-  title?: string
-  lastSeq: number
-  pendingApprovals: number
-  approvalMode?: string
-  archived?: boolean
-  contextTokens?: number
-  contextWindow?: number
-  reasoningEffort?: string
-}
 
 /** 座舱快照子集（宿主桥转发 GET /sessions/:id/cockpit；null = 旧内核无路由）。 */
 export interface CockpitSnapshot {

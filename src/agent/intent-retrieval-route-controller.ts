@@ -35,6 +35,8 @@ export class IntentRetrievalRouteController {
   constructor(private readonly deps: IntentRetrievalRouteDeps) {}
 
   async buildForTurn(userInput: string, actionable: boolean, turnMode: TurnMode = 'task'): Promise<void> {
+    const previousRoute = this.deps.getLastRetrievalRoute()
+    this.deps.setLastRetrievalRoute(null)
     const taskContract = this.deps.getTaskContract()
     if (!actionable || !taskContract) {
       this.deps.setIntentRetrievalRoute(null)
@@ -58,7 +60,6 @@ export class IntentRetrievalRouteController {
         }
       }
       // followUp mode: pass previous route's taskKinds for inheritance
-      const previousRoute = this.deps.getLastRetrievalRoute()
       const inheritedTaskKinds = turnMode === 'followUp' && previousRoute ? previousRoute.taskKinds : undefined
       const route = await classifyIntentRetrievalRoute({
         userMessage: userInput,

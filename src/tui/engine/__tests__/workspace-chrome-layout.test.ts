@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { stripVTControlCharacters as plain } from 'node:util'
 import { makeApp } from './_harness.js'
 import type { LiveRegionLine } from '../live-engine.js'
+import { liveMaxRowsFor } from '../app.js'
 import { displayWidth } from '../../width.js'
 import { UIHistory } from '../../ui-history.js'
 import { ConversationViewport, viewportPlainText } from '../conversation-viewport.js'
@@ -74,9 +75,10 @@ test('历史查看器保留嵌套列表与原编号，宽屏正文和实时渲�
 })
 
 for (const [cols, rows] of [[120, 30], [80, 24], [40, 24], [120, 50]] as const) {
-  test(`${cols}×${rows}: metrics stay visible and menu/idle keep the composer at the viewport bottom`, async t => {
+  test(`${cols}×${rows}: metrics stay beside the composer while classic live height is bounded`, async t => {
     const { app } = makeApp({ cols, rows })
     t.after(() => app.dispose())
+    app.glanceDensity = 'full'
     const priv = app as unknown as {
       state: { phase: string }
       live: { render: (lines: LiveRegionLine[], options: { reservedTail: number }) => void }
@@ -85,15 +87,15 @@ for (const [cols, rows] of [[120, 30], [80, 24], [40, 24], [120, 50]] as const) 
     let frame: LiveRegionLine[] = []
     priv.live.render = lines => { frame = lines }
     const anchored = () => {
-      assert.equal(frame.length, rows, 'classic frames occupy the current terminal height')
+      assert.ok(frame.length <= liveMaxRowsFor(rows), 'classic must leave native terminal history outside its live region')
       const mode = frame.findIndex(line => line.region === 'mode')
       const composer = frame.findIndex(line => line.region === 'composer')
       const caret = frame.findIndex(line => line.caretCol !== undefined)
       const bottom = frame.map(line => line.region).lastIndexOf('composer')
-      assert.ok(mode >= rows - 7 && mode < composer, 'metrics and mode remain beside the bottom composer')
+      assert.ok(mode >= frame.length - 7 && mode < composer, 'metrics and mode remain beside the bottom composer')
       assert.ok(caret >= composer && caret < bottom, 'the editable caret remains inside the composer')
-      assert.ok(bottom >= rows - 2, 'only the ordinary prompt footer may follow the composer')
-      return { caret, bottom }
+      assert.ok(bottom >= frame.length - 2, 'only the ordinary prompt footer may follow the composer')
+      return { caret: caret - frame.length, bottom: bottom - frame.length }
     }
     app.setGitBranch('feature/中文')
     app.setReasoningEffortProvider(() => 'high')
@@ -104,7 +106,8 @@ for (const [cols, rows] of [[120, 30], [80, 24], [40, 24], [120, 50]] as const) 
     priv.renderLive()
     let text = frame.map(row => plain(row.text)).join('\n')
     assert.match(text, /⚡98%冷/)
-    assert.match(text, /◧50%/)
+    if (cols >= 80) assert.match(text, /◧100\/64k 50%/)
+    else assert.doesNotMatch(text, /◧/)
     assert.match(text, /API ?¥1\.25/)
     assert.doesNotMatch(text, /后台 0/)
     assert.doesNotMatch(text, /\/metrics/)
@@ -129,6 +132,17 @@ for (const [cols, rows] of [[120, 30], [80, 24], [40, 24], [120, 50]] as const) 
   })
 }
 
+test('default compact shows the initial reasoning effort before the first turn', () => {
+  const { app } = makeApp({ cols: 120, rows: 30 })
+  app.setReasoningEffortProvider(() => 'max')
+  const priv = app as unknown as { live: { render: (lines: LiveRegionLine[]) => void }; renderLive: () => void }
+  let frame: LiveRegionLine[] = []
+  priv.live.render = lines => { frame = lines }
+  priv.renderLive()
+  const text = frame.map(row => plain(row.text)).join('\n')
+  assert.match(text, /◎max/, 'initial effort must be visible without opening full metrics')
+})
+
 for (const cols of [40, 80, 120]) test(`${cols}: long live tail keeps activity and disclosure in separate rows`, t => {
   const { app } = makeApp({ cols, rows: 30 })
   t.after(() => app.dispose())
@@ -144,17 +158,25 @@ for (const cols of [40, 80, 120]) test(`${cols}: long live tail keeps activity a
   assert.ok(frame.some(row => row.caretCol !== undefined))
 })
 
-for (const name of ['read_file', 'bash']) test(`${name}: collapsed results retain their captured raw source`, t => {
+for (const name of ['read_file', 'bash']) test(`${name}: collapsed results retain their captured raw source in read-only detail`, t => {
   const { app } = makeApp()
   t.after(() => app.dispose())
+  app.registerOverlays({})
   app.callbacks.onToolUse('raw-source', name, name === 'bash' ? { command: 'pwd' } : { file_path: 'a.ts' })
   app.callbacks.onToolResult('raw-source', name, 'output\n'.repeat(12), false, '/tmp/tui-source.raw')
   app.callbacks.onTextDelta('已完成')
   app.callbacks.onTurnComplete({}, 1, true)
-  assert.match(plain(app.getScrollbackContent()), /全文来源: \/tmp\/tui-source.raw/)
+  const before = app.getScrollbackContent()
+  assert.doesNotMatch(plain(before), /tui-source\.raw/, 'default scrollback hides the raw source')
+  ;(app as any).expandLastTruncatedTool()
+  assert.equal(app.activeOverlayId(), 'pager')
+  assert.equal(app.getScrollbackContent(), before)
+  const detail = plain((app as any).detailPager.content)
+  assert.equal(detail.split('/tmp/tui-source.raw').length - 1, 1)
+  assert.equal(detail.split('output').length - 1, 12, 'detail retains the complete captured output')
 })
 
-test('resize after menu expansion recomputes the full viewport and bottom composer', t => {
+test('resize after menu expansion recomputes the bounded live region and editable composer', t => {
   const { app, out } = makeApp({ cols: 120, rows: 50 })
   t.after(() => app.dispose())
   const priv = app as unknown as {
@@ -169,14 +191,14 @@ test('resize after menu expansion recomputes the full viewport and bottom compos
   for (const [columns, rows] of [[80, 24], [120, 50], [40, 12], [80, 30]] as const) {
     out.columns = columns; out.rows = rows
     priv.renderLive()
-    assert.equal(frame.length, rows, 'resizing must use the new viewport height immediately')
+    assert.ok(frame.length <= liveMaxRowsFor(rows), 'resizing must respect the new live budget immediately')
     const composer = frame.findIndex(line => line.region === 'composer')
     const caret = frame.findIndex(line => line.caretCol !== undefined)
     const bottom = frame.map(line => line.region).lastIndexOf('composer')
-    assert.ok(caret >= rows - 4 && caret >= composer, 'the caret must stay at the new window bottom')
-    assert.ok(bottom >= rows - 2, 'the composer must be followed only by its optional footer')
+    assert.ok(caret >= frame.length - 4 && caret >= composer, 'the caret must stay at the new window bottom')
+    assert.ok(bottom >= frame.length - 2, 'the composer must be followed only by its optional footer')
     const mode = frame.findIndex(line => line.region === 'mode')
-    if (mode >= 0) assert.ok(mode < composer && mode >= rows - 7)
+    if (mode >= 0) assert.ok(mode < composer && mode >= frame.length - 7)
     assert.ok(frame.every(line => displayWidth(line.text) < columns), 'resizing must also use the new width')
   }
 })

@@ -4,6 +4,7 @@ import type { TestPlanBlock, TestExecutionPlan } from './test-execution-plan.js'
 import { buildTestExecutionPlanAsync } from './test-plan-async.js'
 import { runTestPhases } from './run-test-phases.js'
 import type { ToolCallParams, ToolResult } from './types.js'
+import { summarizeVerification } from './verification-summary.js'
 
 function blockedResult(block: TestPlanBlock): ToolResult {
   const message = block.reason + (block.candidates?.length ? '\n候选文件：\n' + block.candidates.join('\n') : '')
@@ -16,6 +17,10 @@ function blockedResult(block: TestPlanBlock): ToolResult {
 /** Every real batch retains its own receipt and phase; no aggregate can invent coverage. */
 export async function runPlannedTests(params: ToolCallParams, remaining: () => number): Promise<ToolResult> {
   const files = params.input.files
+  if (params.input.full !== true && !(Array.isArray(files) && files.length > 0)
+    && !(typeof params.input.filter === 'string' && params.input.filter.trim())) {
+    return blockedResult({ files: [], code: 'invalid_selection', reason: '没有明确测试范围，未执行测试；候选代码文件不代表选择全量测试。' })
+  }
   if (files !== undefined && (!Array.isArray(files) || files.some(file => typeof file !== 'string'))) return blockedResult({ files: [], code: 'invalid_selection', reason: 'files 必须是测试文件路径列表。' })
   if (params.input.projects !== undefined && (!Array.isArray(params.input.projects) || params.input.projects.some(p => typeof p !== 'string' || !p)) || params.input.shard !== undefined && params.input.shard !== false) return blockedResult({ files: [], code: 'invalid_selection', reason: 'projects 必须为非空名称列表；shard 只接受显式 false 覆盖。' })
   const candidate = params.verificationSnapshot?.candidateOnly ? params.verificationSnapshot : undefined
@@ -72,13 +77,16 @@ export async function runPlannedTests(params: ToolCallParams, remaining: () => n
   const retry = [...plan.groups.slice(completedGroups).flatMap(group => group.files),
     ...results.slice(0, completedGroups).flatMap((result, index) => result.isError ? plan.groups[index]?.files ?? [] : [])]
   const remainingFiles = [...new Set(retry)]
-  const retryFull = candidate && results.slice(0, completedGroups).some((result, index) => result.isError && plan.groups[index]?.files.length === 0)
-  const nextCall = candidate && (remainingFiles.length || retryFull)
-    ? `\n下一步：run_tests(${remainingFiles.length ? `files=${JSON.stringify(remainingFiles)}, ` : ''}deliveryFiles=${JSON.stringify(params.input.deliveryFiles)}); 已完成批次的证据保留。`
+  const nextCall = remainingFiles.length
+    ? `\n尚未通过或未执行的已选测试：${remainingFiles.join(', ')}。已有结果保留；不自动重跑，是否继续由用户决定。`
     : ''
   if (nextCall) params.onOutput?.(nextCall + '\n')
-  if (results.length === 1) return { ...results[0]!, content: `${candidateHeader}${results[0]!.content}${unfinishedNote}${nextCall}`, isError: results[0]!.isError || unfinished }
   const events = results.flatMap(result => [...(result.verification ? [result.verification] : []), ...(result.extraVerifications ?? [])])
-  return { ...results[0], content: candidateHeader + results.map((result, i) => `[验证批次 ${i + 1}/${results.length}]\n${result.content}`).join('\n\n') + unfinishedNote + nextCall,
-    isError: unfinished || results.some(result => result.isError), verification: events[0], extraVerifications: events.slice(1) }
+  const verificationSummary = summarizeVerification(events, plan.groups.length, completedGroups, plan.blocked.length)
+  const totals = verificationSummary.totals
+  const phaseCounts = Object.entries(verificationSummary.byPhase).map(([phase, counts]) => `${phase}: ${counts.passed} 通过 / ${counts.failed} 失败 / ${counts.skipped} 跳过`).join('；')
+  const summary = `\n本次选择范围：${verificationSummary.coverageStatus}；批次 ${completedGroups}/${plan.groups.length}；${totals ? `${totals.passed} 通过 / ${totals.failed} 失败 / ${totals.skipped} 跳过` : verificationSummary.countsReliable ? `分环境执行计数（不重复累计为唯一测试数）：${phaseCounts}` : '测试总数未知'}；结果 ${verificationSummary.outcome}。`
+  if (results.length === 1) return { ...results[0]!, verificationSummary, content: `${candidateHeader}${results[0]!.content}${unfinishedNote}${nextCall}${summary}`, isError: results[0]!.isError || unfinished }
+  return { ...results[0], content: candidateHeader + results.map((result, i) => `[验证批次 ${i + 1}/${results.length}]\n${result.content}`).join('\n\n') + unfinishedNote + nextCall + summary,
+    isError: unfinished || results.some(result => result.isError), verification: events[0], extraVerifications: events.slice(1), verificationSummary }
 }

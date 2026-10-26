@@ -19,34 +19,35 @@ gh release edit vX.Y.Z --notes-file release/body.md
 
 The composer fails closed on a missing/empty preamble, rewrites relative links to absolute GitHub URLs, injects the version into artifact names (`Tianshu_<版本>_aarch64.dmg`), and is idempotent when prepending to a body that already carries the guide.
 
-From the product repository root, after building, signing and uploading the existing GitHub release:
+For repairing metadata of the **already controlled stable version**, after building, signing and uploading its GitHub release:
 
 ```sh
 node scripts/releases/generate-catalog.mjs
-node scripts/releases/publish-atomgit.mjs                 # local validation and dry run
-node scripts/releases/publish-atomgit.mjs --publish       # immutable upload + anonymous full readback
-node scripts/releases/publish-atomgit.mjs --publish
+for platform in darwin-aarch64 darwin-x86_64 windows-x86_64; do
+  node scripts/releases/publish-atomgit.mjs --platform "$platform" --purpose update --assets-only --publish
+done
+node scripts/releases/generate-catalog.mjs --atomgit  # live anonymous verification before verified:true
+node scripts/releases/publish-atomgit.mjs --metadata-only --catalog release-catalog.json --assets release --publish
 node scripts/releases/publish-routing.mjs                # review metadata publication
 node scripts/releases/publish-routing.mjs --publish --website ../tianshu-website
 ```
 
-**Or run the whole close-out through the fail-closed wrapper** (pre-checks + post-verify with retry):
+**Or repair that same controlled stable version through the fail-closed wrapper** (pre-checks + post-verify with retry). A new candidate must use the stage and promote flow below; the wrapper rejects a version different from the local `update-control.json` stable version. AtomGit is mandatory: a missing tag, tag-probe failure or explicit `--skip-atomgit` stops the wrapper before any publication step:
 
 ```sh
 bash scripts/releases/publish-release-catalog.sh             # dry run (read-only pre-checks)
 bash scripts/releases/publish-release-catalog.sh --publish   # publish
-#   --with-atomgit              also run the AtomGit stage (requires the tag already mirrored)
 ```
 
 If `github.com` is unreachable from your network, Node's built-in fetch times out even when `git`/`gh` still work through `git config http.proxy` — Node ignores env proxies unless told otherwise. Prefix with `HTTPS_PROXY=<proxy> NODE_USE_ENV_PROXY=1` in that case.
 
-AtomGit requires the version tag to be mirrored beforehand. The publisher consumes `ATOMGIT_ACCESS_TOKEN` or the system Git credential helper without displaying either. It uses the official upload-address API and PUT headers, then checks the stable anonymous download entry, full SHA-256, size, HEAD and Range. No signed temporary URL is persisted. Missing credentials, login requirements, conflicting existing attachments or failed package checks stop publication. Provider quota and multi-network behavior are not certified by this script.
+AtomGit requires the version tag to be mirrored beforehand. The publisher consumes `ATOMGIT_ACCESS_TOKEN` or the system Git credential helper without displaying either. Upload credentials are never used on the anonymous readback path. `anonymous-download.mjs` streams the complete body to verify size and SHA-256 without retaining a large package, then requests an exact prefix Range and checks HTTP 206, `Content-Range`, total size and returned bytes. Login pages, truncation, wrong digests and ignored or incorrect Range responses fail verification. No signed temporary URL is persisted.
 
-Source qualification is fully automated (2026-10-17): anonymous full download with byte-identical SHA-256 + size plus Range addressability qualify the source; there is no manual acceptance file. The earlier two-network人工记录门 was deleted as over-engineering — manual notes add no truth over the automated evidence. If Range verification fails the source stays disabled; nothing is written remotely in that case.
+Existing attachments and newly uploaded attachments both take this path; a same-name attachment with different bytes is an immutable conflict and is never overwritten. Packages, signatures, checksums, `latest.json` and `release-catalog.json` use the same verifier. A post-upload verification failure can leave immutable attachment bytes on the provider, but does not mark the catalog source verified or publish enabled metadata; retry verifies the existing bytes instead of replacing them.
 
-For several platforms, run `--platform <platform> --publish --assets-only` for each intended update platform. Complete the catalog's AtomGit qualification for every update platform before publishing either immutable metadata file. An incomplete platform set fails before any metadata upload; it cannot lock in a Windows-only manifest while macOS assets are still pending. HEAD is informational and may fail; Range acceptance must match the requested interval, total package size and bytes, not merely return HTTP 206.
+For several platforms, run `--platform <platform> --publish --assets-only` for each intended update platform. `generate-catalog.mjs --atomgit` performs fresh verification for every update platform and only then writes `verified:true, anonymous:true`; injected verifiers exist only for tests, and manual AtomGit evidence cannot replace live verification. An incomplete platform set fails before any metadata upload. Revalidation of identical bytes preserves the original proof timestamp so an interrupted metadata retry keeps the pinned catalog byte-identical.
 
-After asset qualification, finalize or resume metadata publication without reuploading/revalidating the large package:
+After successful `--atomgit` catalog generation, finalize or resume metadata publication without reuploading/revalidating the large package (the final promotion gate independently verifies every package again):
 
 ```sh
 node scripts/releases/publish-atomgit.mjs --metadata-only --catalog release-catalog.json --assets release
@@ -54,11 +55,13 @@ node scripts/releases/publish-atomgit.mjs --metadata-only --catalog release-cata
 node scripts/releases/publish-atomgit.mjs --metadata-only --catalog release-catalog.json --assets release --publish
 ```
 
-This uploads and anonymously reads back both `latest.json` and `release-catalog.json`, preserving the exact catalog bytes published to GitHub/OSS and pinned by update control. Identical existing metadata is verified and reused; different immutable files are rejected. Adding platforms after immutable metadata has already been uploaded requires a new release or a separately reviewed metadata revision. Repeating a partially completed publication preserves verified proof timestamps and the revision. Unqualified assets may be uploaded with `--assets-only`, but cannot publish enabled metadata.
+This uploads and anonymously reads back both `latest.json` and `release-catalog.json`, preserving the exact catalog bytes published to GitHub/OSS and pinned by update control. Identical existing metadata is verified and reused; different immutable files are rejected. Adding platforms after immutable metadata has already been uploaded requires a new release or a separately reviewed metadata revision. Repeating a partially completed publication preserves verified proof timestamps and the revision. `--assets-only` does not publish metadata, but still requires package, signature and checksum readback to succeed.
 
 Controlled clients prefer the pinned AtomGit catalog, then the pinned OSS **metadata**, then GitHub in automatic/AtomGit mode; explicit GitHub mode prioritizes GitHub metadata. This does not enable automatic OSS package downloads. Each metadata route retries direct after an application-proxy network failure, including fresh version manifests as well as restored manifests. Catalog digest/format/size failures stop the operation instead of falling through to another mirror. Both control sources are still checked for pause, revocation and the highest revision; a fast package mirror does not bypass policy. Existing releases without an AtomGit catalog continue through the fallback metadata routes.
 
-Only the catalog is published to GitHub/OSS by `publish-routing.mjs`; the existing package upload workflow remains responsible for OSS backup files. It checks an existing GitHub catalog for immutable artifact identity and monotonic revisions, then uploads the small catalog and requests the website's existing `tianshu-release` dispatch. GitHub and OSS permissions plus website dispatch access must be configured on the publishing host. The site's daily deployment remains a compensating run. Files uploaded before a later failure stay in place for idempotent retry.
+Only the catalog is published to GitHub/OSS by `publish-routing.mjs`; the existing package upload workflow remains responsible for OSS backup files. Before release-notes, GitHub or root OSS writes, routing now closes out the original catalog bytes at `oss://tianshu-update/tianshu/v<version>/release-catalog.json` and anonymously reads them back. A first publication uploads exactly once; identical existing bytes are reused without upload; different bytes fail with `Pinned OSS catalog cannot be replaced` before any remote write. Dry-run only performs these reads. This version-pinned close-out must complete before `publish-update-control.mjs promote` readiness. Update-control uses the same helper for idempotent stage/retry flows; during promote its later pinned upload remains after readiness and is never moved earlier.
+
+Routing also checks the existing GitHub catalog for immutable artifact identity and monotonic revisions, then publishes the root catalog and requests the website's existing `tianshu-release` dispatch. GitHub and OSS permissions plus website dispatch access must be configured on the publishing host. The site's daily deployment remains a compensating run. Files uploaded before a later failure stay in place for idempotent retry.
 
 Old OSS `latest.json` is unchanged unless the operator supplies `--enable-legacy-atomgit`. That option refuses to redirect Windows unless the catalog contains verified anonymous AtomGit evidence and the original signature matches. New clients never select an OSS package automatically; a manual OSS attempt still verifies the original updater signature and catalog SHA-256 before installing. CLI/npm updates are unchanged.
 
@@ -113,7 +116,15 @@ The install cohort is random and stored locally, stable across upgrades, indepen
 
 New clients fetch both control sources on checks and revalidate over the network before download, cache restoration and stopping tasks for installation. No legacy latest fallback exists. Checks currently use fresh metadata instead of caching it. During a transfer, revocation is observed by a 60-second policy poll and a completion check; this is not remote push. Policy/network failures preserve verified cached packages. Revoked packages are discarded when revocation is observed. Old-format stable receipts remain readable and can install eligible, non-revoked versions up to the current stable release. A shutdown-save override never overrides update policy.
 
-Promote only after every published update platform reaches 100% and acceptance records include actual signed Windows and macOS upgrades (`realSignedUpgrade: true`). The root catalog and root `latest.json` must match the candidate, and bilingual release notes require publisher review. This is the only controlled operation that changes the old stable endpoints and dispatches a website refresh:
+Promote only after every published update platform reaches 100% and acceptance records include an actual updater-driven upgrade from the installed stable version through download, installation, relaunch and ready sidecar (`realSignedUpgrade: true`). Checking signatures or launching a bundled CLI alone is insufficient evidence. Record the installed source and before/after versions in each platform conclusion. The root catalog and root `latest.json` must match the candidate, and bilingual release notes require publisher review. Before saving a transaction, uploading control bytes or exposing stable, `verifyPromotionReadiness` independently requires:
+
+- the mirrored AtomGit tag and anonymous full-byte/size/SHA-256/exact-Range verification of every update platform's AtomGit, GitHub **and legacy-client OSS** package;
+- byte-identical anonymous AtomGit, GitHub and OSS version-pinned `release-catalog.json` matching the control `catalogSha256`;
+- AtomGit and GitHub version-pinned `latest.json` with the same version, exact update platform set, source-specific download URLs and updater signatures as the catalog.
+
+Failures are aggregated with the platform and stable public endpoint. This gate also runs during a promotion dry run. Emergency `pause` and `revoke` operations do not invoke it and cannot be blocked by a broken new source. Promotion remains the only controlled operation that changes the old stable endpoints and dispatches a website refresh:
+
+At promotion, the legacy OSS root `latest.json` is generated from the candidate manifest only after its platform URLs and signatures match the controlled catalog. Its package URLs are changed to the anonymously verified OSS objects while the updater signatures remain byte-identical. The uploaded root manifest is read back by digest before the transaction is marked complete. Existing clients reading the OSS endpoint therefore keep a domestic package route; a candidate package upload uses `--assets-only` and does not move that stable pointer.
 
 ```sh
 node scripts/releases/publish-update-control.mjs promote --catalog release-catalog.json --acceptance release/rollout-acceptance.json --release-notes-reviewed --website ../tianshu-website
@@ -121,7 +132,7 @@ node scripts/releases/publish-update-control.mjs promote --catalog release-catal
 
 Run the command as a dry run first; add `--publish` after review. Promotion is multi-step rather than globally atomic: the saved receipt identifies partial completion, and retries converge control, GitHub release status and stable manifests. Website dispatch confirms a refresh request, not a completed website deployment. Verify the deployed download page separately.
 
-Local `update-downloads.jsonl` now includes policy selection, channel, policy revision, platform and upgrade attempts. An installer returning success means `installer_returned`; only the target version plus a ready sidecar means `confirmed`. Reopening the old version records `not_completed`; a target boot without readiness after 60 seconds records `pending` and can later become confirmed. `report-routing.mjs` retains the latest result per attempt and summarizes failure stages. Attempt identifiers are random per attempt and are unrelated to the installation cohort identifier. No feedback is uploaded.
+Local `update-downloads.jsonl` now includes policy selection, channel, policy revision, platform and upgrade attempts. An installer returning success means `installer_returned`; only the target version plus a ready sidecar means `confirmed`. Reopening the old version records `not_completed`; a target boot without readiness after 60 seconds records `pending` and can later become confirmed. `report-routing.mjs` retains the latest result per attempt and summarizes failure stages, including slow-source abandonment (`slow_download`) and final `download_failed` events with received bytes. Attempt identifiers are random per attempt and are unrelated to the installation cohort identifier. No feedback is uploaded.
 
 ```sh
 node --test scripts/releases/update-control.test.mjs

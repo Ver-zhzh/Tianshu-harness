@@ -188,7 +188,8 @@ it('background exit facts override replayed failure text; non-test checks never 
     const unknown: VerificationMetadata[] = []
     const complex = await BASH_TOOL.execute({ cwd: f.cwd, toolUseId: 'complex', input: { command: 'node --test text.test.mjs | cat', run_in_background: true }, jobs, onVerificationCompleted: v => unknown.push(v) })
     await jobs.await(complex.backgroundJobId!, { timeoutMs: 5000 })
-    assert.match(complex.content as string, /无法自动获取完整证明/)
+    assert.match(complex.content as string, /可查询已有执行回执，不自动重跑/)
+    assert.equal(unknown[0]?.outcome, 'unknown')
     assert.notEqual(unknown[0]?.status, 'passed')
     assert.equal(unknown[0]?.coverage, undefined)
   } finally { jobs.killAll(); f.dispose(); rmSync(logs, { recursive: true, force: true }) }

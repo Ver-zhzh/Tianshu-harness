@@ -4,12 +4,44 @@ import { drainSteerGuidance, type HumanGuidance } from '../../../agent/course-ep
 import { SteerBuffer } from '../../steer-buffer.js'
 import { wrapCallbacksWithTuiApp } from '../bridge.js'
 import { makeApp } from './_harness.js'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { createReviewInbox } from '../../../agent/review-inbox.js'
 
 function deferred<Value>() {
   let resolve!: (value: Value) => void
   const promise = new Promise<Value>(resolvePromise => { resolve = resolvePromise })
   return { promise, resolve }
 }
+
+test('TUI bridge notifies a late review without auto-starting triage (contract separation)', async testContext => {
+  const previous = process.env.RIVET_SESSION_DIR
+  const root = mkdtempSync(join(tmpdir(), 'tui-late-review-'))
+  process.env.RIVET_SESSION_DIR = root
+  const { app } = makeApp({ autoStart: false })
+  try {
+    let owner = 'A'
+    app.setReviewOwnerProvider(() => ({ cwd: root, sessionId: owner }))
+    const submissions: Array<{ text: string; origin?: string }> = []
+    app.onSubmit((text, _images, options) => { submissions.push({ text, origin: options?.origin }) })
+    createReviewInbox(root, 'A').record('review-A', 'abc1234', ['src/a.ts'], { tier: 'auto', verdict: 'rejected', findings: [{ claim: 'real issue', evidence: 'src/a.ts:1' }] })
+    const wrapped = wrapCallbacksWithTuiApp(app)
+    // 契约分离：迟到的审查结果只通知，不自动驱动核实 run
+    wrapped.onReviewReady!({ sessionId: 'A', reviewId: 'review-A' })
+    await new Promise(r => setImmediate(r))
+    app.notifyRunSettled()
+    await new Promise(r => setImmediate(r)); await new Promise(r => setImmediate(r))
+    assert.equal(submissions.length, 0, 'no automatic triage run is launched')
+    const inbox = createReviewInbox(root, 'A')
+    assert.equal(inbox.list().length, 1, 'finding preserved for user-initiated handling')
+  } finally {
+    app.dispose()
+    if (previous === undefined) delete process.env.RIVET_SESSION_DIR
+    else process.env.RIVET_SESSION_DIR = previous
+    rmSync(root, { recursive: true, force: true })
+  }
+})
 
 test('async empty TUI human drain falls back to the original human input queue', async testContext => {
   const { app } = makeApp({ autoStart: false })

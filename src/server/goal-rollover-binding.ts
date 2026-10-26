@@ -1,6 +1,8 @@
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
+import { mkdirSync } from 'node:fs'
 import { getSessionDir } from '../agent/session-persist.js'
-import { buildHandoffPrompt } from '../tui/handoff.js'
+import { readFactHandoff, renderFactHandoff } from '../agent/fact-handoff.js'
+import { writeFileAtomicSync } from '../fs-atomic.js'
 import { GoalRolloverCoordinator } from './goal-rollover.js'
 import { RecoveryJournal } from './recovery-journal.js'
 import { prepareRolloverInputs } from './goal-rollover-inputs.js'
@@ -50,7 +52,7 @@ export function bindGoalRollover<S extends { record: SessionRecord; running: boo
     if (!j) { j = new RecoveryJournal(join(getSessionDir(session.cwd), 'rollovers')); journals.set(session.cwd, j) }
     return j
   }
-  return new GoalRolloverCoordinator({
+  const coordinator: GoalRolloverCoordinator = new GoalRolloverCoordinator({
     record,
     capabilities: id => ({ disabledSkills: [...(opts.sessions.get(id)?.disabledSkills ?? [])].sort(),
       reviewGateOverride: opts.sessions.get(id)?.reviewGateOverride }),
@@ -77,8 +79,17 @@ export function bindGoalRollover<S extends { record: SessionRecord; running: boo
     save: state => journal(state.from).saveGoalRollover({ ...state,
       waveGate: getWaveGate(state.from), invokedSkills: [...getInvokedSkills(state.from)] }),
     publish,
-    handoff: (id, path, marker) => manager.run(id, buildHandoffPrompt(path,
-      `自动上下文接力。文档第一行必须原样写入：${marker}\n只写交接，不继续执行原任务，不提交或发送其他内容。`)),
+    handoff: (id, path, marker) => {
+      if (!manager.requestHandoff(id).ok) return false
+      const source = record(id)
+      if (!source) return false
+      mkdirSync(dirname(path), { recursive: true })
+      writeFileAtomicSync(path, `${marker}\n${renderFactHandoff(readFactHandoff(source.cwd, id))}`)
+      // 事实交接不产生模型轮次，接力状态机只能由这里手动推进；rejection 必须
+      // 落地，否则接力会静默停在 handoff 阶段且无人知晓。
+      queueMicrotask(() => { void coordinator.onRunSettled(id).catch(error => manager.reportGoalRolloverFailure(id, error)) })
+      return true
+    },
     create: state => {
       const source = record(state.from)!
       const next = manager.createSession({ ...state.policy, id: state.to,
@@ -121,4 +132,5 @@ export function bindGoalRollover<S extends { record: SessionRecord; running: boo
       }
     },
   })
+  return coordinator
 }

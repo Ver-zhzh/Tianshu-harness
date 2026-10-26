@@ -4,9 +4,11 @@
  * a static catalog the server exposes via `GET /mcp/presets`, with the set of
  * already-configured ids so the UI can render an "add / configured" state.
  *
- * Presets that need secrets declare `requiredEnv` — the UI collects those keys
- * inline and passes them as the server's `env` (same plaintext-in-config
- * tradeoff as provider API keys).
+ * Presets that need secrets declare `requiredEnv` for stdio servers or
+ * `requiredHeaders` for remote servers — the UI collects those values inline
+ * and turns them into `env` / `headers` (same plaintext-in-config tradeoff as
+ * provider API keys). Remote MCP servers only read HTTP headers, so putting a
+ * token in `env` would silently authenticate nothing.
  */
 
 import type { McpTransportType } from './types.js'
@@ -19,6 +21,33 @@ export interface McpPresetEnvField {
   label: string
   /** Optional help / where to obtain the value. */
   help?: string
+}
+
+/** A credential the UI collects and writes into a remote server's headers.
+ *
+ *  Why a separate shape from `requiredEnv`: remote MCP servers consume HTTP
+ *  headers, not child-process env. The GitHub preset used to have neither, so
+ *  clicking “启用” wrote a config with no Authorization header and the endpoint
+ *  answered 401. This descriptor is the missing bridge between the discovery
+ *  card and the already-supported `McpServerConfig.headers` field.
+ */
+export interface McpPresetHeaderField {
+  /** HTTP header name (e.g. Authorization). */
+  key: string
+  /** Human label for the input. */
+  label: string
+  /** Optional guidance: permissions, token type, security notes. */
+  help?: string
+  /** Input placeholder, e.g. github_pat_… */
+  placeholder?: string
+  /** Prefix prepended to the pasted value when building the header.
+   *  GitHub expects `Authorization: Bearer <token>`, while the user pastes only
+   *  the token. A value that already starts with the prefix is left untouched. */
+  valuePrefix?: string
+  /** HTTPS page where the user creates the credential. */
+  obtainUrl?: string
+  /** Label for the obtain button (defaults to the UI's “Get token”). */
+  obtainLabel?: string
 }
 
 /** Upstream maintainer shown on the discovery card — so a user filing a bug
@@ -42,10 +71,17 @@ export interface McpPreset {
   args?: string[]
   /** remote */
   url?: string
-  /** Secrets the preset needs; collected inline and stored as `env`.
+  /** Secrets the preset needs; collected inline and stored as `env` (stdio).
    *  Omit if using OAuth (auth.oauth). */
   requiredEnv?: McpPresetEnvField[]
-  /** OAuth-based auth for this preset. Takes precedence over requiredEnv when set. */
+  /** Credentials collected inline and stored as `headers` (remote HTTP/SSE).
+   *  A preset can expose this alongside OAuth so the UI offers both paths;
+   *  a token path must omit `auth` from the persisted config, otherwise the
+   *  manager's OAuth fail-closed gate fires before the static header is sent. */
+  requiredHeaders?: McpPresetHeaderField[]
+  /** OAuth-based auth for this preset. The discovery UI may offer this as an
+   *  advanced alternative to `requiredHeaders`; the persisted config uses
+   *  exactly one auth path at a time. */
   auth?: McpOAuthConfig
   /** A few representative tool names to set expectations (not exhaustive). */
   expectedTools?: string[]
@@ -123,22 +159,38 @@ export const MCP_PRESETS: McpPreset[] = [
   {
     id: 'github',
     name: 'GitHub',
-    description: '读写 issues / PR / 仓库文件 —— 让 agent 直接在 GitHub 上协作',
+    description: '读写 issues / PR / 仓库文件 —— 官方托管 MCP，无需安装；粘贴 GitHub Personal Access Token 即可连接',
     category: 'dev',
     // stdio 分发给不了这个 server：官方 MCP server 已改写为 Go
     // （github/github-mcp-server），npm 上没有官方包；生态里同名的
     // `github-mcp-server` 是个人仓库（jungchihoon/），把用户的 repo 权限交给它，
     // 与本条目「安全可维护」的前提冲突。故走官方 remote 托管端点：零本地依赖、
-    // 由 GitHub 维护，且天枢的 remote + OAuth 链路早已接线（manager.ts:399-408
-    // 的 cfg.command 分支——stdio 给 env，remote 给 Authorization header）。
-    // 代价要认清：remote 只消费 headers 不消费 env，所以这里**不声明 requiredEnv**
-    // ——手填 PAT 是 stdio 形态才有的路径，本条只能走 OAuth。
+    // 由 GitHub 维护。
+    //
+    // remote 只消费 HTTP headers 不消费 env。这里同时给出两条可达路径：
+    //   1. PAT（推荐、零额外注册）：requiredHeaders → Authorization: Bearer <token>
+    //   2. OAuth App（高级）：auth.oauth → sidecar 换 token 后注入 Authorization
+    // GitHub 没有 Dynamic Client Registration，OAuth 路径必须由用户自备 OAuth App
+    // client id；把 PAT 放第一入口才真正降低启用门槛。两条路径互斥，桌面端
+    // buildPresetHeaders 只在 token 路径写 headers、在 OAuth 路径写 auth。
     transport: 'streamableHttp',
     url: 'https://api.githubcopilot.com/mcp/',
+    requiredHeaders: [
+      {
+        key: 'Authorization',
+        label: 'GitHub Personal Access Token',
+        placeholder: 'github_pat_… 或 ghp_…',
+        valuePrefix: 'Bearer ',
+        help: '推荐 Fine-grained PAT：仅授权要使用的仓库；至少给 Issues、Pull requests、Contents 的 Read & write 权限（Metadata: Read 为自动附带）。Token 只存入本机 config.json。',
+        obtainUrl: 'https://github.com/settings/personal-access-tokens/new',
+        obtainLabel: '创建 Fine-grained Token',
+      },
+    ],
     auth: { type: 'oauth' as const, provider: 'github', scopes: ['repo', 'read:org'] },
+    expectedTools: ['get_issue', 'create_issue', 'create_pull_request', 'get_file_contents'],
     author: { name: 'GitHub', url: 'https://github.com/github' },
     repoUrl: 'https://github.com/github/github-mcp-server',
-    docsUrl: 'https://github.com/github/github-mcp-server',
+    docsUrl: 'https://github.com/github/github-mcp-server/blob/main/docs/remote-server.md',
   },
   // Slack 暂不设条目（有意留白，不是遗漏）：@modelcontextprotocol/server-slack
   // 已于 2025-04-25 废弃（issue #150），而 npm 上的候选

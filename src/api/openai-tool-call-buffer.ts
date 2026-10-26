@@ -22,6 +22,8 @@ export type ToolStreamEvent = {
   fragments?: number
   candidateCount?: number
   reason?: string
+  failureStage?: 'first-fragment' | 'continuation-fragment' | 'finalization'
+  declaredToolCount?: number
   openBuffers?: number
   id?: string
   name?: string

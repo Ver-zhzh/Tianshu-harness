@@ -1,5 +1,5 @@
 /**
- * thinking 回看仓（ThinkingReviewStore）：留存/取出/清空语义 + 重印格式。
+ * thinking 回看仓（ThinkingReviewStore）：留存/取出/清空语义 + 详情格式。
  */
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
@@ -10,7 +10,7 @@ const theme = getTheme()
 const stripAnsi = (s: string) => s.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '')
 
 describe('ThinkingReviewStore', () => {
-  it('save → peek → take（take 后清空，防重复重印）', () => {
+  it('save → peek → take（take 后清空，避免重复消费）', () => {
     const store = new ThinkingReviewStore()
     assert.equal(store.peek(), null)
     store.save({ text: '思考内容', elapsedMs: 1000 })
@@ -47,7 +47,7 @@ describe('ThinkingReviewStore', () => {
 })
 
 describe('formatThinkingReview', () => {
-  it('重印：done 头 + 展开正文', () => {
+  it('详情：done 头 + 展开正文', () => {
     const lines = formatThinkingReview({ text: '第一行思考\n第二行结论', elapsedMs: 12_000 }, theme)
     const plain = lines.map(stripAnsi)
     assert.ok(plain[0]!.includes('已推理'), plain[0])

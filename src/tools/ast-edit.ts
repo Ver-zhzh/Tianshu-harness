@@ -1,3 +1,5 @@
+import { noteMutationSyntax } from '../agent/mutation-facts.js'
+import { contentVersion } from '../agent/file-version.js'
 import type { Tool, ToolCallParams, ToolResult } from './types.js'
 import { relative } from 'node:path'
 import { writeFileAtomicAsync } from '../fs-atomic.js'
@@ -186,8 +188,9 @@ export const AST_EDIT_TOOL: Tool = {
         if (verify) {
           try {
             const check = await checkSyntax(fr.file, fr.newSource)
+            noteMutationSyntax(capture, check)
             if (check.fatal) {
-              const restored = capture ? await restoreFileChange(cwd, capture, params.sessionId) : false
+              const restored = capture ? await restoreFileChange(cwd, capture, params.sessionId, { expectedCurrentVersion: contentVersion(applyEol(fr.newSource, eol)), canRestore: () => params.hasWriteClaim?.(relPath) ?? true }) : false
               rollbackFailed ||= !restored
               incrementEditFailCount(fr.file)
               errors.push(`${fr.file}: 写入后语法错误——${restored ? '已回滚' : '自动回滚失败'}：${check.fatal.split('\n')[0]}`)

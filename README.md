@@ -104,6 +104,19 @@ tianshu
 </tr>
 </table>
 
+> [!WARNING]
+> **Node.js 版本硬门槛（v3.36.0 起）**：CLI 仅支持 **Node 24.22.1+（24.x 线）或 26.12.1+（26.x 线）**。
+> Node 22 / 23 / 25 / 27、24.x < 24.22.1、26.x < 26.12.1 会在启动时被安全闸门拒绝；
+> `/update` 可能已经装上新包，但新 CLI 仍无法启动。先运行 `node -v`，不满足时用
+> nvm / fnm / Volta 或 nodejs.org 升级后再安装。
+>
+> ```bash
+> node -v   # 需要 v24.22.1+ 或 v26.12.1+
+> ```
+>
+> 桌面端自带运行时，不需要手动安装 Node。升级后仍失败时见
+> [安装指南](docs/guides/installation.md) 与 [排障指南](docs/guides/troubleshooting.md)。
+
 <details>
 <summary><b>一键安装脚本 · 从旧包迁移</b></summary>
 

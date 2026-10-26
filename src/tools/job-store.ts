@@ -1,6 +1,6 @@
 import type { ChildProcess } from 'node:child_process'
 import { EventEmitter } from 'node:events'
-import { mkdirSync, createWriteStream, type WriteStream } from 'node:fs'
+import { mkdirSync, createWriteStream, readFileSync, type WriteStream } from 'node:fs'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { track } from './process-tracker.js'
@@ -36,6 +36,9 @@ export type JobStatus = 'running' | 'exited' | 'killed'
 
 /** Serializable snapshot of a background job — safe to send over SSE / REST. */
 export interface JobSnapshot {
+  executionId?: string
+  logRef?: string
+  omittedBytes?: number
   id: string
   command: string
   status: JobStatus
@@ -68,6 +71,8 @@ export interface JobEvent {
 }
 
 export interface JobSpawnOptions {
+  verificationId?: string
+  onStarted?: (job: JobSnapshot) => void
   onCompleted?: (result: { job: JobSnapshot; output: string; error?: string; timedOut: boolean }) => void | Promise<void>
   /** The command actually executed (post rtk/mirror/sandbox rewrite). */
   command: string
@@ -103,6 +108,9 @@ interface Waiter {
 }
 
 class BackgroundJob {
+  private logPath?: string
+  private logBytes = 0
+  private omittedBytes = 0
   readonly id: string
   readonly command: string
   readonly startedAt = Date.now()
@@ -139,6 +147,7 @@ class BackgroundJob {
   }
 
   start(logPath: string): void {
+    this.logPath = logPath || undefined
     try {
       this.logStream = createWriteStream(logPath, { flags: 'a' })
       this.logClosed = new Promise(resolve => { this.logStream!.once('close', resolve) })
@@ -174,6 +183,7 @@ class BackgroundJob {
     }))
     this.child = child
     this.pid = child.pid
+    child.on('spawn', () => this.opts.onStarted?.(this.snapshot()))
 
     // Absolute lifetime cap (opt-in): reap a job that never exits on its own.
     const maxMs = this.opts.maxLifetimeMs ?? jobMaxLifetimeMs()
@@ -198,7 +208,9 @@ class BackgroundJob {
     if (!text) return
     this.ring += text
     if (this.ring.length > RING_CAP) this.ring = this.ring.slice(-RING_CAP)
-    try { this.logStream?.write(text) } catch { /* best-effort */ }
+    const bytes = Buffer.from(text), count = Math.min(bytes.length, Math.max(0, 8 * 1024 * 1024 - this.logBytes))
+    try { if (count) this.logStream?.write(bytes.subarray(0, count)) } catch { /* best-effort */ }
+    this.logBytes += count; this.omittedBytes += bytes.length - count
 
     // Resolve any pattern waiters whose regex now matches the accumulated ring.
     if (this.waiters.length > 0) {
@@ -332,6 +344,8 @@ class BackgroundJob {
 
   snapshot(): JobSnapshot {
     return {
+      ...(this.opts.verificationId ? { executionId: this.opts.verificationId } : {}),
+      ...(this.logPath ? { logRef: this.logPath, omittedBytes: this.omittedBytes } : {}),
       id: this.id,
       command: this.command,
       status: this.status,
@@ -349,7 +363,7 @@ export interface JobRegistry {
   spawn(opts: JobSpawnOptions): JobSnapshot
   await(id: string, opts: JobAwaitOptions): Promise<JobAwaitResult | null>
   list(): JobSnapshot[]
-  logs(id: string): string | null
+  logs(id: string, options?: { offset?: number; limit?: number; tail?: boolean; pattern?: string }): string | null
   kill(id: string): boolean
   /** 记录 spawn 时解析出的验证元数据（见 JobVerificationMeta）——由 spawn
    *  调用方（bash 后台分支）写入，供收敛检测读取「是否在等门禁钦定证据」。 */
@@ -422,8 +436,18 @@ export class SessionJobs extends EventEmitter implements JobRegistry {
     return [...this.jobs.values()].map((j) => j.snapshot()).sort((a, b) => b.startedAt - a.startedAt)
   }
 
-  logs(id: string): string | null {
-    return this.jobs.get(id)?.logs() ?? null
+  logs(id: string, options?: { offset?: number; limit?: number; tail?: boolean; pattern?: string }): string | null {
+    const job = this.jobs.get(id)
+    if (!job) return null
+    let text = job.logs()
+    const snap = job.snapshot()
+    if (snap.logRef) { try { text = readFileSync(snap.logRef, 'utf8') } catch { /* ring remains available */ } }
+    let lines = text.split('\n')
+    if (options?.pattern) lines = lines.filter(line => line.includes(options.pattern!))
+    const limit = Math.min(500, Math.max(1, options?.limit ?? 100))
+    const offset = Math.max(0, options?.offset ?? 0)
+    const selected = options?.tail ? lines.slice(-limit) : lines.slice(offset, offset + limit)
+    return `${selected.join('\n')}\n[日志 ${lines.length} 行；omittedBytes=${snap.omittedBytes ?? 0}${snap.logRef ? `；${snap.logRef}` : ''}]`
   }
 
   kill(id: string): boolean {

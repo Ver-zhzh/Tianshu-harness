@@ -51,10 +51,11 @@ describe('包装对象的可选面转发对账', () => {
   })
 })
 
-it('all shared tool registries resolve current delivery impact rather than historical accumulated tests', () => {
+it('sidecar uses the shared preset assembly and forwards the actual session tool surface', () => {
   const bootstrap = readFileSync(join(process.cwd(), 'src/bootstrap.ts'), 'utf8')
-  assert.match(bootstrap, /resolveDeliveryImpact: \(cwd, files\) => resolveDeliveryImpact\(cwd, files, refs\.meridianIndexer\)/)
+  assert.match(bootstrap, /toolPreset: toolRegistry\.preset/)
   assert.match(source, /createInteractiveToolRegistry\(/)
+  assert.match(source, /getToolSurface: \(\) => agent\.getToolSurface\(\)/)
 })
 
 it('skill runtime policy accessor carries live denies, overlay and Plan Mode to HTTP', () => {

@@ -1,4 +1,6 @@
 import type { Tool, ToolCallParams, ToolResult } from './types.js'
+import { issueMatchRef } from './ast-match-refs.js'
+import { currentFileVersion } from '../agent/file-version.js'
 import { resolve } from 'node:path'
 import { cpuPool } from '../workers/cpu-pool.js'
 import type { AstScanArgs, AstScanMatch, AstScanResult } from '../workers/cpu-tasks.js'
@@ -124,14 +126,22 @@ export const AST_GREP_TOOL: Tool = {
     if (scan.loadError) return { content: scan.loadError, isError: true }
 
     const summary = formatAstGrepSummary(scan.matches.length, scan.filesScanned, scan.errors.length)
-    const body = scan.matches.map(m => formatMatch(m, includeMeta)).join('\n')
+    const matches = scan.matches.map(m => {
+      const degraded = scan.degraded.some(d => d.startsWith(m.file + ':'))
+      let ref: string | undefined
+      try { if (params.sessionId && !degraded && m.fileVersion && m.startIndex !== undefined && m.endIndex !== undefined && currentFileVersion(m.file) === m.fileVersion) {
+        ref = issueMatchRef(params, m.file, m.fileVersion, m.startIndex, m.endIndex, m.matchText)
+      } } catch { /* Changed or removed after scanning: return observation without an editable ref. */ }
+      return { ...m, match_ref: ref }
+    })
+    const body = matches.map(m => formatMatch(m, includeMeta) + (m.match_ref ? ` [match_ref=${m.match_ref}; version=${m.fileVersion}]` : '')).join('\n')
     const errorSection = scan.errors.length > 0 ? `\n\n错误：\n${scan.errors.map(e => `  - ${e}`).join('\n')}` : ''
     const skipSection = scan.skipped.length > 0 ? `\n\n跳过：\n${scan.skipped.map(s => `  - ${s}`).join('\n')}` : ''
     const degradeSection = scan.degraded.length > 0
       ? `\n\n解析降级（以下文件有 tree-sitter 错误恢复区，匹配可能不完整）：\n${scan.degraded.map(d => `  - ${d}`).join('\n')}`
       : ''
 
-    return { content: `${summary}\n\n${body}${errorSection}${skipSection}${degradeSection}` }
+    return { content: `${summary}\n\n${body}${errorSection}${skipSection}${degradeSection}`, astMatches: matches }
   },
 
   requiresApproval: () => false,

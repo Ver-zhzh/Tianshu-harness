@@ -18,7 +18,7 @@ import { resolvePromptBlocks } from '../src/prompt/block-policy.js'
 import { buildBudgetReport, formatBudgetReport, estimateTokens, type BudgetInput } from '../src/prompt/prefix-budget.js'
 import { createDefaultToolRegistry } from '../src/tools/default-registry.js'
 import { resolveToolPreset } from '../src/tools/tool-preset.js'
-import { gateToolDefinitions, resolveMainToolTier } from '../src/agent/tool-tiers.js'
+import { gateToolDefinitions } from '../src/agent/tool-tiers.js'
 import { STAR_DOMAINS } from '../src/agent/star-domain-data.js'
 import { loadConfig } from '../src/config/manager.js'
 import { loadUserInstructions } from '../src/config/user-instructions.js'
@@ -36,7 +36,7 @@ const policy = resolvePromptBlocks(cwd)
 const registry = createDefaultToolRegistry()
 const gatedTools = gateToolDefinitions(registry.getDefinitions(), {
   enabled: true,
-  domainTier: resolveMainToolTier(null),
+  preset: registry.preset,
   toolDescriptions: policy.toolDescriptions,
 })
 const toolsJson = JSON.stringify(gatedTools)
@@ -99,6 +99,7 @@ if (wantJson) {
     toolDescriptions: policy.toolDescriptions,
     preset: resolveToolPreset(cwd),
     toolCount: gatedTools.length,
+    toolScope: 'kernel-only; use scripts/audit-tool-surface.ts for complete interactive assembly',
     actualChars,
     actualTokens: estimateTokens('x'.repeat(actualChars)),
     drift: Number(drift.toFixed(4)),
@@ -110,7 +111,7 @@ if (wantJson) {
   console.log()
   console.log(`真实前缀 ${actualChars} 字符 ~${estimateTokens('x'.repeat(actualChars))} token`)
   console.log(`前缀档位 ${policy.profile}（工具描述 ${policy.toolDescriptions}）`)
-  console.log(`工具档位 ${resolveToolPreset(cwd)}，主控可见 ${gatedTools.length} 个工具`)
+  console.log(`工具档位 ${resolveToolPreset(cwd)}，kernel 可见 ${gatedTools.length} 个工具（完整交互装配请运行 scripts/audit-tool-surface.ts）`)
   console.log('token 为 chars/4 粗估（项目统一口径）——中文密集内容实际偏高，跨块对比用，勿与 API usage 直接比对。')
   if (!snapshot.projectIndexBlock) {
     console.log(`codebase-index 未采集：本脚本不建 MeridianDB，真实会话中该块另占至多 ${policy.caps.codebaseIndex} 字符。`)

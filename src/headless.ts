@@ -1,3 +1,4 @@
+import { renderAskUserQuestionText } from './tools/ask-user-question.js'
 import type { Usage } from './api/types.js'
 import type { AgentCallbacks, AgentLoop } from './agent/loop.js'
 import { tapAgentCallbacks, type EventSink } from './agent/event-tap.js'
@@ -29,6 +30,7 @@ export interface HeadlessRunResult {
 }
 
 export interface HeadlessAgent {
+  onAskUserQuestionRequested?: (info: import('./tools/types.js').AskUserQuestionInfo) => void
   run(prompt: string, callbacks: AgentCallbacks): Promise<void>
 }
 
@@ -45,7 +47,7 @@ export interface HeadlessRunConfig {
    * 同一 schema 的 `SessionEvent` 流。缺省 = 不接线（老调用方零改动）。
    */
   eventSink?: EventSink
-  createAgent: () => Pick<AgentLoop, 'run'> | HeadlessAgent
+  createAgent: () => Pick<AgentLoop, 'run' | 'onAskUserQuestionRequested'> | HeadlessAgent
 }
 
 export function parseCliArgs(args: string[]): HeadlessCliArgs {
@@ -74,7 +76,7 @@ export function parseCliArgs(args: string[]): HeadlessCliArgs {
 }
 
 export async function runHeadless(config: HeadlessRunConfig): Promise<HeadlessRunResult> {
-  let agent: Pick<AgentLoop, 'run'> | HeadlessAgent
+  let agent: Pick<AgentLoop, 'run' | 'onAskUserQuestionRequested'> | HeadlessAgent
   try { agent = config.createAgent() }
   catch (error) {
     if (!(error instanceof UserInstructionsError)) throw error
@@ -166,6 +168,14 @@ export async function runHeadless(config: HeadlessRunConfig): Promise<HeadlessRu
     onCheckpoint: () => {},
     onDomainDrift: () => {},
     onIntentNote: () => {},
+  }
+
+  agent.onAskUserQuestionRequested = info => {
+    const question = redactText(`等待用户补充：\n${renderAskUserQuestionText(info.questions)}`)
+    text += (text ? '\n' : '') + question
+    turnText += (turnText ? '\n' : '') + question
+    lastTurnText = turnText
+    if (streamJson) emit({ type: 'text_delta', text: question })
   }
 
   // tap 自身对 text/thinking/result 做脱敏（与 sidecar 同口径）并合并 delta，

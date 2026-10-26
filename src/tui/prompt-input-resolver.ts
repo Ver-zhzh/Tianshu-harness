@@ -31,7 +31,8 @@ export function resolveAppPromptInput(
   pluginCommands?: { name: string; file: string }[],
   sessionRegistry?: SkillRegistry,
 ): ResolvedPromptInput | null {
-  if (!input.startsWith('/')) return { prompt: input }
+  if (/^\/test\s+all\s*$/i.test(input)) return { prompt: '用户明确要求全量测试：调用 run_tests(full=true)，单环境执行；不要自动重跑或启动代码审查。' }
+  if (!input.startsWith('/')) return { prompt: input, ...(/^(?:请|帮我|请帮我)?\s*(?:审查|做(?:一次|个)代码审查|review\b)/i.test(input.trim()) ? { requiredTools: ['review_changes'] } : {}) }
   const workflow = resolveEcosystemWorkflowInput(input)
   if (workflow) return { prompt: workflow.prompt, requiredTools: workflow.requiredTools }
   const custom = resolveCustomCommand(cwd, input, pluginCommands)
@@ -41,25 +42,25 @@ export function resolveAppPromptInput(
   // /review off|on|status 是 TUI 本地会话开关——本路径（server/headless 映射层）没有
   // refs 可写。明确告知，而不是把 "off" 误当 focus 触发一次审查（白烧 worker token）。
   if (/^\/review\s+(?:off|on|status)\s*$/i.test(input)) {
-    return { prompt: `User typed "${input}". /review off|on|status is a TUI-local session toggle (auto-review gate) that this surface cannot flip. To disable auto review here, set review.skipAuto in config (desktop: Settings → Routing); manual /review [max] keeps working either way.` }
+    return { prompt: `User typed "${input}". This legacy review toggle is a compatibility no-op: commits do not run reviews. Manual /review [max] starts an independent read-only review.` }
   }
-  // /review [max|l1|l2|l3] [focus description] — map to deliver_task instruction for the agent
+  // /review [max|l1|l2|l3] [focus description] — map to review_changes (契约分离：
+  // 审查独立于提交，旧 deliver_task(review_level=...) 映射已移除)
   const reviewMatch = input.match(/^\/review(?:\s+(max|l1|l2|l3))?(?:\s+(.*))?$/i)
   if (reviewMatch) {
     const kw = reviewMatch[1]?.toLowerCase()
+    if (kw === 'l1') return { prompt: '用户选择 L1 静态建议：仅核对范围与证据，不启动 worker。本次未执行独立代码审查或测试。' }
     const focusText = reviewMatch[2]?.trim()
-    const level: 'L1' | 'L2' | 'L3' = kw === 'max' || kw === 'l3' ? 'L3' : kw === 'l1' ? 'L1' : 'L2'
-    const levelLabel = level === 'L3'
-      ? 'L3 Review Squadron (5 inspectors)'
-      : level === 'L1'
-        ? 'L1 nudge (review-discipline reminder, zero review workers)'
-        : 'L2 adversarial verifier'
+    const depth = kw === 'max' || kw === 'l3' ? 'max' : 'default'
+    const levelLabel = depth === 'max'
+      ? 'L3 read-only review formation (multiple inspectors)'
+      : 'L2 single read-only reviewer'
     const focusInstruction = focusText ? ` Focus specifically on: ${focusText}.` : ''
-    return { prompt: `Run code review on the current uncommitted changes: call deliver_task with commit=true and review_level="${level}". This triggers ${levelLabel}.${focusInstruction}` }
+    return { prompt: `Run an independent read-only code review: call review_changes with action="start" and depth="${depth}". This launches ${levelLabel}.${focusInstruction} Review only; do not commit, test, or apply fixes.`, requiredTools: ['review_changes'] }
   }
   // /review typos — don't silently drop user input
   if (/^\/review/i.test(input)) {
-    return { prompt: `User typed "${input}" which looks like a /review command but didn't match the expected format. Usage: /review [max] [focus description]. Run /review max to trigger L3 Review Squadron.` }
+    return { prompt: `User typed "${input}" which looks like a /review command but didn't match the expected format. Usage: /review [max] [focus description]. /review runs an independent read-only review via review_changes.` }
   }
   // 裸技能名直调（issue #100 建议②）：/name [task]——内置/workflow/自定义/网关
   // 均未命中后的兜底。必须放在 looksLikeFilePath 之前：单段 /name 在

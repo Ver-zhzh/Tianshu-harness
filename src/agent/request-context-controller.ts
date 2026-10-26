@@ -10,6 +10,7 @@ import { archiveContextImages } from './context-image-archive.js'
 import { COMPACT_HISTORY_TOOL } from '../compact/recall-marker.js'
 import { commitCompactedHistory } from './session-persist-listener.js'
 import { LocalWorkerPolicyError } from '../api/continuation-prefix.js'
+import { IMAGE_BUDGET_TRIGGER_BYTES, imageBudgetSignature, prepareImageBudgetCandidate } from './image-budget.js'
 
 /** 把压缩的拒绝原因翻译成用户能读的中文（供 compact-blocked 相位）。 */
 function describeCompactBlock(reason?: string): string {
@@ -25,6 +26,7 @@ function describeCompactBlock(reason?: string): string {
 
 /** One request budget owner; ordinary observations never mutate the prompt. */
 export class RequestContextController {
+  private imageBudgetAttempt?: string
   snapshot?: ContextBudgetSnapshot
   private revision = 0
   activeUserMessage?: OaiMessage
@@ -51,8 +53,9 @@ export class RequestContextController {
       return request
     }
     const policy = this.getBudgetPolicy()
-    if (!policy) { this.agent.reasoningRecoveryPending = false; return buildRequest() }
     try {
+      await this.prepareImageBudget(buildRequest, callbacks)
+      if (!policy) { this.agent.reasoningRecoveryPending = false; return buildRequest() }
       const request = await prepareContextRequest({ build: buildRequest, policy, signal: this.agent.abortController?.signal,
         preview: request => (this.agent.config.primaryClient ?? this.agent.config.client)?.previewContextRequest?.(request) ?? request,
         publish: budget => { const current = this.record(budget, true); callbacks.onContextBudget?.(current) },
@@ -77,6 +80,50 @@ export class RequestContextController {
     const request = self.config.promptEngine.buildOaiRequest(self.session.getMessages(), self.recentToolHistory, self.config.contextWindow)
     const visible = (self.config.primaryClient ?? self.config.client)?.previewContextRequest?.(request) ?? request
     this.record(buildContextBudget(visible, policy, { requestId: randomUUID(), revision: 0 }), true)
+  }
+
+  private async prepareImageBudget(build: () => OaiChatRequest, callbacks: AgentCallbacks): Promise<void> {
+    const self = this.agent
+    if (process.env.RIVET_IMAGE_BUDGET === '0' || !self.persist || !self.artifactStore || self.config.client.getExecutionPolicy?.().singleAttempt) return
+    const source = self.session.getMessages().slice()
+    if (!source.some(m => m.role === 'user' && Array.isArray(m.content) && m.content.some(p => p.type === 'image_url'))) return
+    const active = self.session.resolveUserInput(this.activeUserMessage)
+    if (this.activeUserMessage && !active) return
+    const signature = imageBudgetSignature(source, active)
+    if (this.imageBudgetAttempt === signature) return
+    const built = build()
+    const visible = (self.config.primaryClient ?? self.config.client).previewContextRequest?.(built) ?? built
+    const wireBytes = Buffer.byteLength(JSON.stringify(visible))
+    if (wireBytes <= IMAGE_BUDGET_TRIGGER_BYTES) return
+    this.imageBudgetAttempt = signature
+    const sourceJson = JSON.stringify(source)
+    const signal = self.getRunSignal()
+    callbacks.onPhaseChange?.('preparing', { reason: '正在归档历史图片并整理请求体积' })
+    try {
+      const candidate = await prepareImageBudgetCandidate(self.artifactStore, source, {
+        protectedUser: active, wireBytes, sourceBytes: Buffer.byteLength(sourceJson), signal,
+      })
+      if (!candidate) {
+        callbacks.onPhaseChange?.('image-budget', { reason: '没有可安全回收的历史图片；内容已保留，请求体仍超过目标预算' })
+        return
+      }
+      await self.artifactStore.saveDurable({ tool: 'image-budget-history', target: signature, rawContent: sourceJson,
+        summary: 'Original history before image budget transaction', sections: [] })
+      signal?.throwIfAborted()
+      if (JSON.stringify(self.session.getMessages()) !== sourceJson) throw new LocalWorkerPolicyError('历史在图片归档期间发生变化；禁止替换')
+      await commitCompactedHistory(self, source, candidate.messages, 'image_budget')
+      self.config.promptEngine.resetAppendixBaseline()
+      this.imageBudgetAttempt = imageBudgetSignature(self.session.getMessages(), self.session.resolveUserInput(this.activeUserMessage))
+      callbacks.onPhaseChange?.('image-budget', { reason: `历史图片已归档，回收 ${candidate.reclaimedBytes} 字节${candidate.targetReached ? '' : '；受保护内容仍超过目标预算'}` })
+    } catch (error) {
+      this.imageBudgetAttempt = undefined
+      signal?.throwIfAborted()
+      // A failed transactional commit must be recovered by the existing barrier;
+      // never continue with a half-committed authorization.
+      if (error instanceof LocalWorkerPolicyError) throw error
+      callbacks.onPhaseChange?.('image-budget', { reason: '图片整理未完成，原历史已保留；本次请求未发送' })
+      throw error
+    }
   }
 
   async compact(force = false, reason: 'explicit_user_compact' | 'context_limit' = force ? 'explicit_user_compact' : 'context_limit', summaryFocus?: string): Promise<boolean> {

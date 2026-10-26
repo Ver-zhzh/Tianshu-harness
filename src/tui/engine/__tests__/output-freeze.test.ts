@@ -127,7 +127,7 @@ describe('输出冻结（Ctrl+S）', () => {
   })
 })
 
-describe('矮屏与桌面 — 满窗口视口保持底部输入框', () => {
+describe('矮屏与桌面 — 有界动态区保留可编辑输入框', () => {
   async function makePrimedApp(rows: number) {
     const ctx = makeApp(rows)
     const live = (ctx.app as unknown as { live: { render: (lines: readonly LiveRegionLine[], opts?: { reservedTail?: number }) => void } }).live
@@ -140,23 +140,23 @@ describe('矮屏与桌面 — 满窗口视口保持底部输入框', () => {
     return { ...ctx, frame: () => frame }
   }
 
-  test('rows=12（软键盘展开）满帧不超屏，草稿和实时状态仍可见', async t => {
+  test('rows=12（软键盘展开）动态区不超屏，草稿和实时状态仍可见', async t => {
     const { app, frame } = await makePrimedApp(12)
     t.after(() => app.dispose())
-    assert.equal(frame().length, 12)
+    assert.ok(frame().length <= 11)
     assert.ok(frame().some(line => line.livePart === 'status'))
-    assert.ok(frame().findIndex(line => line.caretCol !== undefined) >= 8)
-    assert.ok(frame().map(line => line.region).lastIndexOf('composer') >= 10)
+    assert.ok(frame().findIndex(line => line.caretCol !== undefined) >= frame().length - 4)
+    assert.ok(frame().map(line => line.region).lastIndexOf('composer') >= frame().length - 2)
     assert.equal(app.getInputValue(), '保留草稿')
   })
 
-  test('rows=40 桌面同样使用完整视口，底部光标不被旧28行预算抬起', async t => {
+  test('rows=40 桌面动态区不占满窗口，保留正文显示空间', async t => {
     const { app, frame } = await makePrimedApp(40)
     t.after(() => app.dispose())
-    assert.equal(frame().length, 40)
+    assert.ok(frame().length <= 20)
     assert.ok(frame().some(line => line.livePart === 'status'))
-    assert.ok(frame().findIndex(line => line.caretCol !== undefined) >= 36)
-    assert.ok(frame().map(line => line.region).lastIndexOf('composer') >= 38)
+    assert.ok(frame().findIndex(line => line.caretCol !== undefined) >= frame().length - 4)
+    assert.ok(frame().map(line => line.region).lastIndexOf('composer') >= frame().length - 2)
     assert.equal(app.getInputValue(), '保留草稿')
   })
 })

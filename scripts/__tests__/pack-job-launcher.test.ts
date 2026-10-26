@@ -21,7 +21,7 @@ describe('Windows job launcher packaging contract', () => {
     invalidateJobLauncherCache()
     root = mkdtempSync(join(tmpdir(), 'tianshu-pack-job-'))
     mkdirSync(join(root, 'native'))
-    for (const file of ['job-launch.c', 'build-windows.bat']) cpSync(join(repo, 'native', file), join(root, 'native', file))
+    for (const file of ['job-launch.c', 'job-hook-supervisor.h', 'build-windows.bat']) cpSync(join(repo, 'native', file), join(root, 'native', file))
   })
   afterEach(() => {
     if (previousLauncher === undefined) delete process.env.RIVET_JOB_LAUNCHER

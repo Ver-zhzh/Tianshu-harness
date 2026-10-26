@@ -393,7 +393,8 @@ describe('read-ref compact reference (任务 B2)', () => {
     assert.equal(getFileReadMtime(absPath), null, '表2 evicted')
 
     const r2 = await READ_FILE_TOOL.execute(params({ file_path: file }))
-    assert.ok(r2.content.startsWith('[read-ref]'), 'repeat read takes the shortcut')
+    assert.ok(!r2.content.startsWith('[read-ref]'), 'missing version must fall back to a real read')
+    assert.ok(r2.fileStates?.[0]?.version, 'real read restores version evidence, not just mtime')
     assert.ok(getFileReadMtime(absPath) !== null, 'shortcut must re-register 表2 — otherwise write_file guard loops forever')
   })
 

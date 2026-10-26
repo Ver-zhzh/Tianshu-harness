@@ -1,8 +1,12 @@
+import { lastKnownFileState, trimLastKnown, noteFileObserved, noteFileWritten, getFileReadContentHash, hasObservedFileVersion, forgetFileObservations } from './read-file-state.js'
+import { contentVersion } from '../agent/file-version.js'
+export { getFileReadMtime, noteFileObserved, getFileReadContentHash, isFileFullyObserved } from './read-file-state.js'
 import { existsSync } from 'fs'
-import { createHash } from 'node:crypto'
+import { readSelectedHandoff } from '../agent/handoff-selection.js'
 import { stat, readFile } from 'node:fs/promises'
 import { extname } from 'path'
-import type { Tool, ToolCallParams } from './types.js'
+import type { Tool, ToolCallParams, ToolResult } from './types.js'
+import type { FileStateReceipt } from './file-state-receipt.js'
 import { truncateContent, applyFoldThenPartial } from './truncation.js'
 import { validatePath } from './path-validate.js'
 import { GitignoreFilter } from './gitignore.js'
@@ -18,7 +22,7 @@ import { OFFICE_EXTENSIONS, readOfficeFile } from './office-reader.js'
 import { extractDocumentText } from './doc-extract.js'
 import { normalizeVisionImageDataUrl } from '../utils/image-bytes.js'
 import { buildFocusedReadView } from './focused-read.js'
-import { readExplicitRange, supplyNoRangeContent, headBoundedPayload } from './read-file-range.js'
+import { readExplicitRange, supplyNoRangeContent, headBoundedPayload, READ_WHOLE_MAX_BYTES } from './read-file-range.js'
 import { buildLogPreviewContent, buildFileUiOutput } from './read-file-views.js'
 // Cache GitignoreFilter instances by cwd to avoid re-reading .gitignore on every call
 const gitignoreCache = new Map<string, { filter: Promise<GitignoreFilter>; ts: number }>()
@@ -41,6 +45,7 @@ function trimGitignoreCache(): void {
 // write_file/edit_file) auto-invalidates; our own edits additionally delete
 // entries eagerly via invalidateReadHistory().
 interface ReadHistoryEntry {
+  fullyObserved?: boolean
   mtimeMs: number
   /** stat().size of the whole file at read time — second staleness signal
    *  alongside mtime, hardening against coarse-mtime filesystems (exFAT: 2s). */
@@ -79,6 +84,7 @@ export function setNeighborHintProvider(provider: NeighborHintProvider | undefin
  * blocked without re-reading. Key = fileHistoryKey(sessionId, canonicalPath),
  * no offset/limit. Independent of readHistory (per-slice dedup). */
 interface FileReadHistoryEntry {
+  fullyObserved?: boolean
   mtimeMs: number
   /** stat().size at read time — see ReadHistoryEntry.sizeBytes. */
   sizeBytes: number
@@ -92,25 +98,6 @@ interface FileReadHistoryEntry {
 }
 const fileReadHistory = new Map<string, FileReadHistoryEntry>()
 const FILE_READ_HISTORY_MAX = 200
-
-/** 表2 — last observed file state per session. Written by read_file, grep
- *  registration, AND successful edits (edit_file/hash_edit/write_file). Read
- *  by the stale-file detection in the edit tools and read_section.
- *
- *  This is deliberately separate from readHistory/fileReadHistory (表1): 表1
- *  means "content the model actually read" and is only ever written by read
- *  paths — edits DELETE its entries (invalidateReadHistory) so read-ref can
- *  never claim "unchanged" against pre-edit content. 表2 carries the old
- *  refreshFileReadMtime duty: after our own successful edit we note the new
- *  mtime here so the next edit's staleness check doesn't false-positive on
- *  our own write (read-edit-stale loop prevention). */
-interface KnownFileState {
-  mtimeMs: number
-  sizeBytes: number
-  contentHash?: string
-}
-const lastKnownFileState = new Map<string, KnownFileState>()
-const LAST_KNOWN_MAX = 500
 
 /** Consecutive edit_file "old_string not found" failures per file.
  *  ≥3 triggers a hard gate requiring read_file before further edits. */
@@ -128,16 +115,6 @@ export function resetEditFailCount(canonicalPath: string): void {
 
 export function __resetEditFailCountForTests(): void {
   editFailCount.clear()
-}
-
-function trimLastKnown(): void {
-  if (lastKnownFileState.size <= LAST_KNOWN_MAX) return
-  const drop = Math.ceil(lastKnownFileState.size * 0.2)
-  let i = 0
-  for (const key of lastKnownFileState.keys()) {
-    lastKnownFileState.delete(key)
-    if (++i >= drop) break
-  }
 }
 
 /** When enabled, repeated reads of unchanged files return a compact reference
@@ -272,32 +249,6 @@ function maybeAppendNeighborHint(cwd: string, canonicalPath: string, sessionId: 
   return content + '\n\n' + label.slice(0, 100)
 }
 
-/** Return the last mtimeMs this session observed for a file (via read_file,
- *  grep, or its own successful edit), or null if never observed. */
-export function getFileReadMtime(canonicalPath: string, sessionId?: string): number | null {
-  const entry = lastKnownFileState.get(fileHistoryKey(sessionId, canonicalPath))
-  return entry ? entry.mtimeMs : null
-}
-
-/** Record the file state this session just observed (read or wrote).
- *  Successor of the old refreshFileReadMtime: after a successful edit the
- *  caller notes the post-write mtime here so the NEXT edit's staleness check
- *  doesn't false-positive on our own write (read-edit-stale loop prevention).
- *  Writes 表2 only — never touches the read-dedup tables, so read-ref can
- *  never be tricked into claiming pre-edit content is current. */
-export function noteFileObserved(canonicalPath: string, mtimeMs: number, sizeBytes: number, sessionId?: string, content?: string): void {
-  const key = fileHistoryKey(sessionId, canonicalPath)
-  const previous = lastKnownFileState.get(key)
-  const contentHash = content !== undefined ? createHash('sha256').update(content).digest('hex')
-    : previous?.mtimeMs === mtimeMs && previous.sizeBytes === sizeBytes ? previous.contentHash : undefined
-  lastKnownFileState.set(key, { mtimeMs, sizeBytes, contentHash })
-  trimLastKnown()
-}
-
-export function getFileReadContentHash(canonicalPath: string, sessionId?: string): string | undefined {
-  return lastKnownFileState.get(fileHistoryKey(sessionId, canonicalPath))?.contentHash
-}
-
 /** Drop every read-dedup record (all sessions) for a canonical path. Called
  *  after a successful edit_file/hash_edit/write_file: the on-disk content no
  *  longer matches what any session read, so "already read and unchanged"
@@ -342,19 +293,19 @@ export function invalidateSessionReadDedup(sessionId?: string): void {
  *  longer what any session read), note the post-write file state so the next
  *  edit's staleness check doesn't false-positive on our own write, and mark
  *  the file as session-edited. */
-export async function recordSuccessfulEdit(canonicalPath: string, sessionId?: string): Promise<void> {
+export async function recordSuccessfulEdit(canonicalPath: string, sessionId?: string, content?: string, fullyObserved = false): Promise<void> {
   invalidateReadHistory(canonicalPath)
   markSessionFileEdit(canonicalPath, sessionId)
   try {
     const s = await stat(canonicalPath)
-    noteFileObserved(canonicalPath, s.mtimeMs, s.size, sessionId)
+    noteFileWritten(canonicalPath, s.mtimeMs, s.size, sessionId, content, fullyObserved)
   } catch { /* file vanished between write and stat — nothing to note */ }
 }
 
 /** Test-only: inject a last-known file state so stale detection can trigger
  *  without needing to call read_file first. */
 export function __setFileReadMtimeForTests(canonicalPath: string, mtimeMs: number, sessionId?: string): void {
-  lastKnownFileState.set(fileHistoryKey(sessionId, canonicalPath), { mtimeMs, sizeBytes: -1 })
+  lastKnownFileState.set(fileHistoryKey(sessionId, canonicalPath), { mtimeMs, sizeBytes: -1, fullyObserved: true })
 }
 
 /** Test-only: evict a single 表2 entry — simulates LAST_KNOWN_MAX trimming
@@ -491,6 +442,7 @@ export interface ReadFilePayloadOptions {
 }
 
 export interface ReadFilePayload {
+  fullyObserved?: boolean
   canonicalPath: string
   rawContent: string
   modelContent: string
@@ -739,8 +691,17 @@ export async function readFilePayload(cwd: string, options: ReadFilePayloadOptio
     canonicalPath: filePath,
     rawContent: content,
     modelContent: modelContent + hint + rangeNote,
+    fullyObserved: !hasExplicitRange && modelContent === content,
     uiContent: buildFileUiOutput(content, 50),
   }
+}
+
+function readReceipt<T extends ToolResult>(params: ToolCallParams, path: string, result: T, full = false): ToolResult {
+  const state: FileStateReceipt = { path: relativePosix(params.cwd, path), version: getFileReadContentHash(path, params.sessionId) ?? null,
+    observation: full ? 'full' : 'partial', outcome: 'observed', restoration: 'none' }
+  const line = `文件回执：${state.path}; version=${state.version ?? 'unknown'}; observation=${state.observation}`
+  const tail = result.content.match(/\n\[artifact:[A-Za-z0-9_-]+\]$/)?.[0] ?? ''
+  return { ...result, fileStates: [state], content: (tail ? result.content.slice(0, -tail.length) : result.content) + `\n${line}` + tail }
 }
 
 export const READ_FILE_TOOL: Tool = {
@@ -759,7 +720,7 @@ export const READ_FILE_TOOL: Tool = {
     input_schema: {
       type: 'object',
       properties: {
-        file_path: { type: 'string', description: '文件的绝对路径' },
+        file_path: { type: 'string', description: '文件绝对路径，或用户已选源的 handoff://<sessionId>/<snapshotId>/<section>[/<recordId>]；交接引用仅只读，不授予整个会话目录访问权' },
         file_paths: {
           type: 'array',
           items: { type: 'string' },
@@ -776,7 +737,7 @@ export const READ_FILE_TOOL: Tool = {
   },
 
   async execute(params: ToolCallParams) {
-    // Multi-read branch: file_paths array
+    const handoff = readSelectedHandoff(params); if (handoff) return handoff
     const filePaths = params.input.file_paths as string[] | undefined
     if (filePaths && filePaths.length > 0) {
       const focus = typeof params.input.focus === 'string' ? params.input.focus : undefined
@@ -785,7 +746,6 @@ export const READ_FILE_TOOL: Tool = {
     }
 
     let payload: ReadFilePayload
-
     // Per-agent override wins (worker sessions: compact-disabled + 1M window
     // means an uncapped read permanently occupies every later turn's prompt).
     const computedCap = params.readCapOverride ?? computeModelReadCap({
@@ -805,6 +765,7 @@ export const READ_FILE_TOOL: Tool = {
     let currentMtimeMs: number | null = null
     let currentSizeBytes: number | null = null
     let canonical: string | null = null
+    let reusableVersion = false, verifiedContent: string | undefined
     try {
       canonical = validatePath(params.cwd, filePath)
       if (existsSync(canonical)) {
@@ -815,32 +776,36 @@ export const READ_FILE_TOOL: Tool = {
           dedupKey = readHistoryKey(params.cwd, canonical, offset, limit, params.sessionId)
         }
         const prior = focusedRead || !dedupKey ? undefined : readHistory.get(dedupKey)
-        if (!focusedRead && prior && prior.mtimeMs === currentMtimeMs && prior.sizeBytes === currentSizeBytes && prior.artifactId) {
+        if (!focusedRead && hasObservedFileVersion(canonical, currentMtimeMs, currentSizeBytes, params.sessionId)) {
+          if (currentSizeBytes <= READ_WHOLE_MAX_BYTES) {
+            const bytes = await readFile(canonical)
+            verifiedContent = bytes.toString('utf8')
+            reusableVersion = contentVersion(bytes) === getFileReadContentHash(canonical, params.sessionId)
+          }
+          if (!reusableVersion) {
+            invalidateReadHistory(canonical); forgetFileObservations(canonical); params.prewarmCache?.invalidate(canonical)
+          }
+        }
+        if (reusableVersion && !focusedRead && prior && prior.mtimeMs === currentMtimeMs && prior.sizeBytes === currentSizeBytes && prior.artifactId) {
           if (params.artifactStore) {
             const slice = await sliceFromArtifact(params.artifactStore, prior.artifactId, offset, limit)
             if (slice !== null) {
               debugLog(`[read-dedup] re-serve from artifact file=${canonical} offset=${offset} limit=${limit ?? 'all'}`)
-              // 表2 re-registration: dedup 表(表1) and lastKnownFileState(表2)
-              // trim independently — 表2 may have evicted this entry while 表1
-              // survives. Without this, "read the file first" guidance from the
-              // edit/write staleness guards would loop forever (read short-
-              // circuits here and never refreshes 表2). We just statted the
-              // file, so the observation is current.
-              noteFileObserved(canonical, currentMtimeMs, currentSizeBytes, params.sessionId)
-              return { content: slice }
+              // Retain existing version/scope; missing evidence takes the disk path.
+              noteFileObserved(canonical, currentMtimeMs, currentSizeBytes, params.sessionId, undefined, prior.fullyObserved === true)
+              return readReceipt(params, canonical, { content: slice })
             }
           }
           debugLog(`[read-dedup] artifact unreadable, falling through to normal read file=${canonical}`)
         }
         const fullEntry = focusedRead ? undefined : fileReadHistory.get(fileHistoryKey(params.sessionId, canonical))
-        if (!focusedRead && fullEntry && fullEntry.mtimeMs === currentMtimeMs && fullEntry.sizeBytes === currentSizeBytes && fullEntry.artifactId && (offset !== 1 || limit !== undefined)) {
+        if (reusableVersion && !focusedRead && fullEntry && fullEntry.mtimeMs === currentMtimeMs && fullEntry.sizeBytes === currentSizeBytes && fullEntry.artifactId && (offset !== 1 || limit !== undefined)) {
           if (params.artifactStore) {
             const slice = await sliceFromArtifact(params.artifactStore, fullEntry.artifactId, offset, limit)
             if (slice !== null) {
               debugLog(`[read-dedup-file] re-serve slice from artifact file=${canonical} offset=${offset} limit=${limit ?? 'all'}`)
-              // 表2 re-registration — same eviction-divergence reasoning as above.
-              noteFileObserved(canonical, currentMtimeMs, currentSizeBytes, params.sessionId)
-              return { content: slice }
+              noteFileObserved(canonical, currentMtimeMs, currentSizeBytes, params.sessionId, undefined, fullEntry.fullyObserved === true)
+              return readReceipt(params, canonical, { content: slice })
             }
           }
           debugLog(`[read-dedup-file] artifact unreadable, falling through file=${canonical}`)
@@ -858,7 +823,9 @@ export const READ_FILE_TOOL: Tool = {
 
     // ── 重复读取检测 ──
     // 检测本轮是否已读过同一文件且未变更，若是则在前端注入提醒。
-    const unchangedRepeat = (!focusedRead && canonical && currentMtimeMs !== null && currentSizeBytes !== null && dedupKey)
+    // Dedup tables and version observations evict independently. A reference
+    // cannot recover a missing version; read disk to rebuild actual evidence.
+    const unchangedRepeat = (reusableVersion && !focusedRead && canonical && currentMtimeMs !== null && currentSizeBytes !== null && dedupKey)
       ? isUnchangedRepeatRead(canonical, currentMtimeMs, currentSizeBytes, dedupKey, offset, limit, params.sessionId)
       : false
 
@@ -929,11 +896,9 @@ export const READ_FILE_TOOL: Tool = {
         const totalSaved = params.readRefStats?.savedBytes ?? readRefSavedBytes
         const totalCount = params.readRefStats?.count ?? readRefCount
         debugLog(`[read-ref] file=${canonical} saved=${entryBytes} total-saved=${totalSaved} count=${totalCount}`)
-        // 表2 re-registration — 表1/表2 trim independently; without this a
-        // 表2-evicted entry can dead-loop the blind-overwrite guard ("read it
-        // first" → read-ref short-circuit → 表2 still empty → still refused).
-        noteFileObserved(canonical!, currentMtimeMs!, currentSizeBytes!, params.sessionId)
-        return { content: ref }
+        // A reference may preserve existing evidence, never invent a lost version.
+        noteFileObserved(canonical!, currentMtimeMs!, currentSizeBytes!, params.sessionId, undefined, matchedFull ? matchedFull.fullyObserved === true : !matchedSame?.truncated && offset === 1 && limit === undefined)
+        return readReceipt(params, canonical!, { content: ref })
       }
       // Small fragment — fall through to normal read to avoid wasted round-trips
     }
@@ -943,8 +908,8 @@ export const READ_FILE_TOOL: Tool = {
       // matching prewarm entry (mtime-verified), skip the fs read and apply the
       // current contextWindow's cap to the cached full content. Miss → fall
       // through to the normal fs read below.
-      let prefetchedContent: string | undefined
-      if (params.prewarmCache && canonical && canUsePrewarmForRead(params.input)) {
+      let prefetchedContent = verifiedContent
+      if (prefetchedContent === undefined && params.prewarmCache && canonical && canUsePrewarmForRead(params.input)) {
         const cached = consumePrewarm(params.prewarmCache, canonical)
         if (cached) {
           prefetchedContent = cached.content
@@ -976,20 +941,25 @@ export const READ_FILE_TOOL: Tool = {
 
     // A head is not the file: skipping the rest keeps dedup/read-ref, raw
     // persistence and the artifact outline from presenting the head as the file.
-    if (payload.headBounded) return { content: payload.modelContent, uiContent: payload.uiContent }
+    if (payload.headBounded) {
+      if (canonical && currentMtimeMs !== null && currentSizeBytes !== null) noteFileObserved(canonical, currentMtimeMs, currentSizeBytes, params.sessionId, undefined, false)
+      return readReceipt(params, payload.canonicalPath, { content: payload.modelContent, uiContent: payload.uiContent })
+    }
 
     const rawPath = await persistRawOutput(params.toolUseId, payload.rawContent)
 
     // 表2: note the observed file state so edit-tool staleness checks work.
     if (canonical && currentMtimeMs !== null && currentSizeBytes !== null) {
       noteFileObserved(canonical, currentMtimeMs, currentSizeBytes, params.sessionId,
-        Buffer.byteLength(payload.rawContent) === currentSizeBytes ? payload.rawContent : undefined)
+        Buffer.byteLength(payload.rawContent) === currentSizeBytes ? payload.rawContent : undefined,
+        payload.fullyObserved === true)
     }
 
     // Helper to write the dedup entry once we know whether an artifact was created.
     const recordDedup = (artifactId?: string): void => {
       if (!dedupKey || currentMtimeMs === null || currentSizeBytes === null) return
       readHistory.set(dedupKey, {
+        fullyObserved: payload.fullyObserved === true,
         mtimeMs: currentMtimeMs,
         sizeBytes: currentSizeBytes,
         rawBytes: payload.rawContent.length,
@@ -1006,6 +976,7 @@ export const READ_FILE_TOOL: Tool = {
       if (!canonical || currentMtimeMs === null || currentSizeBytes === null) return
       if (offset !== 1 || limit !== undefined) return // only full reads
       fileReadHistory.set(fileHistoryKey(params.sessionId, canonical), {
+        fullyObserved: payload.fullyObserved === true,
         mtimeMs: currentMtimeMs,
         sizeBytes: currentSizeBytes,
         totalLines: payload.rawContent.split('\n').length,
@@ -1033,11 +1004,11 @@ export const READ_FILE_TOOL: Tool = {
         debugLog(`[artifact-skip] tool=read_file file=${payload.canonicalPath} raw=${payload.rawContent.length} threshold=${artifactThreshold}`)
         recordDedup()
         recordFileDedup()
-        return {
+        return readReceipt(params, payload.canonicalPath, {
           content: repeatWarning ? repeatWarning + '\n' + payload.modelContent : payload.modelContent,
           uiContent: payload.uiContent,
           rawPath,
-        }
+        }, payload.fullyObserved === true)
       }
 
       debugLog(`[artifact-wrap] tool=read_file file=${payload.canonicalPath} raw=${payload.rawContent.length} threshold=${artifactThreshold}`)
@@ -1062,23 +1033,23 @@ export const READ_FILE_TOOL: Tool = {
       // goes BEFORE it.
       const hinted = maybeAppendNeighborHint(params.cwd, payload.canonicalPath, params.sessionId, payload.modelContent + summaryBlock)
       const baseContent = hinted + `\n[artifact:${artifactId}]`
-      return {
+      return readReceipt(params, payload.canonicalPath, {
         content: repeatWarning ? repeatWarning + '\n' + baseContent : baseContent,
         rawContent: payload.modelContent,
         uiContent: payload.uiContent,
         rawPath,
-      }
+      }, payload.fullyObserved === true)
     }
 
     // No artifact store — record dedup without an artifactId.
     recordDedup()
     recordFileDedup()
     const plainContent = repeatWarning ? repeatWarning + '\n' + payload.modelContent : payload.modelContent
-    return {
+    return readReceipt(params, payload.canonicalPath, {
       content: maybeAppendNeighborHint(params.cwd, payload.canonicalPath, params.sessionId, plainContent),
       uiContent: payload.uiContent,
       rawPath,
-    }
+    }, payload.fullyObserved === true)
   },
 
   requiresApproval: () => false,
@@ -1106,6 +1077,7 @@ async function handleMultiRead(
 
   const sections: string[] = []
   const readPaths: string[] = []
+  const fileStates: FileStateReceipt[] = []
   let totalBytes = 0
   let errors = 0
 
@@ -1128,6 +1100,7 @@ async function handleMultiRead(
       const currentStat = await stat(payload.canonicalPath)
       if (!payload.headBounded) {
         fileReadHistory.set(fileHistoryKey(params.sessionId, payload.canonicalPath), {
+          fullyObserved: payload.fullyObserved === true,
           mtimeMs: currentStat.mtimeMs,
           sizeBytes: currentStat.size,
           totalLines: payload.rawContent.split('\n').length,
@@ -1136,7 +1109,12 @@ async function handleMultiRead(
           recordedAt: Date.now(),
         })
       }
-      noteFileObserved(payload.canonicalPath, currentStat.mtimeMs, currentStat.size, params.sessionId)
+      noteFileObserved(payload.canonicalPath, currentStat.mtimeMs, currentStat.size, params.sessionId,
+        Buffer.byteLength(payload.rawContent) === currentStat.size ? payload.rawContent : undefined,
+        payload.fullyObserved === true)
+      const receipt = readReceipt(params, payload.canonicalPath, { content: '' }, payload.fullyObserved === true)
+      fileStates.push(...receipt.fileStates!)
+      sections[sections.length - 1] = receipt.content + sections[sections.length - 1]
       readPaths.push(payload.canonicalPath)
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
@@ -1152,6 +1130,7 @@ async function handleMultiRead(
   const content = sections.join('\n\n')
   return {
     content,
+    fileStates,
     readPaths,
     uiContent: `Read ${paths.length - errors}/${paths.length} files (${(totalBytes / 1024).toFixed(1)} KB total)`,
   }

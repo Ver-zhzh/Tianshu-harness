@@ -104,7 +104,7 @@ test('run_tests timeout claims settlement before synchronous child close and fin
   } finally { Date.now = originalClock }
 })
 
-test('EPERM fallback receives only remaining budget and cannot spawn after exhaustion', async () => {
+test('EPERM returns the original failed execution without another process, before or after budget exhaustion', async () => {
   for (const elapsed of [40, 60]) {
     const clock = Date.now
     const base = clock()
@@ -124,18 +124,11 @@ test('EPERM fallback receives only remaining budget and cannot spawn after exhau
       children[0]!.stderr.write('EPERM')
       spent = elapsed
       children[0]!.emit('close', 1, null)
-      if (elapsed < 50) {
-        await waitFor(() => spawns === 2, 'tsx EPERM retry spawn')
-        assert.equal(spawns, 2)
-        assert.ok(timers.tasks.some(task => task.ms === 10 && !task.cleared))
-        children[1]!.emit('close', 0, null)
-        assert.equal((await pending).isError, false)
-      } else {
-        assert.equal(spawns, 1, 'exhausted retry must not spawn')
-        const result = await pending
-        assert.equal(result.verification?.status, 'blocked')
-        assert.equal(result.verification?.failureKind, 'timeout')
-      }
+      const result = await pending
+      assert.equal(spawns, 1)
+      assert.equal(result.isError, true)
+      assert.match(result.content, /EPERM/)
+      assert.equal(result.verification?.exitCode, 1)
     } finally { for (const child of children) child.emit('close', 1, null); Date.now = clock }
   }
 })

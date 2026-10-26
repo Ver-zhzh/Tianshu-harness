@@ -1,14 +1,14 @@
 import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { writeFileSync, mkdirSync, rmSync, existsSync, readFileSync, statSync } from 'fs'
+import { writeFileSync, mkdtempSync, readFileSync, statSync } from 'fs'
+import { tmpdir } from 'node:os'
 
 import { join } from 'path'
 import { EDIT_FILE_TOOL } from '../edit.js'
 import type { ToolCallParams } from '../types.js'
 
-// Use a directory inside the project tree so validatePath() doesn't reject
-// file operations (security hardening requires all paths within cwd).
-const TEST_DIR = join(process.cwd(), '.test-tmp', 'opencode-edit-test')
+// Each case owns a root: pending backup publication must not race the next case's cleanup.
+let TEST_DIR = ''
 
 function makeParams(input: Record<string, unknown>): ToolCallParams {
   return { input, toolUseId: 'test-id', cwd: TEST_DIR }
@@ -16,8 +16,7 @@ function makeParams(input: Record<string, unknown>): ToolCallParams {
 
 describe('edit_file tool', () => {
   beforeEach(() => {
-    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true })
-    mkdirSync(TEST_DIR, { recursive: true })
+    TEST_DIR = mkdtempSync(join(tmpdir(), 'edit-tool-case-'))
   })
 
   it('replaces a unique string', async () => {

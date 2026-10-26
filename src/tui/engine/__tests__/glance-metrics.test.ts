@@ -1,7 +1,7 @@
 /**
  * T9 GlanceBar 真实指标测试（B）。
  *
- * 契约（CC 对标 f9001b16：ctx% 并入 ◧token 常驻，cache ⚡ 仅 <50% 浮出）：
+ * 契约（full 档：ctx/token、cache、cost 等完整指标）：
  *  1. 设置 metricsProvider 后，GlanceBar 用真实 ◧Xk/Yk·$cost·⚡% 渲染。
  *  2. 无 provider 时不猜价格：GlanceBar 明示暂无计价，不渲染费用金额
  *     （537ca8b0 起真实费用只来自 metricsProvider 的 findModelPricing +
@@ -40,8 +40,8 @@ function makeApp() {
     stdin: stdin as unknown as ReadStream,
     cols: 120, rows: 24, modelName: 'test', contextWindow: 200_000,
   })
-  // 默认 compact 档保留 ⚡/effort，收起 cost/token 绝对值/goal/todo；本套件验证
-  // metrics 管线（provider → 渲染）需要全量展示，固定 full 档。
+  // 本套件验证完整 metrics 管线（provider → 渲染），固定 full 档；
+  // compact 的模型/effort/上下文/异常信号契约由 format-glance 测试单独覆盖。
   app.glanceDensity = 'full'
   app.setSidePanelOpen(true)
   app.start()

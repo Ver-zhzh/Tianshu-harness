@@ -192,14 +192,24 @@ export class DelegationExecutor implements vscode.Disposable {
       })
       return
     }
-    const saved = await doc.save?.()
-    if (saved === false) {
+    let saved = true
+    try {
+      saved = (await doc.save?.()) !== false
+    } catch {
+      saved = false
+    }
+    if (!saved) {
+      const revert = new vscode.WorkspaceEdit()
+      const current = doc.getText()
+      revert.replace(uri, new vscode.Range(doc.positionAt(0), doc.positionAt(current.length)), previousContent)
+      await vscode.workspace.applyEdit(revert)
       await client.answerDelegation(sessionId, requestId, {
         content: `Document save failed for ${relPath}`,
         isError: true,
       })
       return
     }
+    const appliedContent = doc.getText()
     const appliedVersion = doc.version
     if (!this.isCurrent(origin)) {
       await client.answerDelegation(sessionId, requestId, { content: `Applied edit to ${relPath}`, isError: false, status: 'ok' })
@@ -239,7 +249,7 @@ export class DelegationExecutor implements vscode.Disposable {
     if (status === 'rejected') {
       const revert = new vscode.WorkspaceEdit()
       const fresh = await vscode.workspace.openTextDocument(uri)
-      if (fresh.version !== appliedVersion || fresh.getText() !== newContent) {
+      if (fresh.version !== appliedVersion || fresh.getText() !== appliedContent) {
         if (this.isCurrent(origin)) {
           this.decorations.clear(uri)
           this.codeLenses.refresh()

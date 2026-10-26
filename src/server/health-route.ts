@@ -13,17 +13,23 @@ import type { LoopLagSnapshot } from './loop-health.js'
 import type { StoreLockHolder } from './store-lock.js'
 import { isAuthorizedRequest } from './auth.js'
 import { PROTOCOL_VERSION, RUNTIME_CAPABILITIES, type RuntimeCapabilities } from './protocol.js'
+import { DELIVERY_CONTRACT_VERSION } from '../agent/delivery-contract.js'
 import { recentRuntimeDiagnostics, RUNTIME_INSTANCE_ID, type RuntimeDiagnostic } from '../utils/runtime-diagnostics.js'
+import { RUNTIME_PROVENANCE } from '../utils/runtime-provenance.js'
 export { RUNTIME_INSTANCE_ID } from '../utils/runtime-diagnostics.js'
 
 /** 带 token 请求拿到的全量 health 体。`GET /events` 的心跳复用同一份（阶段 4）。 */
 export interface HealthBody {
+  externalHooks?: { queued: number; running: number; cleaning: number; quarantined: number; rejected: number; timeouts: number }
   recentDiagnostics?: readonly RuntimeDiagnostic[]
   storage?: { failedSessions: number; pendingEvents: number }
   snapshotAt?: number
   buildId?: string
+  runtime?: import('../utils/runtime-provenance.js').RuntimeProvenance
+  deliveryContractVersion?: number
   nodeVersion?: string
   memory?: { rss: number; heapUsed: number }
+  pid?: number
   instanceId: string
   readiness: 'ready' | 'initializing' | 'failed'
   ok: boolean
@@ -60,6 +66,7 @@ export function createHealthSnapshot(
   loopLag?: () => LoopLagSnapshot,
   initializationError?: () => string | undefined,
   storeLockHolder?: () => StoreLockHolder | undefined,
+  externalHooks?: () => NonNullable<HealthBody['externalHooks']>,
 ): HealthSnapshot {
   return () => {
     const registryOk = registryReady ? registryReady() : true
@@ -70,11 +77,15 @@ export function createHealthSnapshot(
     const lockHolder = storeLockHolder?.()
     return {
       snapshotAt: Date.now(),
+      ...(externalHooks ? { externalHooks: externalHooks() } : {}),
       recentDiagnostics: recentRuntimeDiagnostics(),
       storage: manager.getStorageHealth(),
       buildId: process.env.RIVET_BUILD_ID ?? 'unknown',
+      runtime: RUNTIME_PROVENANCE,
+      deliveryContractVersion: DELIVERY_CONTRACT_VERSION,
       nodeVersion: process.version,
       memory: { rss: process.memoryUsage().rss, heapUsed: process.memoryUsage().heapUsed },
+      pid: process.pid,
       instanceId: RUNTIME_INSTANCE_ID,
       readiness: initError ? 'failed' : registryOk ? 'ready' : 'initializing',
       ok: registryOk && configuredOk,
@@ -103,9 +114,10 @@ export function buildHealthRoute(
   loopLag?: () => LoopLagSnapshot,
   initializationError?: () => string | undefined,
   storeLockHolder?: () => StoreLockHolder | undefined,
+  externalHooks?: () => NonNullable<HealthBody['externalHooks']>,
 ): Record<string, RouteHandler> {
   const snapshot = createHealthSnapshot(
-    manager, startedAt, version, registryReady, configured, loopLag, initializationError, storeLockHolder,
+    manager, startedAt, version, registryReady, configured, loopLag, initializationError, storeLockHolder, externalHooks,
   )
   return {
     'GET /readyz': (_body, _params, headers) => {

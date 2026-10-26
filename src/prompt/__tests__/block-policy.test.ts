@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { resolvePromptBlocks, invalidatePromptBlocks, standardPromptBlocks } from '../block-policy.js'
 import { FROZEN_BLOCK_CAPS } from '../volatile.js'
 
-const ENV_KEYS = ['RIVET_PROMPT_PROFILE', 'RIVET_PROMPT_TOOL_DESC', 'RIVET_HOME'] as const
+const ENV_KEYS = ['RIVET_PROMPT_PROFILE', 'RIVET_PROMPT_TOOL_DESC', 'RIVET_HOME', 'RIVET_LATENCY_PROMPT_EXPERIMENT'] as const
 
 function clearEnv(): void {
   for (const k of ENV_KEYS) delete process.env[k]
@@ -34,6 +34,18 @@ describe('resolvePromptBlocks precedence', () => {
 
   it('defaults to standard with no env and no config', () => {
     assert.equal(resolvePromptBlocks(dir).profile, 'standard')
+  })
+
+  it('latency experiment changes reference budgets only and cannot leak into a resumed assembly', () => {
+    process.env.RIVET_LATENCY_PROMPT_EXPERIMENT = '1'
+    const candidate = resolvePromptBlocks(dir)
+    assert.equal(candidate.toolDescriptions, 'full')
+    assert.equal(candidate.caps.projectInstructions, FROZEN_BLOCK_CAPS.projectInstructions)
+    assert.ok(candidate.caps.projectMemory < FROZEN_BLOCK_CAPS.projectMemory)
+    const restored = resolvePromptBlocks(dir, false)
+    assert.deepEqual(restored.caps, FROZEN_BLOCK_CAPS)
+    assert.equal(restored.toolDescriptions, 'full')
+    assert.notEqual(restored, candidate, 'memoization must include experiment eligibility')
   })
 
   it('project .rivet-config.json prompt.profile wins over default', () => {

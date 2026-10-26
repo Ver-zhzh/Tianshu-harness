@@ -150,7 +150,7 @@ Layer 4: RuntimeHookPipeline（75 hooks）→ trap-and-emulate で退化行動�
 
 ### 1. 環境要件
 
-- **Node.js ≥ 24**（`engines` で固定）—— `node --version` で確認。低いバージョンは npm インストール時に警告が出るだけでサポート対象外。ワンラインインストールスクリプトは直接ブロックしてアップグレード案内を出します。
+- **Node.js 24.22.1+（24.x 系）または 26.12.1+（26.x 系）**（`engines` 固定）—— `node --version` で確認。Node 22 / 23 / 25 / 27、24.x < 24.22.1、26.x < 26.12.1 は v3.36.0 以降の安全ゲートで起動時に拒否されます。`/update` 後に新 CLI が起動しない場合も、まず Node をアップグレードしてください。ワンラインインストールスクリプトは事前にブロックして案内します。
 - **Git**（強く推奨）—— 任意。無くても天枢は動作します（その場で修正）が、Git があると委譲 worktree 分離・チェックポイントロールバック・`commit`/`diff` レビュー・worker ごとの diff レビューが使えます。インストール：<https://git-scm.com/downloads>。
 
 ### 2. インストール（いずれかを選択）
@@ -161,7 +161,7 @@ Layer 4: RuntimeHookPipeline（75 hooks）→ trap-and-emulate で退化行動�
 > **Windows サポート範囲**：Windows 10（1809+、22H2 推奨）/ Windows 11。画面描画は **WebView2 Runtime（推奨 ≥ 120）** に依存——v3.5 以降のスクロール・描画最適化には新しいランタイムが必要で、古いとセッション領域のスクロールがカクつきます。3.5.3 以降インストーラーは完全なオフラインインストールパッケージを同梱（ネット不要・システムレベル登録）。既存ユーザーが自動更新で古すぎる旨の表示が出た場合：通知バーまたは「設定 → ランタイムとバージョン情報」で「修復ツールを実行」。**ウィンドウが完全に開かない**場合は、スタートメニューの「WebView2 を修復」、または [Releases](https://github.com/huiliyi37/Tianshu-harness/releases/latest) の `windows-repair` ディレクトリから `repair-webview2.cmd` をダブルクリック。[WebView2 オフラインインストールパッケージ](https://go.microsoft.com/fwlink/p/?LinkId=2124703) を手動インストールして再起動しても構いません。
 > **Win10 タブレットモードの既知動作**：タブレットモードでアプリを切り替えると前のアプリが画面外へスライドします——computer_use のスナップショットは遮へい／バックグラウンド自己修復（PrintWindow 描画）済みで、タブレットモードを切る必要はありません。
 
-**方法 B：ワンラインインストールスクリプト（推奨）** —— Node ≥ 24 を検証 → `tianshu-harness` をグローバルインストール（デフォルトは npmmirror ミラー加速、`NPM_CONFIG_REGISTRY` で上書き可）→ `tianshu` を起動。冪等で再実行可能：
+**方法 B：ワンラインインストールスクリプト（推奨）** —— Node 24.22.1+ / 26.12.1+ を検証 → `tianshu-harness` をグローバルインストール（デフォルトは npmmirror ミラー加速、`NPM_CONFIG_REGISTRY` で上書き可）→ `tianshu` を起動。冪等で再実行可能：
 
 ```bash
 # macOS / Linux（bash）

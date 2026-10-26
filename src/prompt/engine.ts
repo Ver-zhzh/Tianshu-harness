@@ -1,3 +1,4 @@
+import { appendExplicitTool } from './tool-catalog.js'
 import { buildOaiToolDefinitions } from './oai-tool-definitions.js'
 import { wireOaiMessage } from '../api/oai-types.js'
 import { currentWorkspaceRoots } from '../tools/workspace-context.js'
@@ -391,12 +392,7 @@ export class PromptEngine {
         this.collapseTokenStep = data.collapseTokenStep
       }
     }
-    // 2026-10-16（issue #500）：构造期不锁工具表。此处曾以 `!!this.executionSnapshot`
-    // 置 toolCatalogPublished，把 resume 继承快照的会话工具表永久冻结——LSP/MCP 晚到
-    // 注册的合法 updateTools 失效，wire 工具表停在装配瞬间、与 prior 分裂，守卫
-    // fail-closed 拒发（worker continuation prefix diverged at tools）。
-    // 防碎缓存由「首请求上网后」的锁定承担（见 onExecutionSnapshot 提交处）；上网前的
-    // 更新发生在缓存代次建立之前，零缓存成本。回归契约：engine-tool-catalog-resume.test.ts。
+    // Publication freezes ordinary registration; explicit additions have a separate authorization path.
     const restoredOptions = this.executionSnapshot ?? this.rewindAuthorization?.prior
     const savedMaxTokens = restoredOptions?.options?.max_tokens ?? restoredOptions?.options?.max_completion_tokens
     if (restoredOptions?.model === config.model && typeof savedMaxTokens === 'number') this.config = { ...this.config, maxTokens: savedMaxTokens }
@@ -1050,23 +1046,27 @@ export class PromptEngine {
 
   updateTools(tools: ToolDefinition[]): void {
     if (this.toolCatalogPublished) return
-    // 字节级幂等守卫（2026-09-06 缓存碎裂根修 P2）：MCP 重连/插件重复注册/
-    // applyFace 重挂会以同一份工具定义反复重进这里——字节不变时跳过替换与
-    // 计数，fingerprint 与请求字节完全不动（此前每次调用都 bump
-    // toolsUpdateCount 并重算指纹，同名工具重注册也会把前缀打碎）。
-    // 上线字节按数组序序列化（buildOaiRequest 的 .map 保序），比较必须同序——
-    // 纯重排也视为变化（保守，与旧行为一致地重建）。
+    // Preserve ordering and skip byte-identical refreshes.
     if (stableStringify(tools) === stableStringify(this.config.staticCtx.tools)) return
     this.config.staticCtx.tools = tools
     this.fingerprint = computeFingerprint(this.systemPrompt, tools, this.volatileBlock)
     this.toolsUpdateCount++
   }
 
-  /** Number of tool definitions (for prefix overhead estimation). */
+  activateExplicitTool(tool: ToolDefinition): boolean {
+    const next = appendExplicitTool(this.config.staticCtx.tools, tool)
+    if (!next) return false
+    const published = this.toolCatalogPublished
+    this.authorizeCacheGeneration()
+    this.toolCatalogPublished = false
+    try { this.updateTools(next) }
+    finally { this.toolCatalogPublished = published }
+    return true
+  }
+
   getToolCount(): number {
     return this.config.staticCtx.tools.length
   }
-  /** 当前上线的工具定义（只读）。 */
   getTools(): readonly ToolDefinition[] { return this.config.staticCtx.tools }
 
   /** /prefix-budget reads frozen bytes without reloading any user files. */

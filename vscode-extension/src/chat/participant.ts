@@ -28,7 +28,7 @@ function resolveTurnTimeoutMs(): number {
   const minutes = typeof configured === 'number' && Number.isFinite(configured) && configured >= 1
     ? configured
     : DEFAULT_TURN_TIMEOUT_MINUTES
-  return Math.round(minutes * 60_000)
+  return Math.min(Math.round(minutes * 60_000), 2_147_483_647)
 }
 
 /** 进行中的一轮：其会话、回复接收端、以及 dispatch 调用的收束钩子。 */
@@ -125,6 +125,15 @@ export class TianshuChatParticipant implements vscode.Disposable {
     if (event === undefined || turn === undefined) return
     if (this.pendingApprovals.size === 0) turn.timeout.arm()
     if (event.kind === 'activity') return
+    if (event.kind === 'tool-input-progress') {
+      const part = new vscode.ChatToolInvocationPart(event.name, event.id)
+      part.enablePartialUpdate = true
+      part.isComplete = event.state === 'aborted'
+      part.invocationMessage = `正在生成 ${event.name} 输入 · ${event.bytes} B`
+      part.pastTenseMessage = event.state === 'aborted' ? '工具输入生成已中断' : '工具输入已生成'
+      turn.stream.push(part)
+      return
+    }
     if (event.kind === 'delta') {
       turn.sawText = true
       turn.stream.markdown(event.text)

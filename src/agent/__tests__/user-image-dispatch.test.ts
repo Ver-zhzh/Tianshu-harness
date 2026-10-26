@@ -15,6 +15,11 @@ import type { StreamCallbacks, StreamClient } from '../../api/stream-client.js'
 import type { ContentBlock } from '../../api/types.js'
 import { OpenAIClient } from '../../api/openai-client.js'
 import { FallbackStreamClient } from '../../api/fallback-client.js'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { ArtifactStore } from '../../artifact/store.js'
+import { loadContextImage } from '../context-image-archive.js'
 
 const IMG = 'data:image/png;base64,' + 'A'.repeat(64)
 const IMG2 = 'data:image/jpeg;base64,' + 'B'.repeat(64)
@@ -33,6 +38,17 @@ function visionClientThrowing(message: string) {
 }
 
 describe('dispatchUserImages', () => {
+  it('text-only vision bridges retain durable original references before producing descriptions', async t => {
+    const root = mkdtempSync(join(tmpdir(), 'vision-bridge-archive-'))
+    t.after(() => rmSync(root, { recursive: true, force: true }))
+    const store = new ArtifactStore(root, 's'), v = visionClientReturning('Visible diagram')
+    const out = await dispatchUserImages('Explain this diagram', [IMG], { supportsVision: false, visionClient: v.client, artifactStore: store })
+    assert.equal(out.images, undefined)
+    assert.match(out.userInput, /Visible diagram/)
+    const ref = /context-image:[A-Za-z0-9_-]+/.exec(out.userInput)?.[0]
+    assert.ok(ref)
+    assert.equal((await loadContextImage(new ArtifactStore(root, 's'), ref))?.dataUrl, IMG)
+  })
   for (const fixture of [
     { label: 'vprov/v-cap', model: 'v-cap' },
     { label: 'vprov/vendor/v-cap', model: 'vendor/v-cap' },

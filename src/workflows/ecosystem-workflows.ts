@@ -169,7 +169,7 @@ export function buildWritingPlanPrompt(options: WritingPlanPromptOptions): strin
 \`\`\`markdown
 # [功能名称] 实现计划
 
-> **面向 AI 代理：** 逐任务实现并按波验证（原生计划执行纪律，见 <plan-executing> 块），或用 plan_task + team_orchestrate 编排多任务。
+> **面向 AI 代理：** 逐任务实现并按波验证（原生计划执行纪律，见 <plan-executing> 块），或直接用 team_orchestrate 的 planPath/planMarkdown 编排多任务。
 
 **目标：** [一句话描述]
 
@@ -325,38 +325,13 @@ ${planInstruction}
 - Shared-worktree model: all flash workers write directly into the controller's single shared workspace (no per-worker worktree, no diff-merge step). The file-claim registry + same-file wave serialization prevent stomping. You review the AGGREGATE result with git diff/git status — you do NOT apply per-worker patches.
 - patcher workers as 天梁 executors stay bounded: each shard objective must say "只执行本 task，不扩展范围，不重写计划".
 
-Execution flow — follow these exact steps:
+Execution flow:
+1. If an existing Markdown plan was supplied, read it and call team_orchestrate with mode="standard", objective and planPath.
+2. For a free-form objective, inspect the directly relevant sources, then write a self-contained Markdown checklist in planMarkdown and pass it directly to team_orchestrate mode="standard". Use ### Task N: <title> headings, list exact file paths and dependsOn for each task; preserve the approved scope and acceptance requirements. Do not call plan_task; default team does not require it.
+3. For explicit /team max, call team_orchestrate with mode="max" and objective; preserve its existing Pro policy. When unavailable, use the standard Markdown path.
+4. team_orchestrate auto-advances the approved waves; do not re-dispatch successful waves. Use fromWave only for manual recovery.
+5. Inspect the aggregate result. Verification follows the user's request and approved plan; disclose unexecuted or failing checks separately. Use deliver_task for the authorized safe commit, without an automatic review/test loop.
 
-If the objective IS a Markdown plan file path (e.g. .rivet/knowledge/...md or docs/superpowers/plans/...md):
-  1. Read the plan file and note its implementation checklist.
-  2. Call plan_task with { objective, files: [planPath, plus the source files mentioned in the plan], execute: true }.
-     plan_task auto-detects the plan file, turns its - [ ] checklist into self-contained patcher shards,
-     and stores the plan so team_orchestrate can pick it up automatically.
-     The FULL path is required — detection is prefix-whitelisted to .rivet/plans/,
-     .rivet/knowledge/ and docs/superpowers/plans/; without it plan_task silently falls
-     back to free-form sharding (and may add a scout dependency that gates every shard).
-  3. Workers write into the shared workspace. Review the aggregate changes (git diff/git status) — there is nothing to manually merge.
-  4. team_orchestrate auto-advances through the remaining waves by default — do NOT re-invoke it per wave.
-     Pass fromWave only for manual recovery (e.g. resuming after an interruption): it runs just that one wave.
-     (No need to pass planJson — team_orchestrate reads it from the internal plan store.)
-
-If the objective is a free-form task description (no plan file):
-  0. Terrain scout (skip for trivial/single-file tasks): before calling plan_task, run one delegate_batch
-     with 1-3 code_scout workers to map the affected modules. Each scout gets one dimension —
-     e.g. "find all callers of <X>" / "check if similar fix already exists in <area>" / "identify
-     test files touched by this change". Scouts return findings with evidenceKind + evidenceRefs
-     (firsthand file:line citations or inferred notes). This gives plan_task a grounded picture
-     instead of guessing the blast radius from a free-form sentence.
-  1. Call plan_task with { objective, files: [the source files in scope], execute: true } to shard and dispatch the first wave.
-     **Always include the files parameter** — even for new-file tasks where the files don't exist yet.
-     Use full relative paths (e.g. "desktop/src/lib/sound.ts"). If you ran a terrain scout, also include
-     the key source files its findings revealed. Listing scope files lets the planner cut orthogonal
-     per-module shards instead of one monolith with empty scope (which causes workers to produce nothing).
-  2. Follow the same review-aggregate-then-continue pattern as above (team_orchestrate without planJson).
-
-After ALL waves complete:
-  1. Run targeted tests + npx tsc --noEmit.
-  2. Call deliver_task with commit=true and a checklist covering each completed shard.
 `
 }
 
@@ -483,9 +458,14 @@ ${objective}
    - 结尾输出「启动/修复前需要准备」小节：环境依赖、启动命令、账号等可操作清单。
 
 后续出口：诊断发现需要修复的问题时，先问用户是否修复；用户确认后按规模走两条路之一：
-- 中小修复（≤8 项、单一关注面）：把核对清单作为 plan_task 的输入走计划-执行链。
+- 中小修复（≤8 项、单一关注面）：主控直接修复，或将核对清单整理为 Task N 格式，通过 team_orchestrate 的 planMarkdown 执行。
 - 大型多维改造（>8 项或横跨 ≥3 个独立关注面）：把核对清单映射为 starflow 的 draftItems 走五阶段编排（council 评审 → team 波次 → galaxy 攻坚），映射形状：每个清单项一条 { id: 短slug, title: 清单项标题, detail: 证据(file:line/exit code) + 修复方向, files: [涉及文件] }。id/title 会被用于 galaxy 维度分类，detail 会成为维度目标——写实、别写空话。
 不要在 /scout 流程里直接改文件。`
+}
+
+export function buildStarflowWorkflowPrompt(objective: string): string {
+  return `用户明确选择星流（Starflow）。任务：${objective}
+需求已清楚时直接继续；有实质歧义时先澄清。调用 starflow 的 confirm:false 展示方案，按用户授权再以 confirm:true 执行。阶段由现有状态机负责，不手工模拟或扩大到其他编排。受阻时报告具体原因；提交、测试和审查继续分别披露，不因失败自动重复派发。`
 }
 
 export function resolveEcosystemWorkflowInput(input: string, opts?: { date?: Date }): WorkflowResolveResult | null {
@@ -518,35 +498,19 @@ export function resolveEcosystemWorkflowInput(input: string, opts?: { date?: Dat
       : { command: parsed.command, prompt: COUNCIL_USAGE }
   }
 
+  if (parsed.command === '/starflow') return parsed.args
+    ? { command: parsed.command, prompt: buildStarflowWorkflowPrompt(parsed.args), requiredTools: ['starflow'] }
+    : { command: parsed.command, prompt: 'Usage: /starflow <任务描述>' }
+
   if (GALAXY_COMMANDS.has(parsed.command)) {
     if (!parsed.args) return { command: parsed.command, prompt: 'Usage: /galaxy <任务描述>\n启动星河集群——拆解为多个维度由不同星域并行执行。' }
     return {
       command: parsed.command,
-      prompt: `用户通过 /galaxy 启动了星河 MoE 集群。你是监管者，只做分派和汇总。
-
-任务：${parsed.args}
-
-完整生命周期（严格按序执行）：
-
-【派发阶段】
-1. skill(name="galaxy")
-2. memory recall 查看历史同类任务的星域组合模式，复用成功经验
-3. 如需外部资料，用 web_search 搜索（每个 worker 也可以自己搜）
-4. glob 扫文件，按后缀分组；结合历史模式确定激活哪些专家
-5. galaxy({confirm: false}) 展示方案，确认后 galaxy({confirm: true}) 启动集群
-6. 等待子代理全部完成——期间不做任何代码操作，只等待
-
-【汇总阶段】
-7. 子代理全部返回后，汇总各维度产出
-8. 逐一检查：每个 worker 是否跑了测试？是否 typecheck 通过？是否有遗留 TODO？
-   - 任何不满足 → 标为阻塞，重启集群修复
-9. memory remember 记录本次星域组合的成功/失败模式
-10. 判断结果：
-    - 全部通过 + 测试绿 + typecheck 绿 → deliver_task commit=true 交付（释放文件归属）
-    - 有失败/冲突/测试红 → 先 deliver_task commit=true 释放本轮文件归属，再分析根因 → galaxy 重启集群修复
-
-【释放纪律】每轮集群结束后必须 deliver_task commit=true 或显式释放文件归属。
-上一轮没释放 = 下一轮文件冲突被拦截。绝不跨轮持有文件归属。`,
+      prompt: `用户明确通过 /galaxy 选择星河集群。任务：${parsed.args}
+按目标与范围形成有限维度；先 galaxy({confirm:false}) 展示方案，再按实际授权 confirm:true 执行。已有成功结果不重做。
+汇总实际文件变化、遗留问题与每项已有执行回执。实施、实际提交、验证、审查分别披露；未执行的检查如实说明。
+验证或审查按用户请求与批准计划执行，不因测试失败、覆盖不完整或审查未做而自动重启集群、扩大测试、追加质量续轮。
+需要授权提交时使用 deliver_task；它只检查归属、范围与 Git 安全。受阻时报告具体原因及已有日志引用。`,
       requiredTools: ['galaxy'],
     }
   }

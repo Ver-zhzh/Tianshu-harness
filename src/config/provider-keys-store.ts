@@ -83,6 +83,45 @@ export function writeProviderKeysFile(file: ProviderKeysFile, base?: string): vo
   writeFileAtomicSync(path, JSON.stringify(file, null, 2) + '\n')
 }
 
+/**
+ * 迁移期让退役迁移看见**权威池**（2026-10-24 收编公开仓 PR #37）。
+ *
+ * 为什么要这一步：`loadConfig` 的迁移段跑在 `injectProviderKeys` 之前，而外部池
+ * 形态下 config.json 没有 keys——迁移看不到池，`ensureReplacementInPool` 只能补进
+ * 无人读的顶层 models；等引用改完，注入后的重跑又因为「引用已是新名」不再触发补池，
+ * 结果是 profile 指向池里不存在的 REPLACEMENT（探针实测：selected key 池只有
+ * other 时 `findModelInKey(...,'selected','deepseek-flash')` 恒 undefined）。
+ *
+ * 做法：把池临时挂到 provider 上跑迁移，再原样恢复——**绝不把外部池写进
+ * config.json**（调用方随后会原样落盘 cpMigrated）。迁移对池的改动按 stale 判定
+ * 写回 provider-keys.json；写失败静默降级，绑定的 fail-closed 校验仍在。
+ */
+export function migrateFlashRetirementWithKeyPools(raw: Record<string, unknown>): boolean {
+  const file = readProviderKeysFile()
+  const providers = (raw.provider as { providers?: Record<string, Record<string, unknown>> } | undefined)?.providers
+  const restored: Array<{ provider: Record<string, unknown>; keys: unknown; existed: boolean }> = []
+  const before = file && JSON.stringify(file)
+  try {
+    for (const name of ['deepseek', 'deepseek-spark']) {
+      const provider = providers?.[name]
+      const keys = file?.providers[name]
+      if (!provider || !keys?.length) continue
+      restored.push({ provider, keys: provider.keys, existed: Object.hasOwn(provider, 'keys') })
+      provider.keys = keys
+    }
+    const changed = migrateDeepseekV4FlashRetirement(raw)
+    if (file && JSON.stringify(file) !== before) {
+      try { writeProviderKeysFile(file) } catch { /* 只读存储：保留既有 fail-closed 绑定校验 */ }
+    }
+    return changed
+  } finally {
+    for (const { provider, keys, existed } of restored) {
+      if (existed) provider.keys = keys
+      else delete provider.keys
+    }
+  }
+}
+
 /** 文件系统 mode（0600）——仅当文件存在时有意义。测试与诊断用。 */
 export function providerKeysFileMode(base?: string): number | undefined {
   const path = providerKeysPath(base)

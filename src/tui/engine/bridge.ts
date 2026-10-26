@@ -28,6 +28,11 @@ export function wrapCallbacksWithTuiApp(
   const live = () => app.runGen === gen
 
   return {
+    onToolInputProgress: progress => {
+      if (!live()) return
+      app.callbacks.onToolInputProgress?.(progress)
+      original.onToolInputProgress?.(progress)
+    },
     onTextDelta: (text) => {
       if (!live()) return
       app.callbacks.onTextDelta(text)
@@ -123,6 +128,11 @@ export function wrapCallbacksWithTuiApp(
       if (!live()) return
       app.callbacks.onDelegationActivity?.(activity)
       original.onDelegationActivity?.(activity)
+    },
+    // Detached review belongs to its session, not the generation of the run that launched it.
+    onReviewReady: notice => {
+      app.callbacks.onReviewReady?.(notice)
+      original.onReviewReady?.(notice)
     },
     onCvmInterception: (notice) => {
       // 迟到的旧 run CVM 通知 → 丢弃，避免为已死 run 追加提示行。

@@ -40,9 +40,11 @@ describe('TypecheckReminderHook', () => {
     const out = run({ touchedTsFiles: true, sawTypecheckThisTask: false, recentToolHistory: RAN_TESTS })
     assert.equal(out.length, 1)
     assert.equal(out[0]!.key, 'typecheck-reminder')
-    assert.equal(out[0]!.tier, 'operational')
+    assert.equal(out[0]!.tier, 'informational')
     assert.equal(out[0]!.category, 'typecheck')
     assert.equal(out[0]!.priority, 0.6)
+    assert.match(out[0]!.content, /不追加检查或阻止提交/)
+    assert.equal(out[0]!.expect, undefined)
   })
 
   it('point 4: fires even when the edit scrolled out of the window', () => {

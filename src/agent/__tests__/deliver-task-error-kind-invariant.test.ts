@@ -42,5 +42,5 @@ test('锚点自检：deliver-task.ts 确实存在 isError 返回（防止正则�
   const source = readFileSync(SOURCE, 'utf-8')
   const count = source.split('\n').filter(l => /isError:\s*true/.test(l)).length
   const helperCalls = source.split('\n').filter(l => /return blockedCommit\(/.test(l)).length
-  assert.ok(count >= 10 && helperCalls >= 10, `扫描到直接错误 ${count} 条、带 errorKind 的停轮助手调用 ${helperCalls} 条；结构可能漂移`)
+  assert.ok(count >= 5 && helperCalls >= 5, `扫描到直接错误 ${count} 条、带 errorKind 的停轮助手调用 ${helperCalls} 条；结构可能漂移`)
 })

@@ -1,3 +1,7 @@
+import { describeToolSurface } from './tool-surface.js'
+import { observeAgentRuntimeRun } from './runtime-run-observation.js'
+import { publishFactHandoff } from './fact-handoff.js'
+import { liveHandoffInput } from './live-handoff.js'
 import { isContinuityMaintenance } from './continuity-recovery.js'
 import { withExecutionContinuity } from '../api/execution-continuity.js'
 import { CourseEpisodes } from './course-episodes.js'
@@ -25,7 +29,7 @@ import { attachSessionPersistListener, commitCompactedHistory } from './session-
 import { PrewarmCache } from './prewarm.js'
 import { getTodos, getTodoRegressionStats } from '../tools/todo.js'
 import { resolveDecisionsArm } from './decisions-experiment.js'
-import { gateToolDefinitions, isExtendedTool } from './tool-tiers.js'
+import { gateToolDefinitions, isExtendedTool, toolMountRestriction } from './tool-tiers.js'
 import { applyDescriptionMode } from '../tools/description-compact.js'
 import { resolvePromptBlocks } from '../prompt/block-policy.js'
 import { wireUserInstructionsPersistence, agentPrefixBudget } from './user-instructions-runtime.js'
@@ -74,6 +78,8 @@ import { createThetaState } from './star-event.js'
 import type { ThetaState } from './star-event.js'
 import { RuntimeHookPipeline, createRuntimeHookContext, type RuntimeHookSnapshot, type RuntimeHookContext } from './runtime-hooks.js'
 import { DetachedRunner } from './post-session-detach.js'
+import { RunLifecycle } from './run-lifecycle.js'
+import { capturePostSessionInputs } from './post-session-inputs.js'
 import { TurnPerceptionController } from './turn-perception.js'
 import { TurnIntentController } from './turn-intent.js'
 import { ContextInjectionController } from './context-injection.js'
@@ -284,6 +290,13 @@ export class AgentLoop {
   zenController: ZenPhaseController
   /** 中止路径 postSession 的后台链（见 post-session-detach.ts）。 */
   private readonly postSessionDetach = new DetachedRunner()
+  private runLifecycle?: RunLifecycle
+
+  getRunId(): string | undefined { return this.runLifecycle?.id }
+  getRunStartedAt(): number | undefined { return this.runLifecycle?.startedAt }
+  getRunSignal(): AbortSignal | undefined {
+    return this.runLifecycle?.signalFor(this.abortController?.signal) ?? this.abortController?.signal
+  }
   private physarumForWarmup?: PhysarumEngine
   private meridianDbForWarmup?: import('../repo/meridian-db.js').MeridianDb
   private memoriesWarmed = false
@@ -754,7 +767,7 @@ export class AgentLoop {
   /** A1: unified advisory bus — collects corrective signals, renders ≤3 per turn */
   advisoryBus = new AdvisoryBus()
   /** P1a 核销闭环：advisory 送达后按 expect 谓词核销 adopted/ignored */
-  advisoryReadback = new AdvisoryReadback()
+  advisoryReadback = new AdvisoryReadback(undefined, () => this.cwd)
   readonly courseEpisodes = new CourseEpisodes(this)
   /** P0 共享工作事实（《收敛阶段补修》§3）：任务边界/工作版本/进展/验证执行，
    *  每 modelTurn 感知前快照一次，感知/收敛/核销读同一份。 */
@@ -990,6 +1003,10 @@ export class AgentLoop {
     this.physarumForWarmup = physarum
     this.meridianDbForWarmup = meridianDb
 
+    this.config.externalHookRuntime = this.config.externalHookHost?.createRuntime({
+      parent: this.config.externalHookParent, cwd: this.cwd, sessionId: this.config.sessionId, getPluginHooks: this.config.getPluginHooks,
+      emitResult: this.config.emitHookResult, emitCleanup: this.config.emitHookCleanup,
+    })
     this.runtimeHooks = this.config.runtimeHooks ?? createRuntimeHooksPipeline(this)
     // P2 Wave 2: config HMR —— 非 headless 交互模式装配。配置变更（hooks.disabled）
     // 经 watcher 热更到管线，下一轮生效。缓存影响：hook 开关不动工具指纹/system
@@ -1215,7 +1232,7 @@ export class AgentLoop {
       const domain = this.sessionDomain?.id ?? ''
       const numericId = this._sessionNumericId ?? undefined
       const mark = buildAgentMark({ symbol: VOID_SYMBOL, domain, numericId })
-      const summary = `plan closed: ${input.planFile} [${input.tasks}] ${input.deliveryState}`
+      const summary = `plan closed: ${input.planFile} [${input.tasks}] ${input.summary ?? `执行状态未知；历史声明 ${input.deliveryState}`}`
       const milestone = buildDepartureMilestone({
         sessionId: this.config.sessionId ?? 'anon',
         agentMark: mark,
@@ -1636,28 +1653,16 @@ export class AgentLoop {
 
   /**
    * 应用工具门控后的定义集 — 构造期之外（MCP/LSP 注册刷新、逃生口挂载）的唯一过滤入口。
-   * 复用 createAgentConfig 同款 gateToolDefinitions，确保 updateTools 不会把 EXTENDED 工具
-   * 整个还原（历史 bug：MCP/LSP 初始化后 updateTools 拉全量 → 门控被毫秒内覆盖）。
    */
   private gatedToolDefinitions(): import('../api/types.js').ToolDefinition[] {
     const all = this.config.toolRegistry.getDefinitions()
     const gating = this.config.toolGating
-    // 描述档位：优先读会话启动期冻结的快照（config.blockPolicy）——长驻进程里
-    // 进程级 memo 会被新会话创建时 invalidate，live 读会让描述从 compact 回弹
-    // 成 full，system 字节中途翻转 → 整段前缀缓存 miss。快照缺省（手工构造
-    // config 的测试路径）才回退 live 解析。
     const toolDescriptions = (this.config.blockPolicy
       ?? resolvePromptBlocks(this.config.cwd ?? process.cwd())).toolDescriptions
-    // 门控先行：disabledTools / domainTier 等策略边界在任何相位（含 zen）都
-    // 不得绕过——zen 只做「读面 ∩ 门控存活集」的二次收窄，而非替代门控
-    // （历史缺陷：zen 分支提前 return 跳过 gateToolDefinitions，策略禁用的
-    // 工具在禅相位仍对模型暴露）。原 `if (!gating)` 早退路径同样经此合并。
-    // 注：gateToolDefinitions 内部三处返回均已 applyDescriptionMode，故下方
-    // 只对**新增**的 zen_unlock 定义再应用一次，避免对已处理定义双重压缩
-    // （压缩非严格幂等时即为字节级回归）。
     const gated = gating
       ? gateToolDefinitions(all, {
           enabled: gating.enabled,
+          preset: gating.preset ?? this.config.toolRegistry.preset,
           coreOverride: gating.coreOverride,
           extraCore: gating.extraCore,
           domainTier: gating.domainTier,
@@ -1699,8 +1704,17 @@ export class AgentLoop {
 
   /** 当前主控实际可见的工具名（已应用门控 + 运行时挂载 + zen 读面）。 */
   getActiveToolNames(): string[] {
-    return this.gatedToolDefinitions().map(d => d.name)
+    return this.config.promptEngine.getTools().map(d => d.name)
   }
+
+  private gatedToolDefinitionsForMount(name: string) {
+    this.mountedExtras.add(name)
+    try { return this.gatedToolDefinitions().find(definition => definition.name === name) }
+    finally { this.mountedExtras.delete(name) }
+  }
+  getMountedToolNames(): readonly string[] { return [...this.mountedExtras] }
+
+  getToolSurface() { return describeToolSurface(this.config.toolRegistry, this.config.promptEngine.getTools(), this.config.toolGating) }
 
   // ── Zen Mode 相位控制 ────────────────────────────────
 
@@ -1795,15 +1809,10 @@ export class AgentLoop {
   }
 
   /**
-   * 逃生口：把一个 EXTENDED 工具临时挂回主控（在 turn 边界由 slash 命令触发）。
-   *
-   * 代价：挂载会改变 staticCtx.tools 的 fingerprint，对 exact-prefix 缓存的 provider
-   * （deepseek-native / anthropic-cache-control）造成一次性全前缀缓存失效；'none' provider 无代价。
-   *
-   * @returns 结构化结果，供 UI 渲染（status + 缓存影响）
+   * Explicitly mount a cold tool, preserving session restrictions and cache reporting.
    */
-  enableTool(name: string): {
-    status: 'mounted' | 'already-active' | 'not-extended' | 'unknown' | 'gating-off'
+  enableTool(name: string, options?: { runtimeBoundary: true }): {
+    status: 'mounted' | 'already-active' | 'not-extended' | 'unknown' | 'gating-off' | 'disabled' | 'restricted' | 'busy'
     cacheImpact: 'prefix-invalidated' | 'none'
     prefixCacheStrategy: 'deepseek-native' | 'anthropic-cache-control' | 'none'
   } {
@@ -1811,10 +1820,15 @@ export class AgentLoop {
     const cacheImpact: 'prefix-invalidated' | 'none' =
       strategy === 'none' ? 'none' : 'prefix-invalidated'
 
+    const restriction = this.config.toolGating && toolMountRestriction(name, this.config.toolGating)
+    if (restriction) return { status: restriction, cacheImpact: 'none', prefixCacheStrategy: strategy }
+
     // 门控未开 → 全量本就可见，无需挂载
     if (!this.config.toolGating || !this.config.toolGating.enabled) {
       return { status: 'gating-off', cacheImpact: 'none', prefixCacheStrategy: strategy }
     }
+    if (this.getActiveToolNames().includes(name) && isExtendedTool(name)) return { status: 'already-active', cacheImpact: 'none', prefixCacheStrategy: strategy }
+
     // 工具必须真实注册
     if (!this.config.toolRegistry.getDefinitions().some(d => d.name === name)) {
       return { status: 'unknown', cacheImpact: 'none', prefixCacheStrategy: strategy }
@@ -1823,12 +1837,12 @@ export class AgentLoop {
     if (!isExtendedTool(name)) {
       return { status: 'not-extended', cacheImpact: 'none', prefixCacheStrategy: strategy }
     }
-    // 已挂载 → 幂等
-    if (this.mountedExtras.has(name)) {
-      return { status: 'already-active', cacheImpact: 'none', prefixCacheStrategy: strategy }
-    }
+    if (this.isRunning() && !options?.runtimeBoundary) return { status: 'busy', cacheImpact: 'none', prefixCacheStrategy: strategy }
+    const definition = this.gatedToolDefinitionsForMount(name)
+    if (!definition) return { status: 'restricted', cacheImpact: 'none', prefixCacheStrategy: strategy }
+    this.config.promptEngine.activateExplicitTool(definition)
+    this.config.client.authorizeCacheGeneration?.('explicit_user_tool_mount')
     this.mountedExtras.add(name)
-    this.updateTools()
     return { status: 'mounted', cacheImpact, prefixCacheStrategy: strategy }
   }
 
@@ -2297,9 +2311,9 @@ export class AgentLoop {
    * Set (or clear) the approved-plan pointer. Injects a tiny slug/title/path
    * reminder into the dynamic appendix — NOT the plan body (which stays on disk).
    * Approving releases plan mode (state→off) so execution tools are unblocked.
-   * Cache-safe: the pointer never enters the frozen base.
    */
   setActivePlan(plan: { slug: string; title: string; selectedApproach?: string } | null): void {
+    this.workFacts.acceptApprovedImplementation(plan !== null)
     if (!plan) {
       this.config.promptEngine.setActivePlan(null)
       // Clears the <plan-executing> advisory — re-entering plan mode (or an
@@ -2494,17 +2508,19 @@ export class AgentLoop {
   }
 
   async runPostSession(callbacks: AgentCallbacks): Promise<void> {
-    await this.runPostSessionWith(this.buildPostSessionContext(callbacks))
+    const lifecycle = this.runLifecycle
+    const start = () => {
+      const ctx = this.buildPostSessionContext(callbacks)
+      const withInputs = capturePostSessionInputs(this)
+      const runHooks = this.config.inputOrigin === 'worker_task' ? async () => {} : withInputs(() => this.runtimeHooks.capturePostSession(ctx))
+      return this.postSessionDetach.schedule(() => withInputs(() => this.runPostSessionWith(runHooks, lifecycle)))
+    }
+    await (lifecycle ? lifecycle.finalize(start) : start())
   }
 
-  /**
-   * 中止路径专用：快照**同步**取（下一轮 initializeRun 会重置 evidence /
-   * trajectory / sensorium），hooks 与落盘进后台串行链。run() 不等它——
-   * 对齐 Codex（hooks 异步，下一轮 drain）。natural-finish 仍走 runPostSession。
-   */
+  /** Abort releases the foreground immediately; the run's sole finalizer stays tracked. */
   schedulePostSessionDetached(callbacks: AgentCallbacks): void {
-    const ctx = this.buildPostSessionContext(callbacks)
-    this.postSessionDetach.schedule(() => this.runPostSessionWith(ctx))
+    void this.runPostSession(callbacks).catch(() => { /* best-effort */ })
   }
 
   /** 关停收口：等后台 postSession 链跑完（有界）。 */
@@ -2513,14 +2529,17 @@ export class AgentLoop {
   }
 
   private buildPostSessionContext(callbacks: AgentCallbacks): RuntimeHookContext {
-    return createRuntimeHookContext(this.buildRuntimeSnapshot(),
-      { emitPhaseChange: (phase, detail) => { callbacks.onPhaseChange?.(phase, detail) } })
+    const signal = this.getRunSignal()
+    return createRuntimeHookContext(structuredClone(this.buildRuntimeSnapshot()),
+      { emitPhaseChange: (phase, detail) => { if (!signal?.aborted) callbacks.onPhaseChange?.(phase, detail) } })
   }
 
-  private async runPostSessionWith(ctx: RuntimeHookContext): Promise<void> {
+  private async runPostSessionWith(runHooks: () => Promise<void>, lifecycle?: RunLifecycle): Promise<void> {
     // P0-1: drain pending async persist writes so tool results survive abort/Ctrl+C.
     await this.drainPersistWrites()
-    if (this.config.inputOrigin !== 'worker_task') await this.runtimeHooks.runPostSession(ctx)
+    await runHooks()
+    // A newer run owns live counters and handoff state. Its finalizer will flush them.
+    if (lifecycle && lifecycle !== this.runLifecycle) return
     if (this.config.sessionRegistry) {
       try { this.config.sessionRegistry.cleanupOldEvents(2 * 60 * 60 * 1000) } catch { /* ignore */ }
     }
@@ -2550,14 +2569,14 @@ export class AgentLoop {
       }
     } catch { /* non-critical */ }
     try {
-      // 会话内 /handoff（或人工编辑）已产出更新的交接文档时，结构化摘要不覆盖——
-      // 自动 handoff 只是「会话内没做手动交接」的兜底（shouldAutoWriteHandoff）。
+      // Preserve manual prose; publish machine facts independently.
       const sp = this.persist
       const handoffMtime = sp && existsSync(sp.getHandoffPath()) ? statSync(sp.getHandoffPath()).mtimeMs : null
       if (sp && shouldAutoWriteHandoff(handoffMtime, this.createdAtMs)) {
-        const handoffText = this.compaction.buildSessionHandoff()
-        sp.writeHandoff(handoffText)
+        if (this.config.sessionId) publishFactHandoff(this.cwd, this.config.sessionId, liveHandoffInput(this))
+        else sp.writeHandoff(this.compaction.buildSessionHandoff())
       } else if (sp) {
+        if (this.config.sessionId) publishFactHandoff(this.cwd, this.config.sessionId, liveHandoffInput(this), undefined, true)
         sp.writeHandoffTail(this.compaction.buildSessionHandoff())
       }
       if (sp) {
@@ -2651,16 +2670,8 @@ export class AgentLoop {
   }
 
   private async runObserved(userInput: string, callbacks: AgentCallbacks, images?: string[]): Promise<AgentRunOutcome> {
-    // Re-entry guard: prevent concurrent agent.run() calls.
-    // React strict mode or rapid re-submits could trigger handleSubmit
-    // while a previous run is still in-flight, corrupting SessionContext.
-    // Claim the guard synchronously before any await (including the
-    // cancelIdleCompaction drain) so a duplicate run() that arrives during the
-    // drain sees _running=true and no-ops instead of racing _runInner.
-    //
-    // 返回 'skipped' 而非静默 return：调用方（TUI）在此之前已把自己置为 busy，
-    // 若这里无声无息地走掉，busy 就再没人清——用户按 ESC 后立刻发的消息会落进
-    // 一个没有活跃 run 的队列里，永远等不到注入边界。调用方据此复位并如实告知。
+    // Claim ownership before any await. A skipped caller must reset its UI busy
+    // state explicitly; it cannot expect callbacks from a run that never started.
     if (this._running) {
       debugLog('[agent] run() called while already running — skipping duplicate')
       return 'skipped-already-running'
@@ -2679,6 +2690,8 @@ export class AgentLoop {
     this._pendingAbort = false
     this._watchdogAborted = false
     this.abortController = new AbortController()
+    const lifecycle = this.runLifecycle = new RunLifecycle()
+    this.config.externalHookRuntime?.beginRun(lifecycle.id)
     // 晚到注册闸门（回流自 3.14alpha 71872ed9f，缓存碎裂根修）：MCP/插件/LSP 的
     // 异步注册未清零时先等（8s 封顶，挂死的 MCP 不阻塞会话）——晚到的 tools 变化
     // 吸收进本 user 边界断尾，不再在请求发出后中途改写 tools 数组碎前缀（会话
@@ -2686,18 +2699,13 @@ export class AgentLoop {
     // 放在 abort controller 之后：闸门等待期内 Esc 仍能打断实时信号。
     // 可选调用：测试里有以裸对象冒充 toolRegistry 的桩（只给 getDefinitions），
     // 缺该方法时跳过闸门而非炸掉 run（生产路径恒为真 ToolRegistry）。
-    await this.config.toolRegistry.awaitExtraRegistrations?.(8_000)
-    // 工具表在本 user 边界定稿：晚到注册已吸收，此后外部工具（MCP）不再注入
-    // ——会话一旦有请求上网，改 tools 段就会碎整段前缀（见 refreshToolsAtBoundary）。
-    this._toolSetPublished = true
-    // W3：每轮用户输入开始时重置 system-reminder 计数器（每轮最多 1 条）。
-    this.session.resetSrCount()
-    // Cancel + drain any pending/in-flight idle compaction before mutating the
-    // session, so the user turn never races idle history rewrites. Awaiting the
-    // settle is correct (not a stall): the idle abort makes the in-flight pass
-    // bail at its next checkpoint; replaceMessages itself is synchronous so the
-    // session is always in a consistent state at the await boundary.
-    try {
+    return observeAgentRuntimeRun(this, lifecycle.id, async () => { try {
+      await this.config.externalHookRuntime?.barrier(this.getRunSignal())
+      await this.config.toolRegistry.awaitExtraRegistrations?.(8_000)
+      // Freeze the tool catalog at this user boundary, after late registrations.
+      this._toolSetPublished = true
+      this.session.resetSrCount()
+      // Drain idle history rewrites before this run mutates the session.
       await waitForAgentRewind(this)
       await this.cancelIdleCompaction()
 
@@ -2712,7 +2720,7 @@ export class AgentLoop {
       // 视觉分派（三条出口的纪律与文案见 user-image-dispatch.ts）：
       //   多模态主控直通 / text-only 走识图桥 / text-only 且无桥 → 丢弃 + 可见提示。
       const dispatched = await dispatchUserImages(userInput, images, {
-        supportsVision: this.config.supportsVision,
+        supportsVision: this.config.supportsVision, artifactStore: this.artifactStore,
         visionClient: this.config.visionClient,
         visionModel: this.config.visionBridge?.detail,
         recordUsage: usage => this.recordSidePathUsage('vision-description', usage, this.config.visionBridge?.detail ?? 'unknown'),
@@ -2722,17 +2730,18 @@ export class AgentLoop {
         cacheDescription: (imageId, cacheKey, description) => {
           this.imageRegistry.cacheDescription(imageId, cacheKey, description)
         },
-        signal: this.abortController.signal,
+        signal: this.getRunSignal(),
       })
       userInput = dispatched.userInput
       images = dispatched.images
 
       await this._runInner(userInput, callbacks, images)
-      return 'completed'
+      return 'completed' as const
     } finally {
+      lifecycle.close()
       this._running = false
       this.scheduleIdleCompaction()
-    }
+    } })
   }
 
   /**
@@ -2942,6 +2951,7 @@ export class AgentLoop {
       : null
     return {
       committedPhase: wsState.committedPhase,
+      repairActive: this.workFacts.hasActiveRepair(),
       // 候选观测三元组同源（审查 finding 1）：candidate 清空后不得残留 source。
       candidatePhase: wsState.candidate?.value ?? null,
       candidateTurns: wsState.candidate?.turns ?? 0,

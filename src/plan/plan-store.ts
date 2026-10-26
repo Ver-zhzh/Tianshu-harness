@@ -15,6 +15,7 @@ import { join } from 'node:path'
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 
 export interface PlanDocument {
+  completion?: { summary: string; revision: 'current' | 'changed' | 'unknown' }
   /** 文件名 slug (不含 .md) */
   slug: string
   /** 计划标题（从 markdown H1 提取） */

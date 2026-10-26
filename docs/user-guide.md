@@ -212,14 +212,23 @@ tail -f run.jsonl | jq -c 'select(.type == "tool_use") | .data.name'
 
 ### 工具集与 preset
 
-天枢内置 51 个工具（full 档口径），按 preset 分档装配（解析优先级：`RIVET_TOOL_PRESET` 环境变量 > 项目 `.rivet-config.json` 的 `tools.preset` > 项目 `runtime.domains.<域>.toolPreset` > 用户配置 `tools.preset` > 用户 `runtime.domains.<域>.toolPreset` > 星域内置默认档（太一域→taiyi）> 兜底档：**`minimal`**（2026-09-23 起；此前非 lean 为 `frontend`）：
+工具档位分别控制装配和主控可见面。解析优先级：`RIVET_TOOL_PRESET` > 项目 `tools.preset` > 项目域覆盖 > 用户 `tools.preset` > 用户域覆盖 > 星域内置默认档 > **minimal**。
 
-| Preset | 工具数 | 说明 |
-|--------|--------|------|
-| **minimal**（默认） | 30 | 日常开发全能力——读写/检索/bash/git 史实侦察（`git_scout`）/测试/委托/web/计划/todo/memory，省 token、保 prefix cache——未做任何配置时的兜底档 |
-| **frontend** | 31 | minimal + `browser_debug`（UI 渲染验证闭环） |
-| **full** | 51 | 全集，含 `council_convene` / `team_orchestrate` / `attack_case` / `semantic_search` / `repo_graph` / `monitor` / `computer_use` / `capability` / `cli_discover` / 办公工具族等进阶能力 |
-| **taiyi** | 14 | 最小评测档——高频核心 + 交付闭环，去编排/浏览器/网络/视觉等重工具；太一星域钉定时自动落此档 |
+下表为无 MCP/LSP、无调度器和强制扩展的 CLI 基线：
+
+| Preset | 装配／主控可见 | 说明 |
+|---|---|---|
+| **minimal**（默认） | 36／26 | 日常开发、基本委派、team、记忆、胶囊、图像追问；高级编排冷注册 |
+| **frontend** | 37／27 | minimal + `browser_debug` |
+| **orchestration**（编排） | 36／30 | minimal + `galaxy`、`starflow`、`plan_task`、`council_convene`，无需启用 full |
+| **full** | 56／43 | 全功能装配与完整编排，低频扩展仍按主控分层显示 |
+| **taiyi** | 14／13 | 保持太一评测基线，`diff` 为冷工具 |
+
+有真实调度器时装配各加 3；`schedule_*` 仅在 full/taiyi 默认可见，其他档可显式 `/tools enable schedule_create` 等。主控默认移出 `git_scout`，只读 worker 继续可用；基本委派与 team 不受影响。
+
+使用 `/tools` 查看当前实际可见、冷注册、未注册、禁用及白名单限制。`/galaxy`、`/starflow`、`/council` 只挂载该显式指令需要的工具，受已有白名单与禁用项约束，并提示一次缓存影响；不会自动升到 full。设置修改用于后续会话，当前会话工具面保持会话内策略。
+
+`/team` 可直接传已有 `planPath`，或由主控按 `### Task N: 标题` 整理 `planMarkdown`（正文列出文件、依赖和验收）。无需默认可见的 `plan_task`。显式计划优先于会话残留计划；`/team max` 保持原有权限规则。
 
 ```bash
 RIVET_TOOL_PRESET=full tianshu        # 本次会话用 full
@@ -449,10 +458,12 @@ v2 manifest 仍逐会话保存技能正文与描述；本轮 compact 不改变�
 | 环境变量 | 默认 | 作用 |
 |----------|------|------|
 | `RIVET_ADAPTIVE_MEMORY` | `on` | `on` 自动注入相关记忆要点；`shadow` 只评估不注入；`off` 关闭 |
-| `RIVET_MEMORY_AUTO_CAPTURE` | `on` | 会话末把重要操作交给模型判断后写入 LTM |
-| `RIVET_MEMORY_CONSOLIDATION` | `on` | 会话末生成摘要 + 可复用做法 |
+| `RIVET_MEMORY_AUTO_CAPTURE` | `off` | 会话末把重要操作交给模型判断后写入 LTM，显式 `1/on/true` 开启 |
+| `RIVET_MEMORY_CONSOLIDATION` | `off` | 会话末生成摘要 + 可复用做法，显式 `1/on/true` 开启 |
 | `RIVET_MEMORY_BACKFILL` | `off` | 显式开启后，启动闲时对历史会话补跑巩固（幂等） |
 | `RIVET_NO_CROSS_SESSION` | 未设置 | `1` 强制关闭跨会话加载（记忆块/事件/伴生感知） |
+
+自动形成记忆的两项功能默认关闭，可在桌面「设置 → 行为 → 自动形成记忆」分别开启，也可设置 `agent.memoryFormation.autoCapture` / `agent.memoryFormation.consolidation`。保存后新会话生效；已有记忆保留，召回不受影响。环境变量优先于配置：`1/on/true` 开启，`0/off/false` 关闭，空值使用配置，其他非空值保守关闭。
 
 配置层关闭跨会话知识：`{ "agent": { "crossSessionEnabled": false } }`。
 
@@ -563,7 +574,7 @@ tianshu --terminal-mode captured-pty
 |------|------|
 | `Enter` | 发送 · `Shift+Enter` 换行 |
 | `Ctrl+C` | 三态：agent 活跃时中断当前 run；有输入时清空输入行；空闲时 2 秒内双击退出 |
-| `Esc` | 关闭覆盖层 / 退出 worker 视图；agent 跑时中断；vim 模式下兼 normal↔insert；双击（<400ms）倒带 |
+| `Esc` | 有正文或输入框选区时先取消选区；关闭覆盖层 / 退出 worker 视图；agent 跑时中断；vim 模式下兼 normal↔insert；双击（<400ms）倒带 |
 | `Ctrl+P` | 命令面板（Ctrl+Esc 被 Windows「开始菜单」抢占，已换绑） |
 | `Ctrl+]` | 切右侧抽屉（宽终端） |
 | `Ctrl+R` | 历史搜索 overlay（仅空闲时） |
@@ -572,6 +583,8 @@ tianshu --terminal-mode captured-pty
 | `Ctrl+X` `r` | leader 键：`Ctrl+X` 后接 `r` 开右侧面板 |
 | `Ctrl+X` `t` | leader 键：`Ctrl+X` 后接 `t` 展开 todo 全量回看 |
 | `↑` | 输入框为空且队列有 pending 时，取回最近一条排队 steer 消息编辑 |
+| `↑` / `↓` | 与 codex 一致：输入框为空，或内容是未改动的已召回历史且光标在开头/结尾时翻输入历史；编辑中的草稿永不被换走。其余情况按屏幕上的视觉行（含自动折行）上下移动并保持列，首行再按 `↑` 到开头、末行再按 `↓` 到结尾。`Ctrl+N` 仍可显式翻到下一条 |
+| 鼠标（全屏渲染） | 输入框内单击落光标、拖动选择、双击选词、三击选整行；松开即复制（`/settings` →「选中即复制」可关），`Ctrl+C` 也复制选区；选中后 `Backspace`/`Delete` 删除、直接输入或粘贴替换。经典渲染不接管鼠标（保留终端原生滚动与回滚），此时的鼠标选区属于终端自身，复制行为取决于终端设置（如 Windows Terminal 的 `copyOnSelect`） |
 | `@` | 触发文件/文件夹/符号补全（`Tab` 循环候选，退格整块删除） |
 | `Ctrl+V` | 粘贴剪贴板图片（自动转 base64 内联） |
 | `F1`–`F8` | 高频命令直绑：F1 /help · F2 /tasks · F3 /cache · F4 /cockpit · F5 /theme · F6 /model · F7 /permission · F8 /sessions |
@@ -755,7 +768,7 @@ tianshu config set-approval auto-safe       # 持久化默认档位
     "autoThreshold": 800000       // 触发自动压缩的 token 阈值
   },
   "tools": {
-    "preset": "minimal"           // minimal（默认）| frontend | full | taiyi
+    "preset": "minimal"           // minimal（默认）| frontend | orchestration | full | taiyi
   },
   "workers": {
     "profiles": {                 // 自定义 worker 模型档位
@@ -806,7 +819,7 @@ tianshu config set-approval auto-safe       # 持久化默认档位
 |------|------|
 | `DEEPSEEK_API_KEY` | DeepSeek API 密钥 |
 | `DEEPSEEK_SPARK_API_KEY` | DeepSeek Spark（Pro 专属预设）API 密钥 |
-| `RIVET_TOOL_PRESET` | 工具集档位：`minimal`（默认）/ `frontend` / `full` / `taiyi` |
+| `RIVET_TOOL_PRESET` | 工具集档位：`minimal`（默认）/ `frontend` / `orchestration` / `full` / `taiyi` |
 | `RIVET_EMBEDDING_MODEL` / `RIVET_EMBEDDING_BASE_URL` / `RIVET_EMBEDDING_API_KEY` | 语义搜索的嵌入模型路由（默认 `text-embedding-3-small`） |
 | `RIVET_NO_EMBEDDINGS=1` | 关闭嵌入索引 |
 | `RIVET_SANDBOX` / `RIVET_SANDBOX_WRITABLE` | 追加可写沙箱根目录 / 可写目录列表 |
@@ -842,8 +855,8 @@ tianshu config set-approval auto-safe       # 持久化默认档位
 | 变量 | 作用 |
 |------|------|
 | `RIVET_ADAPTIVE_MEMORY` | 自动注入治理/约束/偏好类记忆：`on`（默认）/ `shadow` 只评估 / `off` 关闭 |
-| `RIVET_MEMORY_AUTO_CAPTURE` | 会话末把重要操作交给模型判断后写入长期记忆（默认 `on`） |
-| `RIVET_MEMORY_CONSOLIDATION` | 会话末生成摘要与可复用做法（默认 `on`） |
+| `RIVET_MEMORY_AUTO_CAPTURE` | 会话末把重要操作交给模型判断后写入长期记忆（默认 `off`，显式 `1/on/true` 开启） |
+| `RIVET_MEMORY_CONSOLIDATION` | 会话末生成摘要与可复用做法（默认 `off`，显式 `1/on/true` 开启） |
 | `RIVET_MEMORY_BACKFILL` | 启动闲时对历史会话补跑巩固（默认 `off`，幂等账本） |
 
 > 完整环境变量清单（120+ 项，含内部实验开关）见 `src/config/env-registry.ts`。
@@ -959,3 +972,16 @@ tianshu logs open desktop            # 打开 sidecar 日志目录（GUI 起不�
 **回答被中途截断了（显示「输出已达 token 上限」）怎么办？** 说明这一轮输出达到了模型的 `maxTokens` 上限、内容被截断——但**已输出的部分全部保留在对话历史里**，直接发「继续」让模型接着往下写即可（不丢内容，也无需重述）。长回答频繁被截断时，自建 / 本地部署的模型可在 provider 配置里调大 `maxTokens`。
 
 **429 / 额度不足怎么办？** 桌面端 Insights 面板可查 DeepSeek 余额与欠费状态；降低成本可 `/effort` 降推理深度档，或 `/model` 换 flash 档（如 `deepseek-flash`）。若该服务商频繁 429，可按「重试与速率限制」章节（[Provider 配置手册](user-guide-provider-config.md)）调整重试次数、退避曲线或开启客户端限速。
+
+
+### 用户和插件 Hook 的执行预算
+
+项目 `.rivet/hooks.json` 支持 `preTurn`、`postTool`、`postTurn`、`postSession` 和 `onError`。脚本通过 stdin 接收事件 JSON，同时可读取 `RIVET_HOOK_EVENT`、`RIVET_SESSION_ID`、`RIVET_TURN` 与 `RIVET_TOOL_NAME`。未授信项目不执行项目脚本。
+
+脚本异步执行。同一真实工作目录的事件组串行，组内先项目脚本、再插件脚本；不同目录最多并发 4 组。单脚本默认 5 秒，可由条目的正整数 `timeoutMs` 覆盖；整组默认 10 秒，含配置读取、排队及执行，沿用 runtime hook 的有效预算。单目录最多排队 16 组、整个宿主最多 128 组，满队列明确跳过。配置修改影响后续提交的事件。
+
+取消或开始下一轮会停止旧轮外部 hook；调用方立即结束等待，进程回收仍被跟踪。POSIX 先发送 TERM，200ms 后升级 KILL，最多 2 秒确认回收。Windows 使用 Job Object 监督助手确认后代全部退出。若无法确认清理，此目录停止推进后续任务；检查脚本及残留进程，确认清理后再重启运行时恢复，其他目录及服务连接仍可响应。已发生的外部写入不回滚，也不自动重试脚本。
+
+每脚本输出最多 64KiB、每组最多 256KiB；超限停止执行。脚本不应启动脱离管理的守护进程。`postSession` 保留调用时的 run 和轮次，迟到诊断不会改变新一轮状态。桌面 Hooks 页可查看超时、取消、输出超限及清理结果；`onError` 自身失败不会递归调用。
+
+Windows 正式 CLI 包提供 x64、arm64 作业助手。助手缺失、架构错误或协议不兼容时脚本不会启动；请重新安装完整发行包，或将 `RIVET_JOB_LAUNCHER` 指向同版本可信助手。源码构建不要求跨平台编译；CLI 发布打包须先准备同一源码版本的两种 Windows 助手及 SHA-256 清单，打包门禁会核对它们。

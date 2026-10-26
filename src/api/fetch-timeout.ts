@@ -26,6 +26,7 @@ import { beginCallAudit, auditConfigFingerprint, type CallAuditContext } from '.
 import { observeAuditResponse } from './transport-audit.js'
 import { prepareExecutionSend, credentialPrincipal, currentExecutionScope, assertExecutionAccess } from './execution-continuity.js'
 import { proRegistry } from './pro-registry.js'
+import { randomUUID } from 'node:crypto'
 
 const DEFAULT_TIMEOUT_MS = 45_000
 
@@ -36,15 +37,21 @@ export async function fetchWithTimeout(
   /** undici dispatcher（如 ProxyAgent）——provider 级代理覆盖的透传槽位。 */
   dispatcher?: unknown,
   auditContext?: CallAuditContext,
+  preparedAudit?: ReturnType<typeof beginCallAudit>,
 ): Promise<Response> {
+  const preparationStartedAt = performance.now()
   const userSignal = init.signal
   const execution = currentExecutionScope()
+  let parsedBody: Record<string, unknown> | undefined
+  if (typeof init.body === 'string') {
+    try { parsedBody = JSON.parse(init.body) as Record<string, unknown> } catch { /* non-model request */ }
+  }
   if (execution && auditContext?.requestId) {
     execution.requestId = auditContext.requestId
     execution.attemptId = auditContext.attemptId
   }
   if (execution && typeof init.body === 'string') {
-    const body = JSON.parse(init.body) as Record<string, unknown>
+    const body = parsedBody ?? JSON.parse(init.body) as Record<string, unknown>
     await prepareExecutionSend(String(url), body, credentialPrincipal(init.headers))
   }
   if (execution?.sessionId) {
@@ -62,10 +69,15 @@ export async function fetchWithTimeout(
   }
   let model: string | undefined
   let wireOptions: Record<string, unknown> = {}
-  try { const body = typeof init.body === 'string' ? JSON.parse(init.body) : {}; model = body.model; wireOptions = Object.fromEntries(['thinking', 'reasoning', 'reasoning_effort', 'max_tokens', 'max_output_tokens', 'temperature', 'tool_choice', 'response_format'].map(key => [key, body[key]])) } catch { /* non-model request */ }
+  try { const body = parsedBody ?? {}; model = body.model as string | undefined; wireOptions = Object.fromEntries(['thinking', 'reasoning', 'reasoning_effort', 'max_tokens', 'max_output_tokens', 'temperature', 'tool_choice', 'response_format'].map(key => [key, body[key]])) } catch { /* non-model request */ }
+  model ??= auditContext?.model
   // OpenAI chat has a richer attempt observer; other protocols use this transport observer.
-  const context = { ...auditContext, configFingerprint: auditConfigFingerprint(wireOptions), model, provider: auditContext?.provider ?? (() => { try { return new URL(url).hostname } catch { return undefined } })(), purpose: auditContext?.purpose ?? 'transport_completion', sessionId: auditContext?.sessionId ?? new Headers(init.headers).get('X-Request-Session') ?? undefined }
-  const audit = (model ?? execution?.model) && !String(url).includes('/chat/completions') ? beginCallAudit({ ...context, model: model ?? execution?.model }) : undefined
+  const context = { ...auditContext, requestId: auditContext?.requestId ?? randomUUID(), attemptId: auditContext?.attemptId ?? randomUUID(), configFingerprint: auditConfigFingerprint(wireOptions), model, provider: auditContext?.provider ?? (() => { try { return new URL(url).hostname } catch { return undefined } })(), purpose: auditContext?.purpose ?? 'transport_completion', sessionId: auditContext?.sessionId ?? new Headers(init.headers).get('X-Request-Session') ?? undefined }
+  const audit = preparedAudit ?? ((model ?? execution?.model) && !String(url).includes('/chat/completions') ? beginCallAudit({ ...context, model: model ?? execution?.model }, preparationStartedAt) : undefined)
+  audit?.setWireContext({ model: model ?? execution?.model, provider: context.provider, configFingerprint: context.configFingerprint })
+  if (audit && typeof init.body === 'string') {
+    audit.observation.sent(init.body, parsedBody)
+  }
   if (audit && execution) execution.usageFields = {}
   // Own controller + timer instead of AbortSignal.timeout: AbortSignal.timeout
   // cannot be disarmed, so merging it into the fetch signal would keep counting

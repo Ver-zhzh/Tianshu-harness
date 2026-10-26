@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "version": "3.37.0",
+  "date": "2026-10-26",
+  "fullNotesUrl": "https://github.com/huiliyi37/Tianshu-harness/releases/tag/v3.37.0",
+  "locales": {
+    "zh": {
+      "title": "提交/验证/审查契约分离与默认工具面收口",
+      "highlights": [
+        "提交、验证、审查彻底分离：deliver_task 收敛为纯安全提交（不再自动验证、不再自动派审查、回执不作质量背书）；新增 review_changes 独立审查入口（固定快照、只读 reviewer、发现持久化）；run_tests 空参数不再默认全量。",
+        "默认主控工具面 30→26 件，工具定义体积 -23.2%：galaxy / starflow / plan_task / council_convene 移出默认面按需挂载，新增 orchestration 档整体开放高级编排；/tools 与桌面设置显示真实装配与可见计数。",
+        "桌面端：自动更新重做（断点续传、来源校验、损坏运行时自恢复），默认主题改为纯白圣殿（aether-citadel），GitHub MCP 连接改 PAT 优先三步指引；自动记忆形成改为 opt-in（设置 → 行为可开）。"
+      ]
+    },
+    "en": {
+      "title": "Commit/verify/review separation and a focused default tool surface",
+      "highlights": [
+        "Commit, verification and review are now fully separate: deliver_task is a pure safe-commit (no automatic verification or review, no quality endorsement in receipts); a new review_changes entry provides independent review (pinned snapshot, read-only reviewer, persisted findings); run_tests with no arguments no longer runs the full suite.",
+        "The default main-controller tool surface shrinks from 30 to 26 tools with 23.2% smaller tool definitions: galaxy / starflow / plan_task / council_convene move out of the default surface and mount on demand, and a new orchestration preset opens them together; /tools and desktop settings show real assembly and visibility counts.",
+        "Desktop: the updater is rebuilt (resumable downloads, verified sources, self-recovery of damaged runtimes), the default theme is now aether-citadel, and GitHub MCP onboarding is PAT-first with a three-step guide; automatic memory formation is now opt-in (Settings → Behavior)."
+      ]
+    }
+  }
+}

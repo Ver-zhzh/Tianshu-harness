@@ -12,16 +12,15 @@ import type { ActiveStarDomain } from './star-domain.js'
 
 /**
  * Shared warning shown when a star-domain is switched MID-SESSION. Swapping the
- * volatileBlock rewrites frozenBase, so the prefix cache is fully invalidated and
- * the next request rebuilds the whole context (~10x cost). New sessions / picking
- * a domain before the first turn pay nothing.
+ * volatileBlock prepares a new frozenBase, applied at the next user boundary.
+ * Matching can stop at the changed prefix; actual cost depends on the provider.
  */
 export const DOMAIN_SWITCH_CACHE_WARNING =
-  '⚠ 会话中途切换星域会使前缀缓存整体失效，下一次请求需全量重建上下文（成本约 10 倍+）。建议新开会话或在会话开始时选择。'
+  '星域提示词将在下一条用户消息生效；变化位置之后的前缀缓存可能无法复用，实际命中率与费用取决于服务商。不会因此切换模型。'
 
 /** 选择器底部的常驻预防性备注（短版；切换后的忠告用上面的 WARNING）。 */
 export const DOMAIN_SWITCH_CACHE_NOTE =
-  '⚠ 会话内切换星域会打断前缀缓存，建议在新会话切换'
+  '下一条用户消息起生效；提示词变化可能降低缓存命中率，不切换模型'
 
 export interface DomainPickerEntry {
   /** Selection key: 'auto' | domain id. */

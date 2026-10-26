@@ -111,6 +111,7 @@ async function fixture(unconfigured = false) {
     authorizeFrozen()
   })
   const agent = {
+    getMountedToolNames: () => [],
     session, persist, config: { client, promptEngine: engine }, drainPersistWrites: () => listener.drain(), abort() {},
     stopConfigWatcher() { order.push('shutdown-cleanup') }, async cancelIdleCompaction() {}, async drainPostSession() {},
     async run(prompt: string) {

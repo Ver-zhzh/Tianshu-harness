@@ -62,6 +62,7 @@ import { buildWorkerEpisode, persistWorkerActualIndex } from './worker-episode.j
 import { recordWorkerEpisodeClosure } from './reward-loop.js'
 import { signalFromWorkerEpisode, signalsFromVerifiedResults } from './control-plane-adapters.js'
 import { WorktreeCoordinator } from './worktree-coordinator.js'
+import { reviewSnapshotCwd } from './review-snapshot.js'
 import { classifyProfile } from './coordination-policy.js'
 import { aggregateResults } from './aggregation.js'
 import { CoordinatorState } from './coordinator-state.js'
@@ -530,7 +531,9 @@ export function classifyWorkerError(error: unknown): WorkerFailureReason {
 }
 
 export function workerFailureResult(order: WorkOrder, error: unknown, opts?: { nextActions?: string[]; failureReason?: WorkerFailureReason }): WorkerResult {
-  const reason = error instanceof Error ? error.message : String(error)
+  // 绑定拒绝改走 describe()：摘要里带上目标身份与实例配置路径 + PID，主会话才
+  // 能判断子代理连的是哪份配置；其余错误沿用 message，既有文案不变。
+  const reason = error instanceof ModelBindingUnavailable ? error.describe() : error instanceof Error ? error.message : String(error)
   const nextActions = opts?.nextActions ?? ['This task is terminal. Inspect runtime code and retained evidence; do not redispatch or resume it automatically.']
   // 兜底归类：未显式传 reason 时按错误消息推断（timeout/crash/parse 等），
   // 不再一律盖 'unknown'——消费方可按 failureReason 差异化恢复。
@@ -1973,6 +1976,10 @@ export class DelegationCoordinator {
     }
     const workerRegistry = filterToolRegistry(this.config.baseToolRegistry, presentTools)
     let workerConfig = this.config.runtimeFactory(order, selected, workerRegistry)
+    if (order.scope.reviewSnapshot) {
+      if (order.profile !== 'reviewer' || role === 'hands') throw new Error('Review snapshots require the read-only reviewer profile')
+      workerConfig.cwd = reviewSnapshotCwd(order.scope.reviewSnapshot)
+    }
     if (workerConfig.runtimeDecision) {
       selected = workerConfig.runtimeDecision.capabilityCard ?? { ...this.cardForModelOverride(workerConfig.runtimeDecision.model), contextWindow: workerConfig.runtimeDecision.contextWindow }
       workerConfig.providerName = workerConfig.runtimeDecision.providerName

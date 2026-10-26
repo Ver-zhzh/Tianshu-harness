@@ -18,19 +18,31 @@
 
 import { readUnacknowledged, recordRecovery, type RecoveryEntry } from './recovery-journal.js'
 import { access, copyFile, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
-import { join, dirname } from 'node:path'
+import { join, dirname, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { debugLog } from '../utils/debug.js'
 import { writeFileAtomicAsync } from '../fs-atomic.js'
+import { readFileSync, writeFileSync, unlinkSync, statSync } from 'node:fs'
+import { currentFileVersion } from './file-version.js'
+import { contentVersion } from './file-version.js'
+import { validatePath } from '../tools/path-validate.js'
+import { mutationFact, observeMutationFile, noteMutationRestoration, type MutationObservation } from './mutation-facts.js'
+
+import { withFileMutationLocks } from './file-mutation-lock.js'
+import { extractPatchTargetPathsFromDiff } from '../tools/write-tool-helpers.js'
+import { attachMutationReceipts } from '../tools/file-state-receipt.js'
+import { getFileReadContentHash, isFileFullyObserved, noteFileObserved, invalidateReadHistory } from '../tools/read-file.js'
 
 /** Lightweight record of a file mutation with a backup for undo. */
 export interface FileChangeRecord {
+  intent?: 'draft-append'
   filePath: string
   action: 'edit' | 'write' | 'delete'
   /** Path to a temporary backup of the original file content. */
   backupPath?: string
   toolCallId: string
   ts: number
+  existedBefore?: boolean
 }
 
 async function pathExists(p: string): Promise<boolean> {
@@ -112,15 +124,37 @@ export function withFileChangeTracking<A, R>(
 ): (args: A) => Promise<R> {
   return async args => {
     const captures: FileChangeRecord[] = []
+    const observations = new Map<FileChangeRecord, { cwd: string; before: MutationObservation }>()
+    const params = (args && typeof args === 'object' && 'params' in args ? args.params : args) as import('../tools/types.js').ToolCallParams
+    const input = params?.input
+    const paths = input ? (typeof input.file_path === 'string' ? [input.file_path]
+      : Array.isArray(input.write_files) ? input.write_files.filter((p): p is string => typeof p === 'string')
+      : typeof input.diff === 'string' ? extractPatchTargetPathsFromDiff(input.diff)
+      : Array.isArray(input.paths) ? input.paths.filter((p): p is string => typeof p === 'string') : []) : []
+    return withFileMutationLocks(paths.map(p => resolve(params.cwd, p)), async () => {
+    let result: R | undefined
     try {
-      return await run(args, async (cwd, record) => {
+      result = await run(args, async (cwd, record) => {
+        const before = await observeMutationFile(cwd, record.filePath)
         const capture = await trackFileChange(cwd, record)
         captures.push(capture)
+        observations.set(capture, { cwd, before })
         return capture
       })
+      return result
     } finally {
+      const facts = await Promise.all(captures.map(capture => {
+        const observation = observations.get(capture)!
+        return mutationFact(observation.cwd, capture, observation.before, params?.sessionId)
+      }))
+      if (facts.length && result && typeof result === 'object' && 'content' in result) {
+        Object.assign(result, { mutations: facts })
+        attachMutationReceipts(result as import('../tools/types.js').ToolResult, facts, params?.cwd)
+      }
+      if (facts.length) { try { params?.onMutationFacts?.(facts) } catch { /* never replay an applied edit for reporting failure */ } }
       for (const capture of captures) releaseFileChange(capture)
     }
+    })
   }
 }
 
@@ -245,20 +279,51 @@ export async function restoreLatestBackup(cwd: string, filePath: string, session
 
 /** Restore the exact pre-mutation capture, even if another tool captures the
  * same path or the shared memory cache evicts its completed disk backup. */
-export async function restoreFileChange(cwd: string, capture: FileChangeRecord, sessionId?: string): Promise<boolean> {
+export interface RestoreVersionGuard { expectedCurrentVersion: string | null; canRestore?: () => boolean }
+const expectedWrites = new WeakMap<FileChangeRecord, RestoreVersionGuard>()
+export function expectFileChange(capture: FileChangeRecord, content: string | Buffer, canRestore?: () => boolean): void {
+  expectedWrites.set(capture, { expectedCurrentVersion: contentVersion(content), canRestore })
+}
+export async function restoreFileChange(cwd: string, capture: FileChangeRecord, sessionId?: string, guard?: RestoreVersionGuard): Promise<boolean> {
   const held = capturedBackups.get(capture)
   if (held && held.cwd !== cwd) return false
   const memory = held?.memory ?? (capture.backupPath ? memoryBackups.get(capture.backupPath) : undefined)
-  return restoreBackup(cwd, capture.filePath, capture.backupPath, memory, sessionId, 'restore file change')
+  const path = join(cwd, capture.filePath)
+  const observedVersion = getFileReadContentHash(path, sessionId)
+  const fullyObserved = isFileFullyObserved(path, sessionId)
+  const restored = await restoreBackup(cwd, capture.filePath, capture.backupPath, memory, sessionId, 'restore file change', guard ?? expectedWrites.get(capture), capture.existedBefore === false)
+  if (restored) {
+    invalidateReadHistory(path)
+    try {
+      const bytes = memory?.content ?? (capture.backupPath ? readFileSync(capture.backupPath) : undefined)
+      if (bytes && currentFileVersion(path) === contentVersion(bytes)) {
+        const info = statSync(path)
+        noteFileObserved(path, info.mtimeMs, info.size, sessionId, observedVersion === contentVersion(bytes) ? bytes.toString('utf8') : undefined, fullyObserved)
+      }
+    } catch { /* removed new file or concurrent writer: do not fabricate an observation */ }
+  }
+  noteMutationRestoration(capture, restored)
+  return restored
 }
 
 async function restoreBackup(
   cwd: string, filePath: string, backupPath: string | undefined,
   memory: MemoryBackup | undefined, sessionId: string | undefined, action: string,
+  guard?: RestoreVersionGuard, removeCreated = false,
 ): Promise<boolean> {
   // 内存优先：覆写前捕获的旧内容直接在手里（后台磁盘落盘可能仍在途）。
   try {
-    if (memory) {
+    if (guard) {
+      const path = validatePath(cwd, filePath)
+      const bytes = removeCreated ? undefined : memory?.content ?? (backupPath ? readFileSync(backupPath) : undefined)
+      if (!removeCreated && !bytes) return false
+      if (guard.canRestore && !guard.canRestore()) return false
+      if (currentFileVersion(path) !== guard.expectedCurrentVersion) return false
+      // No await between final ownership/version check and mutation. Cooperative
+      // claims serialize other writers; changed bytes fail toward retaining them.
+      if (removeCreated) { if (guard.expectedCurrentVersion !== null) unlinkSync(path) }
+      else writeFileSync(path, bytes!)
+    } else if (memory) {
       await writeFile(join(cwd, filePath), memory.content)
     } else {
       if (!backupPath || !(await pathExists(backupPath))) return false
@@ -346,7 +411,7 @@ export async function trackFileChange(
     evictOldBackupsDebounced(cwd)
   }
 
-  const capture = { ...record, backupPath, ts }
+  const capture = { ...record, backupPath, ts, existedBefore: !!backupPath }
   if (captured) capturedBackups.set(capture, { cwd, memory: captured })
   if (diskLeaseDir) diskCaptureLeases.set(capture, diskLeaseDir)
   return capture

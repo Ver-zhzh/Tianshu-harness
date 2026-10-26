@@ -61,7 +61,8 @@ describe('signalsFromObligations (Wave 3 adapter)', () => {
     assert.equal(signals.length, 2)
     const bugfix = signals.find(s => s.summary.includes('缺陷已复现'))!
     assert.equal(bugfix.kind, 'obligation')
-    assert.equal(bugfix.requiresDecision, true)
+    assert.equal(bugfix.requiresDecision, false)
+    assert.equal(bugfix.routeHint, 'status')
     assert.ok(bugfix.key.startsWith('obligation:verify:'))
     const existence = signals.find(s => s.summary.includes('X 存在'))!
     assert.ok(existence.key.startsWith('obligation:inspect:'))
@@ -188,7 +189,7 @@ describe('ObligationTracker version (misfire telemetry basis)', () => {
 
   it('final gate ladder: continue_once → markContinued → honest_blocked downgrade', () => {
     const tracker = new ObligationTracker()
-    tracker.upsert({ family: 'bugfix', claim: '缺陷已复现并修复', targets: ['src/a.ts'], risk: 'high' })
+    tracker.upsert({ family: 'existence', claim: '引用源码存在', targets: ['src/a.ts'], risk: 'high' })
     const first = tracker.evaluateFinal()
     assert.equal(first.verdict, 'continue_once')
     assert.ok(first.nextAction)
@@ -234,9 +235,8 @@ describe('self-verify hook obligation supersede (Wave 3)', () => {
 
   it('active high delivery obligation → structured signal only, no duplicate advisory', () => {
     const { advisories, controlSignals } = runHook({ withObligation: true })
-    assert.equal(controlSignals.length, 1)
-    assert.equal(controlSignals[0]!.kind, 'verification')
-    assert.ok(!advisories.includes('self-verify'))
+    assert.equal(controlSignals.length, 0)
+    assert.ok(advisories.includes('self-verify'))
   })
 
   it('no obligation → legacy advisory still fires', () => {

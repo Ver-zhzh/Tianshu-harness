@@ -1,4 +1,6 @@
-export interface StreamCacheObservability {
+import type { RequestMeasurements } from '../api/request-observability.js'
+
+export interface StreamCacheObservability extends RequestMeasurements {
   ttftMs?: number
 }
 
@@ -104,7 +106,7 @@ export class TurnCacheObservability {
     const pending = this.pending
     this.pending = undefined
     return {
-      ...(stream.ttftMs !== undefined ? { ttftMs: stream.ttftMs } : {}),
+      ...stream,
       ...pending,
     }
   }

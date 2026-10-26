@@ -355,15 +355,14 @@ describe('formatCollapsedGroupLive', () => {
     assert.ok(lines[0]!.includes('●'))
   })
 
-  it('shows preview of last completed entry content', () => {
+  it('keeps recent output out of the single live aggregate line', () => {
     const group = makeGroup([
       { id: '1', kind: 'read', displayName: 'a.ts', completed: true, content: 'preview line 1\npreview line 2' },
       { id: '2', kind: 'read', displayName: 'b.ts', completed: false },
     ])
     const lines = formatCollapsedGroupLive(group, theme)
-    // 应该有 header + 预览行
-    const contentLines = lines.slice(1).filter(l => l.includes('preview'))
-    assert.ok(contentLines.length > 0)
+    assert.equal(lines.length, 1)
+    assert.ok(!lines[0]!.includes('preview line'))
   })
 })
 

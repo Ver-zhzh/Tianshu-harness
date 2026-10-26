@@ -24,6 +24,7 @@ import {
   supersedeOpenObligations,
   upsertObligation,
   deriveObligationId,
+  isIndependentVerification,
   type CreateObligationInput,
   type EvidenceObligation,
   type FinalEvaluation,
@@ -178,7 +179,7 @@ export class ObligationTracker {
   /** 未决高风险义务（reasoning-spiral 等升级器消费）。 */
   unresolvedHigh(): readonly EvidenceObligation[] {
     return this.#store.obligations.filter(
-      o => o.risk === 'high' && (o.state === 'open' || o.state === 'attempted'),
+      o => o.risk === 'high' && !isIndependentVerification(o.family) && (o.state === 'open' || o.state === 'attempted'),
     )
   }
 }

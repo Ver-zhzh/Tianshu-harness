@@ -81,9 +81,32 @@ export function yieldMessage(idleMs: UserIdleMs, thresholdMs: number): string {
  * 但 `maybeYieldForUserActivity` 在 Node 宿主进程内先于子 shell 执行——若只读宿主
  * `process.env`，模型在 bash 命令内写的 `export RIVET_CU_YIELD_MS=0` 永远不生效。
  */
+function shellCodeWithoutQuotes(command: string): string {
+  let code = ''
+  let quote: "'" | '"' | undefined
+  let escaped = false
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!
+    if (escaped) { escaped = false; continue }
+    if (ch === '\\') { escaped = true; continue }
+    if (quote) {
+      if (ch === quote) quote = undefined
+      continue
+    }
+    if (ch === "'" || ch === '"') { quote = ch; continue }
+    if (ch === '#' && (i === 0 || /\s/.test(command[i - 1]!))) {
+      while (i < command.length && command[i] !== '\n') i++
+      code += '\n'
+      continue
+    }
+    code += ch
+  }
+  return code
+}
+
 export function resolveInlineYieldMs(command: string): number | undefined {
-  const normalized = normalizeBashCommand(command)
-  const m = /\bRIVET_CU_YIELD_MS=(\d+)\b/.exec(command) ?? /\bRIVET_CU_YIELD_MS=(\d+)\b/.exec(normalized)
+  const code = shellCodeWithoutQuotes(command)
+  const m = /(?:^|\n|;|&&|\|\|)\s*(?:export\s+)?RIVET_CU_YIELD_MS=(\d+)(?=\s|;|&&|\|\||$)/.exec(code)
   if (!m) return undefined
   const n = Number.parseInt(m[1]!, 10)
   return Number.isFinite(n) && n >= 0 ? n : undefined

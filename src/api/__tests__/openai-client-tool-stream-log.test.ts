@@ -22,8 +22,8 @@ let origCwd: string
 
 function frame(obj: unknown): string { return `data: ${JSON.stringify(obj)}\n\n` }
 
-async function runFrames(frames: string[]): Promise<any[]> {
-  const client = new OpenAIClient(CONFIG)
+async function runFrames(frames: string[], config = CONFIG): Promise<any[]> {
+  const client = new OpenAIClient(config)
   const encoder = new TextEncoder()
   const stream = new ReadableStream({
     start(controller) {
@@ -52,6 +52,21 @@ describe('tool-stream event log (observability)', () => {
   after(() => {
     process.chdir(origCwd)
     rmSync(workdir, { recursive: true, force: true })
+  })
+
+  it('an event without session metadata still carries request and attempt identity', async () => {
+    await runFrames([
+      frame({ choices: [{ delta: { tool_calls: [
+        { index: 0, id: 'a', function: { name: 'grep', arguments: '{"path":"a"}' } },
+        { index: 1, id: 'b', function: { name: 'grep', arguments: '{"path":"b"}' } },
+      ] } }] }),
+      frame({ choices: [{ delta: { tool_calls: [{ function: { arguments: 'orphan' } }] }, finish_reason: 'tool_calls' }] }),
+    ], { ...CONFIG, sessionId: undefined })
+    const event = JSON.parse(readFileSync(join(workdir, '.rivet', 'tool-stream.jsonl'), 'utf8').trim().split('\n')[0]!)
+    assert.equal(event.session, null)
+    assert.match(event.requestId, /^[0-9a-f-]{36}$/)
+    assert.ok(event.attemptId)
+    assert.equal(typeof event.buildId, 'string')
   })
 
   it('ambiguous continuation chunk (multiple open buffers) → drop-ambiguous logged', async () => {

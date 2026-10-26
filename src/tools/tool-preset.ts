@@ -1,3 +1,5 @@
+import { TOOL_PRESET_NAMES, type ToolPreset } from './tool-preset-names.js'
+export type { ToolPreset } from './tool-preset-names.js'
 import { existsSync, readFileSync } from 'node:fs'
 import { findProjectConfig } from '../config/manager.js'
 import { userConfigPath } from '../config/paths.js'
@@ -5,56 +7,22 @@ import { userConfigPath } from '../config/paths.js'
 import { STAR_DOMAINS } from '../agent/star-domain-data.js'
 
 /**
- * Tool preset — 会话启动期的工具装配档位（会话内冻结，前缀缓存零影响）。
+ * Session-start assembly and main-agent visibility are separate.
+ * CLI baseline (registered / main; excludes MCP, desktop office and forced extras):
+ * minimal 36 / 26; frontend 37 / 27; orchestration 36 / 30;
+ * full 56 / 43; taiyi 14 / 13 (frozen evaluation baseline).
  *
- * 四档语义（2026-07-19 工具审计落地，入口成本实测见 .rivet/scratch/tool-audit.ts）。
+ * Minimal retains basic delegation, team and assistant capabilities. Advanced
+ * orchestration remains cold-registered for explicit activation; orchestration
+ * exposes galaxy/starflow/plan_task/council_convene at session start.
+ * With a real scheduler, registration adds three tools. Their default main
+ * visibility is limited to full and taiyi; other presets opt in explicitly.
  *
- * **两个数字口径，别混**（2026-10-09 校正）：
- *   ① 「装配」= kernel + bootstrap 完整件数（无调度器的 CLI 交互模式；serve/桌面端
- *      因调度器把 schedule_create/list/delete 也装上，各档 +3）；
- *   ② 「主控」= 主控实际可调用的件数——EXTENDED 层工具装配了但被 tool-tiers 门控
- *      摘掉（见 src/agent/tool-tiers.ts 的 gateToolDefinitions）。
- * 历史上只写①一个数，于是「文档说你有 N 件、模型实际调不到」反复出现（issue #413 同族）。
- *
- * - **minimal（默认，装配 34 / 主控 30）**：日常开发全能力——读写/检索/bash/git/
- *   测试/委托/交付/plan/web_search/web_fetch。去掉编排（council/team）、browser 系、
- *   attack_case、semantic_search 等重而冷门的工具。（2026-09-23 起为发版默认档，
- *   取代 frontend——browser_debug 改用 RIVET_BROWSER_DEBUG=1 或显式给档开启。）
- * - **frontend（装配 35 / 主控 31）**：minimal + browser_debug（UI 渲染验证闭环）。
- * - **full（装配 55 / 主控 42）**：全集，含 attack_case/council/team/semantic_search/
- *   repo_graph/undo/recall_general/record_general_finding/ast_edit/related_tests/
- *   inspect_project/import_resource/leave_mark/browser_debug/monitor。
- *   （2026-10-20 +1：skill_runtime 技能 Python 运行时，issue #523。）
- * - **taiyi（装配 14 / 主控 13，评测档）**：太一星域最小工具集——只保留 2026-08-04
- *   会话使用率审计（最近 40 主会话 / 2938 消息 / 23 工具）中的高频核心 + 交付闭环：
- *   bash/read_file/write_file/edit_file/hash_edit/grep/glob/git/todo/
- *   deliver_task/run_tests/job/plan/diff（plan_submit/plan_close 已并作 plan）。
- *   主控 13 = 14 减去 `diff`（EXTENDED 层，主控默认不可见，worker 可用）。
- *   任何 preset 门控工具一律不注册；kernel 无条件注册的 ast_grep/web_fetch/
- *   web_search/repo_map/read_section/request_path_access/ask_image/skill
- *   经 default-registry 的 `preset !== 'taiyi'` 守卫排除；bootstrap 侧
- *   无条件注册的编排/辅助工具（delegate/galaxy/starflow/plan_task/memory 等）经
- *   TAIYI_EXCLUDES + presetIncludes 排除（2026-08-07 闭环修复；**2026-10-09 补
- *   memory**——它此前在 bootstrap.ts / serve-agent.ts 两处无条件注册，不在任何
- *   档位门控里，注释却写着「memory 已移出本档」、测试也以为它「走 default-registry
- *   的 kernel 守卫」排除，而 default-registry 根本没有 memory ⇒ 实装 15 ≠ 文档 14。
- *   本注释此前也栽过同类：曾写 17 并误含 request_path_access）。
- *   用途：评测「只留关键工具是否够用」；显式 RIVET_TOOL_PRESET=taiyi 或
- *   tools.preset=taiyi 触发。另作太一星域内置默认档（star-domain-data
- *   toolPreset 字段）：defaultDomain 钉定 taiyi 且无任何显式给档时落到本档——
- *   这是「钉太一即 14 件」的默认体验，显式配置恒优先可覆盖。
- *   ⚠ 评测基线：改本档的装配集等于换基线，历史评测结果不可直接比。
- *
- * 解析优先级：`RIVET_TOOL_PRESET` env > 项目 `.rivet-config.json` tools.preset
- * > 项目 runtime.domains[域].toolPreset > 用户配置 tools.preset（`userConfigPath()`，
- * 认 RIVET_HOME/RIVET_CONFIG_PATH）> 用户 runtime.domains[域].toolPreset
- * > 域内置默认档（STAR_DOMAINS[域].toolPreset）> 默认 `minimal`。
- * 变更只在下个会话生效（会话中途改工具指纹 = 前缀全量重建，反经济）。
+ * Precedence: env > project preset > project domain preset > user preset >
+ * user domain preset > domain built-in > minimal. Existing sessions stay frozen.
  */
 
-export type ToolPreset = 'minimal' | 'frontend' | 'full' | 'taiyi'
-
-const VALID = new Set<string>(['minimal', 'frontend', 'full', 'taiyi'])
+const VALID = new Set<string>(TOOL_PRESET_NAMES)
 
 function parsePreset(raw: unknown): ToolPreset | null {
   return typeof raw === 'string' && VALID.has(raw) ? (raw as ToolPreset) : null
@@ -141,7 +109,6 @@ export function __resetToolPresetForTest(): void {
 const MINIMAL_EXCLUDES: ReadonlySet<string> = new Set([
   // 编排（重 + 日常低频）。team_orchestrate 2026-07-29 移除——它是唯一
   // 多 worker 波次编排入口，主控必须可见（T3 修复：随 tool-tiers 升入 CORE）。
-  'council_convene',
   // browser 系
   'browser_debug',
   // 重而冷门 / 零使用（2026-07-19 会话使用率审计）
@@ -184,6 +151,8 @@ const MINIMAL_EXCLUDES: ReadonlySet<string> = new Set([
  *  default-registry 的 kernel 守卫」，但 default-registry 根本没有 memory，
  *  于是 taiyi 实装 15 件而文档写 14。两个注册点已同步加门控。 */
 const TAIYI_EXCLUDES: ReadonlySet<string> = new Set([
+  'council_convene',
+  'review_changes',
   'delegate_task',
   'delegate_batch',
   'galaxy',
@@ -201,7 +170,7 @@ export function presetIncludes(preset: ToolPreset, toolName: string): boolean {
   if (preset === 'full') return true
   if (preset === 'taiyi' && TAIYI_EXCLUDES.has(toolName)) return false
   if (preset === 'frontend' && toolName === 'browser_debug') return true
-  // taiyi 与 minimal 在此层其余语义一致（门控工具全不注册）；kernel 侧
+  // taiyi 与 minimal 在此层其余语义一致（冷工具由主控分层控制）；kernel 侧
   // taiyi 另有 8 个 `preset !== 'taiyi'` 守卫（default-registry）。
   return !MINIMAL_EXCLUDES.has(toolName)
 }

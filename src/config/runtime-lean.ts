@@ -75,7 +75,7 @@ export interface RuntimeLeanConfigSlice {
 
 /** 域级 runtime 覆盖（runtime.domains[domainId]），含工具档位。 */
 export interface RuntimeDomainConfigSlice extends RuntimeLeanConfigSlice {
-  toolPreset?: 'minimal' | 'frontend' | 'full' | 'taiyi'
+  toolPreset?: 'minimal' | 'frontend' | 'orchestration' | 'full' | 'taiyi'
 }
 
 interface RuntimeSection {

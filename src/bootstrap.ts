@@ -1,3 +1,4 @@
+import { ExternalHookHost } from './hooks/external-hook-host.js'
 import { sessionProviderKey, snapshotSessionBinding } from './model/model-binding.js'
 import { buildReplacementAgent } from './agent/runtime-rebuild.js'
 import { loadUserInstructions } from './config/user-instructions.js'
@@ -79,6 +80,10 @@ import { createRecallCapsuleTool } from './tools/recall-capsule.js'
 import { createRecallGeneralTool } from './tools/recall-general.js'
 import { createRecordGeneralFindingTool } from './tools/record-general-finding.js'
 import { createDeliverTaskTool } from './agent/deliver-task.js'
+import { createReviewChangesTool } from './tools/review-changes.js'
+import { readDeliveryReceipt } from './agent/delivery-receipt.js'
+import { collectCurrentDirtyFiles } from './agent/delivery-report.js'
+import { createReviewInbox } from './agent/review-inbox.js'
 import { createUpdateGoalTool } from './tools/update-goal.js'
 import type { createTaskLedger } from './agent/task-ledger.js'
 import type { createOwnershipLedger } from './agent/ownership-ledger.js'
@@ -99,7 +104,7 @@ import { resolveInitialReasoningEffort } from './agent/runtime-effort.js'
 export { resolveInitialReasoningEffort }
 import { canonicalizeModelId } from './api/model-aliases.js'
 import { contractModels } from './config/contract-models.js'
-import { resolveProviderForModel, type ResolvedModelTarget, type ModelResolutionContext } from './bootstrap/model-resolution.js'
+import { resolveProviderForModel, isCurrentModelTarget, type ResolvedModelTarget, type ModelResolutionContext } from './bootstrap/model-resolution.js'
 export { resolveProviderForModel, type ResolvedModelTarget, type ModelResolutionContext }
 import { DelegationCoordinator } from './agent/coordinator.js'
 import { ProviderHealthTracker } from './agent/provider-health.js'
@@ -151,6 +156,7 @@ import type { TuiPerfSummary } from './tui/engine/perf-monitor.js'
 
 /** 运行时可变引用 — 替代 main.tsx 中的 module-level _xxxRef 全局变量 */
 export interface RuntimeRefs {
+  externalHookHost?: import('./hooks/external-hook-types.js').ExternalHookHostPort
   preparedBaseline?: BaselineSnapshot
   coordinator: DelegationCoordinator | null
   fileHistory: FileHistory | null
@@ -742,6 +748,44 @@ export function createInteractiveToolRegistry(
     reg.register(BROWSER_DEBUG_TOOL)
   }
 
+  // review_changes — 独立审查（契约分离）。preset full 含；RIVET_REVIEW_CHANGES=1 强制开启。
+  // 无 coordinator 时工具自身降级为 review_unavailable（advisory 错误），不崩。
+  if (presetIncludes(toolPreset, 'review_changes') || process.env.RIVET_REVIEW_CHANGES === '1') {
+    reg.register(createReviewChangesTool((params) => {
+      const sessionId = refs.sessionId
+      if (!sessionId) return undefined
+      return {
+        cwd,
+        sessionId,
+        taskLedger: refs.taskLedger ?? undefined,
+        reviewDeps: refs.coordinator ? createCoordinatorReviewDeps({
+          delegate: async (request, abortSignal) => {
+            if (!refs.coordinator) throw new Error('DelegationCoordinator not initialized')
+            return refs.coordinator.delegate(request, abortSignal)
+          },
+          delegateBatch: async (requests, policy, abortSignal, onProgress) => {
+            if (!refs.coordinator) throw new Error('DelegationCoordinator not initialized')
+            return refs.coordinator.delegateBatch(requests, policy, abortSignal, onProgress)
+          },
+        }, { reviewDepth: params?.reviewDepth ?? 0 }) : undefined,
+        ownedDirtyFiles: async () => {
+          const gate = refs.deliveryGate
+          const ledger = refs.taskLedger
+          if (!gate || !ledger) return []
+          try {
+            refs.ownershipLedger?.autoOwnFromLedger()
+            const dirty = await collectCurrentDirtyFiles(cwd)
+            const report = gate.getReport([], dirty, undefined, undefined, false)
+            return report.ownedFiles
+          } catch { return [] }
+        },
+        lastCommitRef: () => {
+          try { return readDeliveryReceipt(cwd, sessionId) } catch { return undefined }
+        },
+      }
+    }))
+  }
+
   // repo_graph — meridian 图查询。preset full 含；RIVET_REPO_GRAPH=1 强制开启；
   // zen structuredRead 读面豁免（面内工具必须在注册表里，否则读面名存实亡）。
   if (presetIncludes(toolPreset, 'repo_graph') || process.env.RIVET_REPO_GRAPH === '1' || zenStructuredRead) {
@@ -839,43 +883,9 @@ export function createInteractiveToolRegistry(
     // 提交硬门恢复路径：会话中途 git init 后现场重采并原地换基线
     // （TUI 与桌面 sidecar 共用本装配，详见 recaptureBaselineInto）。
     recaptureBaseline: (targetCwd) => recaptureBaselineInto(b1Baseline, b1TaskLedger, targetCwd),
-    getCurrentSnapshotRef: () => b1SnapshotManager?.currentSnapshotRef() ?? undefined,
-    getCurrentSnapshotRefForFiles: files => candidateSnapshotRef(cwd, files) ?? undefined,
     sessionRegistry: refs.sessionRegistry ?? undefined,
     sessionId: refs.sessionId ?? undefined,
-    reviewDepth: params?.reviewDepth ?? 0,
-    getDepthLayer: () => refs.promptEngine?.getTaskDepthLayer(),
-    reviewDeps: createCoordinatorReviewDeps({
-      delegate: async (request, abortSignal) => {
-        if (!refs.coordinator) throw new Error('DelegationCoordinator not initialized')
-        return refs.coordinator.delegate(request, abortSignal)
-      },
-      delegateBatch: async (requests, policy, abortSignal, onProgress) => {
-        if (!refs.coordinator) throw new Error('DelegationCoordinator not initialized')
-        return refs.coordinator.delegateBatch(requests, policy, abortSignal, onProgress)
-      },
-    }, { reviewDepth: params?.reviewDepth ?? 0 }),
-    isGoalActive: () => refs.goalTrackerRef.current?.isActive() ?? false,
-    isGoalAchieved: () => refs.goalTrackerRef.current?.isGoalAchieved() ?? false,
-    getLastVerdict: () => refs.goalTrackerRef.current?.getLastVerdict() ?? null,
-    reviewConfig: config.agent.review,
     autoCommit: config.agent.delivery?.autoCommit !== false,
-    isAutoReviewOff: () => refs.reviewGateRef.current === 'off',
-    meridianIndexer: refs.meridianIndexer,
-    getTaskContract: () => refs.getTaskContract?.(),
-    getImpactedTests: () => refs.getImpactedTests?.() ?? [],
-    resolveDeliveryImpact: (impactCwd, files, typecheckProof) => resolve(impactCwd) === resolve(cwd)
-      ? resolveDeliveryImpact(impactCwd, files, refs.meridianIndexer, typecheckProof)
-      : resolveCandidateDeliveryImpact(impactCwd, files, refs.meridianIndexer, typecheckProof),
-    // P4 收束闸：PAL 收敛案件快照（闭包现读 store——B1Context 每次调用现构造，
-    // hook 无法"写入"它；这是与其他 getter 一致的既有注入模式）
-    getPalConvergedCases: () => refs.getProblemAttackStore?.()?.convergedCasesSnapshot() ?? [],
-    // 遗产回收 W-A1：needs_user 案件披露（minimalQuestion 由 store 预计算）
-    getPalNeedsUserCases: () => refs.getProblemAttackStore?.()?.needsUserCasesSnapshot() ?? [],
-    // 收编 #2：冗余义务门禁消费——生产注入（此前仅测试注入，链路不可达）。
-    getObligationStore: () => refs.obligationTrackerRef?.current?.getStore() ?? emptyObligationStore(),
-    getClaimTracker: () => refs.claimTrackerRef?.current?.() ?? undefined,
-    scoutFirewallConfig: config.agent.scoutEvidenceFirewall,
   })))
 
   // update_goal — model-driven goal lifecycle control (paused/blocked/complete)
@@ -931,6 +941,9 @@ export function createAgentRuntime(deps: {
    */
   sharedProviderHealth?: ProviderHealthTracker
   /** I4: optional callback to surface user hook results to the desktop event stream. */
+  externalHookHost?: import('./hooks/external-hook-types.js').ExternalHookHostPort
+  getPluginHooks?: import('./agent/loop-types.js').AgentConfig['getPluginHooks']
+  emitHookCleanup?: import('./agent/loop-types.js').AgentConfig['emitHookCleanup']
   emitHookResult?: import('./agent/loop-types.js').AgentConfig['emitHookResult']
   /** #463: optional callback to re-emit a `goal_state` event per goal iteration. */
   onGoalIteration?: import('./agent/loop-types.js').AgentConfig['onGoalIteration']
@@ -1019,6 +1032,7 @@ export function createAgentRuntime(deps: {
     // 全量传入；门控统一在 createAgentConfig 内经 gateToolDefinitions 施加，
     // 与 AgentLoop.updateTools() 共用同一过滤逻辑（避免 MCP/LSP 异步注册后被还原）。
     toolDefinitions: toolRegistry.getDefinitions(),
+    toolPreset: toolRegistry.preset,
     sessionMemoryBlock: persist.buildMemoryBlock(),
     auth,
     inheritFrozenFrom: deps.inheritFrozenFrom ?? persist.readFrozenSnapshot(),
@@ -1062,6 +1076,8 @@ export function createAgentRuntime(deps: {
       listActiveClaims: () => claimStore.listActiveClaims(),
       getUserInstructions: () => agentCfg.promptEngine.getUserInstructionsForDispatch(),
       sessionMemoryBlock: () => persist.buildMemoryBlock(),
+      externalHookHost: deps.externalHookHost ?? refs.externalHookHost,
+      externalHookParent: agentForSignals?.config.externalHookRuntime && agentForSignals.getRunId() ? { runtimeId: agentForSignals.config.externalHookRuntime.runtimeId, runId: agentForSignals.getRunId()! } : undefined,
       domainKnowledgeStore,
       writeProfiles: profileRegistry.listWriteProfiles(),
     }
@@ -1157,7 +1173,10 @@ export function createAgentRuntime(deps: {
       meridianIndexer: refs.meridianIndexer,
       modelRoutingShadowModelCards: modelCards,
       domainKnowledgeStore,
+      externalHookHost: deps.externalHookHost ?? refs.externalHookHost,
+      getPluginHooks: deps.getPluginHooks ?? (() => refs.pluginHooks),
       emitHookResult: deps.emitHookResult,
+      emitHookCleanup: deps.emitHookCleanup,
       // #463: sidecar wires this to re-emit `goal_state` SSE per goal iteration.
       onGoalIteration: deps.onGoalIteration,
       // 多会话隔离：turn-end 任务进度回灌与 todo-reminder 快照统一读本会话 store。
@@ -1404,6 +1423,7 @@ export function createShutdownHandler(ctx: BootstrapContext): () => Promise<void
   return () => {
     if (shutdownPromise) return shutdownPromise
     shutdownPromise = (async () => {
+      const hookDrain = ctx.refs.externalHookHost?.shutdown()
       try {
         await waitForAgentRewind(ctx.agent)
         // Mark a clean exit. Next startup mints a fresh session by default;
@@ -1429,6 +1449,7 @@ export function createShutdownHandler(ctx: BootstrapContext): () => Promise<void
       } catch (err) {
         try { process.stderr.write(`[shutdown] callback error: ${(err as Error)?.message}\n`) } catch { /* noop */ }
       } finally {
+        await hookDrain
         if (ctx.heartbeatInterval) clearInterval(ctx.heartbeatInterval)
         // Token 台账最后一趟推送（autoSync 全开时才有动作）：有界超时，不拖退出。
         try { await ctx.tokenLedger?.shutdownFlush() } catch { /* best-effort */ }
@@ -1470,10 +1491,12 @@ export function createShutdownHandler(ctx: BootstrapContext): () => Promise<void
 
 export interface SwitchModelResult {
   ok: boolean
+  changed?: boolean
   error?: string
   /** 成功时返回的展示名（alias 优先）与上下文窗口，供 UI 刷新 */
   modelName?: string
   contextWindow?: number
+  warnings?: string[]
 }
 
 /**
@@ -1481,7 +1504,7 @@ export interface SwitchModelResult {
  * 不存在仅热换 client 的轻量路径）。成功时**原地更新** ctx 的 agent/provider/apiKey/auth，
  * 使所有持有 ctx 引用的闭包（onSubmit/onAbort）自动用上新 agent。
  *
- * session / persist / toolRegistry / refs / fileHistory 等全部复用，前缀缓存与历史不受影响。
+ * session / persist / toolRegistry / refs / fileHistory 复用；真实切换开启新的请求缓存代次。
  */
 export function switchAgentRuntime(ctx: BootstrapContext, modelId: string, targetProvider?: string): SwitchModelResult {
   // 切换前记录当前模型 id，供 JSONL 审计事件的 from 字段。
@@ -1491,12 +1514,18 @@ export function switchAgentRuntime(ctx: BootstrapContext, modelId: string, targe
   if (!resolved) return { ok: false, error: `Model "${modelId}" not found in any provider.` }
   if ('error' in resolved) return { ok: false, error: resolved.error }
   const { provider, apiKey, auth, providerName: provName } = resolved
+  if (isCurrentModelTarget(ctx, fromModel, resolved)) {
+    return { ok: true, changed: false, modelName: resolved.modelId, contextWindow: resolved.contextWindow }
+  }
+  // Resolve and reject no-op selections before interrupting an active task.
+  try { ctx.agent.abort() } catch { /* idle/uninitialized */ }
 
   // Wave K (P0 同源修复): createAgentRuntime 内部会 new DelegationCoordinator
     // 写入 refs.coordinator，旧 coordinator 被覆盖但其 stallSweep 定时器与在途
     // worker AbortController 仍在持有句柄。TUI 单 session 进程 + switch 频率低，
     // 影响有限——但与 sidecar 同源 (serve.ts 已修)，一并对齐避免长会话切换密集
     // 场景累积泄漏。
+    const warnings: string[] = []
     const agent = buildReplacementAgent(ctx.agent, ctx.refs, undefined, true, inherited => createAgentRuntime({
       userInstructions: ctx.agent.config.promptEngine.getUserInstructionsSnapshot(),
       provider,
@@ -1515,7 +1544,7 @@ export function switchAgentRuntime(ctx: BootstrapContext, modelId: string, targe
       session: ctx.session,
       inheritFrozenFrom: inherited,
       onStatusLine: text => ctx.setStatusLine?.(text),
-    }).agent)
+    }).agent, message => warnings.push(message))
 
     // 搬运后台 job 注册表到新 agent：不搬则新 AgentLoop 自建空 SessionJobs，
     // 旧 agent 上在跑的后台 job 被孤立（仍在跑但无人管理/无事件）。setJobs 会
@@ -1524,7 +1553,6 @@ export function switchAgentRuntime(ctx: BootstrapContext, modelId: string, targe
     const carriedJobs = ctx.agent.jobs
     if (carriedJobs) { try { agent.setJobs(carriedJobs) } catch { /* best-effort */ } }
 
-    ctx.setStatusLine?.('模型已更换，后续请求可能重建缓存')
     ctx.agent = agent
     ctx.onAgentRuntimeChanged?.()
     ctx.refs.promptEngine = agent.config.promptEngine
@@ -1546,7 +1574,7 @@ export function switchAgentRuntime(ctx: BootstrapContext, modelId: string, targe
       ctx.persist.appendModelSwitch({ from: fromModel, to: resolved.modelId, provider: provName })
     } catch { /* persistence is best-effort — never block a model switch */ }
 
-    return { ok: true, modelName: resolved.modelId, contextWindow: resolved.contextWindow }
+    return { ok: true, changed: true, modelName: resolved.modelId, contextWindow: resolved.contextWindow, ...(warnings.length ? { warnings } : {}) }
 }
 
 export interface SwitchSessionResult {
@@ -1692,6 +1720,7 @@ export function switchAgentSession(ctx: BootstrapContext, targetId: string): Swi
   // 旧 agent 的 fs.watch 句柄随丢弃释放（三条 switch 路径统一纪律）。
   try { ctx.agent.stopFsWatcher() } catch { /* best-effort */ }
   // config 热载 watcher 同款释放：不关则旧实例 watcher 僵尸存活，继续回调死管线。
+  void ctx.agent.config.externalHookRuntime?.close().catch(() => {})
   try { ctx.agent.stopConfigWatcher() } catch { /* best-effort */ }
 
   const oldId = ctx.sessionId
@@ -1924,6 +1953,7 @@ export async function switchAgentCwd(ctx: BootstrapContext, target: string): Pro
   // 旧 agent 的 fs.watch 句柄随丢弃释放（/model、/resume 同款统一纪律）。
   try { oldAgent.stopFsWatcher() } catch { /* best-effort */ }
   // config 热载 watcher 同款释放：不关则旧实例 watcher 僵尸存活，继续回调死管线。
+  await oldAgent.config.externalHookRuntime?.close()
   try { oldAgent.stopConfigWatcher() } catch { /* best-effort */ }
 
   // 7. 会话归属账本：meta.cwd（跨 cwd resume 守卫读它）+ pointer + registry。
@@ -2219,6 +2249,7 @@ export async function bootstrapInteractiveSession(opts: BootstrapOptions = {}): 
 
   // 9. Runtime refs
   const refs: RuntimeRefs = {
+    externalHookHost: new ExternalHookHost(),
     coordinator: null,
     fileHistory,
     claimStore,

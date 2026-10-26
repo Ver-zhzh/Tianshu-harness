@@ -190,6 +190,10 @@ function splitClauses(sentence: string): string[] {
   return sentence.split(/[，,、；;]+/).map(s => s.trim()).filter(s => s.length > 0)
 }
 
+function describesGoalOrPlan(sentence: string): boolean {
+  return /^(?:(?:我来|让我|现在)?(?:理解|确认|复述|梳理)(?:一下)?(?:任务|需求|目标)|任务|目标|需求|(?:实现|设计|执行)?方案|计划(?:内容|步骤)?|(?:the\s+)?(?:goal|plan|requirement))\s*[:：]/i.test(sentence.trim())
+}
+
 /** 分句内是否含写侧动词（WRITE_VERB 或动词性「提交」）。 */
 function clauseHasWriteVerb(clause: string): boolean {
   return WRITE_VERB_PATTERN.test(clause) || WRITE_COMMIT_VERB_RE.test(clause)
@@ -201,6 +205,7 @@ function hasSameSentencePair(
   verbPattern: RegExp,
 ): boolean {
   for (const sentence of splitSentences(text)) {
+    if (describesGoalOrPlan(sentence)) continue
     // 输入请求句：整句是「请求用户先提供输入，我再动手」的等待结构，
     // 不参与承诺配对；句级豁免，同段别处的真承诺不受影响。
     if (INPUT_REQUEST_RE.test(sentence)) continue
@@ -233,6 +238,7 @@ export function hasImperativeActionTail(text: string): boolean {
   if (/[？?]$/.test(tail.trimEnd())) return false
   const sentence = lastSentence(tail)
   if (!sentence || sentence.length > 80) return false
+  if (describesGoalOrPlan(sentence)) return false
   // 话题/陈述句守卫：句首动词接名词化标记（"修复针对的…""编辑器的配置"）
   if (TOPIC_STATEMENT_RE.test(sentence)) return false
   return IMPERATIVE_HEAD_RE.test(sentence) && !COMPLETION_MARKER_RE.test(sentence)
@@ -349,6 +355,20 @@ export function hasWriteActionIntent(text: string): boolean {
   // 交付/收尾信号（与承诺检测同窗，尾部 600 字符）
   if (DELIVERY_SIGNAL_RE.test(tail)) return false
   return false
+}
+
+/** Bounded, session-local dedupe of the same still-unfulfilled commitment. */
+export class ActionIntentNudges {
+  private seen = new Set<string>()
+  claim(text: string): boolean {
+    const clauses = splitSentences(text.slice(-600)).filter(s => !describesGoalOrPlan(s)).flatMap(splitClauses)
+      .filter(clause => hasSameSentencePair(clause, ACTION_PROMISE_PATTERN, TOOL_VERB_PATTERN) || hasImperativeActionTail(clause))
+    const key = clauses.join('|').toLowerCase().replace(/(?:接下来|现在|我来|我先|马上|\s|[，,。.!！])/g, '')
+    if (!key || this.seen.has(key)) return false
+    this.seen.add(key)
+    if (this.seen.size > 64) this.seen.delete(this.seen.values().next().value!)
+    return true
+  }
 }
 /**
  * 会推进"写承诺"的工具——文件写入、状态变更命令、测试执行、计划/交付操作。

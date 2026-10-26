@@ -150,7 +150,7 @@ Layer 4: RuntimeHookPipeline（75 hooks） → trap-and-emulate로 퇴화 행동
 
 ### 1. 환경 요구사항
 
-- **Node.js ≥ 24**（`engines` 고정）—— `node --version`으로 확인하세요. 낮은 버전은 npm 설치 시 경고만 뜨며 지원 범위가 아닙니다. 원클릭 설치 스크립트는 직접 차단하고 업그레이드 안내를 제시합니다.
+- **Node.js 24.22.1+（24.x 계열）또는 26.12.1+（26.x 계열）**（`engines` 고정）—— `node --version`으로 확인하세요. Node 22 / 23 / 25 / 27, 24.x < 24.22.1, 26.x < 26.12.1은 v3.36.0 이후 안전 게이트에서 시작 시 거부됩니다. `/update` 후 새 CLI가 시작되지 않는 경우에도 먼저 Node를 업그레이드하세요. 원클릭 설치 스크립트는 사전에 차단하고 안내를 제시합니다.
 - **Git**（강력 권장）—— 선택 사항. 없어도 天枢는 동작하지만（그 자리에서 수정）, Git이 있으면 위임 worktree 격리, 체크포인트 롤백, `commit`/`diff` 검토, worker별 diff 검토가 가능합니다. 설치: <https://git-scm.com/downloads>.
 
 ### 2. 설치（택一）
@@ -161,7 +161,7 @@ Layer 4: RuntimeHookPipeline（75 hooks） → trap-and-emulate로 퇴화 행동
 > **Windows 지원 범위**: Windows 10（1809+, 22H2 권장）/ Windows 11. 화면 렌더링은 **WebView2 Runtime（≥ 120 권장）**에 의존합니다——v3.5부터의 스크롤·렌더링 최적화는 최신 런타임이 필요하며, 구버전은 세션 영역 스크롤이 끊깁니다. 3.5.3부터 설치 프로그램에 완전한 오프라인 설치 패키지가 내장됩니다（네트워크 불필요, 시스템 레벨 등록）. 기존 사용자가 자동 업데이트 후 "너무 오래됨" 안내를 받으면: 안내 바 또는 「설정 → 런타임 및 정보」에서 「복구 도구 실행」. **창이 아예 열리지 않을 때**는 시작 메뉴의 「WebView2 복구」를 사용하거나, [Releases](https://github.com/huiliyi37/Tianshu-harness/releases/latest)에서 `windows-repair` 디렉터리의 `repair-webview2.cmd`를 더블클릭하세요. 또는 [WebView2 오프라인 설치 패키지](https://go.microsoft.com/fwlink/p/?LinkId=2124703)를 수동 설치 후 재시작하세요.
 > **Win10 태블릿 모드 알려진 동작**: 태블릿 모드에서 앱 전환 시 이전 앱이 화면 밖으로 밀려납니다——computer_use 스냅샷이 가림/백그라운드 자가복구를 수행하므로（PrintWindow 렌더링）태블릿 모드를 끌 필요가 없습니다.
 
-**방식 B: 원클릭 설치 스크립트（권장）** —— Node ≥ 24 확인 → `tianshu-harness` 전역 설치（기본 npmmirror 미러 가속, `NPM_CONFIG_REGISTRY`로 덮어쓰기 가능）→ `tianshu` 실행. 멱등하게 반복 실행 가능:
+**방식 B: 원클릭 설치 스크립트（권장）** —— Node 24.22.1+ / 26.12.1+ 확인 → `tianshu-harness` 전역 설치（기본 npmmirror 미러 가속, `NPM_CONFIG_REGISTRY`로 덮어쓰기 가능）→ `tianshu` 실행. 멱등하게 반복 실행 가능:
 
 ```bash
 # macOS / Linux（bash）

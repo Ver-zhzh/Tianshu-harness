@@ -4,6 +4,9 @@ export interface PlanCloseOptions {
   deliveryState?: 'GREEN' | 'YELLOW' | 'RED'
   note?: string
   updateClosure?: boolean
+  executionStatus?: 'completed' | 'partial' | 'blocked'
+  summaryLines?: string[]
+  acceptance?: Array<{ id: string; kind?: string; status: string }>
 }
 
 export interface PlanCloseChange {
@@ -201,19 +204,21 @@ function buildClosure(taskLabel: string, options: PlanCloseOptions): string[] {
   const lines = [
     '## 7. Execution closure',
     '',
-    `已闭环：${taskLabel} 均已完成并通过验证。`,
+    `实施关闭：${taskLabel}，执行状态 ${options.executionStatus ?? 'completed'}。`,
+    ...options.summaryLines ?? ['实际提交：未知。', '验证：未知，未关联执行回执。', '审查：未知，未关联独立审查。'],
+    '未分类的旧清单未逐项核实；未勾选项及延后项继续保留。',
     '',
   ]
 
   const verifiedCommands = options.verifiedCommands ?? []
   if (verifiedCommands.length > 0) {
-    lines.push('最终验证记录：', '', '```bash', ...verifiedCommands, '```')
+    lines.push('历史命令声明（不等于真实验证证据）：', '', '```bash', ...verifiedCommands, '```')
   } else {
-    lines.push('最终验证记录：本次未传入显式验证命令。')
+    lines.push('历史命令声明：未提供。')
   }
 
   if (options.deliveryState) {
-    lines.push('', `交付门检查：${options.deliveryState}。`)
+    lines.push('', `历史交付状态声明：${options.deliveryState}（不用于判定实施、验证或审查）。`)
   }
 
   if (options.note?.trim()) {
@@ -246,7 +251,10 @@ export function closePlanMarkdown(markdown: string, options: PlanCloseOptions): 
       if (fenceMask[i]) continue
       const line = nextLines[i]!
       if (/^\s*- \[[ xX]\]/.test(line)) checkboxCount++
-      if (/^(\s*- \[) \](.*)$/.test(line)) {
+      const criterionId = /<!--\s*acceptance:([^\s]+)\s*-->/.exec(line)?.[1]
+      const satisfied = criterionId && options.acceptance?.some(a => a.id === criterionId && a.kind && a.status === 'met')
+      const completedImplementation = (options.executionStatus ?? 'completed') === 'completed' && /^\s*- \[ \]\s*\[implementation\]/.test(line)
+      if ((satisfied || completedImplementation) && /^(\s*- \[) \](.*)$/.test(line)) {
         nextLines[i] = line.replace(/^(\s*- \[) \](.*)$/, '$1x]$2')
         changedCheckboxCount++
       }
@@ -261,7 +269,7 @@ export function closePlanMarkdown(markdown: string, options: PlanCloseOptions): 
   if (updateClosure) {
     const allTaskNumbers = blocks.map(block => block.taskNumber).sort((a, b) => a - b)
     const taskLabel = formatTaskLabel(options.tasks, selected, allTaskNumbers)
-    const statusLine = `**执行状态：** 已闭环。${taskLabel} 均已完成；验证通过${options.deliveryState ? `；交付门检查：${options.deliveryState}` : ''}。`
+    const statusLine = `**执行状态：** ${options.executionStatus ?? 'completed'}。${taskLabel} 实施状态已登记；提交、验证和审查见独立回执；旧清单未逐项核实。`
     const statusResult = upsertExecutionStatus(finalLines, statusLine)
     finalLines = statusResult.lines
     const closureResult = upsertExecutionClosure(finalLines, buildClosure(taskLabel, options))

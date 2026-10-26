@@ -130,6 +130,44 @@ function remindersIn(session: SessionContext): string[] {
 }
 
 describe('B2 turn-call-limit planMode/star-domain awareness (defect 2)', () => {
+  it('trusted approved-plan setter reaches implementation facts without parsing kickoff prose', () => {
+    const registry = new ToolRegistry()
+    const agent = new AgentLoop({ client: mockClientReadProbes(0), promptEngine: makeEngine(), toolRegistry: registry,
+      compact: { enabled: false, autoThreshold: 800_000, autoFloor: 500_000, model: 'flash' } } as any, new SessionContext(), TEST_CWD)
+    assert.equal(agent.currentEditExpectation().kind, 'unknown')
+    agent.setActivePlan({ slug: 'approved', title: 'Approved implementation' })
+    assert.equal(agent.currentEditExpectation().source, 'explicit-mutation-allowed')
+    agent.setActivePlan(null)
+    assert.equal(agent.currentEditExpectation().kind, 'unknown')
+  })
+  it('action promise runtime replay separates Flash goal paraphrase and deduplicates a real commitment across runs', async () => {
+    writeFileSync(join(TEST_CWD, 'intent.txt'), 'theme configuration\n')
+    for (const [text, expected] of [
+      ['我来理解任务：把桌面端的默认主题从当前默认改为「纯白圣殿」，并确保打包分发后首次启动的默认主题也是它。先探查主题系统结构。', 0],
+      ['现在修改 theme.ts。', 1],
+    ] as const) {
+      const session = new SessionContext(), registry = new ToolRegistry()
+      registry.register(READ_FILE_TOOL)
+      let calls = 0
+      const client = { stream: async (_request: unknown, cb: StreamCallbacks) => {
+        calls++
+        const done = calls % 3 === 0
+        cb.onTextDelta(done ? 'Done.' : text)
+        cb.onContentBlock(done ? makeTextBlock('Done.') : makeReadFileBlock(`intent-${calls}`, 'intent.txt'))
+        cb.onStopReason(done ? 'end_turn' : 'tool_use', { input_tokens: 100, output_tokens: 20, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 })
+      } } as unknown as StreamClient
+      const agent = new AgentLoop({ client, promptEngine: makeEngine(), toolRegistry: registry, maxTurns: 10, contextWindow: 1_000_000,
+        compact: { enabled: false, autoThreshold: 800_000, autoFloor: 500_000, model: 'flash' } } as any, session, TEST_CWD)
+      const submitted: string[] = [], original = agent.advisoryBus.submit.bind(agent.advisoryBus)
+      const spy = mock.method(agent.advisoryBus, 'submit', (entry: Parameters<typeof agent.advisoryBus.submit>[0]) => { if (entry.key === 'action-intent') submitted.push(entry.content); return original(entry) })
+      try {
+        await agent.run('修改主题配置', makeCallbacks())
+        await agent.run('继续同一个任务', makeCallbacks())
+        assert.equal(submitted.length, expected, `${text}: ${submitted.join('\n')}`)
+        assert.equal(calls, 6, 'no additional model round, write, review or test is scheduled')
+      } finally { spy.mock.restore() }
+    }
+  })
   it('planning 态不发收敛提醒（即使 turn >= 28，1M 窗口阈值）', async () => {
     const session = new SessionContext()
     const registry = new ToolRegistry()

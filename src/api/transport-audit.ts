@@ -12,6 +12,17 @@ export function observeAuditResponse(response: Response, context: CallAuditConte
     try {
       const parsed = JSON.parse(line.startsWith('data:') ? line.slice(5).trim() : line)
       const data = parsed.response ?? parsed.message ?? parsed
+      const delta = parsed.delta
+      if ((parsed.type === 'response.output_text.delta' && typeof delta === 'string' && delta)
+        || (delta?.type === 'text_delta' && delta.text)) audit.observation.output('text')
+      if ((parsed.type?.startsWith('response.reasoning') && typeof delta === 'string' && delta)
+        || (delta?.type === 'thinking_delta' && delta.thinking)) audit.observation.output('thinking')
+      if (parsed.type === 'response.function_call_arguments.delta' || parsed.item?.type === 'function_call'
+        || parsed.content_block?.type === 'tool_use' || delta?.type === 'input_json_delta') audit.observation.output('tool')
+      for (const candidate of parsed.candidates ?? []) for (const part of candidate.content?.parts ?? []) {
+        if (part.text) audit.observation.output(part.thought ? 'thinking' : 'text')
+        if (part.functionCall) audit.observation.output('tool')
+      }
       if (typeof data.id === 'string') facts.responseId = data.id
       if (typeof data.model === 'string') facts.responseModel = data.model
       if (typeof data.system_fingerprint === 'string') facts.systemFingerprint = data.system_fingerprint

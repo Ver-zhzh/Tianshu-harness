@@ -63,6 +63,7 @@ export type InjectionChannel =
   | 'ephemeral'
   | 'reminder'
   | 'tool-result'
+  | 'user-explicit'
   | 'ui-only'
 
 /** 该注入点变化时的缓存代价。 */
@@ -438,6 +439,24 @@ export const APPENDIX_SURFACES: readonly InjectionSurface[] = [
  */
 export const CHANNEL_SURFACES: readonly InjectionSurface[] = [
   {
+    id: 'user-explicit.image-preview-reference', channel: 'user-explicit', cost: 'append-tail', volatility: 'per-boundary',
+    producer: 'prepareVisionImages()',
+    anchor: { file: 'src/agent/vision-image-preparation.ts', symbol: 'Original images retained:' },
+    note: '原图耐久归档后，在新图片消息尾部附回查引用、尺寸与坐标比例；不改既有历史。',
+  },
+  {
+    id: 'reminder.image-budget-reference', channel: 'reminder', cost: 'prefix-replace', volatility: 'transition',
+    producer: 'prepareImageBudgetCandidate()',
+    anchor: { file: 'src/agent/image-budget.ts', symbol: 'Earlier image archived as' },
+    note: '图片体积预算事务把已归档旧图片换为回查引用；仅耐久提交与 image_budget 新缓存代次一起生效。',
+  },
+  {
+    id: 'ui-only.tool-input-progress', channel: 'ui-only', cost: 'none', volatility: 'per-turn',
+    producer: 'ToolInputProgressEmitter',
+    anchor: { file: 'src/api/tool-input-progress.ts', symbol: 'export class ToolInputProgressEmitter' },
+    note: '工具输入生成的有界计数，不携带参数片段，不进入模型消息。',
+  },
+  {
     id: 'trailer.domain-task-boundary', channel: 'trailer-frozen', cost: 'boundary-rebuild', volatility: 'session-constant',
     producer: 'DOMAIN_TASK_BOUNDARY',
     anchor: { file: 'src/prompt/volatile.ts', symbol: '${DOMAIN_TASK_BOUNDARY}' },
@@ -448,6 +467,12 @@ export const CHANNEL_SURFACES: readonly InjectionSurface[] = [
     producer: 'renderUserInstructions()',
     anchor: { file: 'src/prompt/volatile.ts', symbol: 'renderUserInstructions(ctx.userInstructions, ctx.userInstructionsRevoked)' },
     note: '用户显式启用的常驻规则或停用标记；独立完整预算含分隔符最多 1024 字符。会话冻结、按新输入边界发布，历史不改写，每个历史用户边界仍有上下文成本；无额外模型调用。',
+  },
+  {
+    id: 'tool-result.file-state-receipt', channel: 'tool-result', cost: 'append-tail', volatility: 'per-turn',
+    producer: 'attachMutationReceipts()/readReceipt()',
+    anchor: { file: 'src/tools/file-state-receipt.ts', symbol: 'export function attachMutationReceipts' },
+    note: '文件工具尾部的版本、恢复结果及有界结构回执；pipeline 在 artifact/轮次预算裁剪后保留最多约 1100 字符的版本尾注。只读引用不授权整文件覆盖；HTML 纯解析范围逐项展示，不自动执行验证。',
   },
   {
     id: 'tool-result.verification-guidance', channel: 'tool-result', cost: 'append-tail', volatility: 'per-turn',
@@ -462,10 +487,10 @@ export const CHANNEL_SURFACES: readonly InjectionSurface[] = [
     note: '隔离快照未包含的 dirty 文件随验证结果点名；隔离失败及归因重试也显示，管线在输出截断/artifact 化后补回提示。诊断不补覆盖或放行失败。',
   },
   {
-    id: 'tool-result.delivery-verification-plan', channel: 'tool-result', cost: 'append-tail', volatility: 'per-turn',
-    producer: 'renderDeliveryVerificationPlan()',
-    anchor: { file: 'src/agent/deliver-task.ts', symbol: 'lines.push(...renderDeliveryVerificationPlan' },
-    note: '提交因 required 覆盖缺口受阻时，返回累计进度与按项目分批的独立命令；未适配 runner 保留义务，不以名单截断或 advisory 豁免验证。',
+    id: 'tool-result.review-finding-disposition', channel: 'tool-result', cost: 'append-tail', volatility: 'transition',
+    producer: 'handleReviewFindingAction()',
+    anchor: { file: 'src/agent/review-followup-tool.ts', symbol: 'export async function handleReviewFindingAction' },
+    note: '审查发现持久化台账的查看和核销回执；fixed 核对真实后续修复提交；验证状态独立，passed 核对本会话真实回归记录，不改变提交许可。',
   },
   {
     id: 'reminder.goal-rollover-kickoff', channel: 'reminder', cost: 'boundary-rebuild', volatility: 'transition',
@@ -578,6 +603,12 @@ export const CHANNEL_SURFACES: readonly InjectionSurface[] = [
 
 /** 全表。 */
 export const INJECTION_SURFACES: readonly InjectionSurface[] = [
+  { id: 'user.handoff-explicit', channel: 'user-explicit', cost: 'append-tail', volatility: 'transition',
+    producer: 'queryHandoffCommand()', anchor: { file: 'src/agent/handoff-command.ts', symbol: 'queryHandoffCommand' },
+    note: '仅用户显式指定源会话及快照时进入当前 user 边界；默认速览，不改冻结前缀，不自动选最近会话。' },
+  { id: 'tool.handoff-selected-read', channel: 'tool-result', cost: 'append-tail', volatility: 'transition',
+    producer: 'readSelectedHandoff()', anchor: { file: 'src/agent/handoff-selection.ts', symbol: 'readSelectedHandoff' },
+    note: 'read_file 只读已显式选择的同项目不可变快照；历史事实不冒充当前有效证据，不自动展开全文。' },
   ...APPENDIX_PROTECTED_SURFACES,
   ...APPENDIX_SURFACES,
   ...CHANNEL_SURFACES,

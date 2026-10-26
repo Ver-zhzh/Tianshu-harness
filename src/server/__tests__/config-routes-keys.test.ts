@@ -189,6 +189,8 @@ describe('multi-key server contract', () => {
       apiKey: 'sk-second-key',
       label: '备用号',
       models: [{ id: 'explicit-model' }],
+      // 本地 mock server 属私网端点——本周期端点网络策略默认拒绝，须显式声明放行
+      allowPrivateNetwork: true,
     }, AUTH)
     assert.equal(res.status, 200, JSON.stringify(res.body))
     const body = res.body as { ok: boolean; key: { id: string; keyStatus: unknown; models: Array<{ id: string }> }; keys: KeyListItem[] }
@@ -206,7 +208,7 @@ describe('multi-key server contract', () => {
     withProvider({ keyRef: RELAY, models: [{ id: 'legacy-a' }] })
     writeSecret(RELAY, 'sk-first-key')
 
-    const res = await router('POST', `/config/providers/${RELAY}/keys`, { apiKey: 'sk-wrong-key' }, AUTH)
+    const res = await router('POST', `/config/providers/${RELAY}/keys`, { apiKey: 'sk-wrong-key', allowPrivateNetwork: true }, AUTH)
     assert.equal(res.status, 400)
     assert.match(JSON.stringify(res.body), /auth|401|invalid/i)
     assert.equal(loadConfig().provider.providers[RELAY]!.keys!.length, 1, '探测失败不得落库')
@@ -224,7 +226,7 @@ describe('multi-key server contract', () => {
     server = await startModelsServer('sk-second')
     withProvider({ keyRef: RELAY, models: [{ id: 'legacy-a' }] })
     writeSecret(RELAY, 'sk-first-key')
-    const added = await router('POST', `/config/providers/${RELAY}/keys`, { apiKey: 'sk-second' }, AUTH)
+    const added = await router('POST', `/config/providers/${RELAY}/keys`, { apiKey: 'sk-second', allowPrivateNetwork: true }, AUTH)
     const id = (added.body as { key: { id: string } }).key.id
 
     const removed = await router('DELETE', `/config/providers/${RELAY}/keys/${id}`, {}, AUTH)
@@ -266,13 +268,13 @@ describe('multi-key server contract', () => {
     withProvider({ keyRef: RELAY, models: [{ id: 'legacy-a' }] })
     writeSecret(RELAY, 'sk-first-key')
 
-    const res = await router('PUT', `/config/providers/${RELAY}/keys/default/key`, { apiKey: 'sk-rotated' }, AUTH)
+    const res = await router('PUT', `/config/providers/${RELAY}/keys/default/key`, { apiKey: 'sk-rotated', allowPrivateNetwork: true }, AUTH)
     assert.equal(res.status, 200, JSON.stringify(res.body))
     assert.equal(readSecret(RELAY), 'sk-rotated')
     assert.equal(server.seenAuth(), 'Bearer sk-rotated')
     assert.equal((res.body as { key: KeyListItem }).key.keyStatus.source, 'inline')
 
-    const failed = await router('PUT', `/config/providers/${RELAY}/keys/default/key`, { apiKey: 'sk-stale' }, AUTH)
+    const failed = await router('PUT', `/config/providers/${RELAY}/keys/default/key`, { apiKey: 'sk-stale', allowPrivateNetwork: true }, AUTH)
     assert.equal(failed.status, 400)
     assert.equal(readSecret(RELAY), 'sk-rotated', '探测失败不得覆盖已有凭据')
   })

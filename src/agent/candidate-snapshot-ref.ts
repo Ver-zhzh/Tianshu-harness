@@ -3,6 +3,7 @@ import { lstatSync, readFileSync, realpathSync } from 'node:fs'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
 import { spawnGitSync } from '../tools/spawn-git.js'
 import { detectSensitiveFileOnDisk } from '../tools/sensitive-file-detector.js'
+import { normalizeEolBytes } from '../utils/eol-bytes.js'
 
 /** Identity of exactly the tree that deliver_task(files=...) would commit. */
 export function candidateSnapshotRef(cwd: string, files: readonly string[]): string | null {
@@ -26,7 +27,9 @@ export function candidateSnapshotRef(cwd: string, files: readonly string[]): str
       if (isAbsolute(inside) || inside === '..' || inside.startsWith(`..${sep}`)) return null
       if (!stat.isFile()) return null
       hash.update(String(stat.mode & 0o111))
-      hash.update(readFileSync(path))
+      // 行尾归一化：快照由 worktree 检出（LF），工作区可能被编辑器存成 CRLF。
+      // 两者语义相同，按原始字节比会让 ref 永远不等（issue #537 A 项）。
+      hash.update(normalizeEolBytes(readFileSync(path)))
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return null
       hash.update('deleted')

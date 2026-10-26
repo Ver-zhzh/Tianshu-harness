@@ -36,7 +36,9 @@ export async function runGateCompletion(
   recordSidePath: (kind: string, usage: Partial<Usage>) => void,
   prompt: string,
   timeoutMs: number,
+  parentSignal?: AbortSignal,
 ): Promise<string> {
+  parentSignal?.throwIfAborted()
   // 独立新建 request（不复用主请求对象）——无 prefixProbe、无 mutation 风险
   const request = {
     model: '', // client already binds the model
@@ -49,35 +51,42 @@ export async function runGateCompletion(
   let streamError: Error | undefined
   let timedOut = false
   const abort = new AbortController()
-
-  const streamPromise = client.stream(request, {
-    onTextDelta: text => { chunks.push(text) },
-    onThinkingDelta: () => {},
-    onContentBlock: () => {},
-    onStreamAttemptAborted: info => { if (info.usage) recordSidePath('essence_gate', info.usage) },
-    onStopReason: (_reason, usage) => {
-      recordSidePath('essence_gate', usage ?? {})
-    },
-    onError: err => { streamError = err },
-  }, abort.signal)
-
-  // race 保底：stream 忽略 abort 也不得拖过内层预算
+  const signal = parentSignal ? AbortSignal.any([parentSignal, abort.signal]) : abort.signal
+  let active = true
   let timer: ReturnType<typeof setTimeout> | undefined
-  const timeoutPromise = new Promise<never>((_, reject) => {
+  let removeListener: (() => void) | undefined
+  const cancelled = new Promise<never>((_, reject) => {
+    const onAbort = () => reject(signal.reason)
+    signal.addEventListener('abort', onAbort, { once: true })
+    removeListener = () => signal.removeEventListener('abort', onAbort)
     timer = setTimeout(() => {
       timedOut = true
-      abort.abort()
-      reject(new EssenceGateTimeoutError())
+      abort.abort(new EssenceGateTimeoutError())
     }, timeoutMs)
+  })
+  const streamPromise = Promise.resolve().then(() => {
+    signal.throwIfAborted()
+    return client.stream(request, {
+      onTextDelta: text => { if (active && !signal.aborted) chunks.push(text) },
+      onThinkingDelta: () => {},
+      onContentBlock: () => {},
+      // Provider bills remain real even after the result loses permission to commit.
+      onStreamAttemptAborted: info => { if (info.usage) recordSidePath('essence_gate', info.usage) },
+      onStopReason: (_reason, usage) => { recordSidePath('essence_gate', usage ?? {}) },
+      onError: err => { if (active) streamError = err },
+    }, signal)
   })
 
   try {
-    await Promise.race([streamPromise, timeoutPromise])
+    await Promise.race([streamPromise, cancelled])
+    if (timedOut) throw new EssenceGateTimeoutError()
+    parentSignal?.throwIfAborted()
+    if (streamError) throw streamError
+    return chunks.join('')
   } finally {
+    active = false
     if (timer) clearTimeout(timer)
+    removeListener?.()
+    abort.abort()
   }
-  // 超时优先于 streamError——abort 引发的 onError（AbortError）不掩盖归因
-  if (timedOut) throw new EssenceGateTimeoutError()
-  if (streamError) throw streamError
-  return chunks.join('')
 }

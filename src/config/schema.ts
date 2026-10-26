@@ -1,3 +1,4 @@
+import { TOOL_PRESET_NAMES } from '../tools/tool-preset-names.js'
 import { z } from 'zod'
 import { mcpConfigSchema, type McpConfig } from '../mcp/config.js'
 import { workspaceConfigSchema, type WorkspaceConfig } from './workspace-schema.js'
@@ -9,6 +10,7 @@ import { endpointNetworkPolicySchema } from './endpoint-network-schema.js'
 export type { ProviderRetryConfig } from './retry-schema.js'
 import { THEME_NAMES } from '../tui/theme.js'
 import { MIN_MAX_EVENTS_DISK_BYTES, MIN_MAX_LOADED_SESSIONS, MIN_IDLE_AGENT_TTL_MS } from './runtime-lean.js'
+import { READ_CONCURRENCY } from './read-concurrency.js'
 /**
  * Capability override fields valid at BOTH provider and model level — pure
  * semantics about the model's reasoning behavior. All optional: when absent,
@@ -367,18 +369,15 @@ export type ModelTarget = z.infer<typeof modelTargetSchema>
 export const reviewProfileOverrideSchema = modelTargetSchema
 /** Review worker configuration block.
  *  - profiles: per-profile override map; omitted profiles fall back to session model
- *  - skipAuto: bypass deliver_task post-commit auto review (per-config equivalent
- *    of RIVET_REVIEW_DISCIPLINE=0, but scoped to this config file). Default false:
- *    auto review is ON by default — users opt out via explicit `true` here, the
- *    RIVET_REVIEW_DISCIPLINE env, or the TUI/desktop settings panel. */
+ *  - skipAuto: DEPRECATED (contract separation 2026-10-25) — commits no longer
+ *    trigger post-commit auto review, so this toggle has no effect. It is still
+ *    read (schema-compat) so old config files keep loading, but nothing consumes
+ *    it to re-enable automatic execution. */
 export const reviewConfigSchema = z.object({
   profiles: z.record(z.string(), reviewProfileOverrideSchema).default({}),
   skipAuto: z.boolean().default(false),
-  /** Spark-specific review toggle: bypass deliver_task post-commit auto review
-   *  for spark provider (deepseek-spark) sessions only. Default false:
-   *  spark review is ON by default — spark sessions get auto review at
-   *  deliver_task time (L1/L2 classification per classifyAutoReviewTier).
-   *  Overridden by RIVET_REVIEW_DISCIPLINE=0 env var (all reviews off). */
+  /** Spark-specific review toggle — DEPRECATED (contract separation): same
+ *    no-effect semantics as skipAuto; retained for schema compatibility. */
   skipAutoSpark: z.boolean().default(false),
   /** Enable mechanical-change fast-path: docs-only and pure rename changes
    *  bypass verification gate (unverified RED only) and skip review workers.
@@ -462,6 +461,8 @@ export const agentSchema = z.object({
   /** Session-end dream / skill-distill. Default true when a sessionId exists;
    *  lean profile forces this off. */
   dreamEnabled: z.boolean().default(true),
+  /** Automatic memory formation is opt-in; existing memory remains available for recall. */
+  memoryFormation: z.object({ autoCapture: z.boolean().default(false), consolidation: z.boolean().default(false) }).default({}),
   /** 写操作后的安全模式正则告警（层1）。默认开：纯正则、零 API 调用、命中才注入，
    *  与其他 advisory hook 同档。设 false 或 RIVET_SECURITY_GUIDANCE=0 关闭。
    *  配置项存在的意义是让桌面端用户也能关——GUI 启动的 sidecar 继承不到 shell 环境变量。 */
@@ -980,7 +981,7 @@ const runtimeDomainSchema = z.object({
   idleAgentTtlMs: z.number().int().min(MIN_IDLE_AGENT_TTL_MS).optional(),
   maxEventsDiskBytes: z.number().int().min(MIN_MAX_EVENTS_DISK_BYTES).optional(),
   /** 该域会话的工具装配档位（defaultDomain 钉定该域时生效）。 */
-  toolPreset: z.enum(['minimal', 'frontend', 'full', 'taiyi']).optional(),
+  toolPreset: z.enum(TOOL_PRESET_NAMES).optional(),
 }).default({})
 
 const runtimeSchema = z.object({
@@ -1042,10 +1043,11 @@ export const configSchema = z.object({
   env: envSchema,
   ui: uiSchema,
   verify: verifySchema,
-  workspace: workspaceConfigSchema,  /** 工具装配档位：minimal / frontend（默认）/ full / taiyi（14 评测档）。
+  workspace: workspaceConfigSchema,  /** 工具装配档位：minimal（默认）/ frontend / orchestration / full / taiyi。
    *  会话启动期解析，会话内冻结（前缀缓存安全）；RIVET_TOOL_PRESET env 优先于此配置。 */
   tools: z.object({
-    preset: z.enum(['minimal', 'frontend', 'full', 'taiyi']).optional(),
+    readConcurrency: z.number().int().min(READ_CONCURRENCY.min).max(READ_CONCURRENCY.max).optional(),
+    preset: z.enum(TOOL_PRESET_NAMES).optional(),
     /** Zen Mode（禅模式）：读专注开局，动手即解锁。字段全可选——bootstrap 经
      *  resolveZenConfig 物化默认并 fail-loud（空 face/重复名等在此层校验）。
      *  未配置时 enabled 默认 **false**（opt-in）：新会话以全量工具面开局零缓存
@@ -1110,7 +1112,8 @@ export type Config = {
   verify: VerifyConfig
   workspace: WorkspaceConfig
   tools: {
-    preset?: 'minimal' | 'frontend' | 'full' | 'taiyi' | undefined
+    readConcurrency?: number
+    preset?: 'minimal' | 'frontend' | 'orchestration' | 'full' | 'taiyi' | undefined
     /** Zen Mode（禅模式）原始配置；bootstrap 经 resolveZenConfig 物化后传给 AgentLoop。 */
     zen?: {
       enabled?: boolean

@@ -2,10 +2,12 @@ import type { VerificationMetadata } from '../tools/types.js'
 import { verificationMeta } from '../tools/verification-facts.js'
 import type { TaskLedger } from './task-ledger.js'
 import type { EvidenceTracker } from './evidence.js'
+import { enrichVerificationRun } from './verification-runs.js'
 import { candidateSnapshotRef } from './candidate-snapshot-ref.js'
 
 export function createVerificationRecorder(deps: {
   taskLedger?: TaskLedger; evidence: Pick<EvidenceTracker, 'trackVerification'>
+  sessionId?: string
   cwd?: string
   destructiveGate?: { noteVerification(status: VerificationMetadata['status']): void }
   onRecorded?: (verification: VerificationMetadata) => void
@@ -22,7 +24,7 @@ export function createVerificationRecorder(deps: {
       ? deps.taskLedger?.captureVerificationFingerprint?.(true, verification.coverage.executionRoot) : undefined
     const candidateRef = verification.candidateFiles?.length && deps.cwd
       ? candidateSnapshotRef(deps.cwd, verification.candidateFiles) : undefined
-    const v = verification.candidateFiles?.length
+    const v: VerificationMetadata = verification.candidateFiles?.length
       ? { ...verification, workspaceFingerprint: verification.snapshotRef,
           stale: verification.stale || !verification.snapshotRef || candidateRef !== verification.snapshotRef }
       : { ...verification,
@@ -31,6 +33,10 @@ export function createVerificationRecorder(deps: {
               || actualSnapshot !== undefined && actualSnapshot !== captured } : {}),
         }
     deps.taskLedger?.record({ type: 'verification', command: event?.command ?? v.command, status: v.status, meta: { ...verificationMeta(v, !!event?.command), ...event?.meta } })
+    if (deps.cwd && deps.sessionId) {
+      try { enrichVerificationRun(deps.cwd, deps.sessionId, v) }
+      catch { v.userGuidance = [v.userGuidance, '回执补充写入失败；实际执行已结束，请查询已有日志，不自动重跑。'].filter(Boolean).join('\n') }
+    }
     deps.evidence.trackVerification(v)
     deps.onRecorded?.(v)
     if (!v.stale) deps.destructiveGate?.noteVerification(v.status)

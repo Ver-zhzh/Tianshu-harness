@@ -20,6 +20,25 @@ related: [../user-guide.md, troubleshooting.md]
 - **Node.js 24.x ≥ 24.22.1 或 26.x ≥ 26.12.1**（`engines` 钉定）—— 用 `node --version` 检查。受影响的旧版本在 CLI 启动时会被拒绝；一键安装脚本会提前拦截并给出升级指引。
 - **Git**（强烈建议）—— 可选。没有它天枢仍可运行（就地修改），但 git 能解锁：委派 worktree 隔离、检查点回滚、`commit`/`diff` 审查、每个 worker 的 diff 审查。安装：<https://git-scm.com/downloads>。
 
+> [!WARNING]
+> **v3.36.0 起 Node 版本是硬门槛。** 仅支持 **Node 24.22.1+（24.x 线）** 或
+> **Node 26.12.1+（26.x 线）**。Node 22 / 23 / 25 / 27、24.x < 24.22.1、
+> 26.x < 26.12.1 都会在 CLI 入口被安全闸门拒绝。
+>
+> 典型症状：启动横幅提示 `Update available: 3.35.0 → 3.36.1`，跑完 `/update`
+> 后新版本仍起不来，或终端直接退出。此时先查 `node -v`；不满足就先升级 Node，
+> 再重装：
+>
+> ```bash
+> node -v   # 需要 v24.22.1+ 或 v26.12.1+
+> # 任选一种版本管理方式：
+> nvm install 24.22.1 && nvm use 24.22.1
+> # 或 fnm install 24.22.1 && fnm use 24.22.1
+> npm install -g tianshu-harness@3.36.1
+> ```
+>
+> 桌面端自带 Node 运行时，不受此项影响；源码构建同样需要满足上述 Node 版本。
+
 ## 方式 A：桌面端（开箱即用）
 
 从 [GitHub Releases](https://github.com/huiliyi37/Tianshu-harness/releases/latest) 下载：macOS `.dmg`（Apple Silicon / Intel 双架构）· Windows `.exe` 安装向导 · Linux `.AppImage`（**x86_64 / aarch64 双架构**，3.26.0 起）。

@@ -1,3 +1,6 @@
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
 import { createDestructiveGateState } from '../destructive-gate.js'
@@ -26,106 +29,26 @@ test('PR #494: clean force forms agree across the execution gate and approval', 
       assert.equal(GIT_CLEAR_RE.test(command), expected, `pattern: ${command}`)
       assert.equal(gate.evaluate('bash', { command }).block, expected, `gate: ${command}`)
       assert.equal(matchesDangerousBash(command), expected, `approval: ${command}`)
-      if (expected) assert.equal(gate.evaluate('bash', { command }).block, false, 'exact retry keeps existing semantics')
+      if (expected) assert.equal(gate.evaluate('bash', { command }).block, true, 'model retry never authorizes')
     }
   }
   assert.equal(GIT_CLEAR_RE.test('git checkout -q --force .'), true, 'keep local checkout fix')
 })
 
-describe('destructive-gate 决策矩阵', () => {
-  test('无验证失败时不拦截 git 清场命令', () => {
+describe('destructive-gate trusted authorization', () => {
+  test('resends, tool count and successful verification cannot self-authorize', () => {
     const gate = createDestructiveGateState()
-    const d = gate.evaluate('bash', { command: 'git stash' })
-    assert.equal(d.block, false)
-  })
-
-  test('验证失败后窗口内拦截 git 清场,消息含命令与放行指引', () => {
-    const gate = createDestructiveGateState()
-    gate.noteVerification('failed')
-    const d = gate.evaluate('bash', { command: 'git reset --hard HEAD' })
-    assert.equal(d.block, true)
-    if (d.block) {
-      assert.match(d.message, /git reset --hard HEAD/)
-      assert.match(d.message, /原样重发/)
-      assert.match(d.message, /根因/)
+    for (const status of ['failed', 'blocked', 'passed'] as const) {
+      gate.noteVerification(status)
+      for (let i = 0; i < 5; i++) { gate.noteToolExecuted(); assert.equal(gate.evaluate('bash', { command: 'git checkout HEAD -- a.ts' }).block, true) }
     }
-  })
-
-  test('首次拦截、同一命令原样重发放行(显式坚持)', () => {
-    const gate = createDestructiveGateState()
-    gate.noteVerification('failed')
-    assert.equal(gate.evaluate('bash', { command: 'git stash' }).block, true)
-    assert.equal(gate.evaluate('bash', { command: 'git stash' }).block, false)
-    // 空白差异归一化后仍视为同一命令
-    assert.equal(gate.evaluate('bash', { command: '  git   stash ' }).block, false)
-  })
-
-  test('不同的清场命令各自独立拦截一次', () => {
-    const gate = createDestructiveGateState()
-    gate.noteVerification('failed')
-    assert.equal(gate.evaluate('bash', { command: 'git stash' }).block, true)
-    assert.equal(gate.evaluate('bash', { command: 'git clean -fd' }).block, true)
-    assert.equal(gate.evaluate('bash', { command: 'git clean -fd' }).block, false)
-  })
-
-  test('验证通过关窗:失败→通过→清场不拦截', () => {
-    const gate = createDestructiveGateState()
-    gate.noteVerification('failed')
-    gate.noteVerification('passed')
-    assert.equal(gate.evaluate('bash', { command: 'git stash' }).block, false)
-  })
-
-  test('blocked 与 failed 等价开窗，且不关窗', () => {
-    const gate = createDestructiveGateState()
-    // blocked 开窗——和 failed 一样，agent 感知到验证障碍
-    gate.noteVerification('blocked')
-    assert.equal(gate.evaluate('bash', { command: 'git stash' }).block, true)
-    // blocked 不关窗：failed 开窗后再 blocked 不关
-    const gate2 = createDestructiveGateState()
-    gate2.noteVerification('failed')
-    gate2.noteVerification('blocked')
-    assert.equal(gate2.evaluate('bash', { command: 'git stash' }).block, true)
-  })
-
-  test('P1: noteAdvisoryPressure 开窗——advisory 被忽略 ≥2 时拦截清场', () => {
-    const gate = createDestructiveGateState()
-    gate.noteAdvisoryPressure()
-    assert.equal(gate.evaluate('bash', { command: 'git checkout -- .' }).block, true)
-    // 首次拦截,原样重发放行
-    assert.equal(gate.evaluate('bash', { command: 'git checkout -- .' }).block, false)
-  })
-
-  test('窗口按实际执行的工具计数过期(默认 3)', () => {
-    const gate = createDestructiveGateState()
-    gate.noteVerification('failed')
-    gate.noteToolExecuted()
-    gate.noteToolExecuted()
-    gate.noteToolExecuted()
-    // 3 次仍在窗口内
-    assert.equal(gate.evaluate('bash', { command: 'git stash' }).block, true)
-    const gate2 = createDestructiveGateState()
-    gate2.noteVerification('failed')
-    for (let i = 0; i < 4; i++) gate2.noteToolExecuted()
-    assert.equal(gate2.evaluate('bash', { command: 'git stash' }).block, false)
-  })
-
-  test('新的失败重置窗口计数', () => {
-    const gate = createDestructiveGateState()
-    gate.noteVerification('failed')
-    for (let i = 0; i < 3; i++) gate.noteToolExecuted()
-    gate.noteVerification('failed')
-    gate.noteToolExecuted()
-    assert.equal(gate.evaluate('bash', { command: 'git stash' }).block, true)
-  })
-
-  test('非 bash 工具与非清场命令永不拦截', () => {
-    const gate = createDestructiveGateState()
-    gate.noteVerification('failed')
-    assert.equal(gate.evaluate('read_file', { path: 'a.ts' }).block, false)
     assert.equal(gate.evaluate('bash', { command: 'git status' }).block, false)
-    assert.equal(gate.evaluate('bash', { command: 'git stash pop' }).block, false)
-    assert.equal(gate.evaluate('bash', { command: 'npm test' }).block, false)
-    assert.equal(gate.evaluate('bash', {}).block, false)
+    assert.equal(gate.evaluate('deliver_task', {}).block, false)
+  })
+  test('unknown verification is described as unknown', () => {
+    const decision = createDestructiveGateState().evaluate('bash', { command: 'git stash' })
+    assert.ok(decision.block)
+    assert.match(decision.message, /unknown/); assert.doesNotMatch(decision.message, /测试刚失败|原样重发.*放行/)
   })
 })
 
@@ -174,41 +97,24 @@ describe('GIT_CLEAR_RE 共享正则(迁移回归)', () => {
   })
 })
 
-// ─── T4 getVirtueCredit 选项 ──────────────────────────────────────
-// virtueCredit 仅影响 block message 文案中 ≥0.7 时追加一行信任引导语，
-// 不影响 block 决策逻辑。
 
-describe('destructive-gate getVirtueCredit 选项 (T4)', () => {
-  test('B1: credit < 0.7 → 拦截消息不含信任轨迹', () => {
-    const gate = createDestructiveGateState({ getVirtueCredit: () => 0.5 })
-    gate.noteVerification('failed')
-    const d = gate.evaluate('bash', { command: 'git stash' })
-    assert.equal(d.block, true)
-    if (d.block) {
-      assert.ok(!d.message.includes('美德轨迹'), 'credit < 0.7 不应含信任轨迹')
-    }
-  })
-
-  test('B2: credit ≥ 0.7 → 拦截消息含信任轨迹 + credit 数值', () => {
-    const gate = createDestructiveGateState({ getVirtueCredit: () => 0.72 })
-    gate.noteVerification('failed')
-    const d = gate.evaluate('bash', { command: 'git stash' })
-    assert.equal(d.block, true)
-    if (d.block) {
-      assert.match(d.message, /美德轨迹/)
-      assert.match(d.message, /0\.72/)
-    }
-  })
-
-  test('B3: getVirtueCredit 抛异常不崩,正常返回 block（无信任轨迹）', () => {
-    const gate = createDestructiveGateState({
-      getVirtueCredit: () => { throw new Error('boom') },
-    })
-    gate.noteVerification('failed')
-    const d = gate.evaluate('bash', { command: 'git stash' })
-    assert.equal(d.block, true)
-    if (d.block) {
-      assert.ok(!d.message.includes('美德轨迹'), '回调抛异常时应 fallback 到无信任轨迹')
-    }
-  })
+test('172–174 replay: identical targets share an action identity, only user authorization grants it', () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'clear-gate-')), file = join(cwd, 'a.ts')
+  try {
+    writeFileSync(file, 'const a = 1')
+    const gate = createDestructiveGateState()
+    const commands = ["git checkout HEAD -- a.ts\npython3 - <<'PY'\nprint('one')\nPY", "git checkout HEAD -- ./a.ts\npython3 - <<'PY'\nprint('two')\nPY"]
+    const first = gate.evaluate('bash', { command: commands[0] }, cwd), second = gate.evaluate('bash', { command: commands[1] }, cwd)
+    assert.ok(first.block && second.block); assert.deepEqual(first.actions, second.actions)
+    assert.equal(gate.evaluate('bash', { command: commands[1] }, cwd).block, true)
+    gate.approve('bash', { command: commands[1] }, cwd)
+    assert.equal(gate.evaluate('bash', { command: commands[0] }, cwd).block, false)
+    assert.equal(gate.evaluate('bash', { command: commands[0] + '\ngit clean -fd' }, cwd).block, true)
+    gate.approve('bash', { command: 'git checkout HEAD -- *.ts' }, cwd)
+    assert.equal(gate.evaluate('bash', { command: 'git checkout HEAD -- *.ts' }, cwd).block, true, 'glob targets are never reusable file-version grants')
+    gate.approve('bash', { command: 'cd other; git checkout HEAD -- a.ts' }, cwd)
+    assert.equal(gate.evaluate('bash', { command: 'cd other; git checkout HEAD -- a.ts' }, cwd).block, true, 'unknown shell cwd is never a reusable grant')
+    writeFileSync(file, 'peer content')
+    assert.equal(gate.evaluate('bash', { command: commands[1] }, cwd).block, true)
+  } finally { rmSync(cwd, { recursive: true, force: true }) }
 })

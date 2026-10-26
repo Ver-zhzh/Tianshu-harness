@@ -198,6 +198,45 @@ describe('applyCommandFilter', () => {
   })
 
   describe('test-run filter', () => {
+    for (const cause of [
+      'npm ERR! test runner terminated by signal SIGTERM',
+      'Killed (out of memory)',
+      'runner could not start: missing executable',
+      'cleanup hook returned status 3',
+    ]) it(`retains non-assertion failure evidence: ${cause}`, () => {
+      const input = [...Array.from({ length: 20 }, (_, i) => `✔ case ${i}`),
+        'ℹ pass 212', 'ℹ fail 0', 'ℹ skipped 0', 'ℹ todo 0', cause].join('\n')
+      const result = applyCommandFilter('npm run test:desktop', input, 1)
+      assert.ok(result)
+      assert.ok(result.includes(cause), `nonzero exit must retain its diagnostic: ${result}`)
+      assert.ok(result.includes('ℹ fail 0'))
+      assert.ok(!result.includes('✓ 212 passed'))
+    })
+
+    it('does not present statistics as an explanation when no diagnostic was captured', () => {
+      const input = [...Array.from({ length: 20 }, (_, i) => `✔ case ${i}`), 'ℹ pass 212', 'ℹ fail 0'].join('\n')
+      assert.match(applyCommandFilter('npm test', input, 1)!, /未取得可解释退出原因/)
+    })
+
+    for (const command of ['node --test a.test.js', 'npx tsc --noEmit']) it(`retains unknown process diagnostics for ${command}`, () => {
+      const input = ['src/a.ts(1,1): error TS2322: Type mismatch.', 'not ok 1 - failed test',
+        'ℹ pass 2', 'ℹ fail 0', 'cleanup terminated by signal SIGTERM'].join('\n')
+      assert.match(applyCommandFilter(command, input, 1)!, /cleanup terminated by signal SIGTERM/)
+    })
+
+    it('keeps unknown diagnostics before passing items and after a long failure block', () => {
+      const input = ['runner startup diagnostic',
+        ...Array.from({ length: 20 }, (_, i) => `✔ case ${i}`),
+        'FAIL a.test.ts', ...Array.from({ length: 160 }, (_, i) => `failure detail ${i}`),
+        'ℹ pass 212', 'ℹ fail 0', 'cleanup terminated unexpectedly'].join('\n')
+      const result = applyCommandFilter('npm test', input, 1)!
+      assert.ok(result.includes('runner startup diagnostic'))
+      assert.ok(result.includes('cleanup terminated unexpectedly'))
+      assert.ok(result.includes('ℹ fail 0'))
+      assert.match(result, /omitted/)
+      assert.ok(result.split('\n').length < 130)
+    })
+
     it('vitest failure: keeps failure blocks, drops passing lines', () => {
       const input = [
         ...Array.from({ length: 12 }, (_, i) => ` ✓ src/t${i}.test.ts (3 tests) 5ms`),

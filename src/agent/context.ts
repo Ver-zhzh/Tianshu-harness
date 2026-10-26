@@ -280,7 +280,7 @@ export class SessionContext {
   }
   restoreGoalAnchor(goal: string | null): void { this.currentGoal = goal; this.onGoalChanged?.(goal) }
 
-  addUserMessage(content: string, images?: string[], origin: import('./input-origin.js').InputOrigin = 'human'): void {
+  addUserMessage(content: string, images?: string[], origin: import('./input-origin.js').InputOrigin = 'human', imagePolicy?: 'original'): void {
     let msg: OaiMessage
     if (images && images.length > 0) {
       // Multimodal: construct OpenAI vision content parts (text + image_url).
@@ -299,6 +299,7 @@ export class SessionContext {
       msg = { role: 'user', content: sanitizeForJsonTransport(content) }
     }
     if (msg.role === 'user') msg.origin = origin
+    if (msg.role === 'user' && imagePolicy) msg.imagePolicy = imagePolicy
     this.state.oaiMessages.push(msg)
     const t = estimateOaiMessageTokens(msg)
     this.state.estimatedTokens += t

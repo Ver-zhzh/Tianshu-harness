@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
+import fsSync from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
 import { spawnSync } from 'node:child_process'
 import { join } from 'node:path'
@@ -35,6 +36,13 @@ for (const kind of ['apply_patch', 'ast_edit'] as const) {
       t.mock.method(fs, 'writeFile', async (...args: Parameters<typeof fs.writeFile>) => {
         if (String(args[0]) === target) throw Object.assign(new Error('target is locked'), { code: 'EACCES' })
         return originalWrite(...args)
+      })
+      // 版本守卫恢复路径（recovery-stack restoreBackup guard 分支）用 writeFileSync——
+      // 只 mock fs.promises.writeFile 会让拒绝机制空转。
+      const originalWriteSync = fsSync.writeFileSync.bind(fsSync)
+      t.mock.method(fsSync, 'writeFileSync', (...args: Parameters<typeof fsSync.writeFileSync>) => {
+        if (String(args[0]) === target) throw Object.assign(new Error('target is locked'), { code: 'EACCES' })
+        return (originalWriteSync as (...a: unknown[]) => unknown)(...args)
       })
       syncBuiltinESMExports()
       const result = kind === 'apply_patch'

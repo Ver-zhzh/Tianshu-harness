@@ -130,6 +130,15 @@ describe('SettingsFlow editing', () => {
     assert.deepEqual(flow.dirty(), ['review'])
   })
 
+  it('selects the dedicated orchestration preset through the actual settings picker', () => {
+    const flow = open(); gotoCategory(flow, 'basics'); focusField(flow, 'tools.preset'); flow.activate()
+    assert.ok(flow.view().picker?.options.some(option => option.id === 'orchestration'))
+    while (flow.view().picker?.options[flow.view().picker!.index]?.id !== 'orchestration') flow.moveDown()
+    flow.activate()
+    assert.equal(flow.view().fields[flow.view().fieldIndex]?.value, 'orchestration')
+    assert.deepEqual(flow.dirty(), ['toolPreset'])
+  })
+
   it('opens an enum picker positioned on the current value', () => {
     const flow = open()
     gotoCategory(flow, 'basics')

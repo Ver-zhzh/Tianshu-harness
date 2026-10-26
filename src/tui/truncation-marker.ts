@@ -30,7 +30,8 @@ export function toolExpandHint(preferences: FrontendPreferences): string {
  *    ctrl+o 展开`（单位可带空格）、裸提示 `ctrl+o 展开完整 diff`
  *  - `[Ctrl+O]`：历史英文标记 `… +N lines [Ctrl+O]` / `… [Ctrl+O]`——`/resume`
  *    载入的旧会话 scrollback 里仍是英文形态，不认会让旧会话的展开入口失效。
- *  - 重绑定的 ctrl/alt 字母展开键，以及标准键位的 `/pager → Enter 查看详情`。
+ *  - 重绑定的 ctrl/alt 字母展开键，以及标准键位的 `/pager → Enter 查看详情`
+ *    与窄屏缩写 `· /pager`。
  */
 export const TRUNCATION_MARKER_RE =
-  /(?:ctrl|alt)\+[a-z]\s*展开|\/pager\s*→\s*Enter|\[Ctrl\+O\]/i
+  /(?:ctrl|alt)\+[a-z]\s*展开|·\s*\/pager|\/pager\s*→\s*Enter|\[Ctrl\+O\]/i

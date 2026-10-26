@@ -133,3 +133,5 @@ export {
 
 export { STELLAR_CARDS, stellarCard } from '../agent/stellar-card.js'
 export { remoteAccessOrigin } from './remote-access-endpoint.js'
+
+export { readPlanCompletionSummary } from '../plan/completion-summary.js'

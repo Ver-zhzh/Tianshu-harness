@@ -37,7 +37,7 @@ for (const command of destructive) {
     const gate = createDestructiveGateState()
     gate.noteVerification('failed')
     assert.equal(gate.evaluate('bash', { command }).block, true)
-    assert.equal(gate.evaluate('bash', { command }).block, false, 'existing retry behavior is preserved')
+    assert.equal(gate.evaluate('bash', { command }).block, true, 'retry never authorizes; only trusted approve() grants (f3dfbd8cf)')
   })
 }
 

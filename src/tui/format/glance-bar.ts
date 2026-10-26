@@ -179,7 +179,7 @@ export interface GlanceBarInput {
   todoFlash?: boolean
   /**
    * 信息密度分档（Wave 2 减密）：
-   * - 'compact'（TUI 默认）：模型 + effort + cache% + 上下文% + 耗时
+   * - 'compact'（TUI 默认）：模型 + effort + 上下文 + 异常信号 + 耗时；常规指标收起
    * - 'full'：全量（goal/todo/effort/cache/cost 都上）——`/glance full` 切换
    * 未传按 full 处理（兼容既有直接调用方/测试）。
    */
@@ -265,13 +265,11 @@ export function formatGlanceRight(input: GlanceBarInput, theme: RivetTheme): str
     if (badge) parts.push(badge)
   }
 
-  // ── compact 档：模型 + effort + cache% + 上下文% + 耗时 ──
+  // ── compact 档：模型 + 上下文 + 异常信号 + 耗时；常规指标由 full / /status 承载 ──
   if (compact) {
     if (input.modelName) {
       parts.push(color(narrow ? input.modelName.slice(0, 12) : input.modelName, theme.muted))
     }
-    // 推理 effort 强度：◎ + 档位。max 高亮(secondary)、high 主色、medium muted、
-    // low/off dim。让用户随时看到当前实际生效的思考强度（auto-reasoning 会动态调整）。
     if (input.reasoningEffort) {
       const eff = input.reasoningEffort
       const effShort = eff === 'medium' ? 'med' : eff
@@ -281,36 +279,19 @@ export function formatGlanceRight(input: GlanceBarInput, theme: RivetTheme): str
         : theme.muted
       parts.push(color(`◎${effShort}`, effColor))
     }
-    if (input.cacheHitRate !== undefined) {
+    if (input.cacheHitRate !== undefined && (input.cacheStatus === 'degraded' || input.cacheStatus === 'stale' || input.cacheHitRate < 0.5)) {
       const cachePct = (input.cacheHitRate * 100).toFixed(0)
-      const cacheColor = input.cacheStatus === 'degraded' ? theme.warning
-        : input.cacheStatus === 'stale' ? theme.dim
-        : input.cacheHitRate < 0.5 ? theme.warning : theme.muted
+      const cacheColor = input.cacheStatus === 'degraded' || input.cacheHitRate < 0.5 ? theme.warning : theme.dim
       const label = input.cacheStatus === 'degraded' ? `⚡${cachePct}%冷` : `⚡${cachePct}%`
       parts.push(color(label, cacheColor))
-    } else {
-      // 无缓存数据时显示占位，避免右侧空洞或误导
-      parts.push(color('⚡-', theme.dim))
     }
-    // DeepSeek 计价时段：与缓存段相邻（同为费用决策信息）；非 deepseek 缺省不占位
-    if (input.pricingPhase) parts.push(formatPricingPhaseBadge(input.pricingPhase, true, theme))
-    // 常驻余额角标（issue #98）——与计价时段相邻（同属「钱」的信号）；
-    // 非 ready 时 formatOfficialUsageBadge 返回 null → 不占位。
-    if (input.officialUsage) { const b = formatOfficialUsageBadge(input.officialUsage, input.pricingPhase, theme); if (b) parts.push(b) }
-    // CVM 拦截计数：与缓存/上下文% 同为「会话健康度」常驻指标（issue #247 补充项）
+    // CVM 拦截计数保留「已触发 / 未触发 / 未提供」三态，避免健康状态不可辨。
     if (input.cvmInterceptions !== undefined) parts.push(formatCvmBadge(input.cvmInterceptions, theme))
     const cRatio = (input.estimatedTokens && input.maxTokens && input.maxTokens > 0)
       ? input.estimatedTokens / input.maxTokens : 0
     if (input.maxTokens && input.maxTokens > 0 && input.estimatedTokens !== undefined) {
       const tokenColor = cRatio >= 0.9 ? theme.error : cRatio >= 0.75 ? theme.warning : theme.muted
       parts.push(color(`◧${(cRatio * 100).toFixed(0)}%`, tokenColor) + contextNewSessionHint(cRatio, theme, true))
-    }
-    // 费用常驻（compact 档同样显示）：估/API 来源前缀——成本可见性契约。
-    if (input.costSource === 'unknown') {
-      parts.push(color('暂无计价', theme.muted))
-    } else if (input.cost !== undefined && (input.cost > 0 || input.costSource !== undefined)) {
-      const source = input.costSource === 'api' ? 'API ' : input.costSource === 'estimate' ? '≈' : ''
-      parts.push(color(`${source}¥${input.cost.toFixed(2)}`, theme.secondary))
     }
     const zone = parts.join('  ')
     const elapsedStr = input.elapsedMs !== undefined ? formatElapsed(input.elapsedMs) : ''

@@ -132,6 +132,7 @@ export function createAnchorBreakScoutHook(deps: AnchorBreakScoutHookDeps): PreT
         })
 
         const run = await coordinator.delegate(request, deps.getAbortSignal?.())
+        ctx.signal?.throwIfAborted()
 
         const packet = run.status === 'completed' ? run.packet : ''
         const dispatched = packet.trim().length > 0

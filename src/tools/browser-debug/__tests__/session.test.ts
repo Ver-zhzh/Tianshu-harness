@@ -53,6 +53,21 @@ class FakeDriver implements BrowserDebugDriver {
   }
 }
 
+test('browser diagnostics emitted during driver opening are buffered and retained once', async () => {
+  const key = 'opening-diagnostics'
+  try {
+    const session = await getOrCreateSession({ sessionKey: key, headless: true, userDataDir: 'opening-fixture', driverFactory: async opts => {
+      opts.events.onConsole('error', 'opening-error', { pageId: 'p', navigationId: 'n' })
+      opts.events.onRequestStart('opening-r', 'GET', '/early', 'document', undefined, undefined, { pageId: 'p', navigationId: 'n' })
+      opts.events.onResponse('opening-r', 200)
+      return new FakeDriver(key, opts.events)
+    } })
+    assert.equal(session.log.getConsole('error').length, 1)
+    assert.equal(session.log.getConsole('error')[0]?.navigationId, 'n')
+    assert.equal(session.log.getNetwork()[0]?.status, 200)
+  } finally { await closeSession(key) }
+})
+
 test('sessions are isolated by sessionKey', async () => {
   __resetSessionForTest()
   FakeDriver.instances = []

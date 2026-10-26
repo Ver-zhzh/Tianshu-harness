@@ -12,12 +12,13 @@ export class DetachedRunner {
   private pending = 0
 
   /** 排入一个后台任务；同步返回。 */
-  schedule(task: () => Promise<void> | void): void {
+  schedule(task: () => Promise<void> | void): Promise<void> {
     this.pending++
-    this.chain = this.chain
-      .then(() => task())
+    const result = this.chain.then(() => task())
+    this.chain = result
       .catch(() => { /* best-effort: 收尾失败不外溢 */ })
       .finally(() => { this.pending-- })
+    return result
   }
 
   /** 在途（含排队）任务数。 */

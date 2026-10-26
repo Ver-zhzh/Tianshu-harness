@@ -65,9 +65,8 @@ test('3 个短 bash 命令折叠为 "Ran 3 shell commands"', () => {
 
   const text = scrollbackPlain(app)
   assert.ok(text.includes('Ran 3 shell commands'), `expected summary in: ${text.slice(0, 500)}`)
-  assert.ok(text.includes('pwd'), 'should list pwd command')
-  assert.ok(text.includes('ls'), 'should list ls command')
-  assert.ok(text.includes('whoami'), 'should list whoami command')
+  assert.ok(!text.includes('/home/user'), 'default success group hides full output')
+  assert.ok(!text.includes('a.txt'), 'default success group hides full output')
 })
 
 // ── 变更型 bash 打断折叠 ───────────────────────────────────────
@@ -107,9 +106,9 @@ test('bash 错误命令把前面成功命令摘要后单独渲染错误卡片', 
   assert.ok(text.includes('cat missing'), 'error command should be visible')
 })
 
-// ── read/search 与 bash 互相打断 ───────────────────────────────
+// ── read/search 与 bash 汇入统一执行过程 ───────────────────────
 
-test('read 工具打断 bash 组，bash 工具打断 read 组', () => {
+test('read 与 bash 交替时合并为统一执行过程，详情保留全部结果', () => {
   const { app } = makeApp()
 
   app.callbacks.onToolUse('b1', 'bash', { command: 'pwd' })
@@ -121,10 +120,16 @@ test('read 工具打断 bash 组，bash 工具打断 read 组', () => {
   app.callbacks.onTurnComplete({ input_tokens: 100, output_tokens: 50 }, 1, true)
 
   const text = scrollbackPlain(app)
-  assert.match(text, /Run\s+pwd · 完成/, 'first bash should be flushed as a completed command')
-  assert.match(text, /Read\s+a\.ts · 完成/, 'read should be flushed as a completed file')
-  assert.match(text, /Run\s+ls · 完成/, 'second bash should be its own completed command')
-  assert.equal([...text.matchAll(/^[+✓] Run\s+.* · 完成/gm)].length, 2, 'both bash groups should be flushed once')
+  assert.match(text, /执行过程 · 3 工具 · 阅读 1 · 命令 2/, 'alternating families share one process summary')
+  assert.equal(text.split('执行过程 ·').length - 1, 1, 'only one process summary is committed')
+  assert.ok(!/Run\s+pwd · 完成/.test(text), 'individual group titles are folded into the process summary')
+
+  ;(app as any).expandLastTruncatedTool()
+  const detail = stripAnsi((app as any).detailPager?.content ?? '')
+  for (const content of ['/home/user', 'content a', 'b.txt']) {
+    assert.ok(detail.includes(content), `process detail must retain ${content}`)
+  }
+  app.deactivateOverlay()
 })
 
 // ── turn 边界 flush ────────────────────────────────────────────
@@ -138,7 +143,7 @@ test('turnComplete 时 flush 残余 bash 折叠组', () => {
 
   const text = scrollbackPlain(app)
   assert.match(text, /Run\s+pwd · 完成/, 'command should be flushed on turnComplete')
-  assert.ok(text.includes('/home/user'), 'completed output should be preserved')
+  assert.ok(!text.includes('/home/user'), 'default scrollback keeps only the successful command title')
 })
 
 // ── abort flush ───────────────────────────────────────────────

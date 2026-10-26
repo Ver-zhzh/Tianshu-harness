@@ -1,10 +1,8 @@
 /**
- * thinking 回看仓（grok-build collapsed-thinking「诚实重印」对标本）。
+ * thinking 详情回看仓。
  *
- * thinking 提交进 scrollback 的只有一行头部（`已推理 · Ns · N 行`），正文默认
- * 不落盘——长考正文几百行全进 scrollback 是更大的噪音。但「刚才它想了什么」
- * 是真实需求：这里留存最近一次 thinking 的正文，ctrl+t 在空闲时把全文
- * 重印进 scrollback（重印本即持久记录，取出即清，避免重复重印）。
+ * 经典主屏不逐段写入「已推理」摘要或正文；这里留存最近一次 thinking 的正文，
+ * 供 /thinking（legacy ctrl+t）在只读 pager 中查看，不污染 scrollback。
  */
 
 import { formatThinking } from '../format/thinking.js'
@@ -32,7 +30,7 @@ export class ThinkingReviewStore {
     return this.last
   }
 
-  /** 取出并清空——重印是一次性的，重印本已在 scrollback。 */
+  /** 取出并清空，供需要一次性消费详情的调用方使用。 */
   take(): ThinkingReview | null {
     const v = this.last
     this.last = null
@@ -44,7 +42,7 @@ export class ThinkingReviewStore {
   }
 }
 
-/** 重印本体：done 头 + 展开正文（逻辑行上限防一次性糊屏，超出仍走「上方省略」）。 */
+/** 详情文本：done 头 + 展开正文（逻辑行上限防一次性糊屏，超出仍走「上方省略」）。 */
 export function formatThinkingReview(review: ThinkingReview, theme: RivetTheme): string[] {
   return formatThinking({
     text: review.text,

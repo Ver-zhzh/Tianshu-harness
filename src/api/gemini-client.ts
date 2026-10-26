@@ -1,3 +1,5 @@
+import { withNativeRequestAudit } from './native-request-audit.js'
+import { requestAuditContext } from './call-audit.js'
 /**
  * GeminiClient — Google Gemini **native** API (`generativelanguage.googleapis.com`),
  * wire protocol `'gemini'`.
@@ -190,16 +192,17 @@ export class GeminiClient implements StreamClient {
     callbacks: StreamCallbacks,
     signal?: AbortSignal,
   ): Promise<void> {
-    const body = this.buildRequestBody(request)
-
-    await withStructuredRetry(async () => {
+    let requestBody: GeminiRequestBody | undefined
+    const auditContext = { ...requestAuditContext(this.config, request), model: request.model || this.config.model }
+    await withStructuredRetry(() => withNativeRequestAudit(auditContext, signal, async (attemptContext, audit) => {
+      const body = requestBody ??= audit.observation.measure('bodyPreparationMs', () => this.buildRequestBody(request))
       const url = this.endpointUrl()
       const lifecycle = new AbortController()
       if (signal) {
         if (signal.aborted) lifecycle.abort()
         else signal.addEventListener('abort', () => lifecycle.abort(), { once: true })
       }
-      await acquireRateLimitSlot(this.config.baseUrl, this.config.retry?.rateLimit, lifecycle.signal)
+      await audit.observation.measureAsync('rateLimitWaitMs', () => acquireRateLimitSlot(this.config.baseUrl, this.config.retry?.rateLimit, lifecycle.signal))
 
       const response = await fetchWithTimeout(url, {
         method: 'POST',
@@ -210,9 +213,9 @@ export class GeminiClient implements StreamClient {
           // lands in request-line logs or proxy access logs.
           'x-goog-api-key': this.config.apiKey,
         },
-        body: JSON.stringify(body),
+        body: audit.observation.measure('bodyPreparationMs', () => JSON.stringify(body)),
         signal: lifecycle.signal,
-      }, this.config.firstByteTimeoutMs ?? 180_000, this.proxyDispatcher)
+      }, this.config.firstByteTimeoutMs ?? 180_000, this.proxyDispatcher, attemptContext, audit)
 
       if (!response.ok) {
         const errorBody = await response.text().catch(() => '')
@@ -232,7 +235,7 @@ export class GeminiClient implements StreamClient {
       }
 
       await this.processSSEStream(response, callbacks, signal)
-    }, signal, {
+    }), signal, {
       budget: this.config.retryBudget?.(),
       maxTotalDurationMs: this.config.retry?.maxTotalDurationMs ?? 10 * 60_000,
       maxTotalRetries: this.config.maxRetries,
@@ -476,6 +479,7 @@ export class GeminiClient implements StreamClient {
               sawToolCall = true
               callbacks.onToolCallDelta?.()
               const callId = `gemini_call_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+              callbacks.onToolInputProgress?.({ toolCallId: callId, toolName: part.functionCall.name, argumentBytes: Buffer.byteLength(JSON.stringify(part.functionCall.args ?? {})), state: 'complete' })
               // Native delivers functionCall args as an object, already complete.
               callbacks.onContentBlock({
                 type: 'tool_use',

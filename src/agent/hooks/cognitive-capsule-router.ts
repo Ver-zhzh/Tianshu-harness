@@ -277,12 +277,9 @@ const RULES: RouteRule[] = [
     match: s => s.verificationCoverage < 0.3 && s.turn > 3,
     busPriority: 0.55,
     poolKeyFilter: new Set(['Y1', 'Y2', 'Y5']),
-    promptTemplate: '【瑶光】改了 {files_modified} 个文件但还没验证（距上次验证 {turns_since_verify} 轮）。typecheck + 相关测试，跑通再继续。',
+    promptTemplate: '【瑶光】改了 {files_modified} 个文件但还没验证（距上次验证 {turns_since_verify} 轮）。如实披露未验证；独立验证时机由用户决定，不阻止安全提交或收尾。',
     suppressOnTestIntent: true,
     expect: { kind: 'verify_attempted', withinTurns: 2 },
-    // Phase 2 多信号确认：P1(preTurn/star_domain)与 self-verify(postTurn/
-    // discipline)、typecheck(postTurn/typecheck)是独立信号（不同 phase 且
-    // 不同 category）——P1 触发时提前确认它们的挂起条目。
     corroborates: ['self-verify', 'typecheck-reminder'],
   },
   {
@@ -291,7 +288,7 @@ const RULES: RouteRule[] = [
     match: s => s.filesModified > 5 && s.verificationCoverage < 0.5,
     busPriority: 0.55,
     poolKeyFilter: new Set(['Y3', 'Y6']),
-    promptTemplate: '【瑶光】大面积改动（{files_modified} 文件，验证覆盖 {verification_coverage}）。只交付已验证的部分，未验证的留到下轮。',
+    promptTemplate: '大面积改动（{files_modified} 文件，验证覆盖 {verification_coverage}）。如实披露未验证范围，由用户决定独立审查或扩大验证；不要因此自动增加测试或阻止安全提交。',
     suppressOnTestIntent: true,
     expect: { kind: 'verify_attempted', withinTurns: 2 },
   },
@@ -539,17 +536,19 @@ export function createCcrHook(opts: CcrHookOptions): PreTurnRuntimeHook {
         })
         // 触发面修复（2026-07-04）：把选中的原则真正带给模型。此前 principle
         // 只进遥测不进 content——动态原则池（胶囊经验）选了却没送达。
-        const content = `${situationText} 行动指引：${principle.actionPrompt}`
+        const passiveQuality = rule.id === 'P1' || rule.id === 'P3' || rule.id === 'P5'
+        const content = passiveQuality ? situationText : `${situationText} 行动指引：${principle.actionPrompt}`
 
         opts.advisoryBus.submit({
           key: `ccr-${rule.star}-${rule.id}`,
           priority: rule.busPriority,
           // star_domain：独立类别，不与 discipline 争 MAX_PER_CATEGORY 预算
           category: 'star_domain',
+          tier: passiveQuality ? 'informational' : undefined,
           content,
           ttl: 1,
-          expect: rule.expect,
-          corroborates: rule.corroborates,
+          expect: passiveQuality ? undefined : rule.expect,
+          corroborates: passiveQuality ? undefined : rule.corroborates,
         })
 
         // 胶囊经验召回 — CCR 触发的一等附属：同轮追加一条 informational 条目
@@ -637,6 +636,7 @@ function getDominantDimValue(rule: RouteRule, state: RouteState): number {
 //     中性，不会假阳性）；不自建停滞计数。
 
 import type { ObligationStore } from '../evidence-obligation.js'
+import { isIndependentVerification } from '../evidence-obligation.js'
 import type { CaseOpenSignal } from '../case-open-signals.js'
 import { classifyFailureSignal, renderRouteAnnotation } from '../failure-taxonomy.js'
 
@@ -749,7 +749,6 @@ function hasPendingSpecialKey(pendingKeys: readonly string[]): string | undefine
 }
 const VERIFY_YIELD_KEYS = [
   'self-verify',
-  'self-verify:verification-required',
   'self-verify-scope-mismatch',
   'typecheck-reminder',
 ] as const
@@ -764,7 +763,7 @@ function sameStarCcrPending(pendingKeys: readonly string[], star: string): strin
  *  不经 ControlPlane frame（frame 是上一轮归并结果，义务事实要用当前值）。 */
 function hasHighRiskObligationGate(store: ObligationStore): boolean {
   return store.obligations.some(o =>
-    o.risk === 'high' && (o.state === 'open' || o.state === 'attempted'))
+    o.risk === 'high' && !isIndependentVerification(o.family) && (o.state === 'open' || o.state === 'attempted'))
 }
 
 /**
@@ -1054,9 +1053,9 @@ export function createCvmVectorEvaluator(): { evaluate(input: CvmVectorInput): C
               key: 'cvm-vector-瑶光-CV1',
               priority: 0.5,
               category: 'star_domain',
-              content: '【瑶光】证据缺口：已有文件改动未经验证。下一动作：跑 typecheck 或相关测试（run_tests）确认改动闭环。观察到验证尝试即停，本提醒不重复。',
+              tier: 'informational',
+              content: '已有代码改动尚未验证，请如实披露；单独审查和扩大验证由用户选择，不追加全量测试或阻止安全提交。',
               ttl: 1,
-              expect: { kind: 'verify_attempted', withinTurns: 2 },
             },
           },
           yielded: null,

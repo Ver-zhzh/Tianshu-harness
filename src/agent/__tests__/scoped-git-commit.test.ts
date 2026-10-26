@@ -35,6 +35,39 @@ describe('commitScopedFiles', () => {
     rmSync(TMP, { recursive: true, force: true })
   })
 
+  it('stale 路径不再让整次提交误报 HEAD/index 变化（issue #537）', async () => {
+    writeFileSync(join(TMP, 'owned.txt'), 'edited for stale case')
+    // 调用方按原始提交集合（含 stale 路径）捕获基准——deliver_task 就是这么做的。
+    // 函数内部按剔除 stale 后的 addable 捕获 current，两边 files 哈希天然不同，
+    // 曾经 100% 误报「HEAD or index changed」。
+    const version = captureCommitVersion(TMP, ['owned.txt', 'gone.txt'])!
+    const result = await commitScopedFiles({
+      cwd: TMP,
+      files: ['owned.txt', 'gone.txt'],
+      message: 'fix: stale skip',
+      expectedVersion: version,
+    })
+    assert.equal(result.ok, true, result.output)
+    assert.match(result.output, /Skipped 1 stale path/)
+    assert.equal(git(['log', '-1', '--format=%s']).trim(), 'fix: stale skip')
+  })
+
+  it('stale 场景下部分暂存仍被拒绝（修复没有拆掉半暂存保护）', async () => {
+    writeFileSync(join(TMP, 'owned.txt'), 'staged edit')
+    git(['add', '--', 'owned.txt'])
+    writeFileSync(join(TMP, 'owned.txt'), 'unstaged edit')
+    const version = captureCommitVersion(TMP, ['owned.txt', 'gone.txt'])!
+    const result = await commitScopedFiles({
+      cwd: TMP,
+      files: ['owned.txt', 'gone.txt'],
+      message: 'should not land',
+      expectedVersion: version,
+    })
+    assert.equal(result.ok, false)
+    assert.match(result.output, /partially staged/)
+    assert.equal(git(['log', '-1', '--format=%s']).trim(), 'init')
+  })
+
   it('rejects stale previews and mixed staged hunks without absorbing changes', async () => {
     writeFileSync(join(TMP, 'owned.txt'), 'first edit')
     const version = captureCommitVersion(TMP, ['owned.txt'])!
@@ -47,6 +80,52 @@ describe('commitScopedFiles', () => {
     const result = await commitScopedFiles({ cwd: TMP, files: ['owned.txt'], message: 'mixed' })
     assert.equal(result.ok, false); assert.match(result.output, /partially staged/)
     assert.equal(git(['diff', '--cached']), before)
+  })
+
+  // ── 失败归因（issue #537 C 项）────────────────────────────────
+  // 一条「Selected files, HEAD or index changed」曾同时表示四种原因，其中
+  // 「基准读不出」会被读成「HEAD 变了」，把排查引向错误方向。
+
+  it('reason: head-changed —— HEAD 移动单独报出，不混进 index/files', async () => {
+    writeFileSync(join(TMP, 'owned.txt'), 'edit before head bump')
+    const version = captureCommitVersion(TMP, ['owned.txt'])!
+    git(['commit', '--allow-empty', '-m', 'bump head'])
+    const result = await commitScopedFiles({ cwd: TMP, files: ['owned.txt'], message: 'x', expectedVersion: version })
+    assert.equal(result.ok, false)
+    assert.equal(result.reason, 'head-changed')
+    assert.match(result.output, /HEAD moved during commit: [0-9a-f]+ → [0-9a-f]+/)
+  })
+
+  it('reason: index-changed —— 只有暂存区变了，不说 HEAD', async () => {
+    writeFileSync(join(TMP, 'owned.txt'), 'edit')
+    const version = captureCommitVersion(TMP, ['owned.txt'])!
+    writeFileSync(join(TMP, 'other.txt'), 'staged elsewhere')
+    git(['add', '--', 'other.txt'])
+    const result = await commitScopedFiles({ cwd: TMP, files: ['owned.txt'], message: 'x', expectedVersion: version })
+    assert.equal(result.ok, false)
+    assert.equal(result.reason, 'index-changed')
+    assert.match(result.output, /index changed during commit/)
+    assert.doesNotMatch(result.output, /HEAD moved/)
+  })
+
+  it('reason: files-changed —— 只有候选文件内容变了', async () => {
+    writeFileSync(join(TMP, 'owned.txt'), 'first')
+    const version = captureCommitVersion(TMP, ['owned.txt'])!
+    writeFileSync(join(TMP, 'owned.txt'), 'second')
+    const result = await commitScopedFiles({ cwd: TMP, files: ['owned.txt'], message: 'x', expectedVersion: version })
+    assert.equal(result.ok, false)
+    assert.equal(result.reason, 'files-changed')
+    assert.match(result.output, /file content changed/)
+  })
+
+  it('reason: version-unavailable —— 基准读不出，绝不报成 HEAD 变化', async () => {
+    writeFileSync(join(TMP, '.env'), 'SECRET=1\n')
+    const result = await commitScopedFiles({ cwd: TMP, files: ['.env'], message: 'x' })
+    assert.equal(result.ok, false)
+    assert.equal(result.reason, 'version-unavailable')
+    assert.match(result.detail ?? '', /sensitive-file/)
+    assert.match(result.output, /Cannot read the commit baseline: sensitive-file/)
+    assert.doesNotMatch(result.output, /HEAD/, '这是 issue #537 的核心：基准缺失不得读成 HEAD 变化')
   })
 
   it('commits only scoped files and leaves external dirty files untouched', async () => {

@@ -18,6 +18,9 @@ import { writeFileAtomicAsync } from '../fs-atomic.js'
 import { relative } from 'node:path'
 import { validatePath } from './path-validate.js'
 import { closePlanMarkdown, type PlanCloseOptions, type PlanCloseResult } from '../plan/plan-close.js'
+import { completionSummary } from '../plan/completion-evidence.js'
+import { recordPlanClosure } from '../plan/continuity-records.js'
+import { planRevision } from '../plan/plan-revision.js'
 
 // ── plan_submit helpers ──
 
@@ -281,11 +284,14 @@ export const PLAN_TOOL: Tool = {
         file_path: { type: 'string', description: '[close] docs/superpowers/plans/ 下的计划 Markdown 路径' },
         tasks: { type: 'string', description: '[close] 任务选择，如 1、1-3、1,3-4 或 all' },
         apply: { type: 'boolean', description: '[close] 写回计划文件（默认 false 预览模式）' },
+        executionStatus: { type: 'string', enum: ['completed', 'partial', 'blocked'], description: '[close] 实施状态；completed 不表示测试或审查通过' },
+        execution_ids: { type: 'array', items: { type: 'string' }, description: '[close] 本会话实际执行回执 ID' },
+        acceptance_ids: { type: 'array', items: { type: 'string' }, description: '[close] 明确关联验收 ID；省略则按计划路径选取' },
         verifiedCommands: {
           type: 'array', items: { type: 'string' },
-          description: '[close] 闭环摘要中包含的验证命令',
+          description: '[close] 兼容旧命令声明，只有关联真实执行回执才有证据效力',
         },
-        deliveryState: { type: 'string', enum: ['GREEN', 'YELLOW', 'RED'], description: '[close] 交付门状态' },
+        deliveryState: { type: 'string', enum: ['GREEN', 'YELLOW', 'RED'], description: '[close] 历史状态声明，不控制关闭或表示质量通过' },
         note: { type: 'string', description: '[close] 可选闭环备注' },
         updateClosure: { type: 'boolean', description: '[close] 是否 upsert 执行状态与闭环（默认 true）' },
       },
@@ -660,83 +666,44 @@ async function planCloseExecute(params: ToolCallParams): Promise<ToolResult> {
     return { content: '错误：deliveryState 必须是 GREEN、YELLOW 或 RED', isError: true }
   }
 
-  const claimedCommands = asStringArray(params.input.verifiedCommands)
-
-  // ── 防伪闭环: evidence-gated closure ──
-  // When the session wired a real delivery gate, closure state and verified
-  // commands are driven by actual evidence, not the model's self-report.
-  // Degrades gracefully to legacy (trust-claimed) behavior when absent.
-  let effectiveState: GateState | undefined = deliveryState
-  let effectiveCommands = claimedCommands
-  let mismatchNote: string | undefined
-  let realGreen = false
-  let gateBlock: { reason: string; nextStep?: string } | undefined
-
-  if (params.assessDelivery) {
-    const real = params.assessDelivery(params.sessionModifiedFiles)
-    const summary = params.getVerificationEvidence?.()
-    const claimed: GateState = deliveryState ?? 'GREEN'
-
-    if (claimed === 'GREEN' && real.state === 'RED') {
-      gateBlock = {
-        reason: real.blockingReason ?? real.reason ?? 'Delivery gate is RED — owned files modified but unverified.',
-        nextStep: real.shortestNextStep,
-      }
-    } else {
-      effectiveState = worseState(claimed, real.state)
-      realGreen = effectiveState === 'GREEN'
-      const hasRealVerification = real.verificationCount > 0 || (summary?.verified ?? 0) > 0
-      if (!hasRealVerification) {
-        if (claimedCommands && claimedCommands.length > 0) {
-          mismatchNote = `声明了 ${claimedCommands.length} 条验证命令，但会话证据中无对应验证记录（已按真实证据记为空）。`
-        }
-        effectiveCommands = undefined
-      } else if (!effectiveCommands && real.latestVerificationTotals?.command) {
-        effectiveCommands = [real.latestVerificationTotals.command]
-      }
-    }
-  }
-
-  // Anti-forgery block only fires on write (apply=true); preview still renders.
-  if (gateBlock && params.input.apply === true) {
-    return {
-      content: [
-        `计划关闭被拦截：声称 GREEN，但交付门禁为 RED。`,
-        gateBlock.reason,
-        gateBlock.nextStep ? `下一步：${gateBlock.nextStep}` : '',
-        '',
-        `请先跑真实验证（typecheck/测试）再关闭，或诚实以 deliveryState=RED/YELLOW 作为进度检查点关闭。`,
-      ].filter(Boolean).join('\n'),
-      isError: true,
-    }
-  }
-
-  const combinedNote = [
-    typeof params.input.note === 'string' ? params.input.note : undefined,
-    mismatchNote,
-  ].filter(Boolean).join(' ') || undefined
+  const executionStatus = params.input.executionStatus ?? 'completed'
+  if (!['completed', 'partial', 'blocked'].includes(String(executionStatus))) return { content: 'executionStatus 必须是 completed、partial 或 blocked', isError: true, errorKind: 'format_error' }
+  let completion: ReturnType<typeof completionSummary>
+  try { completion = completionSummary(params, relativePath, executionStatus as 'completed' | 'partial' | 'blocked') }
+  catch (error) { return { content: `验收证据读取失败：${String(error)}`, isError: true } }
+  const combinedNote = typeof params.input.note === 'string' ? params.input.note : undefined
 
   try {
-    const result = closePlanMarkdown(await readFile(filePath, 'utf-8'), {
+    const before = await readFile(filePath, 'utf-8')
+    const result = closePlanMarkdown(before, {
       tasks,
-      verifiedCommands: effectiveCommands,
-      deliveryState: effectiveState,
+      verifiedCommands: asStringArray(params.input.verifiedCommands),
+      deliveryState: deliveryState,
+      executionStatus: completion.executionStatus,
+      summaryLines: completion.detail,
+      acceptance: completion.criteria,
       note: combinedNote,
       updateClosure: typeof params.input.updateClosure === 'boolean' ? params.input.updateClosure : undefined,
     })
 
     const action = closureAction(result)
     if (params.input.apply === true) {
-      // EXECUTED status marker is written only on gate-backed GREEN.
-      const contentToWrite = realGreen ? insertPlanStatusMarker(result.content, 'EXECUTED') : result.content
+      // EXECUTED records implementation completion; quality facts stay independent.
+      const contentToWrite = executionStatus === 'completed' ? insertPlanStatusMarker(result.content, 'EXECUTED') : result.content.replace(/^>\s*\*\*Status:\s*EXECUTED\*\*[^\n]*(?:\r?\n)+/gm, '')
+      if (await readFile(filePath, 'utf8') !== before) throw Error('计划已变化；未覆盖其他会话内容，请重新读取')
       await writeFileAtomicAsync(filePath, contentToWrite)
+      let receiptWarning: string | undefined
+      try { if (params.sessionId) recordPlanClosure(params, { planRef: relativePath, beforeRevision: planRevision(before), afterRevision: planRevision(contentToWrite),
+        executionStatus: completion.executionStatus, acceptanceIds: completion.criteria.map(c => c.id), executionIds: completion.executionIds, summary: completion.summary }) }
+      catch { receiptWarning = '实施关闭已写入计划；关闭回执持久化失败，证据未知，不自动重跑。' }
       // plan close 只做闭环标记，不再承担「解锁写权限」职责。
       // 退出 plan mode 改用 plan action=exit_mode（或审批自动退出）。
       if (params.onPlanClosed) {
         params.onPlanClosed({
           planFile: relativePath,
           tasks,
-          deliveryState: effectiveState ?? 'GREEN',
+          deliveryState: deliveryState ?? 'YELLOW',
+          executionStatus: completion.executionStatus, executionIds: completion.executionIds, summary: completion.summary,
           totalChangedCheckboxes: result.totalChangedCheckboxes,
         })
       }
@@ -747,8 +714,8 @@ async function planCloseExecute(params: ToolCallParams): Promise<ToolResult> {
           `任务：${tasks}`,
           `已更新复选框：${result.totalChangedCheckboxes}`,
           `闭环：${action}`,
-          effectiveState ? `交付：${effectiveState}${realGreen ? '（已标记 EXECUTED）' : ''}` : '',
-          mismatchNote ? `证据：${mismatchNote}` : '',
+          completion.summary,
+          receiptWarning,
         ].filter(Boolean).join('\n'),
       }
     }
@@ -759,9 +726,7 @@ async function planCloseExecute(params: ToolCallParams): Promise<ToolResult> {
         `任务：${tasks}`,
         `将更新复选框：${result.totalChangedCheckboxes}`,
         `闭环：${action}`,
-        effectiveState ? `交付：${effectiveState}` : '',
-        gateBlock ? `⚠ 门禁：声称 GREEN 但真实门禁为 RED —— apply=true 将被拦截。` : '',
-        mismatchNote ? `证据：${mismatchNote}` : '',
+        completion.summary,
         '',
         '变更：',
         ...formatChanges(result),

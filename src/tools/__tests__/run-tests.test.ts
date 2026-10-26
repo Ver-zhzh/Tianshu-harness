@@ -126,7 +126,7 @@ describe('mixed', () => {
   })
 
   it('detects test command from package.json', async () => {
-    const result = await RUN_TESTS_TOOL.execute(makeParams({}, passingDir))
+    const result = await RUN_TESTS_TOOL.execute(makeParams({ full: true }, passingDir))
     assert.equal(result.isError, false)
     // Success output is either a one-liner summary (when parse succeeds)
     // or a multi-line fallback (when parse can't match the test runner output)
@@ -138,7 +138,7 @@ describe('mixed', () => {
   })
 
   it('runs and reports success for passing tests', async () => {
-    const result = await RUN_TESTS_TOOL.execute(makeParams({}, passingDir))
+    const result = await RUN_TESTS_TOOL.execute(makeParams({ full: true }, passingDir))
     assert.equal(result.isError, false)
     // Phase 1 deterministic trimming: success output is either a one-liner ✓
     // or a multi-line fallback when parse fails (pre-existing limitation)
@@ -147,7 +147,7 @@ describe('mixed', () => {
   })
 
   it('reports failure output for failing tests', async () => {
-    const result = await RUN_TESTS_TOOL.execute(makeParams({}, failingDir))
+    const result = await RUN_TESTS_TOOL.execute(makeParams({ full: true }, failingDir))
     assert.ok(result.content.length > 0)
     assert.ok(result.verification)
     // verification metadata is always present
@@ -226,7 +226,7 @@ process.exit(result.status ?? 1);`)
   it('does not default to npm test when package.json is absent', async () => {
     const dir = makeTestDir('run-tests-empty-')
     try {
-      const result = await RUN_TESTS_TOOL.execute(makeParams({}, dir))
+      const result = await RUN_TESTS_TOOL.execute(makeParams({ full: true }, dir))
 
       assert.equal(result.isError, true)
       assert.equal(result.verification!.status, 'blocked')
@@ -242,7 +242,7 @@ process.exit(result.status ?? 1);`)
   it('detects Python projects and recommends pytest without tests directory', async () => {
     const dir = setupPythonProject()
     try {
-      const result = await RUN_TESTS_TOOL.execute(makeParams({}, dir))
+      const result = await RUN_TESTS_TOOL.execute(makeParams({ full: true }, dir))
 
       assert.equal(result.isError, true)
       assert.equal(result.verification!.status, 'blocked')
@@ -258,7 +258,7 @@ process.exit(result.status ?? 1);`)
   it('runs pytest for Python projects with tests directory', { skip: FAKE_PYTEST_SKIP }, async () => {
     const dir = setupPythonProject({ withTests: true, withFakePytest: true })
     try {
-      const result = await RUN_TESTS_TOOL.execute(makeParams({}, dir))
+      const result = await RUN_TESTS_TOOL.execute(makeParams({ full: true }, dir))
 
       assert.equal(result.isError, false)
       assert.equal(result.verification!.command, 'pytest')
@@ -323,7 +323,7 @@ process.exit(result.status ?? 1);`)
       // recommendedCommand=pytest → worker 直 spawn pytest → Windows ENOENT
       // （verifier 无 bash，无旁路，工单直接 blocked）。
       // 判据收紧为「tests/ 下含 .py」后不得再推荐或运行 pytest。
-      const result = await RUN_TESTS_TOOL.execute(makeParams({}, dir))
+      const result = await RUN_TESTS_TOOL.execute(makeParams({ full: true }, dir))
 
       assert.notEqual(result.verification!.recommendedCommand, 'pytest')
       assert.notEqual(result.verification!.command, 'pytest')
@@ -338,7 +338,7 @@ process.exit(result.status ?? 1);`)
     try {
       // 防误伤：无 marker 文件、只有 tests/test_example.py —— 收紧后仍须判 pytest
       // 并正常跑通（否则真实 Python 项目会被推给 unknown blocked 引导）。
-      const result = await RUN_TESTS_TOOL.execute(makeParams({}, dir))
+      const result = await RUN_TESTS_TOOL.execute(makeParams({ full: true }, dir))
 
       assert.equal(result.isError, false)
       assert.equal(result.verification!.command, 'pytest')
@@ -388,7 +388,7 @@ process.exit(result.status ?? 1);`)
         name: 'invocation-fail',
         scripts: { test: 'node -e "console.error(\'SyntaxError: The requested module does not provide an export named boom\'); process.exit(1)"' },
       }))
-      const result = await RUN_TESTS_TOOL.execute(makeParams({}, dir))
+      const result = await RUN_TESTS_TOOL.execute(makeParams({ full: true }, dir))
 
       assert.equal(result.isError, true)
       assert.equal(result.verification!.status, 'blocked')
@@ -406,7 +406,7 @@ process.exit(result.status ?? 1);`)
     // 正确的下一步是先核实状态。见 docs/analysis/2026-09-22-session-retrospective.md §4。
     const dir = setupHangingProject()
     try {
-      const result = await RUN_TESTS_TOOL.execute(makeParams({ timeout: 50 }, dir))
+      const result = await RUN_TESTS_TOOL.execute(makeParams({ timeout: 50, full: true }, dir))
 
       assert.equal(result.isError, true)
       assert.equal(result.verification!.status, 'blocked')
@@ -419,13 +419,13 @@ process.exit(result.status ?? 1);`)
     }
   })
 
-  it('requiresApproval returns false', () => {
-    assert.equal(RUN_TESTS_TOOL.requiresApproval(makeParams({}, '/tmp')), false)
+  it('full test runs use the existing approval boundary', () => {
+    assert.equal(RUN_TESTS_TOOL.requiresApproval(makeParams({ full: true }, '/tmp')), true)
   })
 
   it('sets outer tool timeout above requested test timeout', () => {
     assert.equal(RUN_TESTS_TOOL.timeoutMs?.(makeParams({ timeout: 50 }, passingDir)), 5050)
-    assert.equal(RUN_TESTS_TOOL.timeoutMs?.(makeParams({}, passingDir)), 125000)
+    assert.equal(RUN_TESTS_TOOL.timeoutMs?.(makeParams({ full: true }, passingDir)), 125000)
   })
 
   it('isConcurrencySafe returns false', () => {
@@ -447,7 +447,7 @@ process.exit(result.status ?? 1);`)
         },
       }))
       const result = await RUN_TESTS_TOOL.execute({
-        ...makeParams({}, dir),
+        ...makeParams({ full: true }, dir),
         onOutput: (text: string) => chunks.push(text),
       })
 

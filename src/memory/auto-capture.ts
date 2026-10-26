@@ -12,6 +12,7 @@
 import type { RuntimeToolEvent } from '../agent/runtime-hooks.js'
 import { appendMemoryEntry, type MemoryKind, type MemorySource } from './unified-memory.js'
 import { scrubMemoryText } from './memory-scrub.js'
+import { memoryFormationEnabled } from './formation-policy.js'
 
 /// 抄送端类型：postTool hook 传入的工具事件形状（与 runtime-hooks 对齐）。
 export interface CaptureCandidate {
@@ -227,10 +228,7 @@ export function applyCaptureVerdicts(
   return written
 }
 
-/** 记忆形成侧缺省开启判断流程（可用 env 关）。 */
-export function autoCaptureEnabled(value = process.env.RIVET_MEMORY_AUTO_CAPTURE): boolean {
-  const v = value?.trim().toLowerCase()
-  if (v === '0' || v === 'off' || v === 'false') return false
-  // 默认开（产品需求）；shadow 不写了，正常判断记入。
-  return true
+/** Explicit opt-in; an environment override takes precedence over saved settings. */
+export function autoCaptureEnabled(value = process.env.RIVET_MEMORY_AUTO_CAPTURE, configured = false): boolean {
+  return memoryFormationEnabled(value, configured)
 }

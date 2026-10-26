@@ -1,3 +1,4 @@
+import { ExternalHookHost } from '../hooks/external-hook-host.js'
 import { buildUpdateRestartRoutes } from './update-restart-routes.js'
 import { disposeAllBrowserContexts } from './browser-contexts.js'
 import { disposeSessionFilePreviews } from './file-open-routes.js'
@@ -67,7 +68,7 @@ import { setShutdownHandler } from './shutdown-registry.js'
 import { CronWiring } from './cron-wiring.js'
 import { buildMcpRoutes } from './mcp-api.js'
 import { buildPluginRoutes } from './plugin-api.js'
-import { pluginToolsWarmup, warmPluginToolsCache } from './plugin-session-cache.js'
+import { pluginHooksSnapshot, pluginToolsWarmup, warmPluginToolsCache } from './plugin-session-cache.js'
 import {
   PLUGIN_WARM_WAIT_CAP_MS,
   createServeTimingLogger,
@@ -96,7 +97,7 @@ import { createAuthProvider } from '../auth/registry.js'
 import type { AuthProvider } from '../auth/types.js'
 import type { SessionPersist } from '../agent/session-persist.js'
 import type { SessionContext } from '../agent/context.js'
-import { buildOpenPathCommand, buildRevealCommand, decideOpenAction, isDirectoryPath, windowsFileHasHandler } from '../tools/open-path.js'
+import { buildOpenFileRoute } from './open-file-route.js'
 import { installStallObserver } from '../agent/stall-observer.js'
 import { SessionRegistry } from '../agent/session-registry.js'
 import { StoreLock, isStoreLockAcquired, type StoreLockState } from './store-lock.js'
@@ -808,7 +809,9 @@ export async function runServe(opts: RunServeOptions = {}): Promise<RunningServe
   // Wave F: sameCwdRunningCount 是 late-bound——sessions 创建后才能引用，
   // 先置 null，sessions 就绪后回写。getSameCwdRunningSessions getter 对
   // sessions 未就绪的窗口期会回退 0（安全）。
+  const externalHookHost = new ExternalHookHost()
   const sharedRuntime: SharedRuntime = {
+    externalHookHost,
     providerHealth: new ProviderHealthTracker(),
     domainStores: new Map(),
     meridianIndexers: new Map(),
@@ -927,7 +930,11 @@ export async function runServe(opts: RunServeOptions = {}): Promise<RunningServe
       allowedTools,
     ], signal, expectedTranscriptWatermark)
   }
-  const executionBackend = await resolveExecutionBackend(buildGatewayAgent)
+  const executionBackend = await resolveExecutionBackend(buildGatewayAgent, { externalHookHost,
+    hookBinding: (cwd, sessionId) => ({ cwd, sessionId, getPluginHooks: pluginHooksSnapshot,
+      emitResult: (results, meta) => sharedRuntime.sessions?.emitHookResult(sessionId, results, meta),
+      emitCleanup: meta => sharedRuntime.sessions?.emitHookCleanup(sessionId, meta) }),
+  })
   // cold /health does not pay for tools/Meridian/council.
   const sessions = new RuntimeSessionManager({
     runLedger: ownsSessionStore ? new RunLedger(join(desktopDir(), 'run-ledgers')) : undefined,
@@ -1132,66 +1139,7 @@ export async function runServe(opts: RunServeOptions = {}): Promise<RunningServe
   let whisperEngine: SpeechEngine | null = createSpeechEngineFromEnv()
   Object.assign(routes, buildSpeechRoutes(() => whisperEngine, apiToken, { onModelInstalled: () => { whisperEngine = createSpeechEngineFromEnv(); return whisperEngine !== null } }))
 
-  // Open file in system editor / reveal in file manager — thin wrapper so the
-  // Desktop webview can request the sidecar to open a local path without
-  // needing a Tauri plugin.
-  routes['POST /open-file'] = async (body, _params, headers) => {
-    // 路由级鉴权（防御纵深）：open-file 会以用户身份启动 explorer/编辑器，
-    // 不能只靠 index.ts 全局门。
-    if (!isAuthorizedRequest({ body, headers }, apiToken)) {
-      return { status: 401, body: { error: 'Unauthorized' } }
-    }
-    const filePath = (body as Record<string, unknown>)?.path
-    if (typeof filePath !== 'string' || !filePath) {
-      return { status: 400, body: { error: 'Missing path' } }
-    }
-    const reveal = (body as Record<string, unknown>)?.reveal === true
-    const bodyCwd = (body as Record<string, unknown>)?.cwd
-    const { existsSync } = require('node:fs') as typeof import('node:fs')
-    const { resolve: resolvePath } = require('node:path') as typeof import('node:path')
-    // 用请求体里的 cwd（=项目目录）解析相对路径，而非 sidecar 的 process.cwd()
-    // （=home 目录）——否则 Windows 下相对路径解析到错误位置 → existsSync 404。
-    const resolved = typeof bodyCwd === 'string' && bodyCwd
-      ? resolvePath(bodyCwd, filePath)
-      : resolvePath(filePath)
-    if (!existsSync(resolved)) {
-      return { status: 404, body: { error: `Path not found: ${resolved}` } }
-    }
-    const command = buildOpenPathCommand(resolved)
-    // Windows 上 reveal=false (打开文件/文件夹) 时绕过 buildOpenPathCommand 的
-    // PowerShell Start-Process——实测 spawned ok 但实际窗口/编辑器不弹 (尤其
-    // 中文/特殊字符路径)。直接 spawn explorer.exe [路径]: explorer 对文件夹
-    // 打开资源管理器, 对文件用关联程序打开 (跟双击一样), 不经 PowerShell 引号
-    // 二次解析, 最可靠。reveal=true 仍走 buildRevealCommand (explorer /select,)。
-    //
-    // 例外（issue #193）：文件若没有关联处理程序，「跟双击一样」会弹「选取应用」
-    // 对话框——它 detached 存活，调用方既回收不了也察觉不到。这类退化为定位
-    // (explorer /select, 必定成功且不弹框)，并把结果如实回报（此前一律回 opened）。
-    const isDir = isDirectoryPath(resolved)
-    const action = reveal ? 'reveal' : decideOpenAction({
-      platform: process.platform,
-      isDirectory: isDir,
-      hasHandler: isDir ? undefined : windowsFileHasHandler(resolved),
-    })
-    let effectiveCommand = action === 'reveal' ? buildRevealCommand(resolved) : command
-    if (action === 'open' && process.platform === 'win32') {
-      effectiveCommand = { cmd: 'explorer.exe', args: [resolved.replace(/\//g, '\\')] }
-    }
-    try {
-      const { spawn } = await import('node:child_process')
-      await new Promise<void>((resolve, reject) => {
-        const child = spawn(effectiveCommand.cmd, effectiveCommand.args, { detached: true, stdio: 'ignore', windowsHide: true })
-        child.on('error', reject)
-        child.on('spawn', () => { child.unref(); resolve() })
-      })
-      return action === 'reveal'
-        ? { status: 200, body: { opened: false, revealed: true, path: resolved } }
-        : { status: 200, body: { opened: resolved } }
-    } catch (err) {
-      console.error(`[open-file] spawn failed: ${effectiveCommand.cmd} ${effectiveCommand.args.join(' ')} → ${(err as Error).message}`)
-      return { status: 500, body: { error: `启动失败: ${(err as Error).message}` } }
-    }
-  }
+  Object.assign(routes, buildOpenFileRoute(apiToken))
 
   // N1: GET /health — sidecar liveness for the desktop crash-reconnect banner.
   // RIVET_VERSION is injected at build time via tsup define (tsup.config.ts) so
@@ -1222,14 +1170,14 @@ export async function runServe(opts: RunServeOptions = {}): Promise<RunningServe
 
   Object.assign(
     routes,
-    buildHealthRoute(sessions, startedAt, version, apiToken, registryReady, serveConfigured, loopLagForHealth, () => initializationError, () => storeLock?.holder()),
+    buildHealthRoute(sessions, startedAt, version, apiToken, registryReady, serveConfigured, loopLagForHealth, () => initializationError, () => storeLock?.holder(), () => externalHookHost.snapshot()),
   )
   // 阶段 4：GET /events 全局推送通道——sessions/tasks 失效提示 + 5s health 心跳
   // （心跳体与带 token 的 GET /health 同一构造点，前端直接 setQueryData）。
   Object.assign(
     routes,
     buildServerEventsRoute(serverEvents, apiToken, {
-      healthSnapshot: createHealthSnapshot(sessions, startedAt, version, registryReady, serveConfigured, loopLagForHealth, () => initializationError, () => storeLock?.holder()),
+      healthSnapshot: createHealthSnapshot(sessions, startedAt, version, registryReady, serveConfigured, loopLagForHealth, () => initializationError, () => storeLock?.holder(), () => externalHookHost.snapshot()),
     }, sseRegistry),
   )
 
@@ -1358,6 +1306,7 @@ export async function runServe(opts: RunServeOptions = {}): Promise<RunningServe
     scheduler,
     shared: sharedRuntime,
     close: (cb) => {
+      const hookDrain = externalHookHost.shutdown()
       warmup?.cancel()
       // 发现文件先清（pid 校验在 clearServerInfo 内）——优雅排空可能持续数秒，
       // 期间新来的 attach 不该继续发现垂死实例。
@@ -1412,7 +1361,7 @@ export async function runServe(opts: RunServeOptions = {}): Promise<RunningServe
         // 回调（实测要等 5s keepAliveTimeout）——立即回收让退出即时完成。
         server.closeIdleConnections()
       }
-      void sessions.shutdownAll().then(finish, finish)
+      void Promise.allSettled([sessions.shutdownAll(), hookDrain]).then(finish, finish)
     },
   }
 }
@@ -1568,6 +1517,7 @@ export async function serveCommand(args: string[]): Promise<void> {
 
   // Last-resort: SIGKILL MCP children even if shutdownServer threw.
   process.on('exit', () => {
+    try { server.shared.externalHookHost?.forceExit() } catch { /* best-effort */ }
     try { server.shared.mcpManager?.killChildrenSync?.() } catch { /* best-effort */ }
   })
 

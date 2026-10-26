@@ -116,6 +116,9 @@ export interface PlanClosedInput {
   tasks: string
   deliveryState: 'GREEN' | 'YELLOW' | 'RED'
   totalChangedCheckboxes: number
+  executionStatus?: import('../plan/completion-evidence.js').ExecutionStatus
+  executionIds?: string[]
+  summary?: string
 }
 
 /** Plan submitted for approval — surfaced to the TUI so it can prompt the user
@@ -143,6 +146,7 @@ export interface AskUserQuestionInfo {
 
 /** U6/C1: a step input passed through onPlanSteps to seed/sync PlanExecutionTrace. */
 export interface PlanStepInput {
+  acceptanceIds?: string[]
   /** Optional stable identifier (e.g. todo id). */
   id?: string
   /** Step description shown in trace / UI. */
@@ -156,9 +160,15 @@ export interface PlanStepInput {
  * 流向 loop：声明写进 `TaskContract.successCriteria`，状态回写核销 acceptance 义务。
  */
 export interface AcceptanceItemInput {
+  id?: string
+  kind?: 'implementation' | 'verification' | 'review'
+  stepId?: string
+  consumerBoundary?: string
+  evidenceRefs?: string[]
+  reason?: string
   /** 用户做什么动作 → 看到什么可观察结果。拒绝内部属性/信号级表述。 */
   criterion: string
-  status: 'pending' | 'met' | 'blocked'
+  status: 'pending' | 'met' | 'blocked' | 'deferred'
   /** met：实际执行了什么观察到了什么；blocked：为何执行不了。 */
   evidence?: string
 }
@@ -195,6 +205,8 @@ export interface VerificationSnapshotPlan {
 }
 
 export interface ToolCallParams {
+  currentVerificationFingerprint?: () => string | null
+  getActualCommits?: () => string[]
   runtimeExecutionPlan?: import('../skills/runtime/operation.js').RuntimeExecutionPlan
   saveSkillDraft?: import('../skills/skill-creation.js').SkillDraftWriter
   onVerificationCompleted?: (verification: VerificationMetadata) => void
@@ -219,6 +231,11 @@ export interface ToolCallParams {
   /** Register a file written internally by a tool (e.g. ast-edit via writeFileAtomicAsync).
    *  Ensures evidence/filesModified and cerebellar gate are aware of the write. */
   onFileWrite?: (filePath: string) => void
+  hasWriteClaim?: (filePath: string) => boolean
+  onProcessExit?: (state: 'exited' | 'unknown') => void
+  onVerificationStarted?: (executionId: string) => void
+  onRepairDisposition?: (file: string) => void
+  onMutationFacts?: (facts: import('../agent/mutation-facts.js').MutationFact[]) => void
   /** Capture an agent's departure mark for 主控 to record at session close. */
   onLeaveMark?: (mark: LeaveMarkInput) => void
   /** Write a constellation milestone when plan_close succeeds with apply=true. */
@@ -246,6 +263,7 @@ export interface ToolCallParams {
   /** T4: structured per-worker delegation updates (subagent panel). Optional —
    *  set by the tool pipeline; absent in non-server contexts (no-op). */
   onWorkerActivity?: (activity: DelegationActivity) => void
+  onReviewReady?: (notice: import('../agent/review-inbox.js').ReviewFollowupNotice) => void
   /** 视觉副驾查询句柄（ask_image 工具用）。据 imageId 从会话 ImageRegistry 取图后：
    *  - 主控多模态 → 返回 { forwardImage } 原图，由 pipeline 转发给主控原生识图；
    *  - 主控 text-only → 用 question 定向问视觉桥，返回 { answer } 文本（命中缓存零调用）。
@@ -392,6 +410,12 @@ export interface TestCompletionCoverage {
 }
 
 export interface VerificationMetadata {
+  attribution?: 'known' | 'opaque'
+  executionState?: 'running' | 'exited' | 'timed_out' | 'cancelled' | 'failed_to_start' | 'unknown'
+  outcome?: 'passed' | 'failed' | 'unknown'
+  coverageStatus?: 'complete' | 'partial' | 'unknown'
+  logRef?: string
+  omittedBytes?: number
   coverage?: TestCompletionCoverage
   executionId?: string
   comparisonId?: string
@@ -441,6 +465,14 @@ export interface VerificationMetadata {
 export type ToolErrorClass = 'environment' | 'exec-failure' | 'timeout'
 
 export interface ToolResult {
+  fileStates?: import('./file-state-receipt.js').FileStateReceipt[]
+  /** Structured preflight reason; never inferred from source/error text. */
+  errorReason?: string
+  astMatches?: Array<import('./ast-grep.js').AstGrepMatch & { match_ref?: string }>
+  mutations?: import('../agent/mutation-facts.js').MutationFact[]
+  verificationSummary?: ReturnType<typeof import('./verification-summary.js').summarizeVerification>
+  fileChanges?: string[]
+  verificationRun?: import('../agent/verification-runs.js').VerificationRun
   skillDraft?: import('../server/protocol.js').SkillDraftReference
   verificationPlan?: import('./test-execution-plan.js').DeliveryVerificationPlan
   generatedImageId?: string

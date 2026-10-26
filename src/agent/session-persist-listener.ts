@@ -14,7 +14,7 @@ import { MAX_SESSION_MESSAGE_JSON_CHARS } from '../compact/constants.js'
 const compactionFailures = new WeakMap<SessionContext, { error: unknown; recover: () => Promise<void> }>()
 
 export async function commitCompactedHistory(agent: AgentLoop, expected: OaiMessage[], candidate: OaiMessage[],
-  reason: 'context_limit' | 'explicit_user_compact' = 'context_limit'): Promise<void> {
+  reason: 'context_limit' | 'explicit_user_compact' | 'image_budget' = 'context_limit'): Promise<void> {
   const source = JSON.stringify(expected)
   const target = structuredClone(candidate)
   const targetProof = proveRewindHistory(target)
@@ -23,7 +23,7 @@ export async function commitCompactedHistory(agent: AgentLoop, expected: OaiMess
   const persist = agent.persist
   const prior = client.getMainPrefixProof?.() ?? engine.getRewindAuthorization()?.prior ?? engine.getExecutionSnapshot()
   const model = engine.getModel()
-  if (!['context_limit', 'explicit_user_compact'].includes(reason) || client.getExecutionPolicy?.().singleAttempt || (prior && prior.model !== model)
+  if (!['context_limit', 'explicit_user_compact', 'image_budget'].includes(reason) || client.getExecutionPolicy?.().singleAttempt || (prior && prior.model !== model)
     || (persist && prior && !client.restoreRewindAuthorization)) {
     throw new LocalWorkerPolicyError('压缩授权的模型或执行策略不匹配；禁止提交')
   }

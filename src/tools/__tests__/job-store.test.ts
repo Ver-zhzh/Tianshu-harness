@@ -277,7 +277,7 @@ describe('SessionJobs', () => {
       assert.equal(local.store.waitingVerificationJob(job.startedAt), null, 'new task cannot borrow old job')
       await local.store.killAllAsync()
       for (const snapshot of [...local.store.list(), ...events.map(e => e.job)]) {
-        assert.deepEqual(Object.keys(snapshot).sort(), ['id', 'command', 'status', 'exitCode', 'startedAt', 'endedAt', 'lastLine', 'pid'].sort())
+        assert.deepEqual(Object.keys(snapshot).sort(), ['id', 'command', 'status', 'exitCode', 'startedAt', 'endedAt', 'lastLine', 'pid', 'logRef', 'omittedBytes'].sort())
       }
     } finally { await local.store.killAllAsync(); rmSync(local.dir, { recursive: true, force: true }) }
   })

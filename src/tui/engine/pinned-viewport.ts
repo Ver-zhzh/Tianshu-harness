@@ -1,11 +1,10 @@
 /**
- * 全高钉住视口（classic 非读屏模式）——把整帧按终端实际高度分区：
+ * 全高钉住视口的独立布局实验（当前未接入 classic 运行路径）——把整帧按终端实际高度分区：
  * 顶部指令摘要（pinned）→ 近期已提交历史的只读投影 → 实时动态段 → 底部输入区。
  *
- * 取代旧的「底部定高 live region + padDynamicRegion 高水位」模型：摘要此前只是
- * live region 内第一行，长会话滚屏后悬在窗口中下部；纯高度 resize 也没有失效
- * 路径。本模块只产出帧内容（不发终端控制序列、不写历史），锚定与 scrollback
- * 纪律仍归 LiveEngine/CommitEngine。
+ * 经典主屏继续使用原生 scrollback + 底部 live region；不能把此投影直接接入
+ * classic，否则已提交历史可能被重绘进物理 scrollback。本模块只产出帧内容
+ * （不发终端控制序列、不写历史）。
  *
  * 历史投影经 revision 缓存（ticker 每帧命中），/clear 与会话切换只移动显示
  * 边界（afterRevision），pager 读的原始历史不动。

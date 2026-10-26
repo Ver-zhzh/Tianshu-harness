@@ -17,6 +17,7 @@ function fakeLoop(over: Partial<Record<string, unknown>> = {}): AgentLoop {
   const base = {
     cwd: '/work',
     session: { getTurnCount: () => 7 },
+    getRunId: () => 'fixture-run',
     recentToolHistory: [
       { tool: 'bash', status: 'ok', target: 'ls', bashActivity: 'readonly', extra: 'dropped' },
       { tool: 'read_file', status: 'error', target: 'a.ts' },

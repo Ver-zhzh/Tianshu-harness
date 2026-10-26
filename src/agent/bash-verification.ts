@@ -43,12 +43,10 @@ export function inferBashVerificationScope(command: string, cwd = ''): Pick<Veri
   return classifyVerificationIntent(command, cwd).scope ?? { scope: 'unknown' }
 }
 
-/** blocked 时的可操作反馈：说清为什么无法归因 + 给出可复制的单条命令。 */
+/** A missing coverage proof does not require executing the command again. */
 function blockedGuidance(command: string): string {
-  const reason = classifyVerificationCommand(command).reason
-  const suggestion = suggestSingleCommand(command)
-  if (!suggestion) return reason ?? '缺少完整逐文件完成证明；请用支持的运行器重新验证。'
-  return `${reason ?? '这条命令无法归因为验证。'}\n可复制的单条命令：${suggestion}`
+  return (classifyVerificationCommand(command).reason ?? '覆盖完整性尚未确认。')
+    + ' 已有执行事实和日志保留；查询执行回执或原始日志，不自动重跑。'
 }
 
 function count(output: string, pattern: RegExp): number {
@@ -83,6 +81,8 @@ export function buildBashVerification(
     : status === 'failed' && exitCode !== undefined && result?.isError === false ? 'test_failure'
     : undefined
   return {
+    ...(result?.verification?.executionId ? { executionId: result.verification.executionId, executionState: result.verification.executionState,
+      outcome: result.verification.outcome, coverageStatus: result.verification.coverageStatus, logRef: result.verification.logRef, attribution: result.verification.attribution } : {}),
     command, status, ...scope, passed, failed, skipped, countsReliable: counts.countsReliable,
     ...(result?.verification?.coverage ? { coverage: result.verification.coverage } : {}),
     ...(status === 'blocked' || scope.kind === 'test' && !result?.verification?.coverage?.complete ? { userGuidance: blockedGuidance(command) } : {}),

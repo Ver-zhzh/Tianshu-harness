@@ -8,7 +8,7 @@ import type { CompactionConfig } from '../compact/constants.js'
 import type { ContextClaimStore } from '../context/claim-store.js'
 import type { HookRegistry } from '../hooks/registry.js'
 import type { RuntimeHookPipeline } from './runtime-hooks.js'
-import type { HookEvent, HookResult } from '../hooks/user-hooks-runner.js'
+import type { HookResult } from '../hooks/user-hooks-runner.js'
 import type { ModelCapabilityCard } from '../model/capability.js'
 import type { PlanModeState } from './plan-mode.js'
 import type { PermissionConfig, PermissionOverlay } from './permissions.js'
@@ -27,6 +27,8 @@ import type { DomainDriftResult } from './domain-drift-detector.js'
 export type ApprovalMode = 'auto-accept' | 'auto-safe' | 'manual' | 'dangerously-skip-permissions'
 
 export interface AgentConfig {
+  latencyReasoningSupported?: boolean
+  latencyPromptExperiment?: boolean
   saveSkillDraft?: import('../skills/skill-creation.js').SkillDraftWriter
   executionToolAllowlist?: readonly string[]
   inputOrigin?: import('./input-origin.js').InputOrigin
@@ -35,6 +37,7 @@ export interface AgentConfig {
   budgetSummaryMaxTokens?: number
   promptEngine: PromptEngine
   toolRegistry: ToolRegistry
+  readConcurrency?: number
   maxTurns: number
   /**
    * C3 检查点间隔 — Auto 模式下每 N 轮暂停并同步进度摘要（0 = 关）。
@@ -104,6 +107,9 @@ export interface AgentConfig {
   getSessionMemoryState?: () => import('../context/types.js').LedgerSessionMemoryState | undefined
   hooks?: HookRegistry
   runtimeHooks?: RuntimeHookPipeline
+  externalHookParent?: { runtimeId: string; runId: string }
+  externalHookHost?: import('../hooks/external-hook-types.js').ExternalHookHostPort
+  externalHookRuntime?: import('../hooks/external-hook-types.js').ExternalHookRuntime
   /** P2: CVM 五阶段管线装配配置（来自磁盘 Config.hooks，bootstrap 填入）。
    *  disabled 会话级禁用的 hook id；交互模式可热更（config-watcher 更新
    *  RuntimeHookPipeline.setDisabledHookIds）。与上方 hooks（用户自定义
@@ -114,7 +120,8 @@ export interface AgentConfig {
     slowMs?: number
   }
   /** I4: emit user hook results to the desktop event stream. */
-  emitHookResult?: (results: HookResult[], meta: { event: HookEvent; turn?: number; toolName?: string; error?: string }) => void
+  emitHookResult?: (results: HookResult[], meta: import('../hooks/external-hook-types.js').HookResultMeta) => void
+  emitHookCleanup?: (meta: import('../hooks/external-hook-types.js').HookResultMeta) => void
   /** #463: per-iteration goal progress → desktop `goal_state` SSE. The sidecar
    *  wires this to re-emit the goal snapshot each time the tracker advances an
    *  iteration; without it the desktop counter stays at the creation snapshot. */
@@ -207,6 +214,7 @@ export interface AgentConfig {
   companionPresenceEnabled?: boolean
   /** Session-end dream / skill-distill. Default true; lean forces off. */
   dreamEnabled?: boolean
+  memoryFormation?: import('../memory/formation-policy.js').MemoryFormationConfig
   /** Runtime lean profile — trims postTool meridian/physarum and postSession dream. */
   runtimeLean?: boolean
   /** 资源压力状态行回调（TUI setStatusLine 通道）：resource_pressure trigger
@@ -275,6 +283,7 @@ export interface AgentConfig {
    *  updateTools() 复用此状态重新过滤，避免 MCP/LSP 异步注册后把门控整个还原。
    *  缺省 undefined → 不门控（全量）。 */
   toolGating?: {
+    preset?: import('../tools/tool-preset-names.js').ToolPreset
     enabled: boolean
     coreOverride?: readonly string[]
     extraCore?: readonly string[]
@@ -375,6 +384,7 @@ export interface ToolDisplayEvidence {
 }
 
 export interface AgentCallbacks {
+  onToolInputProgress?: (progress: import('../api/tool-input-progress.js').ToolInputProgress) => void
   onContextBudget?: (budget: import('../server/protocol.js').ContextBudgetSnapshot) => void
   /** Await durable execution intent before a tool may produce side effects. */
   beforeToolExecute?: (id: string, name: string, input: Record<string, unknown>) => Promise<void>
@@ -439,6 +449,8 @@ export interface AgentCallbacks {
   onAutonomyCheckpoint?: (info: AutonomyCheckpointInfo) => void
   /** T4 — structured per-worker delegation status/progress (subagent panel). */
   onDelegationActivity?: (activity: DelegationActivity) => void
+  /** Detached review completed after delivery; the owner host may schedule bounded triage. */
+  onReviewReady?: (notice: import('./review-inbox.js').ReviewFollowupNotice) => void
   /**
    * E4 — optional client tool-landing delegation. Return null to fail-back to
    * local execution (no client / capability miss / timeout). A resolved

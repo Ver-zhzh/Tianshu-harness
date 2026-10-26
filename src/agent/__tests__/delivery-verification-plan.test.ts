@@ -41,52 +41,26 @@ it('candidate pending reason ignores another candidate failure while legacy stat
   } finally { rmSync(cwd, { recursive: true, force: true }) }
 })
 
-it('actual delivery returns executable batches; all batches cover obligations and advisory never blocks', { skip: process.platform === 'win32' }, async () => {
+it('delivery no longer builds a verification plan (contract separation); commit returns without batches', { skip: process.platform === 'win32' }, async () => {
   const cwd = mkdtempSync(join(tmpdir(), 'delivery-batches-'))
   try {
     execFileSync('git', ['init', '-q'], { cwd })
     writeFileSync(join(cwd, 'package.json'), JSON.stringify({ type: 'module', scripts: { test: 'node --test' } }))
-    const required = Array.from({ length: 24 }, (_, i) => `part-${i}.test.mjs`)
-    for (const path of [...required, 'advisory.test.mjs']) writeFileSync(join(cwd, path), "import {test} from 'node:test'; test('proof',()=>{});")
     writeFileSync(join(cwd, 'feature.js'), 'export const feature = 0;')
-    execFileSync('git', ['add', '--', 'package.json', 'feature.js', ...required, 'advisory.test.mjs'], { cwd })
+    execFileSync('git', ['add', '--', 'package.json', 'feature.js'], { cwd })
     execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.com', 'commit', '-qm', 'base'], { cwd })
     writeFileSync(join(cwd, 'feature.js'), 'export const feature = 1;')
     const ledger = createTaskLedger({ taskId: 'batches' })
     ledger.record({ type: 'file_write', path: 'feature.js' })
-    ledger.record({ type: 'verification', command: 'typecheck', status: 'passed', meta: { kind: 'typecheck', scope: 'full', exitCode: 0 } })
     const ownership = createOwnershipLedger({ taskLedger: ledger, baseline: createWorktreeBaseline({ branch: 'main', head: 'base', preExistingDirty: [], preExistingUntracked: [], capturedAt: Date.now() }) })
     const gate = createDeliveryGateV2({ taskLedger: ledger, ownership, attribution: createVerificationAttribution({ ownership }) })
     let commits = 0
-    const tool = createDeliverTaskTool(() => ({ taskLedger: ledger, ownership, gate, getCurrentDirtyFiles: () => ['feature.js'], resolveDeliveryImpact: async () => ({ resolved: true, requiredTests: required, advisoryTests: ['advisory.test.mjs'], policyVersion: 1 }), detectWroteButNeverRead: () => [], commitOwnedFiles: () => { commits++; return { ok: true, output: 'fixture commit' } } }))
-    const params = { cwd, toolUseId: 'batch-deliver', input: { commit: true, force: true, message: 'fix: fixture' } }
-    const status = await tool.execute({ ...params, input: { commit: false } })
-    assert.notEqual(status.isError, true)
-    assert.match(status.content, /required 24，已覆盖 0，剩余 24/)
-    const first = await tool.execute(params)
-    assert.equal(first.isError, true)
-    assert.equal(commits, 0)
-    assert.match(first.content, /required 24，已覆盖 0，剩余 24/)
-    assert.ok(first.content.indexOf('run_tests(files=') < first.content.indexOf('part-0.test.mjs: not_run'), 'the first executable batch precedes per-file reasons')
-    assert.match(first.content, /其余 16 个文件状态见 verificationPlan.pendingReasons/)
-    const batches = first.verificationPlan!.batches
-    const commands = batches.map(batch => batch.display)
-    assert.equal(first.verificationPlan!.pending.length, 24)
-    assert.equal(commands.length, 2)
-    for (let i = 0; i < commands.length; i++) {
-      const tree = await openCandidateDeliveryTree(cwd, ['feature.js'])
-      try {
-        const result = await RUN_TESTS_TOOL.execute({ cwd, toolUseId: `batch-${i}`, input: { files: batches[i]!.files, deliveryFiles: ['feature.js'] },
-          verificationSnapshot: { path: tree.path, repositoryRoot: cwd, snapshotRef: tree.ref, candidateOnly: true } })
-        assert.equal(result.isError, false, result.content)
-        for (const proof of [...(result.verification ? [result.verification] : []), ...(result.extraVerifications ?? [])]) {
-          ledger.record({ type: 'verification', command: proof.command, status: proof.status, meta: { ...proof } })
-        }
-      } finally { tree.destroy() }
-      const delivered = await tool.execute(params)
-      if (i === 0) { assert.equal(delivered.isError, true); assert.equal(commits, 0); assert.match(delivered.content, /已覆盖 20，剩余 4/) }
-      else { assert.notEqual(delivered.isError, true, delivered.content); assert.equal(commits, 1) }
-    }
+    const tool = createDeliverTaskTool(() => ({ taskLedger: ledger, ownership, gate, getCurrentDirtyFiles: () => ['feature.js'], commitOwnedFiles: () => { commits++; return { ok: true, output: 'fixture commit' } } }))
+    const first = await tool.execute({ cwd, toolUseId: 'batch-deliver', input: { commit: true, force: true, message: 'fix: fixture' } })
+    assert.equal(first.isError, undefined, first.content)
+    assert.equal(commits, 1, 'commit proceeds without a verification plan')
+    assert.equal(first.verificationPlan, undefined, 'no plan is fabricated')
+    assert.match(first.content, /本次未执行测试或审查/)
   } finally { rmSync(cwd, { recursive: true, force: true }) }
 })
 

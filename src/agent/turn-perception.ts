@@ -41,6 +41,7 @@ export interface TurnPerceptionDeps {
 }
 
 export interface PerceptionInput {
+  signal?: AbortSignal
   modelTurn?: number
   turn: number
   estimatedTokens: number
@@ -105,6 +106,8 @@ export class TurnPerceptionController {
       emitDecisionShift?(shift: import('./loop-types.js').DecisionShift): void
     },
   ): Promise<PerceptionResult> {
+    const signal = input.signal
+    signal?.throwIfAborted()
     const sensoriumInput: SensoriumInput = {
       predictionAcc: input.predictionAccumulator,
       pressureResult: input.pressureResult,
@@ -137,7 +140,9 @@ export class TurnPerceptionController {
       emitPhaseChange: (phase, detail) => { effects.emitPhaseChange(phase, detail) },
       emitDecisionShift: shift => { effects.emitDecisionShift?.(shift) },
       emitControlSignal: signal => { this.deps.submitControlSignal?.(signal) },
-    }))
+    }, signal))
+
+    signal?.throwIfAborted()
 
     if (!nextSensorium || !nextStrategy) {
       throw new Error('Perception runtime hook did not produce sensorium and strategy')
@@ -153,7 +158,8 @@ export class TurnPerceptionController {
       setVigor: vigor => { nextVigor = vigor },
       requestThetaCheck: reason => { this.deps.requestThetaCheck(reason) },
       emitControlSignal: signal => { this.deps.submitControlSignal?.(signal) },
-    }))
+    }, signal))
+    signal?.throwIfAborted()
     nextStrategy = currentStrategy
 
     if (nextSensorium.complexity > 0.5) {

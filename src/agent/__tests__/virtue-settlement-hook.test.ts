@@ -153,7 +153,7 @@ describe('createVirtueSettlementHook', () => {
     assert.equal(h.recorded.length, 0, '智 with reappearing tool should NOT be recorded')
   })
 
-  it('智: tool does NOT reappear after detection → high utility, recorded', async () => {
+  it('智: a different tool without attributable file evidence earns no recovery credit', async () => {
     const h = mkHarness()
     const postTurn = createVirtueSettlementHook(h.deps)
 
@@ -169,8 +169,15 @@ describe('createVirtueSettlementHook', () => {
     h.deps.readback.observeTool({ turn: 2, name: 'edit_file', target: 'src/bar.ts', isError: false })
     await postTurn.run({ snapshot: { turn: 3 } } as any)
 
-    assert.equal(h.recorded.length, 1, '智 with no reappear should be recorded')
-    assert.equal(h.recorded[0]!.wuchang, '智')
+    assert.equal(h.recorded.length, 0)
+  })
+
+  it('智: a valid retained change on the target proves useful strategy change', async () => {
+    const h = mkHarness(), hook = createVirtueSettlementHook(h.deps)
+    h.deps.ledger.submit({ ...mkPending(mkSignal('智', 'strategic-awareness'), 1), probeTool: 'grep', probeTarget: 'src/foo.ts' })
+    h.deps.readback.observeTool({ turn: 2, name: 'edit_file', target: 'src/foo.ts', isError: false, mutations: [{ file: 'src/foo.ts', toolCallId: 'repair', attempted: true, attemptedParse: 'valid', restoration: 'none', before: { version: 'old', parse: 'invalid' }, after: { version: 'new', parse: 'valid' } }] })
+    await hook.run({ snapshot: { turn: 3 } } as any)
+    assert.equal(h.recorded[0]?.type, 'strategic-awareness')
   })
 
   it('信(cache-loyalty): triggers when hitRate >= 80% and turn >= 5', async () => {

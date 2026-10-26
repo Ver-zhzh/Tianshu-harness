@@ -40,7 +40,7 @@ describe('tool-tiers', () => {
     })
 
     it('contains essential search tools', () => {
-      const required = ['web_search', 'web_fetch', 'grep', 'semantic_search']
+      const required = ['web_search', 'web_fetch', 'grep', 'ast_grep', 'repo_map']
       for (const name of required) {
         assert.ok(CORE_TOOLS.includes(name as never), `core tool missing: ${name}`)
       }
@@ -175,9 +175,9 @@ describe('tool-tiers', () => {
       }
     })
 
-    it('browser_debug is CORE (UI 渲染验证闭环主工具, 2026-07-15)', () => {
+    it('browser_debug remains core-visible when explicitly assembled', () => {
       const tier = new Set(resolveMainToolTier(null, true))
-      assert.ok(tier.has('browser_debug'), 'browser_debug should be in CORE tier')
+      assert.ok(tier.has('browser_debug'), 'assembly controls whether browser_debug is present')
       assert.equal(isExtendedTool('browser_debug'), false)
     })
   })

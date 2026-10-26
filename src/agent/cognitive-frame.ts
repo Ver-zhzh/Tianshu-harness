@@ -28,6 +28,7 @@ export type { CognitiveFactQuality, CognitiveFactSource } from './cognitive-qual
 /** P3：工作相位/评分口径观测（frame facts 的可选扩展——旧帧缺此字段，
  *  replay 报 legacy；不记录文件正文、敏感路径或原始命令）。 */
 export interface CognitiveFrameWorkFacts {
+  repairActive?: boolean
   committedPhase: string | null
   candidatePhase: string | null
   candidateTurns: number
@@ -205,6 +206,7 @@ export function projectStructureFlowInputs(frame: CognitiveFrame): StructureFlow
     palStalled: frame.facts.pal?.anyStalled ?? false,
     hasVerificationDebt: frame.facts.evidence.hasVerificationDebt,
     consecutiveFailures: frame.facts.evidence.consecutiveFailures,
+    repairActive: frame.facts.work?.repairActive,
     userIntervened: frame.facts.user.intervened,
   }
 }

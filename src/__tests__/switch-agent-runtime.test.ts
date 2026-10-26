@@ -11,6 +11,105 @@ import { resolveProviderForModel, switchAgentRuntime } from '../bootstrap.js'
 import type { BootstrapContext } from '../bootstrap.js'
 import { resolveInitialReasoningEffort } from '../bootstrap.js'
 import { resolveCapabilities } from '../api/provider.js'
+import { isCurrentModelTarget } from '../bootstrap/model-resolution.js'
+import { providerSchema } from '../config/schema.js'
+
+function activeCtx() {
+  const provider = providerSchema.parse({ name: 'fixture', apiKey: 'fixture-only', baseUrl: 'http://127.0.0.1:1/v1', models: [{ id: 'current' }, { id: 'other' }] })
+  let aborted = 0, rebuilt = 0, status = 0, audited = 0
+  const frozen = { generation: 'original' }
+  const client = { generation: 'original' }
+  const agent = {
+    config: { client, promptEngine: {
+      getModel: () => 'current',
+      exportFrozenSnapshot: () => { rebuilt++; throw new Error('replacement boundary reached') },
+    } },
+    abort: () => { aborted++ },
+  }
+  const ctx = {
+    config: { provider: { providers: { fixture: provider } } }, provider, apiKey: 'fixture-only', agent,
+    setStatusLine: () => { status++ }, onAgentRuntimeChanged: () => { rebuilt++ },
+    persist: { updateMetadata: () => { audited++ }, appendModelSwitch: () => { audited++ } },
+    refs: { promptEngine: frozen },
+  } as unknown as BootstrapContext
+  return { ctx, provider, agent, frozen, client, counts: () => ({ aborted, rebuilt, status, audited }) }
+}
+
+test('selecting the same resolved target preserves the active run, agent, client and cache generation', () => {
+  const f = activeCtx()
+  const res = switchAgentRuntime(f.ctx, 'current', 'fixture')
+  assert.equal(res.ok, true)
+  assert.equal(res.changed, false)
+  assert.equal(f.ctx.agent, f.agent)
+  assert.equal(f.ctx.agent.config.client, f.client)
+  assert.equal(f.ctx.refs.promptEngine, f.frozen)
+  assert.deepEqual(f.counts(), { aborted: 0, rebuilt: 0, status: 0, audited: 0 })
+})
+
+test('invalid selections do not abort an active run', () => {
+  const f = activeCtx()
+  assert.equal(switchAgentRuntime(f.ctx, 'missing').ok, false)
+  assert.deepEqual(f.counts(), { aborted: 0, rebuilt: 0, status: 0, audited: 0 })
+})
+
+test('a genuinely different model reaches replacement only after interrupting the old run', () => {
+  const f = activeCtx()
+  assert.throws(() => switchAgentRuntime(f.ctx, 'other', 'fixture'), /replacement boundary reached/)
+  assert.equal(f.counts().aborted, 1)
+  assert.equal(f.counts().rebuilt, 1)
+})
+
+test('target identity includes account, endpoint, wire options and exact model id', () => {
+  const f = activeCtx()
+  const resolved = resolveProviderForModel(f.ctx, 'current', 'fixture')!
+  assert.ok(!('error' in resolved))
+  assert.equal(isCurrentModelTarget(f.ctx, 'current', resolved), true)
+  for (const target of [
+    { ...resolved, apiKey: 'different-fixture-account' },
+    { ...resolved, providerName: 'different-provider' },
+    { ...resolved, provider: { ...resolved.provider, baseUrl: 'http://127.0.0.1:2/v1' } },
+    { ...resolved, provider: { ...resolved.provider, protocol: 'anthropic' as const } },
+    { ...resolved, provider: { ...resolved.provider, temperature: 0.5 } },
+    { ...resolved, provider: { ...resolved.provider, models: [{ ...resolved.provider.models[0]!, contextWindow: 99999 }] } },
+    { ...resolved, modelId: 'other' },
+  ]) assert.equal(isCurrentModelTarget(f.ctx, 'current', target), false)
+  assert.equal(isCurrentModelTarget(f.ctx, 'deepseek-flash', { ...resolved, modelId: 'deepseek-v4-flash' }), false)
+})
+
+test('canonical provider registry key can differ from its display name', () => {
+  const f = activeCtx()
+  f.ctx.config.provider.providers = { canonical: f.provider }
+  assert.equal(switchAgentRuntime(f.ctx, 'current', 'canonical').changed, false)
+  assert.equal(f.counts().aborted, 0)
+})
+
+test('a multi-key pool preserves the active slot, while an explicit different slot is a real switch', () => {
+  const f = activeCtx()
+  const models = f.provider.models
+  const first = { id: 'first', apiKey: 'fixture-only', models }
+  const second = { id: 'second', apiKey: 'fixture-only', models }
+  f.provider.keys = [first, second]
+  f.ctx.provider = { ...f.provider, keys: [second] }
+  assert.equal(switchAgentRuntime(f.ctx, 'current', 'fixture').changed, false)
+  assert.equal(f.counts().aborted, 0)
+  assert.throws(() => switchAgentRuntime(f.ctx, 'fixture:first:current'), /replacement boundary reached/)
+  assert.equal(f.counts().aborted, 1)
+})
+
+test('the registered /model consumer preserves a running UI and does not abort on repeated selection', async t => {
+  const { registerTuiSlashCommands } = await import('../tui/slash-commands.js')
+  const { makeApp } = await import('../tui/engine/__tests__/_harness.js')
+  const f = activeCtx()
+  Object.assign(f.agent, { getReasoningEffort: () => undefined })
+  const { app } = makeApp({ modelName: 'current' })
+  t.after(() => app.dispose())
+  registerTuiSlashCommands(app, f.ctx)
+  app.setStreamingState(true)
+  assert.equal(await app.tryDispatchSlash('/model current'), true)
+  assert.deepEqual(f.counts(), { aborted: 0, rebuilt: 0, status: 0, audited: 0 })
+  assert.equal((app as unknown as { state: { isStreaming: boolean } }).state.isStreaming, true)
+  assert.match(app.getScrollbackContent(), /当前模型保持不变/)
+})
 
 function makeCtx(providers: Record<string, unknown>, currentName = 'p1'): BootstrapContext {
   return {

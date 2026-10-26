@@ -25,6 +25,10 @@ test('each preset is a well-formed transport config', () => {
     for (const env of p.requiredEnv ?? []) {
       assert.ok(env.key && env.label, `${p.id} requiredEnv fields need key + label`)
     }
+    for (const header of p.requiredHeaders ?? []) {
+      assert.ok(header.key && header.label, `${p.id} requiredHeaders fields need key + label`)
+      if (header.obtainUrl) assert.match(header.obtainUrl, /^https:\/\/\S+$/, `${p.id} obtainUrl must be https`)
+    }
   }
 })
 
@@ -39,7 +43,7 @@ test('findMcpPreset resolves by id', () => {
 // 三条断言分工：第一条锁住这次修的路径不被改回去，第二条挡住同族包的再次混入，
 // 第三条联网兜住将来新增的废弃项（门控，不拖慢日常跑）。
 
-test('GitHub 预设走官方 remote 端点，不再依赖已废弃的 npm 包', () => {
+test('GitHub 预设走官方 remote 端点，并提供 PAT（首选）+ OAuth（高级）两条鉴权路径', () => {
   const gh = findMcpPreset('github')
   assert.ok(gh, 'github preset must exist')
   assert.equal(gh.transport, 'streamableHttp')
@@ -49,7 +53,20 @@ test('GitHub 预设走官方 remote 端点，不再依赖已废弃的 npm 包', 
   // 注进没人读的地方，表现为连上了但 401。
   assert.equal(gh.command, undefined, 'remote 预设不得带 command')
   assert.equal(gh.args, undefined, 'remote 预设不得带 args')
-  assert.equal(gh.auth?.provider, 'github', '鉴权仍走 github OAuth')
+
+  // PAT 是降低启用门槛的主入口：remote 只消费 headers，所以 UI 必须拿到
+  // header 字段描述，才能把用户粘贴的 token 变成 Authorization: Bearer …。
+  const authHeader = gh.requiredHeaders?.find(h => h.key === 'Authorization')
+  assert.ok(authHeader, 'GitHub remote 预设必须声明 Authorization header 入口')
+  assert.equal(authHeader.valuePrefix, 'Bearer ', '用户只粘贴 token，UI 负责加 Bearer 前缀')
+  assert.match(authHeader.label, /Personal Access Token/i)
+  assert.match(authHeader.help ?? '', /Fine-grained|Issues|Pull requests|Contents/i, '必须说明需要哪些权限')
+  assert.match(authHeader.obtainUrl ?? '', /^https:\/\/github\.com\/settings\/personal-access-tokens\/new/, '必须给出一键创建 PAT 的入口')
+  assert.ok(gh.expectedTools?.includes('create_pull_request'), '卡片应让用户预期能读写 PR')
+
+  // OAuth 仍保留，但不能是唯一入口：GitHub 没有 DCR，用户自备 OAuth App
+  // 才走得通，把它当唯一路径正是“找不到启用步骤”的根因。
+  assert.equal(gh.auth?.provider, 'github', 'OAuth App 高级路径仍走 github provider')
 })
 
 test('推荐列表不得指向 @modelcontextprotocol/server-* 系列包（该系列已整体废弃）', () => {

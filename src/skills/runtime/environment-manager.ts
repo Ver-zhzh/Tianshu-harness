@@ -1,3 +1,4 @@
+import { ownedProcessTreeAliveAsync } from '../../tools/process-group-state.js'
 /**
  * 技能 Python 环境管理器（issue #523 WP2）。
  *
@@ -25,7 +26,7 @@ import { join, resolve } from 'node:path'
 import { rivetHome } from '../../config/paths.js'
 import { writeFileAtomicSync } from '../../fs-atomic.js'
 import { createLockFileExclusive, readLockFile, removeLockFile } from '../../server/cron-lock.js'
-import { buildSanitizedEnv, execProcess, ownedProcessTreeAlive, type ProcessExecResult } from '../../tools/process-exec.js'
+import { buildSanitizedEnv, execProcess, type ProcessExecResult } from '../../tools/process-exec.js'
 import type { MirrorsConfig } from '../../config/schema.js'
 import { checkRuntimeDeclarationPaths, type RuntimeDeclaration } from './declaration.js'
 import type { PythonInterpreter } from './interpreter.js'
@@ -387,8 +388,8 @@ export class SkillEnvironmentManager {
         this.releaseLock(envKey)
       } else if (childPid) {
         const pid = childPid
-        const reaper = setInterval(() => {
-          if (!ownedProcessTreeAlive(pid)) { this.emptyDir(envDir); this.releaseLock(envKey); clearInterval(reaper) }
+        const reaper = setInterval(async () => {
+          if (!await ownedProcessTreeAliveAsync(pid)) { this.emptyDir(envDir); this.releaseLock(envKey); clearInterval(reaper) }
         }, 1000)
         reaper.unref()
       }

@@ -248,6 +248,7 @@
           "type": "number",
           "default": 10,
           "minimum": 1,
+          "maximum": 35791,
           "description": "原生聊天单轮静默超时上限（分钟，默认 10；收到文本/工具/思考/心跳事件会自动续期）"
         },
         "tianshu.sidecar.keepAliveOnReload": {
@@ -262,7 +263,7 @@
     "build": "node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
     "typecheck": "tsc --noEmit",
-    "test": "node --test-timeout=120000 --test \"tests/*.test.ts\"",
+    "test": "node --import tsx --test-timeout=120000 --test \"tests/*.test.ts\"",
     "package": "npx @vscode/vsce package --no-dependencies"
   },
   "devDependencies": {
@@ -273,6 +274,7 @@
     "esbuild": "^0.28.2",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "tsx": "^4.23.15",
     "typescript": "^5.6.0"
   },
   "dependencies": {

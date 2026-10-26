@@ -23,7 +23,8 @@ export interface TurnCompletionDeps {
   setDecisions: (decisions: string[]) => void
   refreshLedger: () => void
   refreshCacheDiagnostic: (turn: number) => void
-  runPostTurn: () => Promise<void>
+  getRunSignal?: () => AbortSignal | undefined
+  runPostTurn: (signal?: AbortSignal) => Promise<void>
   runBeforeComplete?: () => Promise<void>
   getEffortShadow?: () => EffortShadowRecord | null
   clearEffortShadow?: () => void
@@ -54,6 +55,8 @@ export class TurnCompletionController {
   constructor(private deps: TurnCompletionDeps) {}
 
   async complete(input: CompleteTurnInput): Promise<void> {
+    const signal = this.deps.getRunSignal?.()
+    signal?.throwIfAborted()
     const result = processTurnEnd({
       config: this.deps.config,
       session: this.deps.session,
@@ -72,8 +75,10 @@ export class TurnCompletionController {
     this.deps.refreshLedger()
     this.deps.refreshCacheDiagnostic(input.turn)
     this.completeEffortReward()
-    await this.deps.runPostTurn()
+    await this.deps.runPostTurn(signal)
+    signal?.throwIfAborted()
     if (input.isFinal) await this.deps.runBeforeComplete?.()
+    signal?.throwIfAborted()
     const evidenceSummary = input.isFinal ? this.deps.evidence.buildSummary(result.gateV2) : undefined
     input.callbacks.onTurnComplete(
       this.deps.session.getTotalUsage(),

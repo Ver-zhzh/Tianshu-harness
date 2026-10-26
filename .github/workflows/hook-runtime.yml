@@ -1,0 +1,63 @@
+name: Hook runtime native acceptance
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths: ['native/job-*', 'src/hooks/**', 'scripts/cli-hook-runtime.mjs', '.github/workflows/hook-runtime.yml']
+  pull_request:
+    paths: ['native/job-*', 'src/hooks/**', 'scripts/cli-hook-runtime.mjs', '.github/workflows/hook-runtime.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: windows-latest, arch: x64 }
+          - { runner: windows-11-arm, arch: arm64 }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, check-latest: true }
+      - run: npm ci
+      - shell: cmd
+        run: native\build-windows.bat ${{ matrix.arch }}
+      - run: node --import tsx --test src/hooks/__tests__/windows-hook-native.test.ts
+        env:
+          RIVET_JOB_LAUNCHER: ${{ github.workspace }}/native/win32-${{ matrix.arch }}/job-launch.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hook-runtime-win32-${{ matrix.arch }}
+          path: native/win32-${{ matrix.arch }}/job-launch.exe
+          if-no-files-found: error
+
+  cli-package:
+    needs: native
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, check-latest: true }
+      - run: npm ci
+      - run: npm run build
+      - uses: actions/download-artifact@v4
+        with: { name: hook-runtime-win32-x64, path: ceshi/hook-artifacts/win32-x64 }
+      - uses: actions/download-artifact@v4
+        with: { name: hook-runtime-win32-arm64, path: ceshi/hook-artifacts/win32-arm64 }
+      - run: node scripts/cli-hook-runtime.mjs stage .\ceshi\hook-artifacts ${{ github.sha }}
+      - run: npm exec -- node scripts/verify-cli-hook-install.mjs
+        env:
+          HOOK_RUNTIME_SOURCE: ${{ github.workspace }}/ceshi/hook-artifacts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: verified-cli-hook-runtime
+          path: dist/hook-runtime/
+          if-no-files-found: error

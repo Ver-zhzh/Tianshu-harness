@@ -39,10 +39,10 @@ test('run_tests describes cropped stdout and stderr in both persisted and model-
     ['stdout', 'EARLY_STDOUT\n' + 'x'.repeat(60_000)], ['stdout', 'y'.repeat(60_000)],
     ['stderr', 'EARLY_STDERR\n' + 'z'.repeat(110_000)],
   ], 1)
-  assert.doesNotMatch(saved, /EARLY_STDOUT|EARLY_STDERR/)
-  assert.ok(/stdout[^\n]*40013/.test(saved), 'persisted log must report omitted stdout characters')
-  assert.ok(/stderr[^\n]*30013/.test(saved), 'persisted log must report omitted stderr characters')
-  assert.match(result.content, /输出尾部/)
+  assert.match(saved, /EARLY_STDOUT/)
+  assert.match(saved, /EARLY_STDERR/)
+  assert.equal(result.verification?.omittedBytes, 0, 'preview cropping must not discard captured logs')
+  assert.match(result.content, /展示尾部|捕获日志/)
   assert.ok(result.content.includes(result.rawPath!))
   assert.doesNotMatch(result.content, /完整日志/)
 })
@@ -51,17 +51,17 @@ test('run_tests does not promise a complete log when a large failure summary was
   const raw = 'EARLY_DIAGNOSTIC\n' + Array.from({ length: 700 }, (_, i) => `FAIL case-${i}\n  ${'detail '.repeat(30)}\n`).join('')
   const { result, saved } = await execute([['stdout', raw]], 1)
   assert.match(result.content, /中间省略/)
-  assert.match(result.content, /输出尾部/)
+  assert.match(result.content, /展示尾部|捕获日志/)
   assert.doesNotMatch(result.content, /完整日志/)
-  assert.ok(saved.includes('输出尾部'), 'persisted log must describe its limited scope')
+  assert.ok(saved.includes('EARLY_DIAGNOSTIC'), 'early diagnostics must survive display clipping')
 })
 
 for (const terminal of ['success', 'timeout'] as const) {
   test(`run_tests preserves the cropped-log warning on ${terminal}`, async () => {
     const { result, saved } = await execute([['stdout', 'x'.repeat(110_000) + '\n12 passed\n']], 0, terminal === 'timeout')
-    assert.match(result.content, /输出尾部/)
+    assert.match(result.content, /展示尾部|捕获日志/)
     assert.ok(result.content.includes(result.rawPath!))
-    assert.ok(saved.includes('输出尾部'), 'persisted log must describe its limited scope')
+    assert.match(saved, /12 passed/)
     assert.doesNotMatch(result.content, /完整日志/)
   })
 }

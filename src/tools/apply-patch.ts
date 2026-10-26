@@ -1,3 +1,5 @@
+import { noteMutationSyntax } from '../agent/mutation-facts.js'
+import { contentVersion, currentFileVersion } from '../agent/file-version.js'
 import { spawnGit } from './spawn-git.js'
 import { writeFile, unlink, readFile, mkdir, cp, rm } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
@@ -27,6 +29,7 @@ interface PatchTarget {
   /** Whether the file existed before the patch (governs rollback strategy). */
   existedBefore: boolean
   capture?: FileChangeRecord
+  afterVersion?: string | null
 }
 
 /** Extract the set of files a unified diff writes to (its `+++ ` headers).
@@ -181,9 +184,7 @@ export const APPLY_PATCH_TOOL: Tool = {
       if (!check.ok) return { content: `错误：补丁目标 ${t.rel}：${check.error}`, isError: true }
     }
     for (const t of targets) {
-      if (t.existedBefore) {
-        t.capture = await trackFileChange(params.cwd, { filePath: t.rel, action: 'edit', toolCallId: params.toolUseId ?? 'apply_patch' })
-      }
+      t.capture = await trackFileChange(params.cwd, { filePath: t.rel, action: t.existedBefore ? 'edit' : 'write', toolCallId: params.toolUseId ?? 'apply_patch' })
     }
 
     // E4 — when a client can apply_edit, materialize final file snapshots in a
@@ -198,6 +199,8 @@ export const APPLY_PATCH_TOOL: Tool = {
       diff: normalizedDiff,
       checkOnly,
     }, params.abortSignal)
+
+    for (const t of targets) { try { t.afterVersion = currentFileVersion(t.abs) } catch { /* preserve conflicting paths */ } }
 
     if (!result.ok) {
       // `git apply --3way` 报冲突是 exit 1，但退出前状态已经被动过：冲突文件的
@@ -215,7 +218,7 @@ export const APPLY_PATCH_TOOL: Tool = {
       const rolledBack = targets.length > 0
       let rollbackFailures: string[] = []
       if (rolledBack) {
-        rollbackFailures = await rollbackTargets(params.cwd, targets, params.sessionId)
+        rollbackFailures = await rollbackTargets(params.cwd, targets, params.sessionId, params.hasWriteClaim)
         await unstagePatchTargets(params.cwd, targets, params.abortSignal)
       }
       for (const t of targets) incrementEditFailCount(t.abs)
@@ -235,7 +238,8 @@ export const APPLY_PATCH_TOOL: Tool = {
     if (verify) {
       const fatal = await firstFatalSyntax(targets)
       if (fatal) {
-        const rollbackFailures = await rollbackTargets(params.cwd, targets, params.sessionId)
+        noteMutationSyntax(targets.find(t => t.rel === fatal.rel)?.capture, { fatal: fatal.message, warning: fatal.message })
+        const rollbackFailures = await rollbackTargets(params.cwd, targets, params.sessionId, params.hasWriteClaim)
         for (const t of targets) incrementEditFailCount(t.abs)
         return {
           content: `补丁已应用，但在 ${fatal.rel} 中引入了致命错误：\n${fatal.message}\n\n`
@@ -247,7 +251,12 @@ export const APPLY_PATCH_TOOL: Tool = {
       }
       for (const t of targets) {
         resetEditFailCount(t.abs)
-        await recordSuccessfulEdit(t.abs, params.sessionId)
+        let content: string | undefined
+        try {
+          const landed = await readFile(t.abs, 'utf-8')
+          if (contentVersion(landed) === t.afterVersion) content = landed
+        } catch { /* Metadata failure must not replay an applied patch; leave its observation unknown. */ }
+        await recordSuccessfulEdit(t.abs, params.sessionId, content, false)
       }
     }
 
@@ -276,9 +285,12 @@ async function applyPatchViaClient(
   params: ToolCallParams,
   normalizedDiff: string,
   targets: PatchTarget[],
-): Promise<{ content: string; isError?: boolean; uiContent?: string } | null> {
+): Promise<ToolResult | null> {
   const tmpRoot = join(tmpdir(), `rivet-patch-client-${process.pid}-${Date.now()}`)
   try {
+    // A private index must not bypass the real repository's Git preconditions.
+    const eligible = await applyPatch(params.cwd, { diff: normalizedDiff, checkOnly: true }, params.abortSignal)
+    if (!eligible.ok) return null
     await mkdir(tmpRoot, { recursive: true })
     for (const t of targets) {
       const dest = join(tmpRoot, t.rel)
@@ -291,8 +303,16 @@ async function applyPatchViaClient(
     const { spawnSync } = await import('node:child_process')
     const init = spawnSync('git', ['init'], { cwd: tmpRoot, stdio: 'ignore', windowsHide: true })
     if (init.status !== 0) return null
+    const baseline = targets.filter(t => t.existedBefore).map(t => t.rel)
+    if (baseline.length) {
+      // --3way requires indexed baselines; this index belongs only to the private temp tree.
+      const staged = spawnSync('git', ['-c', 'core.autocrlf=false', '-c', 'core.safecrlf=false', 'add', '-f', '--', ...baseline], { cwd: tmpRoot, stdio: 'ignore', windowsHide: true })
+      if (staged.status !== 0) return null
+    }
     const applied = await applyPatch(tmpRoot, { diff: normalizedDiff, checkOnly: false }, params.abortSignal)
     if (!applied.ok) return null
+    const fatal = await firstFatalSyntax(targets.map(t => ({ ...t, abs: join(tmpRoot, t.rel) })))
+    if (fatal) return { content: `补丁预检在 ${fatal.rel} 发现致命语法错误，未写入工作区：\n${fatal.message}`, isError: true, errorKind: 'syntax_error' }
 
     for (const t of targets) {
       const tmpFile = join(tmpRoot, t.rel)
@@ -314,11 +334,11 @@ async function applyPatchViaClient(
         }
         // accepted — continue remaining files
         resetEditFailCount(t.abs)
-        await recordSuccessfulEdit(t.abs, params.sessionId)
+        await recordSuccessfulEdit(t.abs, params.sessionId, newContent, false)
       } else {
         // Capability vanished mid-patch — remaining already written locally by landingWriteFile
         resetEditFailCount(t.abs)
-        await recordSuccessfulEdit(t.abs, params.sessionId)
+        await recordSuccessfulEdit(t.abs, params.sessionId, newContent, false)
       }
     }
     return {
@@ -340,7 +360,7 @@ async function firstFatalSyntax(targets: PatchTarget[]): Promise<{ rel: string; 
     if (!existsSync(t.abs)) continue
     try {
       const content = await readFile(t.abs, 'utf-8')
-      const check = await checkSyntax(t.abs, content)
+      const check = await checkSyntax(t.abs, content, { parseOnly: true })
       if (check.fatal) return { rel: t.rel, message: check.fatal }
     } catch {
       // Unreadable (binary, races) — not a syntax verdict, skip.
@@ -351,16 +371,11 @@ async function firstFatalSyntax(targets: PatchTarget[]): Promise<{ rel: string; 
 
 /** Undo an applied patch: restore pre-patch content for files that existed,
  *  delete files the patch newly created. Best-effort per file. */
-async function rollbackTargets(cwd: string, targets: PatchTarget[], sessionId?: string): Promise<string[]> {
+async function rollbackTargets(cwd: string, targets: PatchTarget[], sessionId?: string, hasClaim?: (path: string) => boolean): Promise<string[]> {
   const failures: string[] = []
   for (const t of targets) {
-    if (t.existedBefore) {
-      if (!t.capture || !(await restoreFileChange(cwd, t.capture, sessionId))) failures.push(t.rel)
-    } else {
-      try { await unlink(t.abs) } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') failures.push(t.rel)
-      }
-    }
+    if (!t.capture || t.afterVersion === undefined || !(await restoreFileChange(cwd, t.capture, sessionId,
+      { expectedCurrentVersion: t.afterVersion, canRestore: () => hasClaim?.(t.rel) ?? true }))) failures.push(t.rel)
   }
   return failures
 }

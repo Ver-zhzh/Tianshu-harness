@@ -19,10 +19,13 @@ import { grepScanRaw } from './grep-scan-task.ts'
 import { readEventsTailRaw } from './events-tail.ts'
 // @ts-ignore — worker source runs with Node's native type stripping.
 import { readEventsTailIndexed } from './events-summary.ts'
+// @ts-ignore — worker source runs with native type stripping.
+import { htmlSyntaxRaw } from './html-syntax.ts'
 
 type TaskFn = (...args: any[]) => unknown
 
 const tasks: Record<string, TaskFn> = {
+  htmlSyntaxRaw: htmlSyntaxRaw as TaskFn,
   diffUnifiedRaw: diffUnifiedRaw as TaskFn,
   diffStructuredRaw: diffStructuredRaw as TaskFn,
   diffLinesRaw: diffLinesRaw as TaskFn,

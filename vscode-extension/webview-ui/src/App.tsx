@@ -551,7 +551,7 @@ export function App() {
           onApprovalMode={(mode) => {
             if (!activeId) return
             send({ type: 'setApprovalMode', sessionId: activeId, mode })
-            setSessions((prev) => prev.map((s) => (s.id === activeId ? { ...s, approvalMode: mode } : s)))
+            setSessions((prev) => prev.map((s) => (s.id === activeId ? { ...s, approvalMode: mode as SessionRecord['approvalMode'] } : s)))
           }}
           onEffort={(level) => {
             if (!activeId) return

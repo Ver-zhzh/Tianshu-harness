@@ -14,6 +14,7 @@ export type LivenessEventType = Extract<
   | 'text_delta'
   | 'thinking_delta'
   | 'tool_use'
+  | 'tool_input_progress'
   | 'tool_result'
   | 'phase'
   | 'turn_complete'
@@ -28,6 +29,7 @@ const LIVENESS_EVENT_SET: ReadonlySet<string> = new Set<LivenessEventType>([
   'text_delta',
   'thinking_delta',
   'tool_use',
+  'tool_input_progress',
   'tool_result',
   'phase',
   'turn_complete',
@@ -45,7 +47,7 @@ export function isLivenessEvent(ev: SessionEvent): boolean {
   if (!LIVENESS_EVENT_SET.has(ev.type)) return false
   if (ev.type === 'phase') {
     const phase = typeof ev.data?.phase === 'string' ? ev.data.phase : ''
-    return phase.length > 0
+    return phase.length > 0 && phase !== 'idle'
   }
   return true
 }
@@ -80,9 +82,10 @@ export function reduceSessionRunState(prev: SessionRunSummary, ev: SessionEvent)
     }
     case 'phase': {
       const nextPhase = typeof d.phase === 'string' ? d.phase : prev.phase
+      if (nextPhase === 'idle') return { ...prev, status: 'idle', phase: '', lastSeq }
       return {
         ...prev,
-        status: prev.status === 'idle' ? 'running' : prev.status,
+        status: nextPhase && prev.status === 'idle' ? 'running' : prev.status,
         phase: nextPhase,
         lastSeq,
       }

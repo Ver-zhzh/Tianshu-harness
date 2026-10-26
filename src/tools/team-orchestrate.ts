@@ -286,7 +286,7 @@ export function createTeamOrchestrateTool(
     definition: {
       name: 'team_orchestrate',
       description:
-        '运行确定性 team 编排器：解析计划（standard 模式），按文件冲突与依赖把任务分组成波次（wave），派发第一个就绪波次的 worker。返回波次调度与派发摘要。不自动提交（NOT auto-commit）。\n\n分片（SHARDING）：把工作水平切成正交分片——每个分片是完整自包含的单元（实现 + 跑 tsc/lint/相关测试），由一个有能力的 flash 端到端负责。不要按阶段垂直切分（不拆独立的 lint/type/import/test 角色任务）。让分片落在不相交的文件上以并行执行；两个分片必须改同一文件时，设 dependsOn 排序（校验器会对未排序的重叠发出警告）。worker 直接写入控制器的单一共享工作区——没有逐 worker 的 diff 要合并；用 git diff 审查聚合结果。\n\n传 planJson（plan_task 输出的 UnifiedPlan）可跳过 Markdown 解析与 planner fanout，直接执行。',
+        '运行确定性 team 编排器：解析计划（standard 模式），按文件冲突与依赖把任务分组成波次（wave），派发第一个就绪波次的 worker。返回波次调度与派发摘要。不自动提交（NOT auto-commit）。\n\n分片（SHARDING）：把工作水平切成正交分片——每个分片是完整自包含的单元（实现 + 跑 tsc/lint/相关测试），由一个有能力的 flash 端到端负责。不要按阶段垂直切分（不拆独立的 lint/type/import/test 角色任务）。让分片落在不相交的文件上以并行执行；两个分片必须改同一文件时，设 dependsOn 排序（校验器会对未排序的重叠发出警告）。worker 直接写入控制器的单一共享工作区——没有逐 worker 的 diff 要合并；用 git diff 审查聚合结果。\n\n直接传 planPath/planMarkdown：每项使用 ### Task N: 标题，正文写明文件与依赖；planJson 可传已有 UnifiedPlan，跳过 Markdown 解析与 planner fanout。',
       input_schema: {
         type: 'object',
         properties: {
@@ -294,7 +294,7 @@ export function createTeamOrchestrateTool(
           objective: { type: 'string', description: '任务目标陈述。' },
           planPath: { type: 'string', description: '项目内 Markdown 计划文件路径（可选，standard 模式）。' },
           planMarkdown: { type: 'string', description: '内联 Markdown 计划（可选）；优先级高于 planPath。' },
-          planJson: { type: 'string', description: 'plan_task 输出的 UnifiedPlan JSON。提供时跳过 Markdown 解析与 max planner fanout。' },
+          planJson: { type: 'string', description: '预先构造的 UnifiedPlan JSON。也可直接传 planPath/planMarkdown；JSON 提供时跳过 Markdown 解析与 max planner fanout。' },
           maxParallel: { type: 'number', description: '每波次最大并行 worker 数（1-5，默认 3）。' },
           fromWave: { type: 'number', description: '整合前序波次 diff 后，派发这个从零开始的波次索引。缺省 autoAdvance：只执行该波（人工恢复）。' },
           autoAdvance: { type: 'boolean', description: '多波自动推进：缺省时无 fromWave → 从 wave 0 自动跑到末波/首个阻塞；有 fromWave → 只执行该波。显式 true → 从 fromWave 推进到底；false → 只执行起始波。' },
@@ -307,12 +307,12 @@ export function createTeamOrchestrateTool(
       const parsed = inputSchema.safeParse(params.input)
       if (!parsed.success) return { content: `无效输入：${parsed.error.message}`, isError: true, errorKind: 'format_error' }
       const { mode, objective, planPath, planMarkdown, planJson: explicitPlanJson, maxParallel, fromWave, autoAdvance } = parsed.data
-      // Bridge: auto-consume the plan stored by plan_task when planJson is omitted.
-      const planJson = explicitPlanJson ?? consumePlan(params.sessionId)
+      // Explicit current plans take priority over the legacy session bridge.
+      const planJson = explicitPlanJson ?? (planPath || planMarkdown ? undefined : consumePlan(params.sessionId))
       // Stale-plan hygiene: an explicit planJson takes priority, so drop any plan
       // left in the session store — otherwise it would be wrongly auto-consumed by
       // a later bare call.
-      if (explicitPlanJson) clearPlan(params.sessionId)
+      if (explicitPlanJson || planPath || planMarkdown) clearPlan(params.sessionId)
 
       // Task-size gate: block small tasks from triggering heavy orchestration
       const scale = classifyOrchestrationScale(objective)
@@ -386,7 +386,7 @@ export function createTeamOrchestrateTool(
           proGateNote = '\n\n[Pro] team max（多视角规划）是 Pro 功能——已降级为 standard 模式执行现有计划。升级 Pro 解锁多视角 planner fanout。'
         } else {
           return {
-            content: 'team_orchestrate: mode "max"（多视角规划 fanout）是 Pro 功能。Basic 替代路径：先用 plan_task 生成计划，再以 standard 模式执行；或升级 Pro 解锁。',
+            content: 'team_orchestrate: mode "max"（多视角规划 fanout）是 Pro 功能。Basic 替代路径：传 planPath/planMarkdown，以 standard 模式执行；或升级 Pro 解锁。',
             isError: true,
           }
         }
@@ -397,7 +397,7 @@ export function createTeamOrchestrateTool(
       // "no dispatchable waves" weak result when nothing was provided/stored.
       if (effectiveMode === 'standard' && !tasks && !markdown) {
         return {
-          content: 'team_orchestrate 已拦截：未提供计划，也未找到已存储的计划。请先运行 plan_task，或传入 planJson/planPath。',
+          content: 'team_orchestrate 已拦截：未提供计划，也未找到已存储的计划。请直接传入 planPath/planMarkdown，或已有的 planJson。',
           isError: true,
         }
       }
@@ -472,14 +472,13 @@ export function createTeamOrchestrateTool(
       // 静默走到 executePlanWaves → "team skeleton: no task drafts"（isError:false），
       // 调用方无从区分「计划确实无任务」与「格式不匹配解析器」。最常见来源：把
       // 设计文档（`## 分波实施` + `- [ ]`）当任务清单传——任务行需 `Task N`/`TN`/
-      // `Step N` 起头。此处给出改走 plan_task 的完整指引（proposal 的友好展示不受影响）。
+      // `Step N` 起头。此处给出直接修正 planMarkdown 的指引（proposal 的友好展示不受影响）。
       if (effectiveMode === 'standard' && !tasks && markdown && parseTeamTasks(markdown).length === 0) {
         return {
           content: 'team_orchestrate 已拦截：Markdown 已提供但解析出 0 个任务。'
             + '任务行需以 `Task N` / `TN` / `Step N` 起头（如 `### Step 1: 实现 X`）；'
-            + '若传入的是设计文档（`## 分波实施` + `- [ ]` 清单），请改走 plan_task：'
-            + '把计划完整路径放进 files（如 files: [".rivet/plans/<slug>.md", ...源文件]），'
-            + '它会走 checklist 快速路径按 H2/H3 切分，并把计划存入本会话 store 供后续 team_orchestrate 续跑。',
+            + '若传入的是设计文档（`## 分波实施` + `- [ ]` 清单），请将任务转成 `### Task N: 标题`，正文保留原文件、依赖及验收要求，再通过 planMarkdown 传入；'
+            + '兼容格式的计划完整路径可直接作为 planPath；此入口不调用额外规划工具。',
           isError: true,
         }
       }
@@ -518,8 +517,8 @@ export function createTeamOrchestrateTool(
             reviewDepth: params.reviewDepth ?? 0,
             cwd: params.cwd,
             abortSignal: params.abortSignal,
-            // team_orchestrate IS the review-bearing path.
-            reviewGate: true,
+            // Review is an explicit independent user action.
+            reviewGate: false,
             // T9 P3: live worker token/tool stream into the team tool card.
             onActivity,
             // Fleet viz: emit the wave/task DAG (all waiting) before dispatch so

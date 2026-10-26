@@ -61,7 +61,7 @@ lines.on('line', async line => {
   init=message.payload; ignore=init.config.order.id==='no-ack'; if(init.proAuthorization?.denied) await denyRuntimeProAuthorization();
   if(init.config.order.id==='existing') {
    let ready; const started=new Promise(resolve=>ready=resolve); let release=false;
-   const config={...init.config,order:{id:'nested',objective:'synthetic'},toolRegistry:new ToolRegistry(),onActivity:()=>ready(),onSteerDrain:()=>{if(!release)return null;release=false;return 'probe'}};
+   const config={...init.config,order:{id:'nested',objective:'synthetic'},toolRegistry:new ToolRegistry(),promptEngine:{getUserInstructionsSnapshot:()=>({version:1,state:'disabled'})},onActivity:()=>ready(),onSteerDrain:()=>{if(!release)return null;release=false;return 'probe'}};
    nested=withManagedProAuthorization(init.proAuthorization,()=>runWorkerSessionOop(config,{getMemoryBlock:()=>undefined,stallMsOverride:10000,entryOverride:{execArgs:process.execArgv,script:process.argv[1]}}));
    releaseNested=()=>{release=true;config.onSteerDrain?.()}; await started;
   }
@@ -116,6 +116,9 @@ process.on('disconnect',()=>process.exit(0));
     const config = {
       order: { id, objective: 'synthetic task' }, cwd: home, maxTurns: 1, contextWindow: 8192, compact: { enabled: false, model: 'synthetic-model' },
       runtimeDecision: { isWrite: false }, toolRegistry: new ToolRegistry(), onActivity: () => ready(),
+      // parent.ts 组装 init payload 时会取 promptEngine.getUserInstructionsSnapshot()
+      // （本周期新增）——fixture 补最小快照，不接入真实 PromptEngine。
+      promptEngine: { getUserInstructionsSnapshot: () => ({ version: 1, state: 'disabled' }) },
       onSteerDrain: () => { if (!release) return null; release = false; return 'probe' },
     } as unknown as WorkerSessionConfig
     const result = runWorkerSessionOop(config, {

@@ -217,7 +217,7 @@ export function buildGateConvergenceHint(
   }
   // YELLOW — differentiate no_test_infra from transient external blocks
   if (gate.attributionClass === 'module_unverified') {
-    return `交付门禁 YELLOW（波及面未验证）：${gate.reason ?? '改动波及的测试从未被任何 passed 验证覆盖。'}\n引入回归是最常见的交付失败——请运行上述受波及测试（或一次 full-scope 验证）后再交付；commit=true 会被硬拦。` + depthSuffix
+    return `交付门禁 YELLOW（波及面未验证）：${gate.reason ?? '改动波及的测试从未被任何 passed 验证覆盖。'}\n请按预算验证受波及测试并披露未覆盖项；默认 advisory 可先安全提交、随后独立 /review，verification_policy="strict" 才将覆盖作为提交硬门。` + depthSuffix
   }
   if (gate.attributionClass === 'no_test_infra') {
     return `交付门禁 YELLOW（测试基础设施缺失）：${gate.reason ?? '项目无可自动检测的测试框架。'}\n\n不要反复重试 run_tests——它每次都会以同样原因受阻。应向用户报告具体缺失项，并询问是否需要协助搭建测试框架，或用 bash 运行替代验证后交付。` + depthSuffix

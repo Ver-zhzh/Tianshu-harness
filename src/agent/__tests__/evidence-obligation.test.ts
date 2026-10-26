@@ -244,10 +244,10 @@ describe('delivery / blocked / supersede lifecycle', () => {
 
 describe('final gate evaluation (high-risk only — low_risk_small_edit_never_gates_final)', () => {
   it('open high-risk obligation → continue_once with the shortest next action', () => {
-    const ob = createObligation({ family: 'bugfix', claim: 'fix the crash', targets: ['a.ts'], risk: 'high' })
+    const ob = createObligation({ family: 'existence', claim: 'source exists', targets: ['a.ts'], risk: 'high' })
     const result = evaluateFinalCandidate(storeWith(ob))
     assert.equal(result.verdict, 'continue_once')
-    assert.equal(result.nextAction?.action, 'red_reproduction')
+    assert.equal(result.nextAction?.action, 'read_source')
     assert.equal(result.nextAction?.obligationId, ob.id)
   })
 

@@ -25,6 +25,7 @@ export interface PlanStep {
   expectedTools: string[]     // ["read_file", "grep"]
   verificationHint?: string   // "确认 PlanModeState 是二态布尔开关"
   status: StepStatus
+  acceptanceIds?: string[]
 }
 
 export interface ToolCallSummary {
@@ -160,6 +161,7 @@ export function buildPlanSteps(
       description: s.content.trim(),
       expectedTools: inferExpectedTools(s.content),
       status: mapTodoStatusToStepStatus(s.status),
+      ...(s.acceptanceIds?.length ? { acceptanceIds: s.acceptanceIds } : {}),
     }))
 }
 
@@ -189,6 +191,11 @@ export function withPlanSteps(
       (s.id && s.id === existing.id) || s.description === existing.description
     )
     if (!match) return existing
+    const acceptanceChanged = match.acceptanceIds && JSON.stringify(match.acceptanceIds) !== JSON.stringify(existing.acceptanceIds)
+    if (acceptanceChanged) {
+      changed = true
+      existing = { ...existing, acceptanceIds: match.acceptanceIds }
+    }
     // 不覆盖已经 done/replanned 的状态为 pending/active
     if (existing.status === 'done' || existing.status === 'replanned') return existing
     if (existing.status === match.status) return existing

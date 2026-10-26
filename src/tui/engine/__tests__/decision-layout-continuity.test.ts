@@ -13,7 +13,7 @@ import type { LiveRegionLine } from '../live-engine.js'
  * 决策卡从输入光标位置继续绘制，对话被分成上下两层。
  *
  * 缺陷二（内容生命周期）：收起后卡片正文必须退场，仅保留返回入口。
- * 经典模式现在保持满窗口高度，允许历史投影与 padding；总帧塌缩不再是验收条件。
+ * 经典模式只绘制动态区，收起决策卡应释放空白，正文只由 CommitEngine 输出。
  *
  * 断言基于「终态帧文本 + scrollback」：TerminalGrid 模拟 normal screen 的
  * 行为（光标移动、擦除、换行、scrollback），比 frame-only 断言更接近真实终端。
@@ -93,7 +93,7 @@ for (const [cols, rows] of [[120, 30], [80, 24]] as const) {
       } finally { h.app.dispose() }
     })
 
-    test(`${cols}x${rows} ${kind}: collapse removes the card, keeps the composer fixed and Tab restores selection`, async () => {
+    test(`${cols}x${rows} ${kind}: collapse releases card height and Tab restores selection`, async () => {
       const h = makeApp({ cols, rows })
       try {
         await (h.app as any).frontend.ready
@@ -102,11 +102,11 @@ for (const [cols, rows] of [[120, 30], [80, 24]] as const) {
         let frame: readonly LiveRegionLine[] = []
         live.render = (lines, opts) => { frame = lines; render(lines, opts) }
         const position = () => {
-          assert.equal(frame.length, rows, 'decision transitions must retain the full terminal height')
+          assert.ok(frame.length < rows, 'classic decisions must remain in the bounded live region')
           const caret = frame.findIndex(line => line.caretCol !== undefined)
           const bottom = frame.map(line => line.region).lastIndexOf('composer')
-          assert.ok(caret >= rows - 4 && caret <= bottom)
-          assert.ok(bottom >= rows - 2)
+          assert.ok(caret >= frame.length - 4 && caret <= bottom)
+          assert.ok(bottom >= frame.length - 2)
           return { caret, bottom }
         }
         if (kind === 'question') h.app.openAskUserQuestionPanel(question)
@@ -119,7 +119,7 @@ for (const [cols, rows] of [[120, 30], [80, 24]] as const) {
         assert.ok(frame.some(line => line.decisionPart === 'action'))
         h.stdin.dataHandler!('\x1b')
         await tick()
-        assert.deepEqual(position(), expanded, 'collapsing a card must not lift the bottom composer')
+        assert.ok(position().bottom < expanded.bottom, 'collapsing a card must release the expanded height')
         const collapsed = frame.map(line => stripAnsi(line.text)).join('\n')
         assert.match(collapsed, /Tab 返回卡片/, 'the collapsed card must retain its return control')
         assert.equal(collapsed.includes(cardText), false, 'the old card body must not remain in the frame')

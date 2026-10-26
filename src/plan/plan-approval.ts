@@ -4,7 +4,7 @@
  * 闭环三层守卫（缺一即是 TUI/桌面行为分叉）：
  * 1. 内容校验：空计划/占位符草稿在批准边界硬拒（绝不把被掏空的文件标 APPROVED）。
  * 2. 锚点漂移复查：非阻断——计划写成后代码可能已变化，漂移注入 kickoff 让执行方以现实为准。
- * 3. 分波 kickoff：指示 read_file → plan_task(execute=true)/team_orchestrate 逐波过审查门 → plan_close。
+ * 3. kickoff：执行已批准步骤；审查、测试与并行编排由批准内容决定。
  *
  * 缓存纪律：kickoff 是用户边界的 append 消息，纯追加不碰前缀；本模块不注入任何 prompt 块。
  */
@@ -16,7 +16,7 @@ import { extractRequiredSkills } from '../agent/skill-gate.js'
 
 /** Build the kickoff prompt that drives wave-by-wave execution of an approved plan. */
 export function buildPlanKickoff(slug: string, title: string, approach?: string, anchorDriftNote?: string, requiredSkills?: string[]): string {
-  let msg = `开始执行已批准方案「${title}」(.rivet/plans/${slug}.md)。先 read_file 读取该计划,然后用 plan_task(execute=true) 或 team_orchestrate 把任务按波次并行执行、逐波过审查门;开工前用 todo 列出有序步骤跟踪进度,全部完成后 plan_close。`
+  let msg = `开始执行已批准方案「${title}」(.rivet/plans/${slug}.md)。先 read_file 读取计划，用 todo 跟踪已批准步骤并按依赖推进；并行编排、测试和审查仅执行计划明确包含且用户已批准的步骤，不追加质量门或扩大范围。实施完成后用 plan(action="close",executionStatus="completed") 关闭；提交、验证和审查结果分别如实登记，延后项保留原因。`
   if (approach) msg += `\nSelected approach: ${approach} — 只执行此方案,勿执行未选中的备选。`
   // 技能契约指令（长庚域事故 2026-07-25）：计划点名的 skill 是该计划专属的
   // 流程契约。skill 正文已瘦身为纯增量（与前缀纪律不重叠），警告只钉核心

@@ -1,3 +1,5 @@
+import { toolMountNotice } from '../workflows/required-tools.js'
+import { cleanupArchivedWorktree } from './archive-worktree.js'
 import { manageContinuityRecovery } from './session-continuity-recovery.js'
 import { buildWorkerLog, type WorkerLogOptions, type WorkerLog } from './worker-log.js'
 import { SessionTitleCoordinator, titleInput, loadTitleInput, canGenerateTitle, type buildTitleCompletion } from './session-title.js'
@@ -46,6 +48,7 @@ import { loadConfig } from '../config/manager.js'
 import { rivetHome, sessionsDir } from '../config/paths.js'
 import { registerStorageRuntime } from '../storage/maintenance-gate.js'
 import type { DelegationActivity, Tool } from '../tools/types.js'
+import { createReviewFollowupController } from '../agent/review-followup-controller.js'
 import type { ApprovalResult } from '../agent/approval-edit.js'
 import type { HookEvent, HookResult } from '../hooks/user-hooks-runner.js'
 import type { IntentPreview } from '../agent/intent-preview.js'
@@ -79,7 +82,13 @@ import { SteerBuffer } from '../tui/steer-buffer.js'
 import { TEAM_PANEL_UI_PREFIX } from '../tui/team-panel-model.js'
 import { COUNCIL_PANEL_UI_PREFIX } from '../tui/council-panel-model.js'
 import { containsRegisteredFrame } from '../tui/frame-codec.js'
-import { buildHandoffPrompt } from '../tui/handoff.js'
+import { completeHandoffRequest, type HandoffRequest } from '../tui/handoff.js'
+import type { HandoffLiveInput } from '../agent/fact-handoff.js'
+import { requestSessionHandoff, type HandoffResult } from './handoff-service.js'
+export type { HandoffResult } from './handoff-service.js'
+import { resolveHandoffInput } from './handoff-input.js'
+import { recordApprovedDecision } from '../plan/continuity-records.js'
+import { withPlanCompletion } from '../plan/completion-view.js'
 import { handoffRecoveries } from '../agent/recovery-journal.js'
 import { getSessionDir } from '../agent/session-persist.js'
 import { WatchdogRecoveryPolicy } from '../agent/watchdog-recovery-policy.js'
@@ -98,7 +107,7 @@ import { tmpdir } from 'node:os'
 import { renderPdfPageImages } from '../tools/doc-extract.js'
 import { resolveSessionWorkspaceForSession, type SessionWorkspaceMode } from './workspace.js'
 import { stripTerminalEscapes, sanitizeArchiveDisplayName } from '../utils/safe-path.js'
-import { createWorktree, removeWorktree, listWorktrees, hasUnlandedWork, commitAll, commitIndex, revParseHead, squashMergeBranch, pushBranch, type WorktreeEntry } from '../agent/worktree.js'
+import { createWorktree, listWorktrees, hasUnlandedWork, commitIndex, revParseHead, squashMergeBranch, pushBranch, type WorktreeEntry } from '../agent/worktree.js'
 import { createPr } from './gh-cli.js'
 import { getGitGraph, getWorkingTreeFiles, getFileDiff, getFileAtBase, listGitBranches } from '../tools/git.js'
 import type { WorkingTreeFile } from '../tools/git.js'
@@ -280,6 +289,7 @@ export interface DelegateActivityUpdate {
 }
 
 export interface ManagedAgent {
+  setRuntimeNoticeHandler?(handler: (message: string) => void): void
   getRecoverySnapshot?(): unknown
   /**
    * 包装 `AgentLoop.run`。返回值透传其 outcome——`skipped-already-running`
@@ -362,8 +372,9 @@ export interface ManagedAgent {
    * Used by workflow slash-command resolution to ensure prompt-declared tools are
    * visible before run. Optional so lightweight test doubles need not implement it.
    */
+  getToolSurface?(): import('../agent/tool-surface.js').ToolSurfaceSnapshot
   enableTool?(name: string): {
-    status: 'mounted' | 'already-active' | 'not-extended' | 'unknown' | 'gating-off'
+    status: 'mounted' | 'already-active' | 'not-extended' | 'unknown' | 'gating-off' | 'disabled' | 'restricted' | 'busy'
     cacheImpact: 'prefix-invalidated' | 'none'
   }
   /**
@@ -472,6 +483,7 @@ export interface ManagedAgent {
    * P0-2: 返回本会话 TodoStore 的当前清单。plan_task 成功后发 todo_state SSE 用。
    * 多会话隔离——每个 session 独立的 TodoStore。Optional 以兼容 lightweight test doubles。
    */
+  getHandoffInput?(): HandoffLiveInput
   getTodos?(): Array<{ id: string; content: string; status: string }>
   /**
    * Wave L: 进程退出时释放 session 级资源（典型场景：sidecar runServe.close
@@ -479,6 +491,7 @@ export interface ManagedAgent {
    * worker。与 abort() 严格分离——abort 中止当前 turn 但保留 agent 可继续运行，
    * shutdown 是终结性操作。Optional 以兼容 lightweight test doubles。
    */
+  retireExternalHooks?(): Promise<boolean>
   shutdown?(): void | boolean | Promise<void | boolean>
   /**
    * I1: 直接召集议事会评审一个 artifact 中的 council-plan-json 草案。
@@ -1131,12 +1144,13 @@ interface InternalSession {
   steer: SteerBuffer
   /** Phase 2 — queue lane：busy 期间排队的跟进消息（下次 prompt 归并 / steer 升级 / 撤回）。 */
   queueLane: QueueLaneEntry[]
+  reviewFollowup?: ReturnType<typeof createReviewFollowupController>
   /**
    * /handoff 登记的归档任务（桌面端 POST /sessions/:id/handoff）：交接 run 收尾时
    * 把项目内 .rivet/HANDOFF.md 拷贝归档到会话目录 <id>.handoff.md——
    * loadPrevHandoff 注入管线认的位置（与 TUI pendingHandoffCopy 同语义）。
    */
-  pendingHandoff?: { src: string; dest: string; sinceMs: number }
+  pendingHandoff?: HandoffRequest
   /**
    * Background job registry (bash run_in_background + `job` tool). Server-owned so
    * it survives agent rebuilds (switchModel) and its lifecycle events can be
@@ -3101,11 +3115,10 @@ export class RuntimeSessionManager {
               }
             })
             this.maybeWatchdogAutoContinue(session)
-            setImmediate(() => { void this.goalRollover.onRunSettled(id).catch(error => {
-              this.append(session, 'error', { error: redactText(String(error)), code: 'goal_rollover_failed' })
-            }) })
+            setImmediate(() => { void this.goalRollover.onRunSettled(id).catch(error => this.reportGoalRolloverFailure(id, error)) })
             this.scheduleQueueLaneFlush(session)
             if (session.record.archived) this.unloadSession(session)
+            session.reviewFollowup?.settled()
           } finally {
             runSettlement.resolve()
           }
@@ -3169,24 +3182,25 @@ export class RuntimeSessionManager {
     return true
   }
 
-  /**
-   * /handoff（桌面端入口）：登记归档任务后发起交接 run——agent 把交接文档写到
-   * 项目内 .rivet/HANDOFF.md（工作区内免审批），run 收尾时 settleHandoffArchive
-   * 拷贝归档到会话目录 <id>.handoff.md（loadPrevHandoff 注入管线认的位置，
-   * 与 TUI pendingHandoffCopy 同语义）。会话不存在/运行中返回 false（路由 409）。
-   */
-  requestHandoff(id: string, note?: string): { ok: boolean; error?: string } {
+  /** Visible failure fallback remains available when the rollover checkpoint cannot be written. */
+  reportGoalRolloverFailure(id: string, error: unknown): void {
     const session = this.sessions.get(id)
-    if (!session) return { ok: false, error: 'Session not found' }
-    if (session.running) return { ok: false, error: 'Session is already running' }
-    const src = join(session.record.cwd, '.rivet', 'HANDOFF.md')
-    const dest = join(getSessionDir(session.record.cwd), `${session.record.id}.handoff.md`)
-    session.pendingHandoff = { src, dest, sinceMs: Date.now() }
-    if (!this.run(id, buildHandoffPrompt(src, note), undefined, false, undefined, { origin: 'runtime_command' })) {
-      session.pendingHandoff = undefined
-      return { ok: false, error: 'Session is already running' }
-    }
-    return { ok: true }
+    if (!session) return
+    const message = `上下文接力已暂停：${redactText(String(error))}；未自动重试，请检查后显式恢复。`
+    try { this.goalRollover.pauseOnFailure(id, message) } catch { /* event below still reports a failed state write */ }
+    this.append(session, 'error', { error: message, code: 'goal_rollover_failed' })
+  }
+  prepareHandoffInput(id: string, raw: string) {
+    const session = this.sessions.get(id)
+    if (!session) return undefined
+    return resolveHandoffInput(session.record.cwd, id, raw, session.running, (note, options) => this.requestHandoff(id, note, options), text => this.append(session, 'intent_note', { text }))
+  }
+  requestHandoff(id: string, note?: string, options: { narrative?: boolean } = {}): HandoffResult {
+    const session = this.sessions.get(id)
+    return requestSessionHandoff(session, note, options, {
+      start: prompt => this.run(id, prompt, undefined, false, undefined, { origin: 'runtime_command' }),
+      append: (type, data) => { if (session) this.append(session, type, data) },
+    })
   }
 
   /**
@@ -3199,25 +3213,9 @@ export class RuntimeSessionManager {
     const pending = session.pendingHandoff
     if (!pending) return
     session.pendingHandoff = undefined
-    try {
-      // 「文档晚于登记写入」的判定带容差：mtimeMs 是亚毫秒精度、sinceMs 是
-      // Date.now() 整数毫秒，ext4 等文件系统时间戳还有粒度量化——严格 > 会在
-      // 毫秒边界偶发翻转（2026-09-03 CI 三次实证：mtime 262.618 < sinceMs 263，
-      // 交接 run 收尾静默跳过归档）。2s 容差不改「陈旧文档跳过」语义
-      // （陈旧指上一任务遗留的小时级旧文档），只消除边界抖动。
-      if (existsSync(pending.src) && statSync(pending.src).mtimeMs >= pending.sinceMs - 2_000) {
-        // dest 父目录在真实 agent 路径下由 SessionPersist 构造创建；但 best-effort
-        // 不依赖那个时序（懒构建/异常会话里可能尚无目录）。
-        mkdirSync(dirname(pending.dest), { recursive: true })
-        copyFileSync(pending.src, pending.dest)
-        handoffRecoveries(session.record.cwd, session.record.id)
-        this.append(session, 'handoff_archived', {
-          text: `✦ 交接文档已写入 ${pending.src} 并归档 ${pending.dest}（默认不注入新会话；RIVET_PREV_HANDOFF=1 可开启）。`,
-          src: pending.src,
-          dest: pending.dest,
-        })
-      }
-    } catch { /* best-effort：归档失败不阻断会话收尾 */ }
+    const result = completeHandoffRequest(pending)
+    if (result.status === 'archived' || result.status === 'updated') handoffRecoveries(session.record.cwd, session.record.id)
+    this.append(session, 'handoff_archived', { text: result.message, status: result.status, src: pending.sourcePath, dest: pending.destinationPath })
   }
 
   /**
@@ -3420,6 +3418,11 @@ export class RuntimeSessionManager {
     ), session.record.id)
     const finish = (agent: ManagedAgent): ManagedAgent => {
       session.agent = agent
+      agent.setRuntimeNoticeHandler?.(message => {
+        if (this.sessions.get(session.record.id) === session && session.agent === agent) this.append(session, 'intent_note', {
+          title: '工具可用性变化', summary: redactText(message), text: redactText(message), reasons: [], action: '检查配置后按需启用',
+        })
+      })
       this.applySelections(session)
       this.warnIfHistoryLost(session)
       return agent
@@ -4190,7 +4193,7 @@ export class RuntimeSessionManager {
     const session = this.sessions.get(id)
     if (!session) return null
     try {
-      return await storeListPlans(session.record.cwd)
+      return (await storeListPlans(session.record.cwd)).map(plan => withPlanCompletion(session.record.cwd, id, plan))
     } catch {
       return []
     }
@@ -4227,7 +4230,8 @@ export class RuntimeSessionManager {
     const session = this.sessions.get(id)
     if (!session) return undefined
     try {
-      return await storeReadPlan(session.record.cwd, slug)
+      const plan = await storeReadPlan(session.record.cwd, slug)
+      return plan ? withPlanCompletion(session.record.cwd, id, plan) : plan
     } catch {
       return null
     }
@@ -4324,6 +4328,8 @@ export class RuntimeSessionManager {
       }
     }
     const { approved, kickoff } = result
+    try { recordApprovedDecision(session.record.cwd, id, approved.path, approved.content, resolvedApproach) }
+    catch { this.append(session, 'intent_note', { text: '计划已批准，但审批证据写入失败；交接中保留未知，不重复审批。' }) }
     const agent = await this.ensureAgentAsync(session)
     try {
       agent.setActivePlan?.({
@@ -4841,22 +4847,23 @@ export class RuntimeSessionManager {
   emitHookResult(
     id: string,
     results: HookResult[],
-    meta: { event: HookEvent; turn?: number; toolName?: string; error?: string },
+    meta: import('../hooks/external-hook-types.js').HookResultMeta,
   ): void {
     const s = this.sessions.get(id)
     if (!s) return
-    this.append(s, 'hook_result', {
-      event: meta.event,
-      turn: meta.turn,
-      toolName: meta.toolName,
-      error: meta.error,
-      results,
-    })
+    this.append(s, 'hook_result', { ...meta, results })
     this.trimHookResults(s)
   }
 
+  emitHookCleanup(id: string, meta: import('../hooks/external-hook-types.js').HookResultMeta): void {
+    const session = this.sessions.get(id)
+    if (!session) return
+    this.append(session, 'hook_cleanup', { ...meta })
+    this.trimHookResults(session)
+  }
+
   private trimHookResults(session: InternalSession): void {
-    const hookEvents = session.events.filter((e) => e.type === 'hook_result')
+    const hookEvents = session.events.filter((e) => e.type === 'hook_result' || e.type === 'hook_cleanup')
     if (hookEvents.length <= 50) return
     const toDrop = hookEvents.length - 50
     const dropped = new Set(hookEvents.slice(0, toDrop))
@@ -5166,32 +5173,16 @@ export class RuntimeSessionManager {
       this.rejectAllPending(s, 'aborted')
     }
     s.record.archived = true
-    // Clean up isolated worktree on archive. Guard against data loss: if the
-    // worktree has uncommitted changes, checkpoint-commit them first; if the
-    // branch carries commits not merged into the main workspace, keep the
-    // branch (only the worktree directory is removed) so work stays landable.
-    let branchKept = false
-    if (s.record.worktreePath && ![...this.sessions.values()].some(other => other !== s && !other.record.archived && other.record.cwd === s.record.cwd)) {
-      try {
-        const origin = s.record.worktreeOriginCwd ?? listWorktrees(s.record.worktreePath)[0]?.path
-        if (!origin) throw new Error('Worktree origin unavailable; preserve checkout')
-        const work = hasUnlandedWork(origin, s.record.worktreePath, s.record.worktreeBranch)
-        if (work.dirty) {
-          // worktree remove --force discards uncommitted changes — snapshot them.
-          commitAll(s.record.worktreePath, 'rivet: archive checkpoint', { noVerify: true })
-        }
-        const after = work.dirty || work.unmergedCommits > 0
-          ? hasUnlandedWork(origin, s.record.worktreePath, s.record.worktreeBranch)
-          : work
-        // Squash merge-back leaves branch commits unreachable from main —
-        // the landedHead marker proves they were landed. A branch head that
-        // hasn't moved past the last merge-back is safe to delete.
-        const landed = Boolean(s.record.landedHead)
-          && revParseHead(s.record.worktreePath) === s.record.landedHead
-        branchKept = Boolean(s.record.worktreeBranch) && after.unmergedCommits > 0 && !landed
-        removeWorktree(origin, s.record.worktreePath, s.record.worktreeBranch, { keepBranch: branchKept })
-      } catch { /* non-fatal */ }
-    }
+    const archiveGeneration = ++s.lifecycleGeneration
+    const cleanup = () => cleanupArchivedWorktree(s.record,
+      [...this.sessions.values()].some(other => other !== s && !other.record.archived && other.record.cwd === s.record.cwd))
+    let hookDrain: Promise<boolean> | undefined
+    try { hookDrain = s.agent?.retireExternalHooks?.() } catch { hookDrain = Promise.resolve(false) }
+    const branchKept = hookDrain ? false : cleanup()
+    if (hookDrain) void hookDrain.then(confirmed => {
+      if (!confirmed || this.sessions.get(id) !== s || !s.record.archived || s.lifecycleGeneration !== archiveGeneration) return
+      if (cleanup()) this.append(s, 'status', { status: 'archived', branchKept: true, worktreeBranch: s.record.worktreeBranch })
+    }, () => {})
     this.touch(s)
     this.append(s, 'status', branchKept
       ? { status: 'archived', branchKept: true, worktreeBranch: s.record.worktreeBranch }
@@ -5386,8 +5377,12 @@ export class RuntimeSessionManager {
     const session = this.sessions.get(id)
     if (!session) return undefined
     const agent = await this.ensureAgentAsync(session)
-    return agent.enableTool?.(name)
+    const result = agent.enableTool?.(name)
+    if (result?.status === 'mounted') this.append(session, 'intent_note', { title: '工具已启用', summary: toolMountNotice(name, result), reasons: [], action: '继续执行本次显式指令' })
+    return result
   }
+
+  getToolSurface(id: string) { return this.sessions.get(id)?.agent?.getToolSurface?.() }
 
   /**
    * Hot-inject MCP (or other late-discovered) tools into every session that
@@ -6190,14 +6185,9 @@ export class RuntimeSessionManager {
   private buildCallbacks(session: InternalSession, journalWrite: (write: () => Promise<void> | undefined) => void): AgentCallbacks {
     const lifecycleGeneration = session.lifecycleGeneration
     const activeRun = session.activeRunSettlement
-    /**
-     * 本回调批是否仍属于当前会话生命周期（归档 / 删除 / 新 run 会吊销）。
-     * 这是既有语义，**不要**把它收紧成「run 未 settle」：下面近 20 处守卫全靠它，
-     * 而 run 收尾之后到达的回调恰恰是该采纳的——onStreamInterrupted 要把终态如实
-     * 记成 interrupted、onTurnComplete 要补发累计 usage 快照（onAbort 那段注释里
-     * 是同款理由）、onDelegationActivity 要落 worker 活动。收紧这一个谓词 =
-     * 一次性改写这近 20 处的行为，且失效方式是静默丢事件。
-     */
+    /** 生命周期守卫：归档/删除/新 run 吊销，不能按 run 已 settle 收窄。
+     * 收尾后仍须接收中断、累计 usage 和委派终态；待决审批另用 isLiveAttempt。
+     * 后台审查的 onReviewReady 有更长寿命，单独核对 session 对象与归属。 */
     const isActive = (): boolean => this.ownsSessionLifecycle(session, lifecycleGeneration)
     /**
      * isActive 的收窄版：本回调批所属的那次 run 仍是当前在跑、且尚未 settle 的 run。
@@ -6214,6 +6204,13 @@ export class RuntimeSessionManager {
     // 可能是别会话的更新计划，审批卡因此发错/丢失（2026-07-25 修复）。
     const planSubmitToolIds = new Map<string, { slug: string; title: string }>()
     return {
+      onReviewReady: (notice) => {
+        // Review outlives the originating run; bind to the session object, not the old run generation.
+        if (this.sessions.get(session.record.id) !== session || session.record.archived || notice.sessionId !== session.record.id) return
+        // 契约分离（2026-10-25）：自动后续核实控制器退役——审查完成只通知用户，
+        // 不自动驱动核实 run；处理发现由用户显式发起。followupClaimed 不再驱动执行。
+        this.append(session, 'phase', { phase: 'review-followup', reason: '审查完成：发现已记入本会话待办；处理发现由用户决定何时发起（review_changes action=list）。' })
+      },
       onDomainResolved: (resolved) => {
         if (!isActive()) return
         const knownDomain = starDomainRegistry.get(resolved.key)
@@ -6258,6 +6255,10 @@ export class RuntimeSessionManager {
         this.flushToolResultBuf(session)
         session.toolResultStream = undefined
         this.bufferDelta(session, 'thinking_delta', thinking)
+      },
+      onToolInputProgress: progress => {
+        if (!isActive()) return
+        this.append(session, 'tool_input_progress', { ...progress })
       },
       onToolUse: (toolId, name, input) => {
         if (!isActive()) return
@@ -7194,7 +7195,7 @@ export class RuntimeSessionManager {
     if (!this.ownsSessionDurability(session)) return
     // 无进展哨兵打点（stall-observer）：事件落盘 = 回合进展。回合死锁时
     // jsonl 停止写入 → 此 touch 停止 → 观察器 90s 后告警并指认最后事件。
-    if (type !== 'hook_result' && !(type === 'phase' && data.phase === 'heartbeat')) {
+    if (type !== 'hook_result' && type !== 'hook_cleanup' && !(type === 'phase' && data.phase === 'heartbeat')) {
       touchActivity(session.record.id, `evt:${type}`)
     }
     if (type !== 'tool_result') {

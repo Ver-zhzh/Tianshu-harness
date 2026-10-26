@@ -93,6 +93,22 @@ test('native chat times out on silence rather than an active long response and k
   } finally { participant.dispose(); await pending }
 })
 
+test('native chat 将超大分钟配置钳制在 Node 定时器上限内', async () => {
+  let handler: any
+  const delays: number[] = []
+  const { TianshuChatParticipant } = await load('src/chat/participant.ts', { vscode: {
+    chat: { createChatParticipant: (_id: string, fn: any) => { handler = fn; return { dispose() {} } } },
+    workspace: { getConfiguration: () => ({ get: () => 36000 }) },
+  } }, { setTimeout: (_run: () => void, delay: number) => { delays.push(delay); return delays.length }, clearTimeout() {} })
+  const client = { getSession: async () => ({ lastSeq: 0 }), subscribe: () => () => {}, queue: async () => 'idle', prompt: async () => {}, abort: async () => {} }
+  const participant = new TianshuChatParticipant(async () => client, () => {}, {})
+  const pending = handler({ prompt: 'task' }, { history: [{ participant: 'tianshu.default', result: { metadata: { tianshuSessionId: 'A' } } }] }, { progress() {}, markdown() {} }, { onCancellationRequested: () => ({ dispose() {} }) })
+  try {
+    for (let n = 0; n < 20 && !delays.length; n++) await tick()
+    assert.ok(delays.includes(2_147_483_647), `实际定时器预算：${delays.join(', ')}`)
+  } finally { participant.dispose(); await pending }
+})
+
 for (const phase of ['client', 'create', 'session', 'permission', 'prompt']) {
   test(`native chat ignores a late ${phase} rejection after cancellation`, async () => {
     let handler: any, cancel: any, rejectPending: any
@@ -186,13 +202,18 @@ test('dismissed or disposed question dialogs never send an answer', async () => 
 
 // The VS Code host is external. These document doubles retain text/version and
 // apply the real executor's edits so assertions cover its observable file result.
-async function executorFixture() {
+async function executorFixture(opts: { formatOnSave?: boolean; failSave?: boolean } = {}) {
   let text = 'before\n', diskText = 'before\n', version = 1
   const answers: any[] = [], warnings: string[] = [], terminals: any[] = []
   class Uri { fsPath: string; constructor(p: string) { this.fsPath = p } static file(p: string) { return new Uri(p) } }
   class Range { constructor(..._args: any[]) {} }
   class WorkspaceEdit { edits: any[] = []; replace(uri: any, range: any, value: string) { this.edits.push({ uri, range, value }) } createFile() {} }
-  const document = { uri: Uri.file('/fixture/file.txt'), get version() { return version }, getText: () => text, positionAt: (n: number) => ({ line: 0, character: n }), save: async () => { diskText = text; return true } }
+  const document = { uri: Uri.file('/fixture/file.txt'), get version() { return version }, getText: () => text, positionAt: (n: number) => ({ line: 0, character: n }), save: async () => {
+    if (opts.failSave) return false
+    if (opts.formatOnSave) { text = text.replace('agent', 'agent formatted'); version++ }
+    diskText = text
+    return true
+  } }
   const vscode = { Uri, Range, WorkspaceEdit, ThemeColor: class {}, OverviewRulerLane: { Left: 1 }, EventEmitter: class { event() {} fire() {} dispose() {} }, window: {
     createTextEditorDecorationType: () => ({ dispose() {} }), visibleTextEditors: [], showTextDocument: async () => ({ setDecorations() {} }),
     showInformationMessage: async (s: string) => { warnings.push(s) }, showWarningMessage: async (s: string) => { warnings.push(s) },
@@ -230,6 +251,31 @@ test('rejecting an unchanged delegated edit restores the original text', async (
     assert.equal(f.getText(), 'before\n')
     assert.equal(f.getDiskText(), 'before\n', 'rejecting an unchanged delegated edit must also persist the reverted content to disk')
     assert.equal(f.answers.at(-1).status, 'rejected')
+  } finally { f.executor.dispose() }
+})
+
+test('save participants 改变文本后拒绝编辑仍按保存后的内容判撤销', async () => {
+  const f = await executorFixture({ formatOnSave: true })
+  try {
+    const done = f.executor.handleApplyEdit('edit', { path: 'file.txt', oldContent: 'before\n', newContent: 'agent\n' }, f.origin)
+    for (let n = 0; n < 20 && !f.executor.pendingDecisions.size; n++) await tick()
+    assert.equal(f.getDiskText(), 'agent formatted\n')
+    await f.executor.decide(f.document.uri, 'rejected'); await done
+    assert.equal(f.getText(), 'before\n')
+    assert.equal(f.getDiskText(), 'before\n')
+    assert.equal(f.answers.at(-1).status, 'rejected')
+  } finally { f.executor.dispose() }
+})
+
+test('初次保存失败恢复编辑缓冲区，不留下无待决项的脏改动', async () => {
+  const f = await executorFixture({ failSave: true })
+  try {
+    await f.executor.handleApplyEdit('edit', { path: 'file.txt', oldContent: 'before\n', newContent: 'agent\n' }, f.origin)
+    assert.equal(f.getText(), 'before\n')
+    assert.equal(f.getDiskText(), 'before\n')
+    assert.equal(f.executor.pendingDecisions.size, 0)
+    assert.match(f.answers.at(-1).content, /save failed/i)
+    assert.equal(f.answers.at(-1).isError, true)
   } finally { f.executor.dispose() }
 })
 

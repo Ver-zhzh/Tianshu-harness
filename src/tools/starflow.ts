@@ -207,7 +207,7 @@ export function createStarflowTool(deps: StarflowToolDeps): Tool {
             maxItems: 5,
           },
           rounds: { type: 'number', enum: [1, 2], description: 'council 辩论轮数（默认 1；高风险任务传 2 启用反驳轮）。⚠ rounds≥2 受 councilMultiRound Pro 门钳制——Basic 未启用时降级单轮继续（不拒绝），输出标注「已按单轮执行——Pro 门」。' },
-          autoReview: { type: 'boolean', default: true, description: 'Whether Galaxy adds the automatic review wave; defaults to true.' },
+          autoReview: { type: 'boolean', default: false, description: 'Whether Galaxy adds the automatic review wave; defaults to false (contract separation: reviews are launched independently).' },
           seats: {
             type: 'array',
             description: 'council 席位覆盖（同 council_convene 的 seats，透传到首轮与复议轮）。修订轮推荐只召回「上轮否决的席位 + 与修订点相关的域席」，而非默认全量。',
@@ -321,7 +321,7 @@ export function createStarflowTool(deps: StarflowToolDeps): Tool {
         : 0
       // autoReview is an additional serial wave only when Galaxy does not
       // already contain an explicit review/verify dimension.
-      const autoReview = (params?.input?.autoReview as boolean | undefined) ?? true
+      const autoReview = (params?.input?.autoReview as boolean | undefined) ?? false
       const hasExplicitReview = executableDims.some(d => isReviewGalaxyDimension(d.name))
       const reviewMs = autoReview && executableDims.length > 0 && !hasExplicitReview
         ? delegationToolTimeoutMs(turnCount, ['reviewer'], { taskCount: 1 })

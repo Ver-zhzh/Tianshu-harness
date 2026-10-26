@@ -313,10 +313,13 @@ describe('assembly audit — field consumption coverage', () => {
   })
 
   test('decisionStyle: confirmed display-only (regression guard)', () => {
+    // 允许的例外：agent/domain-briefing.ts 是「用户可读简报」展示模块
+    // （8817408c6）——decisionStyle 在其中只翻译为人话标签，不进模型上下文、
+    // 不驱动行为，与本 guard 守护的 display-only 语义一致。
     const decisionStyleConsumers = starDomainFields
       .find(f => f.field === 'decisionStyle')!.consumers
       .map(f => f.replace(/\\/g, '/'))
-      .filter(f => !f.includes('tui/') && !f.includes('main.ts'))
+      .filter(f => !f.includes('tui/') && !f.includes('main.ts') && !f.includes('agent/domain-briefing.ts'))
     const expectedTuiOnly = decisionStyleConsumers.every(
       f => f.includes('tui/') || f.includes('main.ts'),
     )

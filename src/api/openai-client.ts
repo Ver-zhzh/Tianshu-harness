@@ -1,6 +1,7 @@
 import { proveWirePrefix, assertContinuationPrefix, wireObservation, isLocalWorkerPolicyError, type ContinuationPrefixProof, type RequestDiagnostics } from './continuation-prefix.js'
 import { currentExecutionScope } from './execution-continuity.js'
 import { beginCallAudit, auditConfigFingerprint, observedAuditUsage } from './call-audit.js'
+import { ProviderToolProgress } from './tool-input-progress.js'
 import { createHash } from 'node:crypto'
 import type { Usage } from './types.js'
 import { assertCompleteAttachments } from './attachment-integrity.js'
@@ -392,6 +393,7 @@ export function decideStreamHardCap(input: {
 }
 
 export class OpenAIClient implements StreamClient {
+  private inputProgress = new ProviderToolProgress()
   private toolCallBuffer = new Map<number, ToolCallBuffer>()
   private toolCallHintFired = new Set<number>()
   private toolNameVocabulary?: ToolNameVocabulary
@@ -420,6 +422,7 @@ export class OpenAIClient implements StreamClient {
    */
   private toolStreamLogPath: string | null | undefined = undefined
   private toolStreamLogLines = 0
+  private toolStreamAttempt?: { requestId: string; attemptId: string }
   /** Wire-level prefix probe: per-message signatures of the previous main-turn
    *  request's FINAL bytes (post reasoning-strip / sanitize / system-suffix).
    *  Only updated for requests with `prefixProbe: true` so side-path calls
@@ -782,10 +785,12 @@ export class OpenAIClient implements StreamClient {
     })
 
     await withStructuredRetry(async () => {
+      const attemptStartedAt = performance.now()
       // Unique attempt IDs prevent failover usage dedupe collisions.
       const identity: Omit<NonNullable<Usage['observation']>, 'status' | 'fields'> = { requestId, attemptId: `${requestId}:${++attempt}:${crypto.randomUUID()}` }
       // Reset instance state for each attempt
       this.toolCallBuffer.clear()
+      this.inputProgress = new ProviderToolProgress(identity)
       this.toolCallHintFired.clear()
       this.completedToolCallIds.clear()
       this.completedToolCallIndexes.clear()
@@ -962,12 +967,17 @@ export class OpenAIClient implements StreamClient {
       const audit = beginCallAudit({ requestId, attemptId: identity.attemptId, sessionId: this.config.sessionId,
         provider: this.config.providerName ?? 'openai', model: String(guard.body.model), purpose: diagnostics?.purpose ?? (this.config.sessionId?.startsWith('worker-') ? 'worker_execution' : 'main_execution'),
         workOrderId: diagnostics?.workOrderId, routeReason: diagnostics?.routeReason, parentRequestId: diagnostics?.parentRequestId ?? diagnostics?.previousMainRequestId,
-        configFingerprint: auditConfigFingerprint(identity.wire?.options) })
+        configFingerprint: auditConfigFingerprint(identity.wire?.options) }, attemptStartedAt)
       const observedCallbacks: StreamCallbacks = { ...callbacks,
+        onTextDelta: text => { if (text) audit.observation.output('text'); callbacks.onTextDelta(text) },
+        onThinkingDelta: text => { if (text) audit.observation.output('thinking'); callbacks.onThinkingDelta(text) },
+        onToolCallDelta: () => { audit.observation.output('tool'); callbacks.onToolCallDelta?.() },
         onStopReason: (reason, usage) => { audit.finish({ status: 'complete', responseId: identity.responseId, responseModel: identity.responseModel, systemFingerprint: identity.systemFingerprint, finishReason: identity.finishReason ?? reason, usage: observedAuditUsage(usage) }); callbacks.onStopReason?.(reason, usage) },
         onStreamAttemptAborted: info => { audit.finish({ status: 'aborted', responseId: identity.responseId, errorName: info.errorName, usage: observedAuditUsage(info.usage) }); callbacks.onStreamAttemptAborted?.(info) },
       }
       try {
+      const serializedBody = guard.serializedBody ?? JSON.stringify(guard.body)
+      audit.observation.sent(serializedBody, guard.body)
       const response = await fetchWithTimeout(`${normalizeBaseUrl(this.config.baseUrl)}/chat/completions`, {
         method: 'POST',
         headers: {
@@ -979,7 +989,7 @@ export class OpenAIClient implements StreamClient {
             ? { [this.config.sessionHeader ?? 'X-Request-Session']: this.config.sessionId }
             : {}),
         },
-        body: guard.serializedBody ?? JSON.stringify(guard.body),
+        body: serializedBody,
         signal: lifecycle.signal,
       }, fetchTimeout, this.proxyDispatcher, { provider: this.config.providerName })
 
@@ -1145,6 +1155,8 @@ export class OpenAIClient implements StreamClient {
     toolNames?: readonly string[],
   ): Promise<void> {
     this.toolNameVocabulary = toolNames === undefined ? undefined : new ToolNameVocabulary(toolNames)
+    this.toolStreamAttempt = { requestId: identity.requestId, attemptId: identity.attemptId }
+    this.inputProgress = new ProviderToolProgress(identity)
     const settlement = new UsageSettlement()
     const settledUsage = (status: 'complete' | 'aborted') => {
       const usage = settlement.finish(identity, status)
@@ -1461,6 +1473,7 @@ export class OpenAIClient implements StreamClient {
       this.completedToolCallIds.clear()
       this.completedToolCallIndexes.clear()
       this.toolNameVocabulary = undefined
+      this.toolStreamAttempt = undefined
 
       // Failed attempts are sealed by onStreamAttemptAborted. Never emit more
       // content here: it would leak into the next retry's execution/history.
@@ -1476,7 +1489,7 @@ export class OpenAIClient implements StreamClient {
       }>
       usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number; prompt_cache_hit_tokens?: number; prompt_cache_miss_tokens?: number; prompt_tokens_details?: { cached_tokens?: number }; completion_tokens_details?: { reasoning_tokens?: number } }
     },
-    callbacks: Partial<Pick<StreamCallbacks, 'onTextDelta' | 'onThinkingDelta' | 'onContentBlock' | 'onStopReason' | 'onToolCallHint' | 'onToolCallDelta'>>,
+    callbacks: Partial<Pick<StreamCallbacks, 'onTextDelta' | 'onThinkingDelta' | 'onContentBlock' | 'onStopReason' | 'onToolCallHint' | 'onToolCallDelta' | 'onToolInputProgress'>>,
   ): void {
     const choice = chunk.choices?.[0]
 
@@ -1572,6 +1585,8 @@ export class OpenAIClient implements StreamClient {
             } catch (error) {
               this.logToolStreamEvent({ phase: 'name-rejected', idx, id: buf.id,
                 fragments: buf.nameState.fragments, candidateCount: buf.nameState.candidateCount,
+                failureStage: buf.nameState.fragments === 1 ? 'first-fragment' : 'continuation-fragment',
+                declaredToolCount: this.toolNameVocabulary?.names.size,
                 reason: error instanceof ToolNameProtocolError ? error.reason : 'unknown' })
               throw error
             }
@@ -1583,6 +1598,7 @@ export class OpenAIClient implements StreamClient {
           buf.function.arguments += tc.function.arguments
         }
         this.toolCallBuffer.set(idx, buf)
+        this.inputProgress.update(String(idx), buf.id, buf.function.name, tc.function?.arguments ?? '', callbacks.onToolInputProgress)
 
         // Speculative prewarm: emit hint once when tool name + args are parseable
         const hintName = buf.nameState ? buf.nameState.hintName : buf.function.name
@@ -1634,7 +1650,7 @@ export class OpenAIClient implements StreamClient {
    * wholesale, so a deferred entry survives to the final flush.
    */
   private flushToolCalls(
-    callbacks: Partial<Pick<StreamCallbacks, 'onContentBlock' | 'onStopReason' | 'onToolCallHint'>>,
+    callbacks: Partial<Pick<StreamCallbacks, 'onContentBlock' | 'onStopReason' | 'onToolCallHint' | 'onToolInputProgress'>>,
     opts: { final?: boolean } = {},
   ): void {
     const final = opts.final ?? false
@@ -1644,6 +1660,7 @@ export class OpenAIClient implements StreamClient {
         catch (error) {
           this.logToolStreamEvent({ phase: 'name-rejected', idx, id: buf.id,
             fragments: buf.nameState.fragments, candidateCount: buf.nameState.candidateCount,
+            failureStage: 'finalization', declaredToolCount: this.toolNameVocabulary?.names.size,
             reason: error instanceof ToolNameProtocolError ? error.reason : 'unknown' })
           throw error
         }
@@ -1685,6 +1702,7 @@ export class OpenAIClient implements StreamClient {
         callbacks.onToolCallHint(buf.function.name, parsed)
       }
       this.maybeTraceToolStream(final ? 'emit-final' : 'emit', idx, buf)
+      this.inputProgress.update(String(idx), buf.id, buf.function.name, '', callbacks.onToolInputProgress, 'complete')
       callbacks.onContentBlock?.({ type: 'tool_use', id: buf.id, name: buf.function.name, input: parsed })
       this.completedToolCallIds.add(buf.id)
       this.completedToolCallIndexes.add(idx)
@@ -1764,11 +1782,15 @@ export class OpenAIClient implements StreamClient {
       }
     }
     try {
+      const scope = currentExecutionScope()
       appendFileSync(this.toolStreamLogPath, `${JSON.stringify({
         t: new Date().toISOString(),
         model: this.config.model,
         provider: this.config.providerName ?? null,
-        session: this.config.sessionId ?? null,
+        session: this.config.sessionId ?? scope?.sessionId ?? null,
+        requestId: this.toolStreamAttempt?.requestId ?? scope?.requestId ?? null,
+        attemptId: this.toolStreamAttempt?.attemptId ?? scope?.attemptId ?? null,
+        buildId: process.env.RIVET_BUILD_ID ?? 'unknown',
         ...event,
       })}\n`)
       this.toolStreamLogLines++

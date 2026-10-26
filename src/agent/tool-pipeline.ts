@@ -1,3 +1,13 @@
+import { withToolTerminalAudit } from './tool-terminal-audit.js'
+import { ToolCallBudget } from './tool-call-budget.js'
+import { scriptTransactionPaths } from '../tools/script-write-paths.js'
+import { reuseVerification } from '../tools/verification-reuse.js'
+import { queryVerificationRuns } from '../tools/verification-query.js'
+import { createFileRepairStore } from './file-repair-store.js'
+import { immutableToolInput, type PreparedExecution } from './prepared-tool-batch.js'
+import { fileRepairGuard } from './file-repair-guard.js'
+import { fileReadGate } from './file-read-gate.js'
+import { renderFileStateTail } from '../tools/file-state-receipt.js'
 import { assertRuntimeAccess } from '../skills/runtime/policy.js'
 import { prepareSkillRuntimeCall } from '../tools/skill-runtime.js'
 import { createVerificationRecorder, beginCourseToolExecution, type CourseExecutionCallbacks } from './course-verification-execution.js'
@@ -7,7 +17,7 @@ import type { ContentBlock } from '../api/types.js'
 import type { ToolCallParams, ToolErrorClass } from '../tools/types.js'
 import type { TurnHarness } from './turn-harness.js'
 import type { EvidenceTrackerPublic } from './evidence.js'
-import { buildBashVerification, isVerificationCommand } from './bash-verification.js'
+import { buildBashVerification, inferBashVerificationScope, isVerificationCommand } from './bash-verification.js'
 import type { TraceStore } from './trace-store.js'
 import type { RepairHintTracker } from './repair-hint.js'
 import type { ImportGraph } from './import-graph.js'
@@ -16,7 +26,7 @@ import { createCheckpoint, recordAgentTouchedFile, recordBashSideEffects, makeOw
 import { validatePath } from '../tools/path-validate.js'
 import { grantPath } from '../tools/path-grants.js'
 import { outOfWorkspaceFilePaths } from './tool-path-access.js'
-import { dirname, join, relative, isAbsolute } from 'node:path'
+import { dirname, join } from 'node:path'
 import { getSessionDir } from './session-persist.js'
 import { classifyFailure, classifyToolFailure, classifyTestRun, isTransient, resolveErrorKind, type FailureClass } from './failure-classifier.js'
 import { extractClaimsFromToolResult } from '../context/claim-extractor.js'
@@ -24,9 +34,6 @@ import { appendProjectMemory, compactProjectMemory } from '../context/project-me
 import { detectConflicts } from '../context/conflict-detect.js'
 import { createAntibodyProposal } from '../context/antibody.js'
 import { touchActivity, setActivityPhase } from './stall-observer.js'
-import { buildImportGraphAsync, invalidateFile } from './import-graph.js'
-import { generateImpactHint } from './impact-hint.js'
-import { analyzeImpact } from '../repo/meridian-impact.js'
 import { shouldRunDiagnostics, filterDiagnosticsForEdit } from '../lsp/client.js'
 import type { LspManager } from '../lsp/manager.js'
 import { startTraceEvent, finishTraceEvent, fingerprintToolCall, fingerprintToolClass, recordToolFingerprint, recordTraceEvent, offendingFingerprints, getDoomLoopThresholds } from './trace-store.js'
@@ -74,7 +81,6 @@ import { execFileGit } from '../tools/spawn-git.js'
 import { patchTargetPaths, preWriteClaimPaths } from './pre-write-claims.js'
 import { normalizeClaimPath } from './claim-path.js'
 import { WRITE_TOOL_NAMES, extractWriteFilePaths } from '../tools/write-tool-helpers.js'
-import { snapshotOmissionNote } from '../tools/run-tests-snapshot-result.js'
 import { openCandidateDeliveryTree, type CandidateDeliveryTree } from './candidate-delivery-tree.js'
 
 /** Headless prefix on denial messages — a stable marker so worker-session's
@@ -140,15 +146,6 @@ const BLOCKED_CLASSES: ReadonlySet<string> = new Set([
 
 const DEFAULT_TOOL_TIMEOUT_MS = 120_000 // 2 minutes
 
-/** L3 同步段慢阈值（2026-09-10 纵深修复）：同步代码无法被 Promise.race 打断，
- *  只能事后留痕——超过该值即在 stderr 打 [slow-sync-stage]（含工具/阶段/耗时）。
- *  动机：edit_file 后处理曾静默 185s/221s，同步段"无痕"是定案障碍之一。 */
-const SLOW_SYNC_STAGE_MS = 3_000
-
-function warnSlowSyncStage(tool: string, stage: string, ms: number): void {
-  if (ms >= SLOW_SYNC_STAGE_MS) console.warn(`[slow-sync-stage] ${tool} ${stage} took ${ms}ms`)
-}
-
 /** TDD gate config — parsed once from env at module load. */
 const _TDD_GATE_CONFIG: TddGateConfig = parseTddGateConfig()
 
@@ -197,52 +194,6 @@ async function emitToolInputTrace(input: { cwd: string; sessionId?: string; mess
   }
 }
 
-/**
- * Unconditional tool-result trace — always writes (no sampling gate). This is the
- * primary diagnostic log for TUI rendering-loss bugs. Every tool result passing
- * through the pipeline is recorded BEFORE the onToolResult callback.
- *
- * Log path: ~/.rivet/sessions/<project-slug>/<sessionId>/tool-result-trace.jsonl
- * On Windows: %LOCALAPPDATA%\.rivet\sessions\<project-slug>\<sessionId>\tool-result-trace.jsonl
- *
- * Each line is JSON with: { ts, id, name, isError, contentLen, source }
- *   source: "pipeline" = emitted just before callbacks.onToolResult
- *           "bridge"   = received by TUI bridge
- *           "tui"      = processed by TUI handleToolResult
- *
- * To find the log file on any platform:
- *   1. Look at the "Watching" header line printed at TUI startup
- *   2. Or check %LOCALAPPDATA%\.rivet\sessions\ on Windows
- *   3. Or run: dir %LOCALAPPDATA%\.rivet\sessions\ /s /b | findstr tool-result-trace
- */
-async function emitToolResultTrace(input: {
-  cwd: string
-  sessionId?: string
-  id: string
-  name: string
-  isError: boolean | undefined
-  contentLen: number; errorKind?: string // errorKind = 结构化失败分类（trace 归因用）
-  source: 'pipeline' | 'bridge' | 'tui'
-}): Promise<void> {
-  try {
-    const sessionDir = input.sessionId
-      ? join(getSessionDir(input.cwd), input.sessionId)
-      : join(getSessionDir(input.cwd), 'unknown')
-    await mkdir(sessionDir, { recursive: true })
-    const line = JSON.stringify({
-      ts: new Date().toISOString(),
-      id: input.id,
-      name: input.name,
-      isError: input.isError,
-      contentLen: input.contentLen,
-      source: input.source, errorKind: input.errorKind,
-    })
-    await appendFile(join(sessionDir, 'tool-result-trace.jsonl'), `${line}\n`, 'utf8')
-  } catch {
-    // Diagnostics must never affect tool execution or pollute model-visible output.
-  }
-}
-
 /** Build a cross-session ownership guard from the live session registry, if any. */
 function buildOwnershipGuard(deps: {
   cwd: string
@@ -269,16 +220,20 @@ function withToolTimeout<T>(
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     timeoutMs = DEFAULT_TOOL_TIMEOUT_MS
  }
-  if (signal?.aborted) return Promise.reject(new DOMException('Aborted', 'AbortError'))
+  if (signal?.aborted) {
+    void promise.catch(() => {})
+    return Promise.reject(new DOMException('Aborted', 'AbortError'))
+  }
 
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
       // Cascade abort to the underlying op (child proc / fetch) BEFORE rejecting,
       // so the tool stops consuming resources instead of orphaning.
       try { timeoutController?.abort() } catch { /* noop */ }
       reject(new Error(`Tool ${toolName} timed out after ${timeoutMs / 1000}s ${TOOL_TIMEOUT_RECOVERY_HINT}`))
     }, timeoutMs)
-    const onAbort = () => { clearTimeout(timer); reject(new DOMException('Aborted', 'AbortError')) }
+    const onAbort = () => { clearTimeout(timer); signal?.removeEventListener('abort', onAbort); reject(new DOMException('Aborted', 'AbortError')) }
     signal?.addEventListener('abort', onAbort, { once: true })
 
     promise.then(
@@ -289,6 +244,9 @@ function withToolTimeout<T>(
 }
 
 export interface ToolPipelineDeps extends CourseExecutionCallbacks {
+  /** Invocation-local watchdog; supplied only by executeToolUseBounded. */
+  callBudget?: ToolCallBudget
+  executePrepared?: PreparedExecution
   config: AgentConfig
   cwd: string
   harness: TurnHarness
@@ -398,6 +356,8 @@ export interface ToolPipelineDeps extends CourseExecutionCallbacks {
 }
 
 export interface ToolExecResult {
+  errorReason?: string
+  mutations?: import('./mutation-facts.js').MutationFact[]
   presentation?: import('../tools/types.js').ToolResult['presentation']
   toolResult: ContentBlock
   traceStore: TraceStore
@@ -604,14 +564,15 @@ function gitHeadSummaryQuiet(cwd: string): Promise<string | null> {
   })
 }
 
-/**
- * edit_file / hash_edit 总闸（2026-09-08 wedge 纵深）：`withToolTimeout` inside
- * the body only bounds `toolRegistry.execute`; post-tool work (LSP diagnostics,
- * artifact intercept, hooks) ran outside that gate. Wrap the WHOLE call so any
- * unknown future hang becomes a visible timeout instead of a wedged turn. The
- * abort cascades into the inner execute path via the composed signal.
- */
-export async function executeToolUse(
+/** Execution and machine pre/post work remain bounded; known waits are excluded. */
+export function executeToolUse(
+  tu: { id: string; name: string; input: Record<string, unknown>; argsTruncated?: boolean },
+  deps: ToolPipelineDeps, callbacks: AgentCallbacks, turn: number, checkpointAlreadyCreated: boolean,
+): Promise<ToolExecResult> {
+  return withToolTerminalAudit(tu, deps, callbacks, turn, checkpointAlreadyCreated, executeToolUseBounded)
+}
+
+async function executeToolUseBounded(
   tu: { id: string; name: string; input: Record<string, unknown>; argsTruncated?: boolean },
   deps: ToolPipelineDeps,
   callbacks: AgentCallbacks,
@@ -619,27 +580,13 @@ export async function executeToolUse(
   checkpointAlreadyCreated: boolean,
 ): Promise<ToolExecResult> {
   const canonicalName = deps.config.toolRegistry.resolveName(tu.name)
-  const hasTotalGate = canonicalName === 'edit_file' || canonicalName === 'hash_edit'
-  if (!hasTotalGate) {
-    return executeToolUseInner(tu, deps, callbacks, turn, checkpointAlreadyCreated)
-  }
-  const totalAbort = new AbortController()
-  const composedSignal = deps.abortSignal
-    ? AbortSignal.any([deps.abortSignal, totalAbort.signal])
-    : totalAbort.signal
-  return withToolTimeout(
-    executeToolUseInner(
-      tu,
-      { ...deps, abortSignal: composedSignal },
-      callbacks,
-      turn,
-      checkpointAlreadyCreated,
-    ),
-    tu.name,
-    DEFAULT_TOOL_TIMEOUT_MS,
-    deps.abortSignal,
-    totalAbort,
-  )
+  const requested = deps.config.toolRegistry.get(canonicalName)?.timeoutMs?.({ cwd: deps.cwd, input: tu.input, toolUseId: tu.id })
+  const totalTimeout = Number.isFinite(requested) ? Math.max(DEFAULT_TOOL_TIMEOUT_MS, requested!) : DEFAULT_TOOL_TIMEOUT_MS
+  const callBudget = new ToolCallBudget(tu.name, totalTimeout, deps.abortSignal)
+  return callBudget.run(() => executeToolUseInner(tu,
+    { ...deps, abortSignal: callBudget.signal, callBudget },
+    { ...callbacks, onApprovalRequired: (...args) => callBudget.waiting(() => callbacks.onApprovalRequired(...args)) },
+    turn, checkpointAlreadyCreated))
 }
 
 async function executeToolUseInner(
@@ -649,6 +596,8 @@ async function executeToolUseInner(
   turn: number,
   checkpointAlreadyCreated: boolean,
 ): Promise<ToolExecResult> {
+  await deps.config.externalHookRuntime?.barrier(deps.abortSignal)
+  deps.abortSignal?.throwIfAborted()
   let { traceStore, importGraph, lastConflictCheckCount, latestRisk } = deps
   let checkpointCreated = checkpointAlreadyCreated
   // E6：本回合首次建基线失败时置起，尾部追加给模型与用户看（见下方 checkpoint 块）。
@@ -692,22 +641,50 @@ async function executeToolUseInner(
     return { toolResult: { type: 'tool_result', tool_use_id: tu.id, content: message, is_error: true }, traceStore, importGraph, lastConflictCheckCount, checkpointCreated, latestRisk }
   }
 
+  if (tu.name === 'run_tests' && ['list', 'get'].includes(String(tu.input.action))) {
+    const result = queryVerificationRuns({ cwd: deps.cwd, sessionId: deps.config.sessionId, toolUseId: tu.id, input: tu.input })!
+    callbacks.onToolResult(tu.id, tu.name, result.content, !!result.isError)
+    return { toolResult: { type: 'tool_result', tool_use_id: tu.id, content: result.content, is_error: !!result.isError }, traceStore, importGraph, lastConflictCheckCount, checkpointCreated, latestRisk }
+  }
   let recordVerification = createVerificationRecorder(deps)
+  const mutationNotices: string[] = []
   const params: ToolCallParams = {
+    onRepairDisposition: deps.onRepairDisposition,
+    onMutationFacts: facts => {
+      deps.onMutationFacts?.(facts)
+      if (deps.config.sessionId) {
+        const notices = createFileRepairStore(deps.cwd, deps.config.sessionId).record(facts)
+        mutationNotices.push(...notices)
+      }
+    },
     input: tu.input,
     toolUseId: tu.id,
     cwd: deps.cwd,
     onOutput: (chunk) => {
       callbacks.onToolResult(tu.id, tu.name, chunk)
    },
+    currentVerificationFingerprint: deps.taskLedger?.captureVerificationFingerprint,
+    getActualCommits: () => deps.taskLedger?.getEvents().filter(e => e.type === 'git_action' && typeof e.meta?.commitSha === 'string').map(e => String(e.meta!.commitSha)) ?? [],
     // P6 follow-up: let tools (e.g. ast-edit) register internal file writes
     // so evidence/filesModified and cerebellar gate are aware.
-    onFileWrite: (filePath) => deps.evidence.trackFileModified(filePath),
+    hasWriteClaim: deps.sessionRegistry && deps.sessionId ? filePath => {
+      const claim = deps.sessionRegistry!.checkClaim(normalizeClaimPath(deps.cwd, filePath))
+      return claim?.sessionId === deps.sessionId && claim?.claimType === 'exclusive'
+    } : undefined,
+    onFileWrite: (filePath) => {
+      deps.evidence.trackFileModified(filePath)
+      if (tu.name === 'bash' && tu.input.write_files !== undefined && params.hasWriteClaim?.(filePath)) {
+        deps.taskLedger?.record({ type: 'file_write', path: filePath, tool: 'bash' })
+        deps.ownershipLedger?.registerOwned(filePath)
+        recordAgentTouchedFile(deps.cwd, filePath, deps.config.sessionId)
+      }
+    },
     // T4: structured per-worker delegation updates → subagent panel. Optional;
     // forwarded to the session layer alongside the text progress stream.
     onWorkerActivity: callbacks.onDelegationActivity
       ? (activity) => callbacks.onDelegationActivity!(activity)
       : undefined,
+    onReviewReady: callbacks.onReviewReady,
     // E4 — client landing delegation (apply_edit / terminal_exec). Absent when
     // the host did not wire onToolDelegate (CLI / no capabilities) → tools
     // fall through to local write/spawn with zero behavior change.
@@ -747,6 +724,12 @@ async function executeToolUseInner(
     activePlanFilePath: deps.config.activePlanFilePath,
     sessionModel: deps.config.promptEngine.getModel(),
  }
+  const existingExecution = tu.name === 'run_tests' ? reuseVerification(params, 'run_tests')
+    : tu.name === 'bash' && isVerificationCommand(String(tu.input.command ?? ''), deps.cwd) ? reuseVerification(params, 'bash') : undefined
+  if (existingExecution) {
+    callbacks.onToolResult(tu.id, tu.name, existingExecution.content, false)
+    return { toolResult: { type: 'tool_result', tool_use_id: tu.id, content: existingExecution.content, is_error: false }, traceStore, importGraph, lastConflictCheckCount, checkpointCreated, latestRisk }
+  }
 
   // Star signature: counter training-mode regression at token level (思路 E)
   const starSig = getStarSignature(tu.name)
@@ -766,18 +749,6 @@ async function executeToolUseInner(
   let candidateSnapshot: CandidateDeliveryTree | undefined
 
   try {
-    // Cerebellar Loop: read-before-edit gate
-    const intervention = deps.getInterventionLevel?.() ?? 'none'
-    if ((intervention === 'gate' || intervention === 'escalate') && (tu.name === 'edit_file' || tu.name === 'write_file')) {
-      const recentReads = deps.trajectory.getEntries().slice(-3).some(e => e.tool === 'read_file')
-      if (!recentReads) {
-        const gateMsg = `Tool blocked by cerebellar gate: recent prediction error rate is elevated. Read the file before editing to ensure mental model is current.`
-        deps.onGateBlocked?.('cerebellar')
-        callbacks.onToolResult(tu.id, tu.name, gateMsg, true)
-        return { toolResult: { type: 'tool_result', tool_use_id: tu.id, content: gateMsg, is_error: true }, traceStore, importGraph, lastConflictCheckCount, checkpointCreated, latestRisk }
-     }
-   }
-
     // TDD Gate: block edit/write tools when the model has edited files
     // without running tests. Pure decision function, stateless — the
     // EvidenceTracker holds the edit counter and test-verification log.
@@ -814,29 +785,6 @@ async function executeToolUseInner(
         deps.onGateBlocked?.('obligation-red')
         callbacks.onToolResult(tu.id, tu.name, redDecision.message!, true)
         return { toolResult: { type: 'tool_result', tool_use_id: tu.id, content: redDecision.message!, is_error: true }, traceStore, importGraph, lastConflictCheckCount, checkpointCreated, latestRisk }
-      }
-    }
-
-    // Destructive gate: 验证失败后 ≤3 个工具调用内的 git 清场命令当轮拦截
-    // (首次拦截、原样重发放行)。TDD gate 之后、PreToolUse hook 之前。
-    if (deps.destructiveGate && tu.name === 'bash') {
-      const gateDecision = deps.destructiveGate.evaluate(tu.name, tu.input as Record<string, unknown>)
-      if (gateDecision.block) {
-        const blockedAt = Date.now()
-        traceStore = recordTraceEvent(traceStore, {
-          id: `${tu.id}:destructive-gate`,
-          turn,
-          kind: 'tool',
-          name: 'destructive-gate:block',
-          status: 'failed',
-          startedAt: blockedAt,
-          endedAt: blockedAt,
-          durationMs: 0,
-          summary: String((tu.input as Record<string, unknown>).command ?? '').slice(0, 200),
-        })
-        deps.onGateBlocked?.('destructive')
-        callbacks.onToolResult(tu.id, tu.name, gateDecision.message, true)
-        return { toolResult: { type: 'tool_result', tool_use_id: tu.id, content: gateDecision.message, is_error: true }, traceStore, importGraph, lastConflictCheckCount, checkpointCreated, latestRisk }
       }
     }
 
@@ -981,7 +929,7 @@ async function executeToolUseInner(
     // knowledge manifest before editing prompt/memory/recall/verification/ownership
     // paths, but existing approval and edit gates remain responsible for hard safety.
     if (writePath && deps.taskLedger && shouldRequireSensitivePreflight({ path: writePath, events: deps.taskLedger.getEvents() })) {
-      callbacks.onToolResult(tu.id, tu.name, buildSensitivePreflightMessage(writePath), false)
+      callbacks.onToolResult(tu.id, tu.name, buildSensitivePreflightMessage(writePath))
    }
 
     // Approval gate — with sensorium-driven adaptive confidence
@@ -1108,6 +1056,11 @@ async function executeToolUseInner(
     const computerUsePerAppGate = tu.name === 'computer_use'
       && needsApproval
       && (approvalMode === 'manual' || approvalMode === 'auto-safe')
+    // General auto-safe/sensorium approval must not authorize a new full suite.
+    const fullTestScopeGate = (approvalMode === 'manual' || approvalMode === 'auto-safe')
+      && (tu.name === 'run_tests' && (tu.input.action ?? 'run') === 'run' && tu.input.full === true
+        || tu.name === 'bash' && typeof tu.input.command === 'string'
+          && (() => { const scope = inferBashVerificationScope(tu.input.command); return scope.kind === 'test' && scope.scope === 'full' })())
 
     // bash `git commit` 暂存区敏感文件门（收编公开仓 PR #496）：风险分级（assessToolRisk）
     // 只把 commit 记成 medium，sensorium/permissions.allow 都可能把它放行；这里升级为
@@ -1120,6 +1073,7 @@ async function executeToolUseInner(
       && (approvalMode === 'manual' || approvalMode === 'auto-safe')
       && gitCommitStagesSensitiveDualView(deps.cwd, bashCommit)
 
+    const destructiveDecision = deps.destructiveGate?.evaluate(tu.name, tu.input, deps.cwd)
     let shouldAsk = (unconditionalApproval && !yoloBypassesUnconditional)
       ? true
       : skipAllApproval
@@ -1132,7 +1086,7 @@ async function executeToolUseInner(
               ? true
               : bashCommitStagesSensitiveGate
                 ? true
-                : runtimeApprovalGate || computerUsePerAppGate
+                : runtimeApprovalGate || computerUsePerAppGate || fullTestScopeGate
                   ? true
                 : allowlisted
                   ? false
@@ -1143,6 +1097,9 @@ async function executeToolUseInner(
                       : approvalMode === 'auto-safe'
                         ? isHighRisk
                         : false
+
+    // Repetition is never authorization. Existing explicit policy remains authoritative.
+    if (destructiveDecision?.block && !skipAllApproval && !allowlisted && !bashAllowlisted) shouldAsk = true
 
     // YOLO mode intelligent fallback: auto-grant write access for file-tool
     // paths already covered by a read grant. This eliminates the validatePath →
@@ -1176,9 +1133,12 @@ async function executeToolUseInner(
       // the deny branch emits the headless instruction message.
     }
 
+    let approvedDestructiveActions: string[] | undefined
     if (shouldAsk) {
+      const requestedInput = tu.input
       touchActivity(activityKey, `tool:${tu.name}:await-approval`)
       const approvalResult = await callbacks.onApprovalRequired(tu.id, tu.name, tu.input, params.runtimeExecutionPlan ? { runtimePreview: params.runtimeExecutionPlan.preview, previewDigest: params.runtimeExecutionPlan.digest, rebuild: params.runtimeExecutionPlan.request.rebuild } : undefined)
+      deps.abortSignal?.throwIfAborted()
       const resolved: ApprovalResult = typeof approvalResult === 'boolean'
         ? { approved: approvalResult }
         : approvalResult
@@ -1201,10 +1161,11 @@ async function executeToolUseInner(
         // its merits — it needs explicit user approval the model cannot self-grant.
         // Re-emitting the identical call only re-hits the same gate, so tell the
         // model to stop and hand control back to the user instead of retrying.
+        if (destructiveDecision?.block) deps.onGateBlocked?.('destructive')
         const noSandboxReason = bashWriteRequiresApproval && noSandbox
           ? '\n根因：当前命令不在文件系统沙箱保护下（原生 Windows 无内核沙箱 / 未装 bwrap / 该命令走了沙箱旁路），故写命令需人工审批。这不是命令本身的问题——审批后即可执行。要减少审批频率：Linux 装 bubblewrap、Windows 走 WSL，或用 permissions.bash.allowlist 为可信命令前缀免审批。'
           : ''
-        const denyMsg = deps.config.headless
+        const denyMsg = (destructiveDecision?.block ? destructiveDecision.message + '\n' : '') + (deps.config.headless
           ? [
               // HEADLESS_DENY_MARKER embedded here — detectApprovalDeadlock matches on it.
               `Tool "${tu.name}"${target} is ${HEADLESS_DENY_MARKER}: it requires an approval that no human can grant in this context.`,
@@ -1216,7 +1177,7 @@ async function executeToolUseInner(
               `Tool "${tu.name}"${target} was not executed: it requires explicit user approval, which you cannot grant yourself.${noSandboxReason}`,
               'This is NOT a rejection of the change itself. Do NOT re-emit the identical call — repeating it will keep hitting the same approval gate and make no progress.',
               'Instead: briefly state what you were about to do and why it needs approval, then stop and wait for the user to approve it (or adjust their instruction).',
-            ].join('\n')
+            ].join('\n'))
         callbacks.onToolResult(tu.id, tu.name, denyMsg, true)
         return { toolResult: { type: 'tool_result', tool_use_id: tu.id, content: denyMsg, is_error: true }, traceStore, importGraph, lastConflictCheckCount, checkpointCreated, latestRisk }
      }
@@ -1277,6 +1238,13 @@ async function executeToolUseInner(
       // `remember` persists the grant to the per-workspace store so the same
       // directory is not re-prompted in the next session; without it the grant
       // stays in-process, which is what an unqualified "approve once" means.
+      if (destructiveDecision?.block && finalInput === requestedInput) {
+        const current = deps.destructiveGate?.evaluate(tu.name, tu.input, deps.cwd)
+        if (current?.block && JSON.stringify(current.actions) !== JSON.stringify(destructiveDecision.actions)) throw new Error('destructive-gate: 审批期间目标版本已改变；未执行，保留现场')
+      }
+      const approvedClear = deps.destructiveGate?.evaluate(tu.name, tu.input, deps.cwd)
+      if (approvedClear?.block) approvedDestructiveActions = approvedClear.actions
+      deps.destructiveGate?.approve(tu.name, tu.input, deps.cwd)
       const approvedGrant = outOfWorkspaceFilePaths(deps.cwd, tu.name, tu.input)
       if (approvedGrant) {
         const persist = resolved.remember === true
@@ -1286,6 +1254,21 @@ async function executeToolUseInner(
       }
    }
 
+    let explicitScriptPaths: string[] | undefined
+    if (tu.name === 'bash' && tu.input.write_files !== undefined) {
+      try { explicitScriptPaths = scriptTransactionPaths(deps.cwd, tu.input) }
+      catch (error) {
+        const message = `脚本事务未执行：${String(error)}`
+        callbacks.onToolResult(tu.id, tu.name, message, true)
+        return { toolResult: { type: 'tool_result', tool_use_id: tu.id, content: message, is_error: true }, traceStore, importGraph, lastConflictCheckCount, checkpointCreated, latestRisk }
+      }
+    }
+
+    const repairBlock = fileRepairGuard(tu.name, params)
+    if (repairBlock) {
+      callbacks.onToolResult(tu.id, tu.name, repairBlock, true)
+      return { toolResult: { type: 'tool_result', tool_use_id: tu.id, content: repairBlock, is_error: true }, traceStore, importGraph, lastConflictCheckCount, checkpointCreated, latestRisk }
+    }
     // R2 — concurrent write conflict block (desktop multi-session). When a live
     // SessionRegistry is wired and another active session holds an exclusive
     // claim on a target file, fail-closed: refuse the write instead of
@@ -1297,9 +1280,21 @@ async function executeToolUseInner(
     // single-session / no-registry paths are completely unaffected.
     if (deps.sessionRegistry && deps.sessionId) {
       for (const claimPath of preWriteClaimPaths(tu, deps.cwd)) {
+        if (explicitScriptPaths && deps.ownershipLedger?.isExternal(claimPath) && !deps.ownershipLedger.isOwned(claimPath)) {
+          claimBoundary.rollback()
+          const message = `脚本事务未执行：${claimPath} 是外部改动，不自动接管。`
+          callbacks.onToolResult(tu.id, tu.name, message, true)
+          return { toolResult: { type: 'tool_result', tool_use_id: tu.id, content: message, is_error: true }, traceStore, importGraph, lastConflictCheckCount, checkpointCreated, latestRisk }
+        }
         const acquired = deps.sessionRegistry.acquireClaim(deps.sessionId, claimPath, 'exclusive')
         if (!acquired) {
           const owner = deps.sessionRegistry.checkClaim(claimPath, deps.sessionId)
+          if (tu.name === 'bash' && tu.input.write_files !== undefined) {
+            claimBoundary.rollback()
+            const message = `脚本事务未执行：${claimPath} 已被其他会话认领，不自动接管。`
+            callbacks.onToolResult(tu.id, tu.name, message, true)
+            return { toolResult: { type: 'tool_result', tool_use_id: tu.id, content: message, is_error: true }, traceStore, importGraph, lastConflictCheckCount, checkpointCreated, latestRisk }
+          }
           // v2（认领即租约）：先做证据体检——持有方已死（L1）或已长时间不触碰该文件
           // 且工作区干净（L2）时**自动接管**；不再依赖「有人能答批准」，headless 也能解。
           // 其余（陈旧但脏 L3 / 新鲜 L4 / shared_read / 时间不可解析）落回下面的显式
@@ -1353,6 +1348,7 @@ async function executeToolUseInner(
                     ...(askReason ? { reason: askReason } : {}),
                   },
                 })
+                deps.abortSignal?.throwIfAborted()
                 return typeof r === 'boolean' ? r : r.approved === true
               })()
             : false
@@ -1407,8 +1403,8 @@ async function executeToolUseInner(
 
     // 写工具账本收口：recordAgentTouchedFile 是 rollbackToCheckpoint 的唯一文件
     // 来源——漏记 = 修改落在 YOLO 档 safety net（checkpoints + rollback）的回滚窗外。
-    if (WRITE_TOOL_NAMES.has(tu.name)) {
-      for (const editPath of extractWriteFilePaths(tu.name, tu.input)) {
+    if (WRITE_TOOL_NAMES.has(tu.name) || explicitScriptPaths) {
+      for (const editPath of explicitScriptPaths ?? extractWriteFilePaths(tu.name, tu.input)) {
         recordAgentTouchedFile(deps.cwd, editPath, deps.config.sessionId)
       }
     }
@@ -1416,8 +1412,8 @@ async function executeToolUseInner(
     // E4 记账收口：五件写工具（WRITE_TOOL_NAMES）的编辑都要在执行前进
     // file-history（/undo 与边界回溯的记账源头）。路径按 extractWriteFilePaths
     // 解析：ast_edit 的 dryRun 为空不记账，apply_patch 的纯删除 /dev/null 跳过。
-    if (deps.config.fileHistory && WRITE_TOOL_NAMES.has(tu.name)) {
-      const editPaths = extractWriteFilePaths(tu.name, tu.input)
+    if (deps.config.fileHistory && (WRITE_TOOL_NAMES.has(tu.name) || explicitScriptPaths)) {
+      const editPaths = explicitScriptPaths ?? extractWriteFilePaths(tu.name, tu.input)
       if (editPaths.length > 0) {
         touchActivity(activityKey, `tool:${tu.name}:pre:track-edit`)
         for (const editPath of editPaths) {
@@ -1456,13 +1452,12 @@ async function executeToolUseInner(
       predictedSuccess: true,
    })
     let rawToolResult: import('../tools/types.js').ToolResult | undefined
-    let snapshotOmissionGuidance = ''
 
     // VSW: for run_tests, ask the snapshot manager whether to isolate. §6 policy
     // decides; in the common single-clean-session case it returns null → params
     // stays unset → in-place single-phase verification (unchanged default). Any
     // failure here degrades to in-place — VSW must never break verification.
-    if (tu.name === 'run_tests' && tu.input.deliveryFiles !== undefined) {
+    if (tu.name === 'run_tests' && (tu.input.action ?? 'run') === 'run' && tu.input.deliveryFiles !== undefined && (tu.input.full === true || (Array.isArray(tu.input.files) && tu.input.files.length > 0) || (typeof tu.input.filter === 'string' && tu.input.filter.trim().length > 0) || tu.input.check === 'typecheck')) {
       const files = tu.input.deliveryFiles
       if (!Array.isArray(files) || files.length === 0 || files.some(file => typeof file !== 'string' || !file.trim())) {
         params.candidateSnapshotError = 'deliveryFiles 必须是非空文件路径列表。'
@@ -1476,33 +1471,6 @@ async function executeToolUseInner(
           candidateSnapshot = undefined
           params.candidateSnapshotError = `候选快照构建失败：${error instanceof Error ? error.message : String(error)}`
         }
-      }
-    } else if (tu.name === 'run_tests' && deps.verificationSnapshotManager) {
-      try {
-        touchActivity(activityKey, `tool:${tu.name}:pre:snapshot`)
-        const plan = await deps.verificationSnapshotManager.prepare([...(deps.ownershipLedger?.getOwnedFiles() ?? []), ...(deps.ownershipLedger?.getCoOwnedFiles() ?? [])])
-        if (plan) params.verificationSnapshot = { path: plan.path, snapshotRef: plan.snapshotRef, repositoryRoot: deps.cwd, ...(plan.omittedDirtyFiles !== undefined ? { omittedDirtyFiles: plan.omittedDirtyFiles } : {}) }
-        if (plan) snapshotOmissionGuidance = snapshotOmissionNote(plan)
-      } catch {
-        // degrade to in-place
-      }
-      // C3: when running in-place, arm the failure-attribution retry — but only
-      // when live pollution signals make failures ambiguous: peer workspace
-      // mutations (stash/reset events from B1). Without signals the retry stays
-      // unarmed so a plain broken test doesn't pay for a worktree build.
-      if (!params.verificationSnapshot && deps.sessionRegistry && deps.sessionId) {
-        try {
-          const polluted = deps.sessionRegistry.consumeEvents(deps.sessionId, 0, 10)
-            .some(e => e.eventType === 'workspace_mutation')
-          if (polluted) {
-            const mgr = deps.verificationSnapshotManager
-            params.prepareRetrySnapshot = async () => {
-              const retry = await mgr.prepareRetry([...(deps.ownershipLedger?.getOwnedFiles() ?? []), ...(deps.ownershipLedger?.getCoOwnedFiles() ?? [])])
-              if (retry) snapshotOmissionGuidance = snapshotOmissionNote(retry)
-              return retry ? { path: retry.path, snapshotRef: retry.snapshotRef, repositoryRoot: deps.cwd, ...(retry.omittedDirtyFiles !== undefined ? { omittedDirtyFiles: retry.omittedDirtyFiles } : {}) } : null
-            }
-          }
-        } catch { /* attribution retry is best-effort */ }
       }
     }
 
@@ -1521,11 +1489,11 @@ async function executeToolUseInner(
         setActivityPhase(activityKey, 'saving', Date.now() + 30_000)
         await callbacks.beforeToolExecute?.(tu.id, tu.name, tu.input)
         deps.abortSignal?.throwIfAborted()
+        await deps.config.externalHookRuntime?.barrier(deps.abortSignal)
         // 无进展哨兵打点：工具执行起止（CLI/server 共用 agent 内核）。start
         // 后无 end = 卡在工具内（stall-observer 90s 后指认）；end 后无下一
         // start = 卡在回合处理。finally 保证 end 在成功/失败/超时都触达。
         // activityKey 定义在函数头（pre/post 段共用）。
-        touchActivity(activityKey, `tool:${tu.name}:start`)
         try {
           // P5+P6: read_file must always go through real execute to honor the
           // active contextWindow's read cap. The prewarm cache is shared with
@@ -1533,7 +1501,6 @@ async function executeToolUseInner(
           // (smaller) cap; serving cached content here would re-introduce the
           // truncation regression. fs.readFile + OS page cache is fast enough.
           const toolTimeout = toolDef?.timeoutMs?.(params) ?? DEFAULT_TOOL_TIMEOUT_MS
-          setActivityPhase(activityKey, 'tool', Date.now() + toolTimeout)
           // P0/H1: compose a per-tool timeout AbortController with the loop signal,
           // so a tool-level timeout cascades an abort into the underlying op
           // (child proc / fetch) instead of merely rejecting the wrapper Promise.
@@ -1553,9 +1520,37 @@ async function executeToolUseInner(
           composedSignal.throwIfAborted()
           // Zen 相位下未注册工具（幻觉调用）不晋升，但把 registry 的裸
           // Unknown tool 报错变成可行动的 zen_unlock 指引，避免死路重试。
-          if (toolDef) params.onVerificationCompleted = recordVerification = beginCourseToolExecution(deps, tu.name, params.input)
-          claimBoundary.executionStarted = true
-          const execution = deps.config.toolRegistry.execute(tu.name, { ...params, approvalMode, approvalGrantedAt: shouldAsk ? Date.now() : undefined, abortSignal: composedSignal })
+          params.input = tu.input = immutableToolInput(params.input)
+          const dispatch = async () => {
+            composedSignal.throwIfAborted()
+            latestRisk = assertApprovedInputBoundary(tu.name, params.input, deps, params)
+            const destructiveAtDispatch = deps.destructiveGate?.evaluate(tu.name, params.input, deps.cwd)
+            if (destructiveAtDispatch?.block && JSON.stringify(destructiveAtDispatch.actions) !== JSON.stringify(approvedDestructiveActions) && !skipAllApproval && !allowlisted && !bashAllowlisted) throw new Error(destructiveAtDispatch.message)
+            const intervention = deps.getInterventionLevel?.() ?? 'none'
+            if ((intervention === 'gate' || intervention === 'escalate') && (tu.name === 'edit_file' || tu.name === 'write_file')) {
+              const gateMsg = fileReadGate(tu.name, params)
+              if (gateMsg) { deps.onGateBlocked?.('cerebellar'); return { content: gateMsg, isError: true, errorKind: 'refused' as const, errorReason: 'file_observation_required' } }
+            }
+            const repairAtDispatch = fileRepairGuard(tu.name, params)
+            if (repairAtDispatch) throw new Error(repairAtDispatch)
+            if (toolDef) {
+              const execution = beginCourseToolExecution(deps, tu.name, params.input)
+              params.onVerificationCompleted = recordVerification = execution
+              params.onVerificationStarted = execution.started
+            }
+            claimBoundary.executionStarted = true
+            touchActivity(activityKey, `tool:${tu.name}:start`)
+            setActivityPhase(activityKey, 'tool', Date.now() + toolTimeout)
+            const run = () => withToolTimeout(
+              (async () => {
+                composedSignal.throwIfAborted()
+                return deps.config.toolRegistry.execute(tu.name, { ...params, approvalMode, approvalGrantedAt: shouldAsk ? Date.now() : undefined, abortSignal: composedSignal })
+              })(), tu.name, toolTimeout, deps.abortSignal, toolAbort)
+            return deps.callBudget ? deps.callBudget.executing(run) : run()
+          }
+          const execution = deps.executePrepared && deps.callBudget
+            ? deps.callBudget.waiting(release => deps.executePrepared!(tu.name, params.input, () => { release(); return dispatch() }))
+            : deps.executePrepared ? deps.executePrepared(tu.name, params.input, dispatch) : dispatch()
           const zenGuardedExecution = execution.catch(err => {
             const zenHint = deps.getZenUnregisteredHint?.(tu.name)
             if (zenHint) {
@@ -1563,13 +1558,7 @@ async function executeToolUseInner(
             }
             throw err
           })
-          const r = await withToolTimeout(
-            zenGuardedExecution,
-            tu.name,
-            toolTimeout,
-            deps.abortSignal,
-            toolAbort,
-          ).catch((err) => {
+          const r = await zenGuardedExecution.catch((err) => {
             // 超时错误补目标摘要（2026-09-08 写后挂起事故教训）：模型与 sidecar
             // 日志都能指认是哪个文件/命令超时，而非只有工具名。日志留痕——
             // 超时走 reject 路径不进 trajectory（turn-harness 只记录返回结果）。
@@ -1579,6 +1568,7 @@ async function executeToolUseInner(
             }
             throw err
           })
+          if (mutationNotices.length) r.content += '\n' + mutationNotices.splice(0).join('\n')
           rawToolResult = r
           return { content: r.content, isError: r.isError }
         } finally {
@@ -1754,7 +1744,8 @@ async function executeToolUseInner(
     // the cerebellar prediction-error gate, making the agent timid (低信念 → 不敢做事).
     // Skip prediction recording entirely, exactly like TDD-red information gain.
     const isEnvFailure = harnessResult.isError && rawToolResult?.errorClass === 'environment'
-    if (!isTddRed && !isEnvFailure) {
+    const isPreflightFeedback = harnessResult.isError && ['format_error', 'refused'].includes(rawToolResult?.errorKind ?? '') && !rawToolResult?.mutations?.some(f => f.attempted)
+    if (!isTddRed && !isEnvFailure && !isPreflightFeedback) {
       deps.recordPrediction?.(!harnessResult.isError)
    }
     let outputClass: string
@@ -1818,16 +1809,19 @@ async function executeToolUseInner(
     if (bashVerification?.userGuidance && bashVerification.status !== 'failed') {
       finalContent += `\n\n[验证反馈] ${bashVerification.status === 'blocked' ? '该命令未取得可归因的验证证据，不能据此认定测试失败。' : '该命令未取得完整覆盖证明。'}\n${bashVerification.userGuidance}`
     }
-    if (snapshotOmissionGuidance && !finalContent.includes(snapshotOmissionGuidance.trim())) {
-      finalContent += snapshotOmissionGuidance
+
+    if (rawToolResult?.fileStates?.length) {
+      const receipt = renderFileStateTail(rawToolResult.fileStates)
+      const retained = finalContent.includes('文件回执') && rawToolResult.fileStates.every(s => finalContent.includes(s.path) && finalContent.includes(`version=${s.version ?? 'unknown'}`))
+      if (receipt && !retained) finalContent += `\n\n${receipt}`
     }
+
 
     // Normalize isError: tools may omit isError on success (undefined),
     // but the TUI treats undefined as a streaming chunk that never
     // commits to scrollback. Force false so terminal results render.
     // DEBUG: unconditional trace for TUI rendering-loss investigation.
     // Log file: ~/.rivet/sessions/<project-slug>/<sessionId>/tool-result-trace.jsonl
-    void emitToolResultTrace({ cwd: deps.cwd, sessionId: deps.sessionId, id: tu.id, name: tu.name, isError: harnessResult.isError, contentLen: finalContent.length, source: 'pipeline', errorKind: rawToolResult?.errorKind ?? harnessResult.errorClass })
     callbacks.onToolResult(tu.id, tu.name, finalContent, harnessResult.isError ?? false, rawToolResult?.rawPath, rawToolResult?.uiContent, { command: rawToolResult?.command, outputText: rawToolResult?.displayOutput ?? rawToolResult?.uiContent ?? rawToolResult?.content, outputTruncated: rawToolResult?.displayOutputTruncated, images: rawToolResult?.images, exitCode: rawToolResult?.exitCode, lossiness: rawToolResult?.lossiness, ...(rawToolResult?.generatedImageId ? { generatedImageId: rawToolResult.generatedImageId } : {}), ...(rawToolResult?.skillDraft ? { skillDraft: rawToolResult.skillDraft } : {}) })
 
     deps.recordToolHistory(tu.name, tu.input, harnessResult.isError, harnessResult.content, rawToolResult?.errorClass, rawToolResult?.errorKind)
@@ -1954,7 +1948,7 @@ async function executeToolUseInner(
        } else {
           deps.taskLedger.record({ type: 'tool_exec', tool: tu.name, meta: { command: cmd.slice(0, 200) } })
        }
-     } else if (tu.name === 'run_tests') {
+     } else if (tu.name === 'run_tests' && (tu.input.action ?? 'run') === 'run' && rawToolResult?.errorKind !== 'format_error') {
         const filter = typeof tu.input.filter === 'string' ? tu.input.filter : undefined
         const command = filter ? `run_tests ${filter}` : 'run_tests'
         const verification = rawToolResult?.verification
@@ -2121,51 +2115,9 @@ async function executeToolUseInner(
         tu.input.file_path as string,
         `file modified by ${tu.name}`,
       )
-      // Prefer meridian graph (persisted SQLite reverse BFS) over in-memory import-graph.
-      // 绝对路径死角修复（issue #61 族）：写工具按工具文档恒传绝对路径——
-      // `db && !isAbsolute(filePath)` 旧判据让快路径在 Windows 恒不走、每次 run
-      // 首个写工具全量同步扫仓（import-graph，数千次同步 syscall 冻结事件循环）。
-      // 先相对化再判；出界路径（relative 以 .. 开头）才落回内存图。
-      const filePath = tu.input.file_path as string
-      const db = deps.meridianIndexer?.getDb()
-      const relFilePath = (isAbsolute(filePath) ? relative(deps.cwd, filePath) : filePath).replace(/\\/g, '/')
-      // P1-2：冷库（新 clone 首启索引为空）时 db 为真值但无数据——analyzeImpact 恒返回
-      // 空集且不落回 importGraph，impact hint 静默变空（9a9bbf49b 提交信息「importGraph
-      // 留作兜底」仅对 indexer=null/路径出界成立）。加 hasFiles() 空库探测：库空时与
-      // indexer=null 同路落回 importGraph；索引非空但无 impact 才是真无影响，不兜底
-      // （避免每写工具全量扫仓——issue #61 已修路径）。
-      if (db && db.hasFiles() && !relFilePath.startsWith('..') && !isAbsolute(relFilePath)) {
-        const impactT0 = Date.now()
-        const impact = analyzeImpact(db, [relFilePath])
-        warnSlowSyncStage(tu.name, 'meridian-impact', Date.now() - impactT0)
-        if (impact.direct.length > 0 || impact.tests.length > 0) {
-          deps.evidence.trackImpact(impact.direct, impact.tests)
-        }
-      } else {
-        // 冷库回落后台化（2026-09-12，两轮审查修正）：impact hint 是建议性信号，
-        // 异步分片构建（不冻结事件循环，核心目标）；共享盒挂 deps.config
-        // （AgentLoop 会话级对象，buildDeps 逐调用引用转发）——初版把图与构建
-        // Promise 写在逐调用新建的 deps 包上，图永远到不了下一调用（冷库 hint
-        // 静默全灭）且每次写都重复点火全扫。构建未就绪的写入跳过提示即返回。
-        const box = (deps.config.impactGraphState ??= { graph: null, building: null })
-        if (box.graph) {
-          importGraph = invalidateFile(box.graph, deps.cwd, filePath)
-          const hint = generateImpactHint(box.graph, filePath, deps.cwd)
-          if (hint) {
-            deps.evidence.trackImpact(hint.impactedFiles, hint.relatedTests)
-          }
-        } else if (!box.building) {
-          box.building = (async () => {
-            try {
-              box.graph = await buildImportGraphAsync(deps.cwd)
-            } catch {
-              // Best-effort impact analysis — must never produce tool errors.
-            } finally {
-              box.building = null
-            }
-          })()
-        }
-      }
+      // Impact analysis is an explicit diagnostic action, not a post-edit task.
+      // Do not crawl reverse dependencies or populate automatic test obligations.
+
    } else if (tu.name === 'run_tests' && rawToolResult) {
       // Reconnect EvidenceTracker verification pipeline.
       // run_tests returns VerificationMetadata, but this was never fed into
@@ -2192,12 +2144,12 @@ async function executeToolUseInner(
           const diagEvictedId = extractArtifactId(diagnosedContent)
           if (diagEvictedId) deps.artifactIdsEvicted?.push(diagEvictedId)
           if (harnessResult.isError) diagnosedContent = boundToolFailure(diagnosedContent)
-          return { toolResult: { type: 'tool_result', tool_use_id: tu.id, content: starSig ? diagnosedContent + starSig : diagnosedContent, is_error: harnessResult.isError }, traceStore, importGraph, lastConflictCheckCount, checkpointCreated, latestRisk, errorKind: harnessResult.isError ? resolveErrorKind(rawToolResult) : undefined, presentation: rawToolResult?.presentation }
+          return { toolResult: { type: 'tool_result', tool_use_id: tu.id, content: starSig ? diagnosedContent + starSig : diagnosedContent, is_error: harnessResult.isError }, traceStore, importGraph, lastConflictCheckCount, checkpointCreated, latestRisk, errorKind: harnessResult.isError ? resolveErrorKind(rawToolResult) : undefined, presentation: rawToolResult?.presentation, mutations: rawToolResult?.mutations, errorReason: rawToolResult?.errorReason }
        }
      }
    }
 
-    return { toolResult: { type: 'tool_result', tool_use_id: tu.id, content: starSig ? finalContent + starSig : finalContent, is_error: harnessResult.isError }, traceStore, importGraph, lastConflictCheckCount, checkpointCreated, latestRisk, endTurn: rawToolResult?.endTurn === true ? true : undefined, images: rawToolResult?.images, errorKind: harnessResult.isError ? resolveErrorKind(rawToolResult) : undefined, presentation: rawToolResult?.presentation }
+    return { toolResult: { type: 'tool_result', tool_use_id: tu.id, content: starSig ? finalContent + starSig : finalContent, is_error: harnessResult.isError }, traceStore, importGraph, lastConflictCheckCount, checkpointCreated, latestRisk, endTurn: rawToolResult?.endTurn === true ? true : undefined, images: rawToolResult?.images, errorKind: harnessResult.isError ? resolveErrorKind(rawToolResult) : undefined, presentation: rawToolResult?.presentation, mutations: rawToolResult?.mutations, errorReason: rawToolResult?.errorReason }
  } catch (err) {
     candidateSnapshot?.destroy()
     claimBoundary.rollback()

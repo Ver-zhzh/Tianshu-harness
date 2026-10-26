@@ -160,3 +160,19 @@ test(
     }
   },
 )
+
+test(
+  '真实链路·执行期：命令内联 RIVET_CU_YIELD_MS=0 同时关闭执行前与执行期护栏',
+  { skip: process.platform === 'win32' ? 'POSIX-shaped payload (>/dev/null, sleep); shell family varies on win32' : false },
+  async () => {
+    __setYieldWatchProbeForTests(ACTIVE_PROBE)
+    try {
+      const command = 'export RIVET_CU_YIELD_MS=0; echo "SetForegroundWindow(" >/dev/null; sleep 2'
+      const r = await runBash(command, '1200', {}, '500')
+      assert.notEqual(r.isError, true, '内联 =0 不得只在执行前生效、又在执行期终止命令')
+      assert.match(r.content, /exit=0/)
+    } finally {
+      __setYieldWatchProbeForTests(undefined)
+    }
+  },
+)

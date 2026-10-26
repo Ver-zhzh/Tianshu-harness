@@ -33,6 +33,7 @@ class FakeAgent implements ManagedAgent {
   }
   finish() { const r = this.finishRun; this.finishRun = undefined; r?.() }
   abort() { this.finish() }
+  async shutdown() { this.finish(); await new Promise<void>(resolve => setImmediate(resolve)) }
   listArtifacts(): Artifact[] { return [] }
   readArtifact() { return Promise.resolve(null) }
   getMessages(): OaiMessage[] { return [] }
@@ -51,7 +52,7 @@ async function until(predicate: () => unknown) {
   }
 }
 
-function fixture(t: { after: (fn: () => Promise<void>) => void }, ensureGate?: () => Promise<void>) {
+function fixture(t: { after: (fn: () => Promise<void>) => void }, ensureGate?: () => Promise<void>, controlled = true) {
   const home = mkdtempSync(join(tmpdir(), 'goal-rollover-'))
   const cwd = join(home, 'work'); mkdirSync(cwd)
   const goals = join(home, 'goals'); mkdirSync(goals)
@@ -70,15 +71,25 @@ function fixture(t: { after: (fn: () => Promise<void>) => void }, ensureGate?: (
       return a
     }, resolveGoalHandles: id => handles.get(id), resolveReviewGateRef: id => reviewRefs.get(id),
   })
+  // State-machine fault injection needs an explicit controllable user turn.
+  // Production fact handoff has no such run; the separate integration case below proves that.
+  if (controlled) {
+    const request = manager.requestHandoff.bind(manager)
+    manager.requestHandoff = (id, note, options) => {
+      const result = request(id, note, options)
+      if (result.ok) manager.run(id, `fixture boundary ${manager.getSession(id)?.goalRollover?.id}`, undefined, false, undefined, { origin: 'runtime_command' })
+      return result
+    }
+  }
   t.after(async () => {
     for (const cleanup of extraCleanup) await cleanup()
     await manager.shutdownAll()
     await manager.flushGoalRollover()
     await journal.flush()
-    persistence.flushSync()
+    await persistence.flushAllAsync()
     rmSync(home, { recursive: true, force: true })
   })
-  return { manager, agents, journal, persistence, cwd, handles, goals, extraCleanup, reviewRefs }
+  return { manager, agents, journal, persistence, cwd, handles, goals, extraCleanup, reviewRefs, controlled }
 }
 
 async function begin(f: ReturnType<typeof fixture>, input: Parameters<RuntimeSessionManager['createSession']>[0] = {}, configure?: (id: string) => void) {
@@ -96,7 +107,7 @@ async function begin(f: ReturnType<typeof fixture>, input: Parameters<RuntimeSes
   tracker.advanceIteration(); tracker.advanceIteration(); tracker.recordJudgeRun()
   tracker.pause(GOAL_ROLLOVER_REASON)
   agent.finish()
-  await until(() => agent.prompts.length === 2)
+  await until(() => f.controlled ? agent.prompts.length === 2 : !!f.manager.getSession(session.id)?.goalRollover)
   const state = (await f.journal.loadGoalRollover(session.id))!
   assert.ok(state)
   return { session, agent, tracker, state }
@@ -368,4 +379,46 @@ test('cancelling the pending successor while inputs load prevents attachment and
   assert.equal(f.manager.getGoalState(state.to!), null)
   assert.equal(f.agents.get(state.to!)?.prompts.length ?? 0, 0)
   assert.equal(f.manager.getSession(state.to!)?.goalRollover?.phase, 'cancelled')
+})
+
+
+test('production rollover writes fact handoff without an additional source model run', async t => {
+  const f = fixture(t, undefined, false)
+  const { session, agent, state } = await begin(f)
+  await until(() => f.agents.get(state.to!)?.prompts.length)
+  await f.manager.flushGoalRollover()
+  assert.equal(agent.prompts.length, 1)
+  assert.equal(f.agents.get(state.to!)!.prompts.length, 1)
+  assert.match(f.agents.get(state.to!)!.prompts[0]!, /实际提交：/)
+  assert.equal(f.manager.getSession(session.id)!.goalRollover!.phase, 'complete')
+})
+
+test('a fact-handoff checkpoint failure visibly pauses rollover until explicit retry without reserving another successor', async t => {
+  const prior = process.env.RIVET_DEBUG; delete process.env.RIVET_DEBUG
+  t.after(() => { if (prior === undefined) delete process.env.RIVET_DEBUG; else process.env.RIVET_DEBUG = prior })
+  const f = fixture(t, undefined, false)
+  const save = f.journal.saveGoalRollover.bind(f.journal)
+  let broken = true, writes = 0
+  f.journal.saveGoalRollover = async state => {
+    writes++
+    if (broken && state.phase !== 'handoff') throw Error('checkpoint disk unavailable')
+    return save(state)
+  }
+  const { session, agent, state } = await begin(f)
+  await until(() => f.manager.getSession(session.id)!.goalRollover?.phase === 'paused')
+  await f.manager.flushGoalRollover()
+  const view = f.manager.getSession(session.id)!.goalRollover!
+  assert.match(view.error!, /checkpoint disk unavailable/)
+  assert.equal(f.manager.getEvents(session.id)!.events.filter(e => e.type === 'error' && e.data.code === 'goal_rollover_failed').length, 1)
+  assert.equal(f.manager.listSessions().length, 1)
+  const count = writes
+  const coordinator = Reflect.get(f.manager, 'goalRollover') as { onRunSettled(id: string): Promise<boolean> }
+  assert.equal(await coordinator.onRunSettled(session.id), false)
+  assert.equal(writes, count, 'no automatic storage or model retry after failure')
+  broken = false
+  assert.equal(await f.manager.retryGoalRollover(session.id), true)
+  await until(() => f.agents.get(state.to!)?.prompts.length)
+  assert.equal(agent.prompts.length, 1)
+  assert.equal((await f.journal.loadGoalRollover(session.id))!.to, state.to)
+  assert.equal(f.manager.listSessions().length, 2)
 })

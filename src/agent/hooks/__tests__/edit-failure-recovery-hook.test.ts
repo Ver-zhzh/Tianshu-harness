@@ -45,9 +45,9 @@ describe('createEditFailureRecoveryHook', () => {
     assert.equal(submitted.length, 1)
     assert.equal(submitted[0]!.key, 'edit-failure-recovery:src/foo.ts')
     assert.equal(submitted[0]!.category, 'repair')
-    assert.match(submitted[0]!.content, /undo/)
-    assert.match(submitted[0]!.content, /read_file/)
-    assert.match(submitted[0]!.content, /apply_patch/)
+    assert.doesNotMatch(submitted[0]!.content, /调用 undo|全量覆写/)
+    assert.match(submitted[0]!.content, /expected_version/)
+    assert.match(submitted[0]!.content, /精确捕获/)
   })
 
   it('fires for mixed edit tools on the same file', () => {
@@ -91,7 +91,7 @@ describe('createEditFailureRecoveryHook', () => {
     assert.equal(submitted.length, 0)
   })
 
-  it('escalates count and keeps firing on further failures', () => {
+  it('same unresolved failure produces only one actionable recovery suggestion', () => {
     const submitted: AdvisoryEntry[] = []
     const hook = createEditFailureRecoveryHook({
       advisoryBus: { submit: (e: AdvisoryEntry) => { submitted.push(e) } },
@@ -99,8 +99,7 @@ describe('createEditFailureRecoveryHook', () => {
     hook.run(makeCtx(1), makeTool('edit_file', false, 'src/foo.ts'))
     hook.run(makeCtx(1), makeTool('edit_file', false, 'src/foo.ts'))
     hook.run(makeCtx(1), makeTool('edit_file', false, 'src/foo.ts'))
-    assert.equal(submitted.length, 2)
-    assert.ok(submitted[1]!.content.includes('3'))
+    assert.equal(submitted.length, 1)
   })
 
   const PATCH_DIFF = 'diff --git a/src/foo.ts b/src/foo.ts\n--- a/src/foo.ts\n+++ b/src/foo.ts\n@@ -1 +1 @@\n-old\n+new\n'

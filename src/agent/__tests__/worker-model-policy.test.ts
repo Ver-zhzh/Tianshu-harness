@@ -82,6 +82,11 @@ function order(profile = 'code_scout', target?: ModelTarget): WorkOrder {
 }
 const registry = new ToolRegistry()
 function runtime(d: WorkerRuntimeDeps, o = order()) { return buildWorkerRuntime(d, o, buildModelCards(d.provider)[0]!, registry) }
+
+test('worker runtime inherits the configured read concurrency without changing model selection', () => {
+  assert.equal(runtime(deps(c => { c.tools.readConcurrency = 1 })).readConcurrency, 1)
+  assert.equal(runtime(deps()).readConcurrency, 4)
+})
 async function send(config: ReturnType<typeof runtime>) {
   currentOrder = config.order
   await config.client.stream({ model: config.promptEngine.getModel(), messages: [{ role: 'user', content: 'fixture' }], tools: [] }, {

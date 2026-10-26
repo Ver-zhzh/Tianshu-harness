@@ -130,31 +130,18 @@ describe('冷库回落后台化（executeBatch 真实接线）', () => {
     }
   })
 
-  it('点火→就绪→hint 全链：空盒首写点火，构建落定后下一写产生 hint（冷库 hint 全灭回归）', async () => {
+  it('multiple actual write dispatches never start background impact discovery or expand verification', async () => {
     dir = fixtureRepo()
     try {
-      const impacts: string[][] = []
-      const evidence = { ...mockEvidence(), trackImpact: (f: string[], _t: string[]) => { impacts.push(f) } }
+      let executions = 0, impacts = 0
       const config = {} as AgentConfig
-      const controller = makeController(dir, evidence as never, config)
-
-      // 批 1：空盒点火——不产提示、结果零等待；building 挂 config 共享盒。
-      await controller.executeBatch(makeBatch(dir, 'tu-c1', 'b.ts', 'export const b = 2\n'))
-      assert.equal(impacts.length, 0, '构建未就绪的写入不付全扫成本也不产提示')
-      const box = config.impactGraphState
-      assert.ok(box?.building, '后台构建应已点火并挂到 config 共享盒（初版挂逐调用 deps 包=丢失）')
-
-      // 构建落定：图就绪、building 清空。
-      await box!.building
-      assert.ok(config.impactGraphState!.graph, '构建落定后共享盒应持有图')
-      assert.equal(config.impactGraphState!.building, null)
-
-      // 批 2：hint 经共享盒的图产生并累积进 evidence（审查后果一回归）。
-      await controller.executeBatch(makeBatch(dir, 'tu-c2', 'b.ts', 'export const b = 3\n'))
-      assert.equal(impacts.length, 1, '构建就绪后下一写应产生 impact hint')
-      assert.ok(impacts[0]!.some((f) => f.endsWith('a.ts')), `b.ts 反向依赖应含 a.ts: ${JSON.stringify(impacts)}`)
-    } finally {
-      rmSync(dir, { recursive: true, force: true })
-    }
+      const controller = makeController(dir, { ...mockEvidence(), trackImpact: () => { impacts++ } } as never, config)
+      config.toolRegistry.execute = async () => { executions++; return { content: 'written' } }
+      await controller.executeBatch(makeBatch(dir, 'one', 'b.ts', 'export const b = 2'))
+      await controller.executeBatch(makeBatch(dir, 'two', 'b.ts', 'export const b = 3'))
+      assert.equal(executions, 2)
+      assert.equal(config.impactGraphState, undefined)
+      assert.equal(impacts, 0)
+    } finally { rmSync(dir, { recursive: true, force: true }) }
   })
 })

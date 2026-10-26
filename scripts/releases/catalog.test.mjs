@@ -46,7 +46,25 @@ test('generator validates local bytes, remote digest and signature before public
     writeFileSync(join(dir,name+'.sig'),'wrong');await assert.rejects(generateCatalog(args),/signature differ/)
   } finally {rmSync(dir,{recursive:true,force:true})}
 })
-test('existing different attachment cannot be overwritten on retry', async () => {
+test('--atomgit marks verified only after the injected live verifier succeeds', async () => {
+  const dir=mkdtempSync(join(tmpdir(),'tianshu-catalog-atomgit-'));try {
+    const name=fixture().artifacts[0].fileName;writeFileSync(join(dir,name),bytes);writeFileSync(join(dir,name+'.sig'),'signed')
+    const args={assets:dir,manifest:{version:'3.28.0',platforms:{'windows-x86_64':{url:entry('github').url,signature:'signed'}}},githubAssets:[{name,size:bytes.length,digest:`sha256:${digest}`}],atomgit:true}
+    let calls=0
+    const url=entry('atomgit').url
+    const verified=await generateCatalog({...args,verifyAtomgit:async options=>{calls++;assert.deepEqual(options.expected,{size:bytes.length,sha256:digest});return {url,size:bytes.length,sha256:digest,verified:true,anonymous:true,verifiedAt:'2026-10-24T00:00:00Z'}}})
+    assert.equal(calls,1)
+    assert.equal(verified.artifacts[0].sources.atomgit.verified,true)
+    assert.equal(verified.artifacts[0].sources.atomgit.verifiedAt,'2026-10-24T00:00:00Z')
+    const rerun=await generateCatalog({...args,previousCatalog:verified,verifyAtomgit:async()=>{calls++;return {url,size:bytes.length,sha256:digest,verified:true,anonymous:true,verifiedAt:'2026-10-25T00:00:00Z'}}})
+    assert.equal(calls,2,'相同字节重试仍必须重新实测，不能只复用 proof')
+    assert.deepEqual(rerun,verified,'实测成功后保留同字节 proof 时间戳，避免不可变元数据重试漂移')
+    await assert.rejects(generateCatalog({...args,verifyAtomgit:async()=>{throw new Error('anonymous offline')}}),/anonymous offline/)
+    await assert.rejects(generateCatalog({...args,verifyAtomgit:async()=>({url,size:bytes.length,sha256:digest,verified:false,anonymous:false,verifiedAt:'2026-10-24T00:00:00Z'})}),/valid proof/)
+    await assert.rejects(generateCatalog({...args,atomgit:false,evidence:{[name]:{atomgit:entry('atomgit')}}}),/live anonymous verification/)
+  } finally {rmSync(dir,{recursive:true,force:true})}
+})
+test('attachment probe failure cannot permit a remote mutation', async () => {
   let mutations=0
   await assert.rejects(uploadImmutable(async()=>{mutations++},'v3.28.0','fixture.exe',{size:bytes.length,sha256:'0'.repeat(64)},async()=>new Response(null,{status:500})),/Cannot establish attachment absence/)
   assert.equal(mutations,0)

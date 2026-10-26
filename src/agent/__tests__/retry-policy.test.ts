@@ -67,3 +67,16 @@ test('blocks auto-retry for deliver_task even when failure class is transient (i
   assert.equal(result.retry, false)
   assert.match(result.reason, /non-idempotent/)
 })
+
+test('real TurnHarness never repeats explicit review or test executions even if a wrapper says safe', async () => {
+  const { TurnHarness } = await import('../turn-harness.js')
+  const { TrajectoryRecorder } = await import('../trajectory.js')
+  for (const name of ['run_tests', 'review_changes']) {
+    let calls = 0
+    const harness = new TurnHarness({ maxRetries: 3, retryableClasses: ['timeout'] }, new TrajectoryRecorder())
+    const result = await harness.executeTool({ id: name, name, input: {}, turn: 1, isConcurrencySafe: true,
+      execute: async () => { calls++; return { content: 'timed out', isError: true } }, classify: () => 'timeout' })
+    assert.equal(calls, 1)
+    assert.equal(result.retried, false)
+  }
+})

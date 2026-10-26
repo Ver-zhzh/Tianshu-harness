@@ -26,7 +26,7 @@ for (const runner of ['jest', 'vitest'] as const) {
     try {
       const pkg = JSON.parse(readFileSync(join(f.cwd, 'package.json'), 'utf8'))
       pkg.scripts.test += ' --shard=2/2 --passWithNoTests'; f.write('package.json', pkg)
-      const result = await RUN_TESTS_TOOL.execute({ cwd: f.cwd, toolUseId: 'empty-shard', input: {} })
+      const result = await RUN_TESTS_TOOL.execute({ cwd: f.cwd, toolUseId: 'empty-shard', input: { full: true } })
       assert.equal(result.verification?.coverage?.complete, true, JSON.stringify(result.verification))
       assert.equal(result.verification?.coverage?.files.length, 0)
       assert.deepEqual(assessImpactedTestCoverage([f.file], [result.verification!], () => true, f.cwd).uncovered, [f.file])
@@ -78,7 +78,7 @@ for (const runner of ['jest', 'vitest'] as const) {
       for (const file of files) f.write(file, runner === 'jest' ? "test('file',()=>{});" : "import {test} from 'vitest';test('file',()=>{});")
       const pkg = JSON.parse(readFileSync(join(f.cwd, 'package.json'), 'utf8'))
       pkg.scripts.test += ' --shard=1/2'; f.write('package.json', pkg)
-      const first = await RUN_TESTS_TOOL.execute({ cwd: f.cwd, toolUseId: 'shard-one', input: {} })
+      const first = await RUN_TESTS_TOOL.execute({ cwd: f.cwd, toolUseId: 'shard-one', input: { full: true } })
       assert.equal(first.verification?.coverage?.complete, true, JSON.stringify(first.verification))
       const pending = assessImpactedTestCoverage(files, [first.verification!], () => true, f.cwd).uncovered
       assert.ok(pending.length > 0 && pending.length < files.length)
@@ -124,7 +124,7 @@ test('Node reporter ENV/CLI pairs and native shards preserve user output and com
     const pkg = JSON.parse(readFileSync(join(f.cwd, 'package.json'), 'utf8'))
     pkg.scripts.test += ' --test-reporter=spec --test-reporter-destination=user.log --test-shard=1/2'; f.write('package.json', pkg)
     process.env.NODE_OPTIONS = (original ?? '') + ' --test-reporter=dot --test-reporter-destination=env.log'
-    const result = await RUN_TESTS_TOOL.execute({ cwd: f.cwd, toolUseId: 'node-outputs', input: {} })
+    const result = await RUN_TESTS_TOOL.execute({ cwd: f.cwd, toolUseId: 'node-outputs', input: { full: true } })
     assert.equal(result.verification?.coverage?.complete, true, JSON.stringify(result.verification))
     assert.equal(result.verification?.coverage?.files.length, 1)
     assert.ok(readFileSync(join(f.cwd, 'user.log'), 'utf8').length)

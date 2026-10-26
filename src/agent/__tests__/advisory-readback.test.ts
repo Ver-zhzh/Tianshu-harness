@@ -4,6 +4,7 @@ import { AdvisoryReadback, type ObservedToolEvent } from '../advisory-readback.j
 import { AdvisoryBus, type AdvisoryExpectation } from '../advisory-bus.js'
 import { createAdvisoryReadbackHooks, extractObservedTarget } from '../hooks/advisory-readback-hook.js'
 import type { RuntimeHookContext } from '../runtime-hooks.js'
+import { resolve } from 'node:path'
 
 function tool(turn: number, name: string, target = '', isError = false): ObservedToolEvent {
   return { turn, name, target, isError }
@@ -12,6 +13,49 @@ function tool(turn: number, name: string, target = '', isError = false): Observe
 function deliver(rb: AdvisoryReadback, key: string, expect: AdvisoryExpectation, turn: number): void {
   rb.track([{ key, category: 'discipline', expect }], turn)
 }
+
+it('recovery targets and facts normalize at ingestion using the owning project, including project switches', () => {
+  let cwd = resolve('readback-project-one')
+  const rb = new AdvisoryReadback(undefined, () => cwd)
+  const mutation = (file: string) => ({ file, toolCallId: 'repair', attempted: true, attemptedParse: 'valid' as const, restoration: 'none' as const, before: { version: 'bad', parse: 'invalid' as const }, after: { version: 'good', parse: 'valid' as const } })
+  deliver(rb, 'relative-target', { kind: 'tool_appears', tools: ['edit_file'], recoveryTarget: './src/../src/a.ts' }, 1)
+  rb.observeTool({ ...tool(1, 'edit_file'), mutations: [mutation(resolve(cwd, 'src/a.ts'))] })
+  rb.evaluate(1)
+  assert.equal(rb.drainRecoveryOutcomes()[0]?.status, 'resolved')
+  assert.equal(rb.hasUsefulFileEvidence('./src/a.ts', 1, 1), true)
+  deliver(rb, 'absolute-target', { kind: 'tool_appears', tools: ['edit_file'], recoveryTarget: resolve(cwd, 'src/b.ts') }, 2)
+  rb.observeTool({ ...tool(2, 'edit_file'), mutations: [mutation('./src/b.ts')] })
+  rb.evaluate(2)
+  assert.equal(rb.drainRecoveryOutcomes()[0]?.status, 'resolved')
+  deliver(rb, 'old-project', { kind: 'tool_appears', tools: ['edit_file'], recoveryTarget: './src/c.ts' }, 3)
+  cwd = resolve('readback-project-two')
+  rb.observeTool({ ...tool(3, 'edit_file'), mutations: [mutation('./src/c.ts')] })
+  rb.flushAtSessionEnd(3)
+  assert.equal(rb.drainRecoveryOutcomes()[0]?.status, 'unknown', 'a same-named file in a different project cannot settle the old recovery')
+  const owner = cwd
+  deliver(rb, 'observed-before-switch', { kind: 'tool_appears', tools: ['edit_file'], recoveryTarget: './src/d.ts' }, 4)
+  rb.observeTool({ ...tool(4, 'edit_file'), mutations: [mutation('./src/d.ts')] })
+  cwd = resolve('readback-project-three')
+  rb.evaluate(4)
+  assert.equal(rb.drainRecoveryOutcomes()[0]?.status, 'resolved')
+  assert.equal(rb.hasUsefulFileEvidence(resolve(owner, 'src/d.ts'), 4, 4), true)
+})
+
+it('recovery adoption and actual repair settle separately, including a later repair', () => {
+  const rb = new AdvisoryReadback()
+  deliver(rb, 'recover:file', { kind: 'tool_appears', tools: ['read_file'], recoveryTarget: '/a.html', withinTurns: 2 }, 1)
+  rb.observeTool(tool(1, 'read_file', '/a.html'))
+  rb.evaluate(1)
+  assert.equal(rb.drainOutcomes()[0]?.outcome, 'adopted')
+  assert.equal(rb.drainRecoveryOutcomes().length, 0)
+  rb.observeTool({ ...tool(2, 'edit_file', '/a.html'), mutations: [{ file: '/a.html', toolCallId: 'fixed', attempted: true, attemptedParse: 'valid', restoration: 'none', before: { version: 'bad', parse: 'invalid' }, after: { version: 'good', parse: 'valid' } }] })
+  rb.evaluate(2)
+  assert.equal(rb.drainRecoveryOutcomes()[0]?.status, 'resolved')
+  deliver(rb, 'unresolved:file', { kind: 'tool_appears', tools: ['read_file'], recoveryTarget: '/b.html' }, 3)
+  rb.observeTool(tool(3, 'read_file', '/b.html'))
+  rb.flushAtSessionEnd(3)
+  assert.equal(rb.drainRecoveryOutcomes()[0]?.status, 'unknown')
+})
 
 describe('AdvisoryReadback — 谓词矩阵（P1a 核销闭环）', () => {
   // ── tool_appears ──────────────────────────────────────────────

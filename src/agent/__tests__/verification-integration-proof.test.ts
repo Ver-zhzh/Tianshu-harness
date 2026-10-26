@@ -38,7 +38,7 @@ it('real snapshot proofs cover the source repository and integration differences
     for (const path of ['src/feature.ts', 'src/feature.test.ts']) state.taskLedger.record({ type: 'file_write', path })
     snapshot = await createVerificationSnapshot({ baseCwd: cwd, sessionId: 'proof', baselineHead: head, ownedFiles: ['src/feature.ts', 'src/feature.test.ts'] })
     const recorder = createVerificationRecorder({ taskLedger: state.taskLedger, evidence: new EvidenceTracker() })
-    const result = await RUN_TESTS_TOOL.execute({ input: { filter: 'src/feature.test.ts' }, toolUseId: 'proof', cwd, verificationSnapshot: { path: snapshot.path, snapshotRef: 'version', repositoryRoot: cwd } })
+    const result = await RUN_TESTS_TOOL.execute({ input: { filter: 'src/feature.test.ts', environment: 'compare' }, toolUseId: 'proof', cwd, verificationSnapshot: { path: snapshot.path, snapshotRef: 'version', repositoryRoot: cwd } })
     assert.equal(result.verification?.coverage?.complete, true, result.content)
     assert.equal(result.verification?.coverage?.repositoryRoot, realpathSync(cwd))
     assert.equal(result.verification?.coverage?.executionRoot, realpathSync(snapshot.path))

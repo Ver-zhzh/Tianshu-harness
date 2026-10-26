@@ -5,6 +5,8 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { spawnSync } from 'node:child_process'
 import { applyPatch, APPLY_PATCH_TOOL, extractPatchTargetPaths } from '../apply-patch.js'
+import { READ_FILE_TOOL, getFileReadContentHash } from '../read-file.js'
+import { contentVersion } from '../../agent/file-version.js'
 
 function git(cwd: string, args: string[]) {
   return spawnSync('git', args, { cwd, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] })
@@ -65,11 +67,51 @@ index 2e65efe..a2005b8 100644
     })
     assert.ok(!result.isError, result.content)
     // model-facing content stays a short summary
-    assert.equal(result.content, '补丁应用成功。')
+    assert.ok(result.content.startsWith('补丁应用成功。'))
+    assert.equal(result.fileStates?.[0]?.path, 'file.txt')
+    assert.equal(result.fileStates?.[0]?.outcome, 'changed')
     // display-only uiContent carries the diff for colored rendering
     assert.ok(result.uiContent && /^@@/m.test(result.uiContent), 'uiContent has hunk header')
     assert.ok(/^-original$/m.test(result.uiContent!))
     assert.ok(/^\+patched$/m.test(result.uiContent!))
+  })
+
+  it('materialized client patches reject invalid syntax before any workspace landing', async () => {
+    const file = join(repoDir, 'a.json'), source = '{"n":1}\n'
+    writeFileSync(file, source)
+    assert.equal(git(repoDir, ['add', 'a.json']).status, 0)
+    const params = { cwd: repoDir, sessionId: 'client-precheck', toolUseId: 'client-precheck' }
+    await READ_FILE_TOOL.execute({ ...params, input: { file_path: file } })
+    let delegates = 0
+    const result = await APPLY_PATCH_TOOL.execute({ ...params,
+      input: { diff: 'diff --git a/a.json b/a.json\n--- a/a.json\n+++ b/a.json\n@@ -1 +1 @@\n-{"n":1}\n+{\n' },
+      onClientDelegate: async (_kind, payload) => { delegates++; writeFileSync(join(repoDir, payload.path as string), payload.newContent as string); return { content: 'accepted', status: 'ok' } },
+    })
+    assert.equal(result.isError, true)
+    assert.match(result.content, /补丁预检.*未写入工作区/)
+    assert.equal(delegates, 0)
+    assert.equal(readFileSync(file, 'utf8'), source)
+    assert.equal(getFileReadContentHash(file, params.sessionId), contentVersion(source))
+    assert.equal(result.mutations?.length, 1)
+    assert.equal(result.mutations?.[0]?.attempted, false)
+  })
+
+  it('private client index does not bypass the real workspace Git precondition', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'patch-no-git-')), file = join(cwd, 'a.txt'), source = 'before\n'
+    writeFileSync(file, source)
+    const params = { cwd, sessionId: 'no-git-owner', toolUseId: 'no-git' }
+    await READ_FILE_TOOL.execute({ ...params, input: { file_path: file } })
+    let delegates = 0
+    const result = await APPLY_PATCH_TOOL.execute({ ...params,
+      input: { diff: 'diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-before\n+after\n' },
+      onClientDelegate: async () => { delegates++; return { status: 'ok', content: 'must not run' } },
+    })
+    assert.equal(result.isError, true)
+    assert.equal(delegates, 0)
+    assert.equal(readFileSync(file, 'utf8'), source)
+    assert.equal(getFileReadContentHash(file, params.sessionId), contentVersion(source))
+    assert.equal(result.fileStates?.[0]?.outcome, 'restored')
+    assert.equal(result.fileStates?.[0]?.observation, 'full')
   })
 
   it('tool validates non-empty diff input', async () => {

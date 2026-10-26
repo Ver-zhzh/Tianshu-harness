@@ -1,10 +1,12 @@
+import { noteMutationSyntax } from '../agent/mutation-facts.js'
+import { contentVersion } from '../agent/file-version.js'
 import { appendFile, mkdir, rm, stat, readFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { dirname, relative, extname } from 'path'
 import type { Tool, ToolCallParams, ToolResult } from './types.js'
 import { validatePath } from './path-validate.js'
 import { syntaxCheck, checkSyntax } from './syntax-check.js'
-import { getFileReadMtime, recordSuccessfulEdit, incrementEditFailCount, resetEditFailCount } from './read-file.js'
+import { getFileReadMtime, isFileFullyObserved, recordSuccessfulEdit, incrementEditFailCount, resetEditFailCount } from './read-file.js'
 import { landingWriteFile, delegatedToToolResult, isDelegateRejected } from './client-delegate.js'
 import { withFileChangeTracking, restoreFileChange, type FileChangeRecord } from '../agent/recovery-stack.js'
 import { applyEol, chooseEol, detectFileEol, toLf } from './line-endings.js'
@@ -189,9 +191,7 @@ export const WRITE_FILE_TOOL: Tool = {
     // 与回滚（分块中途文件天然不完整）；不计入重写循环提示（分块本就是多次写
     // 同一路径）。delegated 落地仅支持整篇覆盖 —— append 始终本地 appendFile。
     if (append) {
-      if (fileExists) {
-        await trackFileChange(params.cwd, { filePath: relative(params.cwd, filePath), action: 'write', toolCallId: params.toolUseId ?? 'write_file' })
-      }
+      await trackFileChange(params.cwd, { filePath: relative(params.cwd, filePath), action: 'write', toolCallId: params.toolUseId ?? 'write_file', intent: 'draft-append' })
       const eol = fileExists ? await detectFileEol(filePath) : null
       const chunk = applyEol(content, chooseEol(filePath, eol, getTargetEol()))
       const abortedAppend = abortedWrite(params)
@@ -203,7 +203,7 @@ export const WRITE_FILE_TOOL: Tool = {
       }
       await recordSuccessfulEdit(filePath, params.sessionId)
       const total = (await stat(filePath)).size
-      return { content: `已追加 ${chunk.length} 字符到 ${toPosixPath(filePath)}（文件现共 ${total} 字节）。` }
+      return { content: `已追加 ${chunk.length} 字符到 ${toPosixPath(filePath)}（文件现共 ${total} 字节）。分块追加允许结构暂未闭合，结构状态见文件回执。` }
     }
 
     // Blind-overwrite guard (fail-closed): overwriting an existing file this
@@ -218,11 +218,11 @@ export const WRITE_FILE_TOOL: Tool = {
       fileExists
       && !isActivePlanDraft
       && process.env.RIVET_WRITE_OVERWRITE_GUARD !== '0'
-      && getFileReadMtime(filePath, params.sessionId) === null
+      && !isFileFullyObserved(filePath, params.sessionId)
       && !(haveOldContentForDiff && oldContentForDiff === toLf(content))
     ) {
       return {
-        content: `错误：${filePath} 已存在（${existingSize} 字节），但本会话从未读取过。`
+        content: `错误：${filePath} 已存在（${existingSize} 字节），但本会话从未读取过完整内容。`
           + `盲目覆盖会销毁你尚未见过的内容。`
           + `请先 read_file 确认要替换的内容，再用 edit_file 做定向修改，`
           + `或再次调用 write_file 进行有意的整文件重写。`,
@@ -231,7 +231,7 @@ export const WRITE_FILE_TOOL: Tool = {
     }
 
     let capture: FileChangeRecord | undefined
-    if (fileExists) {
+    {
       const relPath = relative(params.cwd, filePath)
       capture = await trackFileChange(params.cwd, { filePath: relPath, action: 'write', toolCallId: params.toolUseId ?? 'write_file' })
     }
@@ -281,21 +281,11 @@ export const WRITE_FILE_TOOL: Tool = {
 
     // Post-write structural validation: if the file is unparseable, roll back.
     const syntax = await checkSyntax(filePath, finalContent)
+    noteMutationSyntax(capture, syntax)
     if (syntax.fatal) {
       let rollbackMsg: string
-      if (!fileExists && land.kind !== 'delegated') {
-        // 新文件没有备份可恢复（trackFileChange 只备份已存在文件）——
-        // 回滚 = 移除刚写入的坏文件，不把语法损坏的残尸留在磁盘上。
-        try {
-          await rm(filePath, { force: true })
-          rollbackMsg = '新文件已自动移除（写入前不存在，无备份可恢复）。'
-        } catch {
-          rollbackMsg = '自动回滚失败。'
-        }
-      } else {
-        const restored = capture ? await restoreFileChange(params.cwd, capture, params.sessionId) : false
-        rollbackMsg = restored ? '更改已自动回滚。' : '自动回滚失败。'
-      }
+      const restored = capture ? await restoreFileChange(params.cwd, capture, params.sessionId, { expectedCurrentVersion: contentVersion(finalContent), canRestore: () => params.hasWriteClaim?.(relative(params.cwd, filePath)) ?? true }) : false
+      rollbackMsg = restored ? (fileExists ? '更改已自动回滚。' : '新文件已自动移除（写入前不存在）。') : '自动回滚失败（归属或版本冲突，现场及备份已保留）。'
       const fails = incrementEditFailCount(filePath)
       const gatePrefix = fails >= 3 ? `此文件已连续写入失败 ${fails} 次，再次编辑前必须先重新 read_file。\n\n` : ''
       return {
@@ -306,7 +296,7 @@ export const WRITE_FILE_TOOL: Tool = {
     }
 
     resetEditFailCount(filePath)
-    await recordSuccessfulEdit(filePath, params.sessionId)
+    await recordSuccessfulEdit(filePath, params.sessionId, finalContent, true)
     const lines = finalContent.split('\n').length
 
     // Post-write enhancements (syntax-check, diff, changed-ranges) are

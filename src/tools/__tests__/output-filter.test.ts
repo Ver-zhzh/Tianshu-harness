@@ -16,8 +16,8 @@ describe('filterBashOutput (tsc --noEmit)', () => {
     assert.equal(result, 'Found 0 errors.')
   })
 
-  // Condition 2: tsc --noEmit, exit non-zero, errors → only error lines, full location kept
-  it('keeps only error TS lines with full file:line:col on failure', () => {
+  // Unknown wrapper output can explain a process failure outside TS diagnostics.
+  it('keeps full TS locations and unknown wrapper output on failure', () => {
     const input = [
       'src/tools/bash.ts(123,45): error TS2345: string is not number',
       'src/tools/foo.ts(10,5): error TS2322: Type mismatch.',
@@ -30,8 +30,7 @@ describe('filterBashOutput (tsc --noEmit)', () => {
     assert.match(result!, /src\/tools\/bash\.ts\(123,45\): error TS2345/)
     assert.match(result!, /src\/tools\/foo\.ts\(10,5\): error TS2322/)
     assert.match(result!, /Found 2 errors/)
-    // Non-error lines are stripped
-    assert.ok(!result!.includes('Compiling'))
+    assert.ok(result!.includes('Compiling project...'))
   })
 
   it('preserves the full diagnostic line including deep paths', () => {

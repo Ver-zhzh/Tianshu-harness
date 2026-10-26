@@ -17,6 +17,10 @@ import type Parser from 'web-tree-sitter'
 // (skip the JS/TS parse check), never block the loop, never a false fatal.
 
 import { cpuPool, isInfraTaskError } from '../workers/cpu-pool.js'
+import type { HTMLSyntaxResult } from '../workers/html-syntax.js'
+import { createHash } from 'node:crypto'
+
+const htmlChecks = new Map<string, SyntaxCheckResult>()
 
 /** esbuild 语法解析的调用通道。null = 池不可用/已熔断（降级跳过检查，绝不误回滚）。 */
 type EsbuildTransform = (content: string, options: { loader: string; target: string; jsx: string }) => Promise<unknown>
@@ -268,6 +272,9 @@ function withTimeout<T>(promise: Promise<T>, label: string, timeoutMs: number): 
 }
 
 export interface SyntaxCheckResult {
+  html?: HTMLSyntaxResult['html']
+  symbols?: string[]
+  checked?: boolean
   /** Non-fatal lint/style warning to display to the model. */
   warning: string | null
   /** Fatal parse/integrity error. If set, the caller should roll back the write. */
@@ -301,33 +308,34 @@ export async function syntaxCheck(filePath: string, content: string): Promise<st
  * Fatal errors indicate the file is corrupted or unparseable and should be
  * rolled back by the caller.
  */
-export async function checkSyntax(filePath: string, content: string): Promise<SyntaxCheckResult> {
-  const ext = extname(filePath)
+export async function checkSyntax(filePath: string, content: string, options: { parseOnly?: boolean } = {}): Promise<SyntaxCheckResult> {
+  const skipped: SyntaxCheckResult = options.parseOnly ? { warning: '语法解析未完成或此格式无可用解析器', fatal: null, checked: false } : OK
+  const ext = extname(filePath).toLowerCase()
 
   // ── TypeScript/JavaScript via esbuild (cpu-pool worker 通道) ──
   if (ext === '.ts' || ext === '.tsx' || ext === '.js' || ext === '.jsx' || ext === '.mjs' || ext === '.cjs') {
-    if (content.length > EXTERNAL_PARSE_SIZE_LIMIT) return OK
+    if (content.length > EXTERNAL_PARSE_SIZE_LIMIT) return skipped
     const loaderMap: Record<string, 'ts' | 'tsx' | 'js' | 'jsx'> = {
       '.ts': 'ts', '.tsx': 'tsx', '.js': 'js', '.jsx': 'jsx', '.mjs': 'js', '.cjs': 'js',
     }
     const loader = loaderMap[ext] ?? 'js'
     const transform = getEsbuildTransform()
-    if (!transform) return OK
+    if (!transform) return skipped
     try {
       await transform(content, { loader, target: 'esnext', jsx: 'automatic' })
       return OK
     } catch (err) {
       // 基础设施失败（worker 超时/被杀/esbuild 缺失）与旧 !esbuild 同语义：
       // 降级跳过解析检查——绝不把环境问题伪装成语法错误回滚好文件。
-      if (isEsbuildInfraError(err)) return OK
-      if (!(err instanceof Error)) return OK
+      if (isEsbuildInfraError(err)) return skipped
+      if (!(err instanceof Error)) return skipped
       const lines = err.message.split('\n')
       const errorLines = lines.filter(l => /ERROR:|error:/i.test(l))
       // 兜底闸门（不依赖任何来源的标记是否到达）：esbuild 的真语法错误必然带
       // "ERROR:" 行（"Transform failed with N error(s):" + "<stdin>:L:C: ERROR: …"）。
       // 没有该行 = 我们读不懂的失败 → 静默降级。此前这里回落成 lines.slice(1)，
       // 把 esbuild 的安装手册正文当「语法提示」返回（issue #366 的用户可见形态）。
-      if (errorLines.length === 0) return OK
+      if (errorLines.length === 0) return skipped
       const cleaned = errorLines.join('\n').replace(/<stdin>:/g, '')
 
       // Second opinion: TypeScript compiler (ground truth for TS/JS syntax).
@@ -343,6 +351,7 @@ export async function checkSyntax(filePath: string, content: string): Promise<Sy
       }
 
       if (second.unavailable) {
+        if (options.parseOnly) return skipped
         // TS module not available → try tsc subprocess as last resort
         const tscResult = await tscSubprocessCheck(filePath)
         if (tscResult === 'pass') {
@@ -372,8 +381,9 @@ export async function checkSyntax(filePath: string, content: string): Promise<Sy
   // 不依赖系统 python；~毫秒级）。tree-sitter 是容错解析器，对缩进错误/空 body
   // 等边界比 CPython ast.parse 宽松（可能漏报），对"写完即时结构校验"足够。
   if (ext === '.py') {
-    if (content.length > EXTERNAL_PARSE_SIZE_LIMIT) return OK
+    if (content.length > EXTERNAL_PARSE_SIZE_LIMIT) return skipped
     const result = await checkPythonSyntaxTreeSitter(content)
+    if (options.parseOnly && result.unavailable) return skipped
     if (result.error) {
       const message = `⚠️ Python 语法错误${result.line ? `（第 ${result.line} 行）` : ''}：${result.error}\n\n文件已写入但存在语法问题，运行时将失败。`
       return { warning: message, fatal: message }
@@ -383,7 +393,7 @@ export async function checkSyntax(filePath: string, content: string): Promise<Sy
 
   // ── CSS: brace balance check (skip if >2MB) ──
   if (ext === '.css') {
-    if (content.length > SYNC_SCAN_SIZE_LIMIT) return OK
+    if (content.length > SYNC_SCAN_SIZE_LIMIT) return skipped
     let depth = 0
     let inString = false
     let stringChar = ''
@@ -415,44 +425,24 @@ export async function checkSyntax(filePath: string, content: string): Promise<Sy
     return OK
   }
 
-  // ── HTML: basic tag balance (skip if >2MB) ──
+  // HTML parsing runs off-thread and shares results across pre/post mutation observations.
   if (ext === '.html' || ext === '.htm') {
-    if (content.length > SYNC_SCAN_SIZE_LIMIT) return OK
-    const voids = new Set([
-      'area','base','br','col','embed','hr','img','input','link','meta',
-      'param','source','track','wbr',
-    ])
-    const openTagRe = /<\/?([a-zA-Z][a-zA-Z0-9]*)[^>]*\/?>/g
-    const stack: { tag: string; pos: number }[] = []
-    let match
-    while ((match = openTagRe.exec(content)) !== null) {
-      const full = match[0]
-      const tag = match[1]!.toLowerCase()
-      const isClose = full.startsWith('</')
-      const isSelfClose = full.endsWith('/>')
-      if (isSelfClose || voids.has(tag)) continue
-      if (isClose) {
-        if (stack.length === 0 || stack[stack.length - 1]!.tag !== tag) {
-          const expected = stack.length > 0 ? stack[stack.length - 1]!.tag : 'nothing'
-          const msg = `⚠️ HTML tag mismatch: unexpected </${tag}> at position ${match.index} (expected </${expected}>)`
-          return { warning: msg, fatal: msg }
-        }
-        stack.pop()
-      } else {
-        stack.push({ tag, pos: match.index })
-      }
-    }
-    if (stack.length > 0) {
-      const unclosed = stack.map(s => `<${s.tag}>`).join(', ')
-      const msg = `⚠️ HTML tag mismatch: ${stack.length} unclosed tag(s): ${unclosed}. Add the missing closing tags.`
-      return { warning: msg, fatal: msg }
-    }
-    return OK
+    const unknown: SyntaxCheckResult = { checked: false, warning: 'HTML 结构及内联脚本解析未完成，结果未知', fatal: null }
+    if (content.length > SYNC_SCAN_SIZE_LIMIT || !cpuPool.available) return unknown
+    const key = createHash('sha256').update(content).digest('hex')
+    const cached = htmlChecks.get(key)
+    if (cached) return cached
+    try {
+      const result = await cpuPool.run('htmlSyntaxRaw', [content], getTsParseTimeoutMs()) as HTMLSyntaxResult
+      htmlChecks.set(key, result)
+      while (htmlChecks.size > 32) htmlChecks.delete(htmlChecks.keys().next().value!)
+      return result
+    } catch { return unknown }
   }
 
   // ── JSON: parse check (skip if >2MB) ──
   if (ext === '.json') {
-    if (content.length > SYNC_SCAN_SIZE_LIMIT) return OK
+    if (content.length > SYNC_SCAN_SIZE_LIMIT) return skipped
     try {
       JSON.parse(content)
       return OK
@@ -463,10 +453,11 @@ export async function checkSyntax(filePath: string, content: string): Promise<Sy
     }
   }
 
-  return OK
+  return skipped
 }
 
 export interface PythonSyntaxResult {
+  unavailable?: boolean
   /** null = clean parse OR infrastructure degrade (never a false fatal). */
   error: string | null
   /** 1-based line of the first ERROR/MISSING node, when available. */
@@ -554,7 +545,7 @@ function firstErrorLine(node: Parser.SyntaxNode): number | undefined {
  */
 export async function checkPythonSyntaxTreeSitter(content: string): Promise<PythonSyntaxResult> {
   const parser = await getPythonParser()
-  if (!parser) return { error: null } // degrade
+  if (!parser) return { error: null, unavailable: true } // degrade
   // Tree lives in WASM memory and is not reclaimed by the JS GC — it must be
   // deleted on every path, including the error path (same as meridian-parser).
   let tree: Parser.Tree | undefined
@@ -565,7 +556,7 @@ export async function checkPythonSyntaxTreeSitter(content: string): Promise<Pyth
     const line = firstErrorLine(tree.rootNode)
     return { error: '存在无法解析的语法结构（括号/引号未闭合、意外符号等）。', line }
   } catch {
-    return { error: null } // parse threw → degrade
+    return { error: null, unavailable: true } // parse threw → degrade
   } finally {
     tree?.delete()
   }

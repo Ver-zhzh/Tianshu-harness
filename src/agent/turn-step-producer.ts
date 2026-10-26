@@ -1,4 +1,5 @@
-import { applyHumanInputBoundary, recordHumanInput, rollbackActiveUserInput } from './human-input-boundary.js'
+import { applyHumanInputBoundary, recordHumanInput } from './human-input-boundary.js'
+import { latencyExperimentEffort } from './latency-experiments.js'
 import { applySessionSkillModes } from '../skills/session-skill-policy.js'
 import { getTodos } from '../tools/todo.js'
 import type { AgentLoop } from './loop.js'
@@ -23,7 +24,7 @@ import { shouldSuggestPlanMode, buildPlanModeSuggestAdvisory, buildPlanModeAutoE
 import { detectQuizLike } from './intent-retrieval-route.js'
 import { renderMemoryBlock } from '../memory/unified-memory.js'
 import { reviewAdaptiveMemory } from '../memory/adaptive-stm.js'
-import { combineMemoryBlocks, crossSessionDisabled, crossSessionMemoryPushEnabled, prevSessionHandoffEnabled, crossSessionClaimsInjectionEnabled, crossSessionEventsAppendixEnabled } from './cross-session-memory-config.js'
+import { combineMemoryBlocksForSession, crossSessionDisabled, crossSessionMemoryPushEnabled, prevSessionHandoffEnabled, crossSessionClaimsInjectionEnabled, crossSessionEventsAppendixEnabled } from './cross-session-memory-config.js'
 export { combineMemoryBlocks, crossSessionDisabled, crossSessionMemoryPushEnabled, prevSessionHandoffEnabled, crossSessionClaimsInjectionEnabled, crossSessionEventsAppendixEnabled } from './cross-session-memory-config.js'
 import { parseMentions, renderMentionContext, normalizeMentionRefs } from '../tui/mention-parser.js'
 import { renderPlanCacheAdvisory } from './plan-cache-advisory.js'
@@ -212,10 +213,10 @@ export class TurnStepProducer {
     this.self.latestCognitiveSnapshot = undefined
     // Capture baseline canonical prefix fingerprint for drift detection
     this.self.baselineFingerprint = this.self.config.promptEngine.getFingerprint()
-    // Load cross-session pheromones for Sensorium.freshness computation.
-    // Use query() so Sensorium sees decayed currentStrength, and prune stale entries opportunistically.
+    // Background refresh belongs to this run even if its query returns after settle.
+    const runSignal = this.self.getRunSignal()
     this.self.stigmergyStore.prune().catch(() => {})
-    this.self.stigmergyStore.query().then(p => { this.self.loadedPheromones = mapQueriedPheromones(p) }).catch(() => {})
+    this.self.stigmergyStore.query().then(p => { if (!runSignal?.aborted) this.self.loadedPheromones = mapQueriedPheromones(p) }).catch(() => {})
 
     // Detect worktree reality: compare injected git context with actual worktree state.
     // 检测含两条 git 子进程调用，与 intent 分类的网络等待互不依赖——这里只启动不等待，
@@ -356,7 +357,7 @@ export class TurnStepProducer {
         if (routeKinds?.includes('bug_fix')) {
           // 跳过纯文档/注释/配置变更——RED 复现不适用于非代码任务。
           if (!noCodeTargets && !quizLike) {
-            // bugfix → RED 复现优先（动作矩阵第一列）。high：final gate 参与方。
+            // bugfix 保留复现状态；验证由当前任务授权独立安排，不参与收尾续轮。
             this.self.obligations.upsert({
               family: 'bugfix',
               claim: `缺陷已被 RED 复现并修复：${this.self.taskContract.objective}`,
@@ -471,7 +472,7 @@ export class TurnStepProducer {
       turn: this.self.session.getTurnCount(), intentText: memoryIntentText, userInput,
       excludeSessionIds: excludedSessionIds,
     })).block
-    this.self.config.promptEngine.setCrossSessionMemoryBlock(combineMemoryBlocks(
+    this.self.config.promptEngine.setCrossSessionMemoryBlock(combineMemoryBlocksForSession(this.self.config.latencyPromptExperiment === true,
       craftedMemory,
       adaptiveMemory,
       crossSessionMemoryPushEnabled() && !crossSessionOff ? renderMemoryBlock(this.self.cwd, userInput, 2000, undefined, { excludeSessionIds: excludedSessionIds }) : null,
@@ -495,7 +496,8 @@ export class TurnStepProducer {
       // （userReasoningOverride=true）不再覆盖，尊重用户选择直到 /effort auto 交还。
       // Plan mode 已在上方强制 max，此处跳过避免覆盖。
       const ruleEffort = selectReasoningEffort(userInput, this.self.config.reasoningFloor)
-      const banditAdjusted = this.self.applyEffortDelta(ruleEffort) as import('./auto-reasoning.js').ReasoningEffort
+      const automaticEffort = this.self.applyEffortDelta(ruleEffort) as import('./auto-reasoning.js').ReasoningEffort
+      const banditAdjusted = this.self.config.latencyReasoningSupported ? latencyExperimentEffort(userInput, automaticEffort) : automaticEffort
       this.self.config.reasoningEffort = banditAdjusted
       this.self.config.client.setReasoningEffort?.(banditAdjusted)
       this.self.shadowEffortTelemetry(ruleEffort)
@@ -509,8 +511,9 @@ export class TurnStepProducer {
    * sync, and OAI request building. Returns the action and request.
    */
   async buildTurnRequest(...args: Parameters<TurnStepProducer['buildRequest']>): ReturnType<TurnStepProducer['buildRequest']> {
+    const signal = this.self.getRunSignal()
     try { return await this.buildRequest(...args) }
-    finally { this.self.decisionShifts.discard('request-aborted-or-failed') }
+    finally { if (!signal?.aborted) this.self.decisionShifts.discard('request-aborted-or-failed') }
   }
 
   private async buildRequest(
@@ -518,13 +521,14 @@ export class TurnStepProducer {
     currentStrategy: StrategyProfile,
     currentSensorium: Sensorium,
     pressureResult: import('../context/pressure-monitor.js').PressureResult,
-    assistantResponded: boolean,
-    userMessageConsumed: boolean,
+    _assistantResponded: boolean,
+    _userMessageConsumed: boolean,
     callbacks: AgentCallbacks,
   ): Promise<{
     action: 'proceed' | 'abort'
     request?: OaiChatRequest
   }> {
+    const signal = this.self.getRunSignal()
     let _tb = Date.now()
     // Non-blocking direction note: fire-and-forget. The agent always continues;
     // the user steers by typing if they want to change direction.
@@ -777,12 +781,7 @@ export class TurnStepProducer {
     _tb = Date.now()
     if (!this.self.config.promptEngine.getRequestBudgetPolicy()) await this.self.compaction.enforceContextCeiling()
     debugLog(`[turn-boundary] turn=${turn} enforceContextCeiling: ${Date.now() - _tb}ms`)
-    // A2: enforceContextCeiling can trigger LLM compact (30s timeout).
-    if (this.self.abortController!.signal.aborted) {
-      if (!assistantResponded && !userMessageConsumed && !this.self.config.promptEngine.getRequestBudgetPolicy()) rollbackActiveUserInput(this.self)
-      callbacks.onAbort(this.self.abortReason())
-      return { action: 'abort' }
-    }
+    signal?.throwIfAborted()
     this.self.contextInjection.refreshActiveClaims()
 
     // Read events from other sessions.
@@ -851,8 +850,10 @@ export class TurnStepProducer {
     // Pre-refresh git status so buildOaiRequest doesn't return stale cached data
     _tb = Date.now()
     await this.self.config.promptEngine.refreshGitContextIfNeeded(this.self.cwd)
+    signal?.throwIfAborted()
     debugLog(`[turn-boundary] turn=${turn} refreshGitContext: ${Date.now() - _tb}ms`)
     const request = await this.self.prepareBudgetedRequest(() => {
+      signal?.throwIfAborted()
       const built = this.self.config.promptEngine.buildOaiRequest(
         this.self.session.getMessages(),
         this.self.recentToolHistory,
@@ -872,7 +873,11 @@ export class TurnStepProducer {
       // 不冲突（client 侧 wire 探针对最终上线字节，各记各的账）。
       // 刻意不发 onImageStripped：那是 413 拒图的持久化语义，会误触
       // persistStrippedImages 把 wire-only 修剪写进历史（见模块注释）。
-      const pruned = this.self.imagePruner.apply(built.messages)
+      // Transactional image budgeting owns production history changes. Legacy
+      // wire-only pruning remains an explicit diagnostic option.
+      const pruned = this.self.config.imagePruning || process.env.RIVET_IMAGE_PRUNING
+        ? this.self.imagePruner.apply(built.messages)
+        : { messages: built.messages, prunedCount: 0, forcePruned: false }
       if (pruned.messages !== built.messages) {
         debugLog('strip-images', `interval prune: pruned ${pruned.prunedCount} image part(s)${pruned.forcePruned ? ' (force-pruned, cycle reset)' : ''}`)
         return { ...built, messages: pruned.messages }
@@ -880,7 +885,7 @@ export class TurnStepProducer {
       return built
     }, callbacks)
 
-    if (this.self.abortController?.signal.aborted) return { action: 'abort' }
+    signal?.throwIfAborted()
     const confirmed = this.self.decisionShifts.confirm(deliveredSnapshot, request, callbacks)
     this.self.advisoryReadback.track(deliveredSnapshot.filter(d => !d.candidateId || confirmed || d.shadow), this.self.modelObservationTurn)
 
@@ -916,11 +921,8 @@ export class TurnStepProducer {
     eligibility: import('./discipline-eligibility.js').DisciplineEligibility,
     pressureResult: import('../context/pressure-monitor.js').PressureResult,
   ): void {
-    // Delivery 义务（动态）：任务型会话里代码文件被改且尚未验证 → 登记
-    // high 义务（self-verify 从 postTurn 软文升格为 final 前门禁的状态载体）。
-    // targets=[] → 任意 passed 验证即关闭（B1 delivery gate 仍是交付权威，
-    // 义务只负责 natural-finish 前的注意力）。doc/config-only 编辑不创建
-    // （low_risk_small_edit_never_gates_final）。upsert 幂等，每轮调用安全。
+    // Quality gaps are durable disclosure records; they do not schedule validation
+    // or gate natural finish. Actual tests and acceptance are independent actions.
     {
       const ev = this.self.evidence.getState()
       const gate = this.self.evidence.getGateState()
@@ -962,12 +964,9 @@ export class TurnStepProducer {
             key: 'acceptance-declare',
             priority: 0.6,
             category: 'discipline',
-            tier: 'operational',
-            content: '代码已改动，但本任务还没有用户级验收面。现在用 todo 的 acceptance 字段声明「用户做什么动作 → 看到什么可观察结果」。'
-              + '跑单测通过属于 delivery，不是验收——验收要落在用户能观察到的行为上（按某个键、访问某个地址、看到某个具体状态）。'
-              + '做完把该项回写 met + evidence；确实执行不了标 blocked 并写明障碍。',
+            tier: 'informational',
+            content: '本任务尚未记录用户级行为验收。可在用户安排验收时用 todo acceptance 记录可观察结果；未验收如实披露，不为取得提交或收尾许可追加验收。',
             ttl: 1,
-            expect: { kind: 'tool_appears', tools: ['todo'], withinTurns: 2 },
           })
         }
       }
@@ -1052,9 +1051,7 @@ export class TurnStepProducer {
     }
     callbacks.onPhaseChange?.('preparing', { reason: 'preparing next turn' })
 
-    // ── Event-loop gap detection ──
-    // If >30s elapsed since last tool completion, the event loop may have
-    // been blocked. Log a warning to help diagnose session freeze bugs.
+    // Diagnose an event-loop gap longer than 30s since the last tool completed.
     if (this.self.lastToolCompleteTime > 0) {
       const gapMs = Date.now() - this.self.lastToolCompleteTime
       if (gapMs > 30_000) {
@@ -1062,8 +1059,9 @@ export class TurnStepProducer {
       }
     }
 
-    const _tb = Date.now()
+    const signal = this.self.getRunSignal(), perceptionStartedAt = Date.now()
     const perceptionResult = await this.self.perception.perceive({
+      signal,
       modelTurn: this.self.modelObservationTurn,
       turn,
       estimatedTokens: estTokens,
@@ -1095,8 +1093,9 @@ export class TurnStepProducer {
         callbacks.onDecisionShift?.(shift)
       },
     })
+    signal?.throwIfAborted()
     this.self.sensorium = perceptionResult.sensorium
-    debugLog(`[turn-boundary] turn=${turn} perceive: ${Date.now() - _tb}ms`)
+    debugLog(`[turn-boundary] turn=${turn} perceive: ${Date.now() - perceptionStartedAt}ms`)
     this.self.strategy = perceptionResult.strategy
     this.self.vigorState = perceptionResult.vigor
     this.self.thetaState = perceptionResult.thetaState

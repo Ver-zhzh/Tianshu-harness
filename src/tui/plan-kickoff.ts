@@ -1,5 +1,6 @@
 import type { AgentLoop } from '../agent/loop.js'
 import { approvePlanWithGuards } from '../plan/plan-approval.js'
+import { recordApprovedDecision } from '../plan/continuity-records.js'
 
 /**
  * 批准计划并自动 kickoff 分波执行的共享闭环。slash `/plan-approve` 与 plan-picker
@@ -9,6 +10,7 @@ import { approvePlanWithGuards } from '../plan/plan-approval.js'
 export async function approvePlanAndKickoff(
   deps: {
     cwd: string
+    sessionId?: string
     agent: Pick<AgentLoop, 'setActivePlan'>
     submitToAgent?: (prompt: string) => void | Promise<void>
     notify: (content: string, isError?: boolean) => void
@@ -29,6 +31,10 @@ export async function approvePlanAndKickoff(
     return false
   }
   const { approved, driftNote, kickoff } = result
+  if (deps.sessionId) {
+    try { recordApprovedDecision(deps.cwd, deps.sessionId, approved.path, approved.content, resolvedApproach) }
+    catch { deps.notify('计划已批准，但审批证据写入失败；交接中将显示未知，不重复审批。', true) }
+  }
   deps.agent.setActivePlan({ slug, title: approved.title, selectedApproach: resolvedApproach })
   const approachLine = resolvedApproach ? `\nSelected approach: **${resolvedApproach}**` : ''
   const driftLine = driftNote

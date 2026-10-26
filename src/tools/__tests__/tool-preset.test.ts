@@ -20,7 +20,7 @@ const SCHEDULE_TOOLS = ['schedule_create', 'schedule_list', 'schedule_delete'] a
 const BOOTSTRAP_TOOLS = [
   'delegate_task', 'undo', 'delegate_batch', 'galaxy', 'team_orchestrate', 'council_convene',
   'starflow', 'recall_capsule', 'recall_general', 'record_general_finding', 'ask_user_question',
-  'browser_debug', 'repo_graph', 'related_tests', 'semantic_search', 'apply_patch',
+  'browser_debug', 'review_changes', 'repo_graph', 'related_tests', 'semantic_search', 'apply_patch',
   'session_vitals', 'attack_case', 'plan_task', 'update_goal', 'memory',
   // 唯一无门控的一个：bootstrap.ts 里 createDeliverTaskTool 无条件注册。
   'deliver_task',
@@ -50,10 +50,10 @@ function totalCount(preset: ToolPreset): number {
 
 describe('presetIncludes', () => {
   it('minimal keeps daily-dev tools and drops heavy/cold ones', () => {
-    for (const keep of ['read_file', 'bash', 'grep', 'web_search', 'web_fetch', 'deliver_task', 'delegate_task', 'delegate_batch', 'apply_patch', 'plan_task', 'recall_capsule', 'ask_user_question']) {
+    for (const keep of ['council_convene', 'review_changes', 'read_file', 'bash', 'grep', 'web_search', 'web_fetch', 'deliver_task', 'delegate_task', 'delegate_batch', 'apply_patch', 'plan_task', 'recall_capsule', 'ask_user_question']) {
       assert.ok(presetIncludes('minimal', keep), `minimal must keep ${keep}`)
     }
-    for (const drop of ['council_convene', 'browser_debug', 'attack_case', 'semantic_search', 'repo_graph', 'undo', 'recall_general', 'record_general_finding', 'ast_edit', 'related_tests', 'inspect_project', 'import_resource', 'leave_mark', 'file_info', 'session_vitals', 'update_goal']) {
+    for (const drop of ['browser_debug', 'attack_case', 'semantic_search', 'repo_graph', 'undo', 'recall_general', 'record_general_finding', 'ast_edit', 'related_tests', 'inspect_project', 'import_resource', 'leave_mark', 'file_info', 'session_vitals', 'update_goal']) {
       assert.ok(!presetIncludes('minimal', drop), `minimal must drop ${drop}`)
     }
   })
@@ -61,7 +61,7 @@ describe('presetIncludes', () => {
   it('frontend = minimal + browser_debug', () => {
     assert.ok(presetIncludes('frontend', 'browser_debug'))
     assert.ok(!presetIncludes('frontend', 'attack_case'))
-    assert.ok(!presetIncludes('frontend', 'council_convene'))
+    assert.ok(presetIncludes('frontend', 'council_convene'), 'cold registration supports explicit mounting')
   })
 
   it('full includes everything', () => {
@@ -115,9 +115,9 @@ describe('assembly counts per preset', () => {
     // 它必须对 readonly worker 可见，而 worker 与主控共用同一张注册表，按档位
     // 排除会连带把 worker 也排掉（readonly profile 无 bash/git，正是要补这条缝）。
     // taiyi 仍按评测档纪律排除（冻结基线，见 tool-preset 的 drop 断言）。
-    assert.equal(totalCount('minimal'), 34)
-    assert.equal(totalCount('frontend'), 35)
-    assert.equal(totalCount('full'), 55)
+    assert.equal(totalCount('minimal'), 36)
+    assert.equal(totalCount('frontend'), 37)
+    assert.equal(totalCount('full'), 56)
     // taiyi = 13（kernel 侧，即 tool-preset.ts 文件头 14 名清单除去 deliver_task）
     // + deliver_task（bootstrap 唯一无条件注册件）。
     assert.equal(totalCount('taiyi'), 14)
@@ -134,8 +134,8 @@ describe('assembly counts per preset', () => {
       for (const n of SCHEDULE_TOOLS) {
         assert.ok(createDefaultToolRegistry([], { preset: 'full' }).has(n), `有调度器要注册 ${n}`)
       }
-      assert.equal(totalCount('minimal'), 37)
-      assert.equal(totalCount('full'), 58)
+      assert.equal(totalCount('minimal'), 39)
+      assert.equal(totalCount('full'), 59)
     } finally {
       setActiveScheduler(undefined)
     }
@@ -267,6 +267,16 @@ describe('resolveToolPreset precedence', () => {
   it('defaults to minimal with no env and no config', () => {
     // 2026-09-23 起发版默认档 minimal（原 frontend；对齐 3.14 线）
     assert.equal(resolveToolPreset(dir), 'minimal')
+  })
+
+  it('orchestration resolves from project and domain overrides; env still wins', () => {
+    writeFileSync(join(dir, '.rivet-config.json'), JSON.stringify({ tools: { preset: 'orchestration' } }))
+    assert.equal(resolveToolPreset(dir, 'taiyi'), 'orchestration')
+    __resetToolPresetForTest()
+    writeFileSync(join(dir, '.rivet-config.json'), JSON.stringify({ runtime: { domains: { qiming: { toolPreset: 'orchestration' } } } }))
+    assert.equal(resolveToolPreset(dir, 'qiming'), 'orchestration')
+    process.env.RIVET_TOOL_PRESET = 'minimal'; __resetToolPresetForTest()
+    assert.equal(resolveToolPreset(dir, 'qiming'), 'minimal')
   })
 
   it('project .rivet-config.json tools.preset wins over default', () => {

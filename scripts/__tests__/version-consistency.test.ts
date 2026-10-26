@@ -105,4 +105,24 @@ describe('版本一致性守卫（issue #278）', () => {
       assert.equal(actual, version, `${file} 必须与运行时 ${version} 一致`)
     }
   })
+
+  // v3.36.0 引入 Node 安全闸门后，README 各语言版本曾只剩一句过时的
+  // “Node.js ≥ 24”：用户按说明安装/更新后新 CLI 在入口被拒绝，误以为更新失败。
+  // 安装文档必须公开两条支持线（24.22.1+ / 26.12.1+），避免再漏语言版本。
+  it('README 与安装排障文档公布当前 Node 安全下限', () => {
+    const docs = [
+      'README.md',
+      'README.en.md',
+      'README.ja.md',
+      'README.ko.md',
+      'docs/guides/installation.md',
+      'docs/guides/troubleshooting.md',
+    ]
+    for (const file of docs) {
+      const text = readFileSync(join(repoRoot, file), 'utf8')
+      assert.match(text, /24\.22\.1/, `${file} 必须写明 Node 24.22.1+ 安全下限`)
+      assert.match(text, /26\.12\.1/, `${file} 必须写明 Node 26.12.1+ 安全下限`)
+      assert.doesNotMatch(text, /Node(?:\.js)?\s*[≥>]=?\s*24(?![.\d])/i, `${file} 不得再用“Node 24+”的过时口径`)
+    }
+  })
 })

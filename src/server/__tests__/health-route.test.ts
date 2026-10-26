@@ -1,5 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { DELIVERY_CONTRACT_VERSION } from '../../agent/delivery-contract.js'
 import { createRouter } from '../index.js'
 import { buildHealthRoute } from '../health-route.js'
 import { RuntimeSessionManager, type ManagedAgent } from '../session-manager.js'
@@ -48,6 +49,9 @@ test('GET /health reports version, uptime and counts', async () => {
   assert.equal(body.runningCount, 1)
   // registryReady omitted → reports healthy (single-session / test default)
   assert.equal(body.registryOk, true)
+  const identity = body as typeof body & { buildId: string; deliveryContractVersion: number }
+  assert.equal(identity.buildId, process.env.RIVET_BUILD_ID ?? 'unknown')
+  assert.equal(identity.deliveryContractVersion, DELIVERY_CONTRACT_VERSION)
 })
 
 test('GET /health 自报 capabilities —— 前端据此判断能力，而不是靠版本号猜（issue #266）', async () => {

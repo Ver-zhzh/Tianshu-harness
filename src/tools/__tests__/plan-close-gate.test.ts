@@ -7,174 +7,62 @@ import { PLAN_TOOL } from '../plan.js'
 import type { DeliveryGateResult } from '../../agent/delivery-gate-v2.js'
 import type { VerificationSummary } from '../../agent/evidence.js'
 
-/**
- * 防伪闭环 (evidence-gated plan closure): plan_close no longer trusts the model's
- * self-reported deliveryState/verifiedCommands when the session wired a real
- * delivery gate. A claimed-GREEN close is blocked when the gate is RED; the
- * closure records the REAL verified commands; the EXECUTED status marker is
- * written only on gate-backed GREEN. Absent a gate, behavior is unchanged.
- */
-describe('plan tool close — evidence gate', () => {
-  let dir = ''
-  const planRel = '.rivet/plans/gate-plan.md'
-
-  const PLAN_BODY = [
-    '# Gate Plan',
-    '',
-    '## 6. Tasks',
-    '',
-    '### Task 1: Do the thing',
-    '- [ ] step one',
-    '- [ ] step two',
-    '',
-  ].join('\n')
-
+describe('plan closure separates implementation from quality', () => {
+  let dir = '', previous: string | undefined
+  const planRel = '.rivet/plans/close.md'
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'rivet-plan-gate-'))
-    const abs = join(dir, planRel)
+    dir = mkdtempSync(join(tmpdir(), 'plan-independent-'))
+    previous = process.env.RIVET_SESSION_DIR; process.env.RIVET_SESSION_DIR = join(dir, 'sessions')
     mkdirSync(join(dir, '.rivet/plans'), { recursive: true })
-    writeFileSync(abs, PLAN_BODY, 'utf-8')
+    writeFileSync(join(dir, planRel), '# Plan\n\n### Task 1\n- [ ] [implementation] implement\n- [ ] legacy unknown\n- [ ] [verification] tests\n- [ ] [review] review\n')
   })
-
-  afterEach(() => {
-    rmSync(dir, { recursive: true, force: true })
+  afterEach(() => { if (previous === undefined) delete process.env.RIVET_SESSION_DIR; else process.env.RIVET_SESSION_DIR = previous; rmSync(dir, { recursive: true, force: true }) })
+  const close = (input: Record<string, unknown> = {}, extra: Record<string, unknown> = {}) => PLAN_TOOL.execute({ cwd: dir, sessionId: 'owner', input: { action: 'close', file_path: planRel, tasks: 'all', apply: true, ...input }, ...extra } as any)
+  it('closes completed implementation with RED/unknown quality and never invokes the gate', async () => {
+    let events: any[] = []
+    const result = await close({ deliveryState: 'GREEN', verifiedCommands: ['npm test'] }, { assessDelivery: () => { throw Error('quality gate must not run') }, onPlanClosed: (e: any) => events.push(e) })
+    assert.ok(!result.isError, result.content)
+    const text = readFileSync(join(dir, planRel), 'utf8')
+    assert.match(text, /Status: EXECUTED/)
+    assert.match(text, /- \[x\] \[implementation\] implement/)
+    for (const item of ['legacy unknown', '[verification] tests', '[review] review']) assert.ok(text.includes('- [ ] ' + item))
+    assert.doesNotMatch(text, /均已完成并通过验证|验证通过/)
+    assert.match(text, /历史命令：npm test（历史声明，未核实）/)
+    assert.equal(events[0].summary, result.content.slice(result.content.indexOf('执行：')))
   })
-
-  function makeGate(over: Partial<DeliveryGateResult> = {}): DeliveryGateResult {
-    return {
-      state: 'GREEN',
-      canDeliver: true,
-      isBlocked: false,
-      ownedFileCount: 1,
-      externalFileCount: 0,
-      verificationCount: 1,
-      supersededFailures: 0,
-      staleSnapshotDropped: 0,
-      staleFingerprintDropped: 0,
-      staleFailureCandidates: 0,
-      toolInvocationFailureCandidates: [],
-      ...over,
+  it('partial/blocked progress is independent of legacy GREEN and does not check implementation boxes', async () => {
+    for (const executionStatus of ['partial', 'blocked']) {
+      const result = await close({ executionStatus, deliveryState: 'GREEN', execution_ids: ['missing'] })
+      assert.ok(!result.isError, result.content)
+      const text = readFileSync(join(dir, planRel), 'utf8')
+      assert.doesNotMatch(text, /Status: EXECUTED/)
+      assert.match(text, /- \[ \] \[implementation\] implement/)
+      assert.match(text, /missing: 未知/)
     }
-  }
-
-  function makeSummary(over: Partial<VerificationSummary> = {}): VerificationSummary {
-    return { total: 1, verified: 1, pending: 0, files: [{ path: 'src/foo.ts', level: 'tested' }], ...over }
-  }
-
-  function close(input: Record<string, unknown>, extra: Record<string, unknown> = {}) {
-    return PLAN_TOOL.execute({
-      cwd: dir,
-      input: { action: 'close', file_path: planRel, tasks: 'all', ...input },
-      toolUseId: 'test-tool-use',
-      ...extra,
-    } as any)
-  }
-
-  const read = () => readFileSync(join(dir, planRel), 'utf-8')
-
-  it('blocks a claimed-GREEN close when the real gate is RED (no write)', async () => {
-    const before = read()
-    const result = await close(
-      { apply: true, deliveryState: 'GREEN', verifiedCommands: ['npm test'] },
-      {
-        assessDelivery: () => makeGate({
-          state: 'RED',
-          canDeliver: false,
-          isBlocked: true,
-          verificationCount: 0,
-          blockingReason: 'owned files modified but unverified',
-          shortestNextStep: 'run npm run typecheck',
-        }),
-        getVerificationEvidence: () => makeSummary({ verified: 0, pending: 1 }),
-      },
-    )
-
-    assert.equal(result.isError, true)
-    assert.ok(result.content.includes('被拦截'))
-    assert.ok(result.content.includes('run npm run typecheck'), 'includes shortestNextStep')
-    assert.equal(read(), before, 'file must not be written when blocked')
   })
-
-  it('blocks when deliveryState omitted (implicit GREEN) and gate is RED', async () => {
-    const before = read()
-    const result = await close(
-      { apply: true },
-      { assessDelivery: () => makeGate({ state: 'RED', isBlocked: true, canDeliver: false, verificationCount: 0 }) },
-    )
-    assert.equal(result.isError, true)
-    assert.equal(read(), before)
-  })
-
-  it('writes EXECUTED marker + real verified commands on gate-backed GREEN', async () => {
-    const result = await close(
-      { apply: true, deliveryState: 'GREEN', verifiedCommands: ['npm test'] },
-      {
-        assessDelivery: () => makeGate({ state: 'GREEN', verificationCount: 2 }),
-        getVerificationEvidence: () => makeSummary({ verified: 2, total: 2 }),
-      },
-    )
-
+  it('preview does not write or evaluate quality', async () => {
+    const before = readFileSync(join(dir, planRel), 'utf8')
+    const result = await close({ apply: false }, { assessDelivery: () => { throw Error('called') } })
     assert.ok(!result.isError, result.content)
-    const written = read()
-    assert.ok(written.includes('> **Status: EXECUTED**'), 'EXECUTED marker written on real GREEN')
-    assert.ok(written.includes('npm test'), 'real verified command recorded in closure')
-    assert.ok(written.includes('- [x] step one'), 'checkboxes closed')
-    assert.ok(result.content.includes('已标记 EXECUTED'))
+    assert.equal(readFileSync(join(dir, planRel), 'utf8'), before)
   })
-
-  it('allows an honest RED close (checkpoint) without EXECUTED marker', async () => {
-    const result = await close(
-      { apply: true, deliveryState: 'RED' },
-      { assessDelivery: () => makeGate({ state: 'RED', isBlocked: true, canDeliver: false, verificationCount: 0 }) },
-    )
-
+  it('missing or corrupt quality records remain unknown without blocking implementation closure', async () => {
+    const owner = join(dir, 'sessions', 'owner')
+    mkdirSync(owner, { recursive: true })
+    writeFileSync(join(owner, 'completion-evidence.json'), '{broken')
+    writeFileSync(join(owner, 'verification-runs.jsonl'), '{broken\n')
+    const result = await close({ execution_ids: ['unknown'] })
     assert.ok(!result.isError, result.content)
-    const written = read()
-    assert.ok(!written.includes('Status: EXECUTED'), 'no EXECUTED marker on RED')
-    assert.ok(written.includes('- [x] step one'), 'progress checkpoint still closes checkboxes')
-    assert.ok(written.includes('交付门检查：RED'))
+    const text = readFileSync(join(dir, planRel), 'utf8')
+    assert.match(text, /Status: EXECUTED/)
+    assert.match(text, /无法确认/)
+    assert.match(text, /unknown: 未知/)
   })
-
-  it('records the real (empty) verified set and notes mismatch when evidence is empty', async () => {
-    const result = await close(
-      { apply: true, deliveryState: 'GREEN', verifiedCommands: ['npm test', 'npm run typecheck'] },
-      {
-        assessDelivery: () => makeGate({ state: 'GREEN', verificationCount: 0 }),
-        getVerificationEvidence: () => makeSummary({ verified: 0, total: 0, pending: 0, files: [] }),
-      },
-    )
-
-    assert.ok(!result.isError, result.content)
-    const written = read()
-    assert.ok(!written.includes('npm test'), 'claimed-but-unbacked command must not be recorded')
-    assert.ok(written.includes('未传入显式验证命令'), 'closure records the real (empty) set')
-    assert.ok(result.content.includes('证据：'), 'mismatch noted in tool output')
-  })
-
-  it('degrades to legacy trust-claimed behavior when no gate is wired (backward compat)', async () => {
-    const result = await close(
-      { apply: true, deliveryState: 'GREEN', verifiedCommands: ['npm test'] },
-      // no assessDelivery / getVerificationEvidence
-    )
-
-    assert.ok(!result.isError, result.content)
-    const written = read()
-    assert.ok(!written.includes('Status: EXECUTED'), 'legacy close never writes EXECUTED marker')
-    assert.ok(written.includes('npm test'), 'legacy trusts claimed verified commands')
-    assert.ok(written.includes('- [x] step one'))
-    assert.ok(written.includes('交付门检查：GREEN'))
-  })
-
-  it('preview (apply omitted) never writes and warns when apply would be blocked', async () => {
-    const before = read()
-    const result = await close(
-      { deliveryState: 'GREEN' },
-      { assessDelivery: () => makeGate({ state: 'RED', isBlocked: true, canDeliver: false, verificationCount: 0 }) },
-    )
-    assert.ok(!result.isError)
-    assert.ok(result.content.includes('预览'))
-    assert.ok(result.content.includes('被拦截'))
-    assert.equal(read(), before, 'preview never writes')
+  it('a partial close preserves the approved plan marker', async () => {
+    const file = join(dir, planRel)
+    writeFileSync(file, '> **Status: APPROVED**\n\n' + readFileSync(file, 'utf8'))
+    assert.ok(!(await close({ executionStatus: 'partial' })).isError)
+    assert.match(readFileSync(file, 'utf8'), /Status: APPROVED/)
   })
 })
 

@@ -19,7 +19,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import type { ReadStream, WriteStream } from 'node:tty'
 import { TuiApp } from '../app.js'
-import { MockOut, MockIn, stripAnsi, makeApp as makeHarnessApp } from './_harness.js'
+import { MockOut, MockIn, makeApp as makeHarnessApp } from './_harness.js'
+import { captureLiveFrame } from './_capture-frame.js'
 
 function makeApp() {
   const out = new MockOut()
@@ -34,42 +35,6 @@ function makeApp() {
 }
 
 const tick = () => new Promise(r => setTimeout(r, 10))
-
-function lastFrameLines(out: { chunks: string[] }): string[] {
-  const last = out.chunks[out.chunks.length - 1] ?? ''
-  return stripAnsi(last).split('\n').filter(l => l.trim() !== '')
-}
-
-/** 在最近若干帧里从新到旧找第一个满足条件的帧。
- *  MockOut 是行级 diff 写入流——单帧只含**变化**的行，未变化的行（如排队条）
- *  在后续帧里缺席，所以「最后一帧」不等于「当前屏幕完整内容」。 */
-function findFrame(
-  out: { chunks: string[] },
-  pred: (lines: string[]) => boolean,
-  lookback = 40,
-): string[] | null {
-  const from = Math.max(0, out.chunks.length - lookback)
-  for (let i = out.chunks.length - 1; i >= from; i--) {
-    const lines = stripAnsi(out.chunks[i] ?? '').split('\n').filter(l => l.trim() !== '')
-    if (pred(lines)) return lines
-  }
-  return null
-}
-
-/** 轮询等待出现满足条件的帧（默认 1s 上限，超时返回最后一帧供失败信息使用）。 */
-async function waitForFrame(
-  out: { chunks: string[] },
-  pred: (lines: string[]) => boolean,
-  timeoutMs = 1_000,
-): Promise<string[]> {
-  const deadline = Date.now() + timeoutMs
-  for (;;) {
-    const hit = findFrame(out, pred)
-    if (hit) return hit
-    if (Date.now() >= deadline) return lastFrameLines(out)
-    await new Promise(r => setTimeout(r, 10))
-  }
-}
 
 // ── 契约 1: 工具边界不注入普通排队消息 ─────────────────────────
 
@@ -294,7 +259,8 @@ test('自然结束时输入框有草稿：不自动发出，队列保留', async
 // ── 契约 6: banner 贴输入框 ─────────────────────────────────────
 
 test('⏳ 已排队条贴在输入框上方，不夹在 thinking 与工具卡之间', async () => {
-  const { app, out, stdin } = makeHarnessApp({ cols: 80, rows: 24 })
+  const { app, stdin } = makeHarnessApp({ cols: 80, rows: 24 })
+  const liveFrame = captureLiveFrame(app)
   app.onSubmit(() => {})
 
   app.setInput('task A')
@@ -311,12 +277,8 @@ test('⏳ 已排队条贴在输入框上方，不夹在 thinking 与工具卡之
   app.callbacks.onToolUse('t1', 'apply_edit', { path: 'src/a.ts', replacement: 'foo' })
   await tick()
 
-  // 判据要求同一帧内同时含排队条与输入框顶边——位置断言（banner 在输入框上方）
-  // 只有在两者同帧时才可判读
-  const lines = await waitForFrame(
-    out,
-    l => l.some(x => x.includes('已排队')) && l.some(x => /^[─━┄-]{3,}/.test(x)),
-  )
+  // 所有位置断言都基于同一张完整 live frame，而非可能来自不同写入批次的行级 diff。
+  const lines = liveFrame.lines().filter(l => l.trim() !== '')
   const bannerIdx = lines.findIndex(l => l.includes('已排队'))
   // 工具卡样式随主题/版本有 `- Tool` 与 `Tool | ⎿` 两种头，这里只锚定「卡存在」。
   const toolIdx = lines.findIndex(l => /(?:^|\s)-?\s*Tool\b|apply_edit|src\/a\.ts/.test(l))

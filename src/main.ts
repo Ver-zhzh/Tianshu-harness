@@ -1,3 +1,7 @@
+import { resolveEcosystemWorkflowInput } from './workflows/ecosystem-workflows.js'
+import { prepareHeadlessHandoff, finishHeadlessHandoff } from './cli/headless-handoff.js'
+import { activateRequiredToolsNow } from './workflows/required-tools.js'
+import { ExternalHookHost } from './hooks/external-hook-host.js'
 import { sessionSkillSnapshot } from './skills/session-skill-snapshot.js'
 /**
  * 天枢 T9 主入口 — 纯 ANSI 终端 UI，零 React/Ink 依赖。
@@ -33,6 +37,7 @@ import type { BootstrapContext, RuntimeRefs } from './bootstrap.js'
 import { resolveCapabilities, resolveEffortChoices, normalizeReasoningEffort } from './api/provider.js'
 import type { ModelPickerEntry } from './tui/format/overlay.js'
 import { persistConnectCommit, resolveConnectRuntimeSelection } from './tui/connect-apply.js'
+import { formatModelSwitchFeedback } from './tui/model-switch-feedback.js'
 import { createExitFuse } from './platform/exit-fuse.js'
 
 /** Apply the picker draft against the successfully selected model's live controls. */
@@ -70,7 +75,6 @@ import { isProFeatureEnabled } from './config/pro-license.js'
 import type { GoalTracker as GoalTrackerInstance } from './agent/goal-tracker.js'
 import { GOAL_BUDGET_BASE, resolveGoalBudget } from './agent/goal-budget.js'
 import { persistGoalActual, readGoalActualSamples } from './agent/goal-actual-index.js'
-import { createUpdateGoalTool } from './tools/update-goal.js'
 import { presetIncludes } from './tools/tool-preset.js'
 import { applySandboxPolicyForApprovalMode } from './tools/sandbox-profile.js'
 import { TuiApp } from './tui/engine/app.js'
@@ -124,8 +128,9 @@ import type { PlanPickerEntry } from './tui/format/overlay.js'
 import { isCurrentModelSelection } from './tui/model-picker-selection.js'
 import { skillRegistry } from './skills/skill-loader.js'
 import { starDomainRegistry } from './agent/star-domain-registry.js'
-import { resolveInitialDomainName, resolveInitialModelName } from './tui/initial-status.js'
+import { resolveInitialDomainName, resolveInitialEffortDisplay, resolveInitialModelName } from './tui/initial-status.js'
 import { buildDomainPickerEntries, DOMAIN_SWITCH_CACHE_WARNING } from './agent/domain-picker-entries.js'
+import { formatDomainSwitchLine } from './agent/domain-briefing.js'
 import { SessionPersist, formatExitSummary } from './agent/session-persist.js'
 import { parseSessionCliArgs } from './agent/session-recovery.js'
 import { loadConstellation } from './constellation/store.js'
@@ -349,25 +354,23 @@ async function main() {
     const { createAgentConfig, createMainAgentConfigInput } = await import('./agent/create-agent-config.js')
     const { MeridianIndexer } = await import('./repo/meridian-indexer.js')
     const { createDefaultToolRegistry, excludeBuiltinTools } = await import('./tools/default-registry.js')
-    const { createDeliverTaskTool } = await import('./agent/deliver-task.js')
-    const { createTaskLedger } = await import('./agent/task-ledger.js')
-    const { createOwnershipLedger } = await import('./agent/ownership-ledger.js')
-    const { createVerificationAttribution } = await import('./agent/verification-attribution.js')
-    const { createDeliveryGateV2 } = await import('./agent/delivery-gate-v2.js')
-    const { createWorktreeBaseline } = await import('./agent/worktree-baseline.js')
+    const { createHeadlessToolRegistry } = await import('./bootstrap/headless-tool-registry.js')
+    const { partitionPluginTools } = await import('./server/plugin-session-cache.js')
     const { createHeadlessCoordinator } = await import('./agent/headless-coordinator.js')
     const { initializePlugins } = await import('./plugins/plugin-loader.js')
-    const { createGalaxyTool } = await import('./tools/galaxy.js')
-    const { createStarflowTool } = await import('./tools/starflow.js')
-    const { createCouncilConveneTool } = await import('./tools/council-convene.js')
-    const { createTeamOrchestrateTool } = await import('./tools/team-orchestrate.js')
-    const { DomainKnowledgeStore } = await import('./agent/domain-knowledge-store.js')
 
     const parsed = parseCliArgs(args)
+    const handoff = parsed.prompt?.trim().startsWith('/handoff')
+      ? prepareHeadlessHandoff(parsed, process.cwd(), getOrCreateSessionId()) : undefined
+    if (handoff?.text !== undefined) {
+      process.stdout.write((parsed.json || parsed.streamJson ? JSON.stringify({ success: true, text: handoff.text, sessionId: handoff.sessionId, usage: { input_tokens: 0, output_tokens: 0 } }) : handoff.text) + '\n')
+      process.exit(0)
+    }
     // Goal mode drives the same AgentLoop + GoalTracker as the TUI /goal command;
     // the continuation loop runs entirely inside a single agent.run() (see
     // TurnOrchestrator), so the headless path only has to attach the tracker.
-    const effectivePrompt = parsed.goal ? buildGoalModePrompt(parsed.goal) : parsed.prompt
+    const workflow = parsed.goal ? null : resolveEcosystemWorkflowInput(parsed.prompt ?? '')
+    const effectivePrompt = handoff?.prompt ?? (parsed.goal ? buildGoalModePrompt(parsed.goal) : workflow?.prompt ?? parsed.prompt)
     if (!effectivePrompt) {
       process.stderr.write('Usage: rivet -p "<prompt>" [--json] [--stream-json]\n   or: rivet --goal "<task>" [--budget N] [--json] [--stream-json]\n')
       process.exit(2)
@@ -382,7 +385,7 @@ async function main() {
     const { buildSearchBackends } = await import('./tools/web-search.js')
     const { buildFetchOptions } = await import('./tools/web-fetch/build-options.js')
     const registryOptions = {
-      preset: (await import('./tools/tool-preset.js')).resolveToolPreset(process.cwd()),
+      preset: (await import('./tools/tool-preset.js')).resolveToolPreset(process.cwd(), cfg.agent.defaultDomain),
       desktopTools: cfg.agent.desktopTools,
       computerUse: (process.platform === 'darwin' || process.platform === 'win32') && process.env.RIVET_COMPUTER_USE !== '0',
       proEnabled: isProFeatureEnabled(cfg, 'computerUse'),
@@ -523,6 +526,7 @@ async function main() {
     const headlessLedger = new TokenLedgerService(cfg)
     headlessLedger.startAutoSync()
     const instructionsRuntime: { agent?: import('./agent/loop.js').AgentLoop } = {}
+    const headlessHookHost = new ExternalHookHost()
     const result = await runHeadless({
       prompt: effectivePrompt,
       json: parsed.json,
@@ -535,10 +539,13 @@ async function main() {
         const instructionsPersist = new SessionPersist(sessionId, process.cwd())
         const useInstructionsPersistence = userInstructions.state === 'active' || instructionsPersist.hasUserInstructionsSnapshot()
         const instructionsFrozen = useInstructionsPersistence && wasSessionResumed() ? instructionsPersist.readFrozenSnapshot() : undefined
-        const toolRegistry = createDefaultToolRegistry([], registryOptions)
+        const headlessAgentRef: { current: import('./agent/loop.js').AgentLoop | null } = { current: null }
+        const { registry: toolRegistry, refs: headlessRefs, claimStore } = createHeadlessToolRegistry(cfg, process.cwd(), sessionId, instructionsPersist, goalTrackerRef, headlessIndexer, () => headlessAgentRef.current?.session.getTurnCount() ?? 0)
 
         // Register plugin tools (loaded during startup, already conflict-checked)
-        for (const tool of pluginTools) {
+        const checkedPlugins = partitionPluginTools(pluginTools, new Set(toolRegistry.getAllNames()))
+        if (checkedPlugins.blocked.length) process.stderr.write(`[plugins] skipped built-in collisions: ${checkedPlugins.blocked.join(', ')}\n`)
+        for (const tool of checkedPlugins.accepted) {
           toolRegistry.register(tool)
         }
         // Register MCP tools (connected before runHeadless; empty when no MCP configured)
@@ -549,55 +556,12 @@ async function main() {
           toolRegistry.remove(name)
         }
 
-        // B1 deliver_task: headless 模式下也需要交付门禁工具。
-        // 无 DelegationCoordinator，reviewDeps 不可用（deliver_task 内部降级处理）。
-        const b1TaskLedger = createTaskLedger({ taskId: sessionId })
-        // headless 无 pre-existing dirty 概念 — 用空基线
-        const b1Baseline = createWorktreeBaseline({
-          branch: '', head: '', preExistingDirty: [], preExistingUntracked: [], capturedAt: Date.now(),
-        })
-        const b1Ownership = createOwnershipLedger({
-          baseline: b1Baseline,
-          taskLedger: b1TaskLedger,
-        })
-        const b1Attribution = createVerificationAttribution({ ownership: b1Ownership })
-        const b1Gate = createDeliveryGateV2({
-          taskLedger: b1TaskLedger,
-          ownership: b1Ownership,
-          attribution: b1Attribution,
-          repoRoot: process.cwd(),
-        })
-        // W1 回归防线: agent 在工具注册后才创建，经 mutable ref 延迟接线
-        const headlessAgentRef: { current: import('./agent/loop.js').AgentLoop | null } = { current: null }
-        toolRegistry.register(createDeliverTaskTool(() => ({
-          taskLedger: b1TaskLedger,
-          ownership: b1Ownership,
-          gate: b1Gate,
-          isGoalActive: () => goalTrackerRef.current?.isActive() ?? false,
-          isGoalAchieved: () => goalTrackerRef.current?.isGoalAchieved() ?? false,
-          getLastVerdict: () => goalTrackerRef.current?.getLastVerdict() ?? null,
-          getImpactedTests: () => headlessAgentRef.current ? [...headlessAgentRef.current.getEvidenceState().impactedTests] : [],
-          // 收编 #2：冗余义务门禁消费（headless 生产注入）
-          getObligationStore: () => headlessAgentRef.current?.obligations.getStore()
-            ?? { obligations: [] },
-          // 证据防火墙 Phase 2：claim tracker（headless 生产注入；hook 未装配时 fail-open）
-          getClaimTracker: () => headlessAgentRef.current?.externalClaimTracker?.(),
-          scoutFirewallConfig: cfg.agent.scoutEvidenceFirewall,
-        })))
-        if (presetIncludes(registryOptions.preset, 'update_goal')) {
-          toolRegistry.register(createUpdateGoalTool(
-            () => goalTrackerRef.current,
-            () => ({ sessionId, cwd: process.cwd() }),
-          ))
-        }
-
-        // Headless DelegationCoordinator — 此前只在 --goal 模式创建（供 goal
-        // judge），-p 模式没有任何编排工具可用。常驻创建并注册 galaxy：
-        // headless 冒烟/benchmark 需要真实的星河扇出（worker 侧缓存指标经
-        // worker cache-log.jsonl 落盘，是预热收益的量化来源）。
-        // 注意：必须在 createAgentConfig（取 toolDefinitions）之前注册，
-        // 否则模型看不到工具定义——registry 有但 prompt 里没有，工具"不在线"。
         const headlessCoordinator = createHeadlessCoordinator({
+          externalHookHost: headlessHookHost,
+          getExternalHookParent: () => {
+            const current = headlessAgentRef.current
+            return current?.config.externalHookRuntime && current.getRunId() ? { runtimeId: current.config.externalHookRuntime.runtimeId, runId: current.getRunId()! } : undefined
+          },
           getUserInstructions: () => {
             if (!headlessAgentRef.current) throw new UserInstructionsError('user_instructions_boundary_required', '主控尚未发布规则，不能派发 worker。')
             return headlessAgentRef.current.config.promptEngine.getUserInstructionsForDispatch()
@@ -613,33 +577,7 @@ async function main() {
           cwd: process.cwd(),
           sessionId,
         })
-        const headlessGalaxyTool = createGalaxyTool({
-          delegateBatch: async (requests, policy, abortSignal, onProgress, onWorkerSettled) =>
-            headlessCoordinator.delegateBatch(requests, policy, abortSignal, onProgress, onWorkerSettled),
-          getRuntimeSnapshot: () => headlessCoordinator.getRuntimeSnapshot(),
-          // 路由学习（收编 #5）：headless 无 SharedRuntime，per-session 建库即可。
-          domainKnowledgeStore: new DomainKnowledgeStore(join(process.cwd(), '.rivet', 'knowledge')),
-          // DP 证据冗余（收编 #2）：agent 创建后由 headlessAgentRef 惰性提供。
-          get obligationTracker() { return headlessAgentRef.current?.obligations },
-        })
-        toolRegistry.register(headlessGalaxyTool)
-
-        // starflow — 星流代码级编排（council→team→galaxy 硬门禁状态机）。
-        // headless 不注册 council_convene / team_orchestrate（模型不可见），
-        // 星流按相同 coordinator 包装等价自构三个子工具实例。
-        toolRegistry.register(createStarflowTool({
-          councilTool: createCouncilConveneTool({
-            delegateBatch: async (requests, policy, abortSignal, onProgress) =>
-              headlessCoordinator.delegateBatch(requests, policy, abortSignal, onProgress),
-          }),
-          teamTool: createTeamOrchestrateTool({
-            delegateBatch: async (requests, policy, abortSignal, onProgress, onWorkerSettled) =>
-              headlessCoordinator.delegateBatch(requests, policy, abortSignal, onProgress, onWorkerSettled),
-            delegate: async (request, abortSignal) => headlessCoordinator.delegate(request, abortSignal),
-          }),
-          galaxyTool: headlessGalaxyTool,
-          cwd: process.cwd(),
-        }))
+        headlessRefs.coordinator = headlessCoordinator
 
         // indexer 在外层创建（见 runHeadless 调用之前）——收尾段的预算回馈也要用它。
         // Goal 预算定价（2026-10-10）：`--budget` 缺省不再固定 100，按任务形状定价
@@ -670,6 +608,7 @@ async function main() {
           config: cfg,
           sessionId,
           toolDefinitions: toolRegistry.getDefinitions(),
+          toolPreset: toolRegistry.preset,
           sessionMemoryBlock: undefined,
           auth: undefined,
         }))
@@ -687,13 +626,16 @@ async function main() {
         // 后者一旦把 zen 并入返回白名单，one-shot 就会静默 arm（且无用户可解锁）。
         // 注：未设 headless: true 是另一件事——它还会联动 tool-pipeline 的审批自动
         // 放行/拒绝分支，属独立改动，不在此处顺手改。
-        const agent = new AgentLoop({ ...agentCfg, toolRegistry, zen: undefined, maxTurns: headlessMaxTurns }, session, process.cwd())
+        const agent = new AgentLoop({ ...agentCfg, contextClaimStore: claimStore, taskLedger: headlessRefs.taskLedger ?? undefined, ownershipLedger: headlessRefs.ownershipLedger ?? undefined, verificationSnapshotManager: headlessRefs.verificationSnapshotManager ?? undefined, getTodos: () => headlessRefs.todoStore.read(), externalHookHost: headlessHookHost, getPluginHooks: () => pluginResult.hooks, toolRegistry, zen: undefined, maxTurns: headlessMaxTurns }, session, process.cwd())
         if (useInstructionsPersistence) {
           wireFrozenSnapshotPersist(instructionsPersist, agentCfg.promptEngine)
           const execution = agentCfg.promptEngine.getExecutionSnapshot()
           if (execution) agentCfg.client.restoreExecutionSnapshot?.(execution)
           instructionsRuntime.agent = agent
         }
+        const activation = activateRequiredToolsNow(workflow?.requiredTools, name => agent.enableTool(name), note => process.stderr.write(note + '\n'))
+        if (!activation.ok) throw new Error(activation.error)
+        headlessRefs.promptEngine = agent.config.promptEngine
         headlessAgentRef.current = agent
         agent.config.coordinatorRef = () => headlessCoordinator
 
@@ -750,10 +692,12 @@ async function main() {
     // 尾段（TUI 侧同一份清理挂在 shutdown() 的 cleanup 列表上，无头分支不走
     // shutdown）。finally 同时覆盖 runHeadless 抛错的情形——异常路径也要收尾。
     }).finally(async () => {
+      await headlessHookHost.shutdown()
       await instructionsRuntime.agent?.drainPersistWrites()
       try { await eventStream?.close() } finally { await headlessLedger.shutdownFlush() }
     })
 
+    if (handoff?.request) finishHeadlessHandoff(handoff.request, result)
     if (result.stdout) process.stdout.write(result.stdout + '\n')
     else if (result.json) process.stdout.write(JSON.stringify(result.json) + '\n')
     // 失败诊断走 stderr——与 stdout 分流，不干扰 --json / --stream-json 的机器消费。
@@ -1035,6 +979,7 @@ async function main() {
     void approvePlanAndKickoff(
       {
         cwd: ctx!.agent.cwd,
+        sessionId: ctx!.sessionId,
         agent: ctx!.agent,
         submitToAgent: (prompt: string) => { tuiApp.submitText(prompt) },
         notify: (content: string, isError?: boolean) => tuiApp.commitStatic(content, { isError }),
@@ -1053,10 +998,12 @@ async function main() {
   }
   tuiApp.setDomainSyncProvider(() => ctx!.agent.getSessionDomain()?.name ?? undefined)
   // 实时思考强度：优先 agent 当前生效 effort（auto-reasoning 动态调整），回退 config floor。
-  tuiApp.setReasoningEffortProvider(() => {
-    const effort = ctx!.agent.getReasoningEffort() ?? ctx!.agent.config.reasoningEffort
-    return effort ? normalizeReasoningEffort(effort, activeModelEffort(ctx!).caps) : undefined
-  })
+  tuiApp.setReasoningEffortProvider(() => resolveInitialEffortDisplay({
+    current: ctx!.agent.getReasoningEffort(),
+    configured: ctx!.agent.config.reasoningEffort,
+    floor: ctx!.agent.config.reasoningFloor,
+    normalize: effort => normalizeReasoningEffort(effort, activeModelEffort(ctx!).caps),
+  }))
 
   // ── GlanceBar 密度默认档 + 可脚本化 statusline 接线 ─────────────
   if (ctx!.config.ui?.glanceDensity) tuiApp.glanceDensity = ctx!.config.ui.glanceDensity
@@ -1517,7 +1464,7 @@ async function main() {
       if (d) {
         ctx!.agent.setSessionDomain({ id: d.id, name: d.name, volatileBlock: d.volatileBlock, motto: d.motto, courageThreshold: d.courageThreshold })
         tuiApp.setSessionStarDomain(d.name)
-        tuiApp.commitStatic(`Domain → ${d.name} (${d.decisionStyle})`)
+        tuiApp.commitStatic(`Domain → ${formatDomainSwitchLine(d)}`)
       } else {
         return
       }
@@ -1525,13 +1472,12 @@ async function main() {
     if (midSession) tuiApp.commitStatic(DOMAIN_SWITCH_CACHE_WARNING)
   }, /* modelPickerExec: */ (provider: string, modelId: string, effort?: string) => {
     // Enter applies to this session; apply effort only after the target runtime exists.
-    try { ctx!.agent.abort() } catch {}
     const res = switchAgentRuntime(ctx!, modelId, provider)
     if (res.ok && res.modelName) {
       applyPickerEffort(ctx!, effort)
       tuiApp.setModelInfo(res.modelName, res.contextWindow)
       attachJobSubscription()
-      tuiApp.commitStatic(`Model switched to: ${res.modelName}${effort ? `（effort → ${effort}，仅本会话）` : ''}`)
+      tuiApp.commitStatic(formatModelSwitchFeedback(res, effort))
     } else {
       tuiApp.commitStatic(`⚠️ Model switch failed: ${res.error ?? 'unknown error'}`)
     }
@@ -1547,7 +1493,7 @@ async function main() {
       if (d) {
         ctx!.agent.setSessionDomain({ id: d.id, name: d.name, volatileBlock: d.volatileBlock, motto: d.motto, courageThreshold: d.courageThreshold })
         tuiApp.setSessionStarDomain(d.name)
-        tuiApp.commitStatic(`Domain → ${d.name} (${d.decisionStyle})`)
+        tuiApp.commitStatic(`Domain → ${formatDomainSwitchLine(d)}`)
       } else {
         tuiApp.commitStatic(`⚠️ 未知星域: ${key}`)
         return
@@ -1563,13 +1509,12 @@ async function main() {
   }, /* modelPickerSaveDefaultExec: */ (provider: string, modelId: string, effort?: string) => {
     // s applies the model and persists it as the default.
     // effort 有显式改动时：会话即时生效 + 随默认持久化（'auto' = 清字段回自动）。
-    try { ctx!.agent.abort() } catch {}
     const res = switchAgentRuntime(ctx!, modelId, provider)
     if (res.ok && res.modelName) {
       applyPickerEffort(ctx!, effort)
       tuiApp.setModelInfo(res.modelName, res.contextWindow)
       attachJobSubscription()
-      tuiApp.commitStatic(`Model switched to: ${res.modelName}`)
+      tuiApp.commitStatic(formatModelSwitchFeedback(res, effort))
     } else {
       tuiApp.commitStatic(`⚠️ Model switch failed: ${res.error ?? 'unknown error'}`)
       return
@@ -1708,6 +1653,7 @@ async function main() {
               const res = switchAgentRuntime(ctx, modelAlias, fresh.provider.default)
               if (res.ok && res.modelName) {
                 tuiApp.setModelInfo(res.modelName, res.contextWindow)
+                for (const warning of res.warnings ?? []) tuiApp.commitStatic(warning)
                 attachJobSubscription()
                 runtime = { needed: true, switched: true, targetModel: res.modelName }
               } else {
@@ -1763,10 +1709,10 @@ async function main() {
           provider: ctx.provider.name, model: ctx.agent.config.promptEngine.getModel(),
         })
         if (selection) {
-          try { ctx.agent.abort() } catch { /* idle */ }
           const res = switchAgentRuntime(ctx, selection.model, selection.provider)
           if (res.ok && res.modelName) {
             tuiApp.setModelInfo(res.modelName, res.contextWindow)
+            for (const warning of res.warnings ?? []) tuiApp.commitStatic(warning)
             attachJobSubscription()
             liveApplied = true
           }
@@ -1787,6 +1733,7 @@ async function main() {
     void approvePlanAndKickoff(
       {
         cwd: ctx!.agent.cwd,
+        sessionId: ctx!.sessionId,
         agent: ctx!.agent,
         submitToAgent: (prompt: string) => { tuiApp.submitText(prompt) },
         notify: (content: string, isError?: boolean) => tuiApp.commitStatic(content, { isError }),
@@ -1969,17 +1916,8 @@ async function main() {
     // workflow 声明的 EXTENDED 工具在发 run 前挂载——prompt 契约与工具可见性同源
     // （会话 5158719d：/council 指示调 council_convene 而门控把它摘了 → 模型被迫模拟）。
     if (resolved.skillInvoked) ctx!.agent.markSkillInvoked(resolved.skillInvoked)
-    for (const toolName of resolved.requiredTools ?? []) {
-      const mount = ctx!.agent.enableTool(toolName)
-      if (mount.status === 'mounted') {
-        const costNote = mount.cacheImpact === 'prefix-invalidated'
-          ? '（下一请求前缀缓存一次性 MISS，后续轮次按新工具集重新缓存）'
-          : ''
-        app!.commitStatic(`🔧 已为本次 workflow 挂载工具 ${toolName}${costNote}`)
-      }
-      // already-active / gating-off → 静默（工具本就可见）
-      // unknown / not-extended → 不应发生（requiredTools 与 EXTENDED_TOOLS 的一致性由 workflow 测试钉住）
-    }
+    const activation = activateRequiredToolsNow(resolved.requiredTools, name => ctx!.agent.enableTool(name), note => app!.commitStatic(note))
+    if (!activation.ok) { app!.commitStatic(activation.error); app!.setStreamingState(false); return }
 
     // 单一权威：TuiApp.agentBusy 是唯一的 streaming 闩。app.onSubmit 只在 TuiApp
     // 判定空闲时触发（busy 时输入已被 TuiApp 入队 steerBuffer），故此处无需再自管
@@ -2031,6 +1969,7 @@ async function main() {
 
   // 中断收尾窗口靠它对着真相校验，而不是只信 notifyRunSettled 那一条信号。
   app.setAgentRunningProbe(() => ctx?.agent.isRunning() === true)
+  app.setReviewOwnerProvider(() => ctx ? { cwd: ctx.agent.cwd, sessionId: ctx.sessionId } : undefined)
 
   // Zen Mode（禅模式）相位徽章：读面收窄期间状态栏常驻「禅」，晋升后消失。
   app.setZenBadgeProvider(() => (ctx?.agent.zenController.isZen ? '禅' : undefined))

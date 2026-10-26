@@ -1,4 +1,6 @@
 import { verificationToolFacts } from '../verification-activity.js'
+import { resolve as requireAbsolute } from 'node:path'
+import { createFileRepairStore } from '../file-repair-store.js'
 /**
  * Advisory-Readback Hook — advisory 采纳核销的运行时接线（P1a）。
  *
@@ -52,16 +54,29 @@ export function extractObservedTarget(tool: RuntimeToolEvent): string {
 export function createAdvisoryReadbackHooks(
   deps: AdvisoryReadbackHookDeps,
 ): [PostToolRuntimeHook, PostTurnRuntimeHook, PostSessionRuntimeHook] {
+  const trackedRepairAdvice = new Set<string>()
   const observer: PostToolRuntimeHook = {
     phase: 'postTool',
     name: 'advisory-readback-observe',
     run(ctx: RuntimeHookContext, tool: RuntimeToolEvent): void {
+      // These suggestions were actually delivered in the tool-result tail, not via the bus.
+      for (const fact of tool.mutations ?? []) {
+        if (!fact.sessionId || !fact.attempted || fact.after.parse !== 'invalid') continue
+        try {
+          const repair = createFileRepairStore(ctx.snapshot.cwd, fact.sessionId).list().find(r => r.file === fact.file)
+          if (!repair?.adviceSent || !repair.eventId || trackedRepairAdvice.has(repair.eventId + fact.file)) continue
+          trackedRepairAdvice.add(repair.eventId + fact.file)
+          const target = requireAbsolute(ctx.snapshot.cwd, fact.file)
+          deps.readback.track([{ key: `file-repair:${repair.eventId}:${fact.file}`, category: 'repair', expect: { kind: 'tool_appears', tools: ['read_file', 'edit_file', 'hash_edit', 'bash'], targetIncludes: fact.file, recoveryTarget: target, withinTurns: 2 } }], ctx.snapshot.modelTurn ?? ctx.snapshot.turn)
+        } catch { /* keep reporting separate from an applied mutation */ }
+      }
       deps.readback.observeTool({
         turn: (ctx.snapshot.modelTurn ?? ctx.snapshot.turn),
         name: tool.name,
         ...verificationToolFacts(tool.name, tool.input ?? { command: extractObservedTarget(tool) }, ctx.snapshot.cwd),
         target: extractObservedTarget(tool),
         isError: tool.isError ?? !tool.success,
+        mutations: tool.mutations?.map(f => ({ ...f, file: requireAbsolute(ctx.snapshot.cwd, f.file) })),
       })
     },
   }
@@ -71,6 +86,7 @@ export function createAdvisoryReadbackHooks(
     name: 'advisory-readback-evaluate',
     run(ctx: RuntimeHookContext): void {
       const decided = deps.readback.evaluate((ctx.snapshot.modelTurn ?? ctx.snapshot.turn))
+      for (const outcome of deps.readback.drainRecoveryOutcomes()) deps.writeTelemetry?.({ kind: 'advisory-recovery-outcome', ...outcome })
       for (const pending of deps.readback.drainUnresolved()) deps.writeTelemetry?.({ kind: ADVISORY_UNRESOLVED_KIND, ...pending })
       if (decided === 0) return
       const outcomes = deps.readback.drainOutcomes()
@@ -83,16 +99,17 @@ export function createAdvisoryReadbackHooks(
     },
   }
 
-  const finalizer: PostSessionRuntimeHook = {
-    phase: 'postSession',
-    name: 'advisory-readback-finalize',
-    run(ctx: RuntimeHookContext): void {
-      const { decided, unresolved } = deps.readback.flushAtSessionEnd((ctx.snapshot.modelTurn ?? ctx.snapshot.turn))
+  const capture = (ctx: RuntimeHookContext): PostSessionRuntimeHook['run'] => {
+    const { decided, unresolved } = deps.readback.flushAtSessionEnd((ctx.snapshot.modelTurn ?? ctx.snapshot.turn))
+    const outcomes = decided > 0 ? deps.readback.drainOutcomes() : []
+    const recoveryOutcomes = deps.readback.drainRecoveryOutcomes()
+    if (decided > 0) deps.onOutcomes?.(deps.readback.getTotals())
+    return () => {
+      for (const outcome of recoveryOutcomes) deps.writeTelemetry?.({ kind: 'advisory-recovery-outcome', ...outcome })
       if (decided > 0) {
-        for (const o of deps.readback.drainOutcomes()) {
+        for (const o of outcomes) {
           deps.writeTelemetry?.({ kind: o.shadow ? ADVISORY_HOLDOUT_KIND : ADVISORY_OUTCOME_KIND, ...o })
         }
-        deps.onOutcomes?.(deps.readback.getTotals())
       }
       if (unresolved.length === 0) return
       // 一条汇总而非逐条：每会话一行，体量可控且足以回答"盲区有多大、卡在哪些 key"。
@@ -110,7 +127,13 @@ export function createAdvisoryReadbackHooks(
         byKey,
         deliveries: unresolved,
       })
-    },
+    }
+  }
+  const finalizer: PostSessionRuntimeHook = {
+    phase: 'postSession',
+    name: 'advisory-readback-finalize',
+    capture,
+    run: ctx => capture(ctx)(ctx),
   }
 
   return [observer, evaluator, finalizer]

@@ -1,3 +1,4 @@
+import { noteMutationSyntax } from '../agent/mutation-facts.js'
 import { readFile, stat } from 'node:fs/promises'
 import { createHash } from 'crypto'
 import { relative } from 'node:path'
@@ -6,10 +7,10 @@ import { validatePath } from './path-validate.js'
 import { checkSyntax } from './syntax-check.js'
 import { detectPointerPlaceholder, pointerPlaceholderError, resolveIdempotentPointer } from './pointer-guard.js'
 import { asBool } from './write-tool-helpers.js'
-import { getFileReadContentHash, noteFileObserved, recordSuccessfulEdit, incrementEditFailCount, resetEditFailCount } from './read-file.js'
+import { getFileReadContentHash, isFileFullyObserved, recordSuccessfulEdit, incrementEditFailCount, resetEditFailCount } from './read-file.js'
 import { landingWriteFile, delegatedToToolResult, isDelegateRejected } from './client-delegate.js'
-import { withFileChangeTracking, restoreFileChange, type FileChangeRecord } from '../agent/recovery-stack.js'
-import { detectEol, chooseEol, toLf, applyEol } from './line-endings.js'
+import { withFileChangeTracking, restoreFileChange, expectFileChange, type FileChangeRecord } from '../agent/recovery-stack.js'
+import { detectEol, chooseEol, toLf, applyEol, type Eol } from './line-endings.js'
 import { getTargetEol } from '../platform.js'
 import { buildFileDiff, computeChangedLineRanges, type LineRange } from './edit-diff.js'
 
@@ -69,24 +70,14 @@ async function finalizeHashEdit(
   newContent: string,
   sessionId: string | undefined,
   capture: FileChangeRecord,
+  eol: Eol,
   successContent: string,
   extraWarning: string,
 ): Promise<{ content: string; isError?: boolean; errorKind?: 'syntax_error' }> {
   const check = await checkSyntax(filePath, newContent)
+  noteMutationSyntax(capture, check)
   if (check.fatal) {
     const restored = await restoreFileChange(cwd, capture, sessionId)
-    // 回滚后 mtime 会变（copyFileSync 不保留原始时间戳），但内容已恢复。
-    // 刷新读文件 mtime 追踪器——否则后续 hash_edit 的仅位置锚点检查会误报
-    // "文件已变化，请重新 read_file"。
-    if (restored) {
-      try {
-        const s = await stat(filePath)
-        // 回滚恢复的是编辑前内容：读回重建内容哈希基线——否则位置锚点检查
-        // （要求完整观察且内容未变）会因 mtime 变化误报为「文件已变化」。
-        const content = await readFile(filePath, 'utf8')
-        noteFileObserved(filePath, s.mtimeMs, s.size, sessionId, content)
-      } catch { /* stat/readFile 失败不影响主流程 */ }
-    }
     const fails = incrementEditFailCount(filePath)
     const gatePrefix = fails >= 3 ? `此文件已连续 hash_edit 失败 ${fails} 次，再次编辑前必须先重新 read_file。\n\n` : ''
     const rollbackMsg = restored ? '更改已自动回滚。' : '自动回滚失败。'
@@ -96,7 +87,7 @@ async function finalizeHashEdit(
       errorKind: 'syntax_error',
     }
   }
-  await recordSuccessfulEdit(filePath, sessionId)
+  await recordSuccessfulEdit(filePath, sessionId, applyEol(newContent, eol), false)
   resetEditFailCount(filePath)
   const combinedWarn = [check.warning, extraWarning].filter(Boolean).join('\n\n')
   return { content: successContent + (combinedWarn ? '\n\n' + combinedWarn : '') }
@@ -401,7 +392,7 @@ new_string 必须是真实文件内容；把历史里的
     if (anchors.some(a => a.hash === null) && anchors.every(a => a.line <= lines.length)) {
       const observed = getFileReadContentHash(filePath, params.sessionId)
       const current = createHash('sha256').update(rawContent).digest('hex')
-      if (!observed || observed !== current) return {
+      if (!isFileFullyObserved(filePath, params.sessionId) || !observed || observed !== current) return {
         content: '错误：仅位置锚点缺少有效读取基线或文件内容已变化。请重新 read_file 或使用内容哈希锚点；未写入文件。',
         isError: true,
       }
@@ -452,6 +443,7 @@ new_string 必须是真实文件内容；把历史里的
           const capture = await trackFileChange(params.cwd, { filePath: relPath, action: 'edit', toolCallId: params.toolUseId ?? 'hash_edit' })
 
           {
+            expectFileChange(capture, applyEol(newContent, eol), () => params.hasWriteClaim?.(relative(params.cwd, filePath)) ?? true)
             const land = await landingWriteFile(params, filePath, content, applyEol(newContent, eol))
             if (land.kind === 'delegated' && (isDelegateRejected(land.delegated) || land.delegated.isError)) {
               return delegatedToToolResult(land.delegated)
@@ -462,7 +454,7 @@ new_string 必须是真实文件内容；把历史里的
             : ''
           const freshAnchors = buildFreshAnchors(newContent.split('\n'), before.length, newLines.length)
           return await finalizeHashEdit(
-            filePath, params.cwd, newContent, params.sessionId, capture,
+            filePath, params.cwd, newContent, params.sessionId, capture, eol,
             `hash_edit${recoveredInfo} 已应用到 ${filePath}：将 L${firstLine}-L${lastLine}（${lastLine - firstLine + 1} 行）替换为 ${newLines.length} 行${freshAnchors}`,
             '',
           )
@@ -498,6 +490,7 @@ new_string 必须是真实文件内容；把历史里的
     const capture = await trackFileChange(params.cwd, { filePath: relPath, action: 'edit', toolCallId: params.toolUseId ?? 'hash_edit' })
 
     {
+      expectFileChange(capture, applyEol(newContent, eol), () => params.hasWriteClaim?.(relative(params.cwd, filePath)) ?? true)
       const land = await landingWriteFile(params, filePath, content, applyEol(newContent, eol))
       if (land.kind === 'delegated' && (isDelegateRejected(land.delegated) || land.delegated.isError)) {
         return delegatedToToolResult(land.delegated)
@@ -505,7 +498,7 @@ new_string 必须是真实文件内容；把历史里的
     }
     const freshAnchors = buildFreshAnchors(newContent.split('\n'), before.length, newLines.length)
     return await finalizeHashEdit(
-      filePath, params.cwd, newContent, params.sessionId, capture,
+      filePath, params.cwd, newContent, params.sessionId, capture, eol,
       `hash_edit 已应用到 ${filePath}：将 L${firstLine}-L${lastLine}（${lastLine - firstLine + 1} 行）替换为 ${newLines.length} 行${freshAnchors}`,
       '',
     )

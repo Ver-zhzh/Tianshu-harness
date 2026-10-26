@@ -1,5 +1,5 @@
 import { stat } from 'node:fs/promises'
-import { statSync } from 'node:fs'
+import { statSync, readFileSync } from 'node:fs'
 import { readFilePayload } from '../tools/read-file.js'
 import type { PrewarmCache } from './prewarm.js'
 
@@ -11,8 +11,7 @@ export interface PrewarmValue {
   uiContent: string
   /**
    * File mtime (ms) at prewarm time. The consumer re-stats the live file and
-   * only serves the cached content when mtime still matches, so an external
-   * edit between prewarm and the real read never serves stale content.
+   * uses metadata as an early rejection before checking the actual bytes.
    */
   mtimeMs: number
   /**
@@ -62,7 +61,7 @@ export const buildPrewarmValueAsync = buildPrewarmValue
 
 /**
  * Consume a prewarmed file: return its full raw content only when a cache entry
- * exists AND the live file's mtime still matches the prewarm-time mtime.
+ * exists AND the live file's metadata and bytes match the cached content.
  *
  * Returns `null` on miss or staleness (external edit) — the caller then falls
  * back to a normal read. This is the consumer the prewarm cache was missing: it
@@ -71,16 +70,16 @@ export const buildPrewarmValueAsync = buildPrewarmValue
  * active contextWindow's cap, so cap consistency holds regardless of which cap
  * was in effect when the file was prewarmed.
  *
- * mtime is re-checked synchronously here (not at prewarm time) because prewarm
- * is fire-and-forget — a stat taken then could be stale by the time the real
- * read happens.
+ * The byte comparison is bounded by MAX_PREWARM_BYTES. It also catches same-size,
+ * same-mtime edits; metadata alone cannot establish a content version.
  */
 export function consumePrewarm(cache: PrewarmCache, canonicalPath: string): PrewarmValue | null {
   const value = cache.get(canonicalPath)
   if (!value) return null
   try {
     const live = statSync(canonicalPath)
-    if (live.mtimeMs !== value.mtimeMs || live.size !== value.sizeBytes) {
+    if (live.size > MAX_PREWARM_BYTES || live.mtimeMs !== value.mtimeMs || live.size !== value.sizeBytes
+      || !readFileSync(canonicalPath).equals(Buffer.from(value.content, 'utf8'))) {
       cache.invalidate(canonicalPath)
       return null // file changed externally since prewarm (mtime OR size moved)
     }

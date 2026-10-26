@@ -16,6 +16,8 @@ export interface TraceEvent {
   summary?: string
   rawPath?: string
   predictedSuccess?: boolean
+  terminal?: boolean
+  dispatched?: boolean
 }
 
 export type TraceEventStartInput = Pick<TraceEvent, 'id' | 'turn' | 'kind' | 'name' | 'startedAt' | 'summary' | 'predictedSuccess'>
@@ -334,4 +336,23 @@ const DOOM_LEVEL_ORDER: Record<DoomLoopLevel, number> = { none: 0, warn: 1, bloc
 /** Combine exact-fingerprint and class-fingerprint detection — strictest wins. */
 export function combineDoomLoopLevels(a: DoomLoopLevel, b: DoomLoopLevel): DoomLoopLevel {
   return DOOM_LEVEL_ORDER[a] >= DOOM_LEVEL_ORDER[b] ? a : b
+}
+
+/** Branches use unbounded event copies; trim only after every sibling delta is merged. */
+export function mergeTraceBranches(base: TraceStore, branches: TraceStore[]): TraceStore {
+  const events = new Map(base.events.map(event => [event.id, event]))
+  const appendDelta = (prior: string[], branch: string[]): string[] => {
+    for (let overlap = Math.min(prior.length, branch.length); overlap >= 0; overlap--) {
+      if (prior.slice(-overlap || prior.length).join('\0') === branch.slice(0, overlap).join('\0')) return branch.slice(overlap)
+    }
+    return branch
+  }
+  const fingerprints = [...base.toolFingerprints], names = [...(base.toolNameHistory ?? [])], classes = [...(base.bashClassFingerprints ?? [])]
+  for (const branch of branches) {
+    for (const event of branch.events) events.set(event.id, event)
+    fingerprints.push(...appendDelta(base.toolFingerprints, branch.toolFingerprints))
+    names.push(...appendDelta(base.toolNameHistory ?? [], branch.toolNameHistory ?? []))
+    classes.push(...appendDelta(base.bashClassFingerprints ?? [], branch.bashClassFingerprints ?? []))
+  }
+  return { ...base, events: [...events.values()].slice(-base.maxEvents), toolFingerprints: fingerprints.slice(-20), toolNameHistory: names.slice(-20), bashClassFingerprints: classes.slice(-20) }
 }

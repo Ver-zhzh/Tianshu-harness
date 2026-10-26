@@ -71,6 +71,7 @@ describe('scrollback transcript parser', () => {
       'ctrl+o 展开完整 diff',
       '… +5 lines [Ctrl+O]',
       '… [Ctrl+O]',
+      '… · /pager',
     ]) {
       const content = [`${ANSI_TOOL} Run(npm test)`, '⎿  line', `⎿  ${marker}`].join('\n')
       const toolMsg = parseScrollbackTranscript(content).find(m => m.role === 'tool')

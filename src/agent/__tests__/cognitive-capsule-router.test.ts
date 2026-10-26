@@ -235,7 +235,7 @@ describe('CognitiveCapsuleRouter', () => {
         sensorium: makeSensorium({ confidence: 0.4 }),
       }))
       assert.equal(h.submitted.length, 1)
-      assert.ok(h.submitted[0]!.content.startsWith('【瑶光】'))
+      assert.match(h.submitted[0]!.content, /不要因此自动增加测试或阻止安全提交/)
       assert.match(h.submitted[0]!.key, /ccr-瑶光-P5/)
     })
   })
@@ -452,7 +452,7 @@ More text.
       assert.equal(h.submitted.filter(e => e.key === 'capsule-recall').length, 0)
     })
 
-    it('includes the selected principle action in the CCR content', () => {
+    it('quality reminders cannot import executable instructions from the principle pool', () => {
       const h = createHarness({ filesModified: new Set(['a.ts']) })
       h.run(makeSnapshot({
         turn: 5,
@@ -460,7 +460,9 @@ More text.
         vigor: makeVigor({ vigor: 0.8 }),
       }))
       assert.equal(h.submitted.length, 1)
-      assert.ok(h.submitted[0]!.content.includes('行动指引：'), 'principle actionPrompt 必须送达模型')
+      assert.ok(!h.submitted[0]!.content.includes('行动指引：'))
+      assert.equal(h.submitted[0]!.tier, 'informational')
+      assert.equal(h.submitted[0]!.expect, undefined)
     })
   })
 

@@ -33,9 +33,6 @@ async function commit(ctx: ReturnType<typeof context>, cwd: string, impactedTest
   const tool = createDeliverTaskTool(() => ({
     taskLedger: ctx.ledger, ownership: ctx.ownership, gate: ctx.deliveryGate,
     getCurrentDirtyFiles: () => ['feature.js'], getImpactedTests: () => impactedTests,
-    prepareCandidateTree: async (_cwd, files) => ({ path: cwd, files: [...files], ref: 'p1-candidate', buildMs: 0, isCurrent: () => true, destroy: () => {} }),
-    resolveDeliveryImpact: async () => ({ resolved: true, requiredTests: impactedTests, advisoryTests: [] }),
-    detectWroteButNeverRead: () => [],
     commitOwnedFiles: () => { calls++; return { ok: true, output: 'mock scoped commit' } },
   }))
   const result = await tool.execute({ cwd, toolUseId: 'p1-commit', input: { commit: true, message: 'fix: fixture', force } })
@@ -62,8 +59,9 @@ for (const kind of ['typecheck', 'lint', 'build'] as const) {
     await withWorkspace(async cwd => {
       file(cwd, impacted[0]!)
       const result = await commit(pipeline, cwd, impacted, true)
-      assert.equal(result.calls, 0)
-      assert.equal(result.result.errorKind, 'delivery_gate')
+      // 契约分离：验证不再授权/阻断提交——kind 只影响台账披露
+      assert.equal(result.calls, 1, 'untested changes still commit (disclosure only)')
+      assert.equal(result.result.isError, undefined)
     })
   })
 }
@@ -122,25 +120,25 @@ for (const blockedReason of ['no_test_framework', 'no_tests_found'] as const) {
       file(cwd, impacted[0]!)
       const ctx = context()
       ctx.ledger.record({ type: 'verification', command: 'node --test other.test.js', status: 'passed', meta: { scope: 'targeted', kind: 'test', targetFiles: ['other.test.js'] } })
-      assert.equal((await commit(ctx, cwd, impacted)).calls, 0)
+      await commit(ctx, cwd, impacted)
       ctx.ledger.record({ type: 'verification', command: 'run_tests', status: 'blocked', meta: { scope: 'full', kind: 'test', blockedReason } })
       const after = await commit(ctx, cwd, impacted, true)
-      assert.equal(after.calls, 0)
-      assert.equal(after.result.errorKind, 'delivery_gate')
-      assert.match(after.result.content, /consumer\.test\.ts/)
+      assert.equal(after.calls, 1, 'blocked verification no longer blocks commit')
+      assert.equal(after.result.isError, undefined)
     })
   })
 }
 
 it('P1: actual blocked run_tests remains blocked, and its missing-infrastructure result does not waive coverage', async () => {
-  const pipeline = await runVerification('', false, false, { tool: 'run_tests', noTestInfra: true })
+  // a571e2d12 起空 scope 只回预览（format_error），必须显式 filter 才会真正执行。
+  const pipeline = await runVerification('bad.test.mjs', false, false, { tool: 'run_tests', noTestInfra: true })
   assert.equal(pipeline.actual.verification?.status, 'blocked')
   assert.equal(pipeline.ledgerEvent.status, 'blocked')
   assert.equal(getEffectiveVerifications(pipeline.ledger.getVerifications()).effective[0]?.blockedReason, 'no_test_framework')
   pipeline.ledger.record({ type: 'verification', command: 'node --test other.test.js', status: 'passed', meta: { scope: 'targeted', kind: 'test', targetFiles: ['other.test.js'] } })
   await withWorkspace(async cwd => {
     file(cwd, impacted[0]!)
-    assert.equal((await commit(pipeline, cwd, impacted, true)).calls, 0)
+    assert.equal((await commit(pipeline, cwd, impacted, true)).calls, 1, 'blocked infra no longer blocks commit')
   })
 })
 
@@ -150,11 +148,11 @@ for (const path of ['tests/test_consumer.py', 'desktop/scripts/__tests__/consume
       file(cwd, path)
       const ctx = context()
       ctx.ledger.record({ type: 'verification', command: 'node --test src/other.test.ts', status: 'passed', meta: { scope: 'targeted', kind: 'test', targetFiles: ['src/other.test.ts'] } })
-      const blocked = await commit(ctx, cwd, [path], true)
-      assert.equal(blocked.calls, 0)
-      assert.deepEqual(blocked.result.verificationPlan?.pending, [path])
+      const committed = await commit(ctx, cwd, [path], true)
+      assert.equal(committed.calls, 1, 'uncovered impacted test no longer blocks commit')
+      assert.equal(committed.result.isError, undefined)
       ctx.ledger.record({ type: 'verification', command: `test ${path}`, status: 'passed', meta: { scope: 'targeted', kind: 'test', targetFiles: [path] } })
-      assert.equal((await commit(ctx, cwd, [path])).calls, 0, 'legacy target selection is not completion proof')
+      await commit(ctx, cwd, [path])
     })
   })
 }
@@ -165,7 +163,7 @@ it('P1: a successful root full run cannot silently cover a different suite', asy
     file(cwd, path)
     const ctx = context()
     ctx.ledger.record({ type: 'verification', command: 'npm test', status: 'passed', meta: { scope: 'full', kind: 'test' } })
-    assert.equal((await commit(ctx, cwd, [path])).calls, 0)
+    assert.equal((await commit(ctx, cwd, [path])).calls, 1, 'coverage mismatch no longer blocks commit — disclosure only')
   })
 })
 

@@ -290,7 +290,7 @@ test('cockpit ←/→/Tab 循环切换面板（统一 tab 键位语义）', () =
   assert.equal(app.getCockpitPanel(), 'summary')
 })
 
-test('ctrl+o 可展开 live 中的活跃折叠组（无需等非折叠工具打断）', () => {
+test('legacy ctrl+o 用只读 pager 查看活跃折叠组，不 flush 也不写 scrollback', () => {
   const { app, out } = makeApp()
 
   ;(app.callbacks as any).onToolUse('t1', 'read_file', { file_path: 'src/a.ts' })
@@ -298,11 +298,13 @@ test('ctrl+o 可展开 live 中的活跃折叠组（无需等非折叠工具打�
   ;(app.callbacks as any).onToolUse('t2', 'read_file', { file_path: 'src/b.ts' })
   ;(app.callbacks as any).onToolResult('t2', 'read_file', 'line1', false)
   assert.ok(app['toolGroupController'].isActiveGroup(), '两个 read 应在活跃组中')
+  const before = app.getScrollbackContent()
 
   ;(app as any).expandLastTruncatedTool()
-  assert.ok(!app['toolGroupController'].isActiveGroup(), '展开后组已 flush')
-  // 展开卡片提交到 scrollback，且不残留待展开的 lastCollapsedGroup（避免重复展开）
+  assert.ok(app['toolGroupController'].isActiveGroup(), '查看快照不得结算活跃组')
+  assert.equal(app.activeOverlayId(), 'pager')
   assert.equal(app['toolGroupController'].getLastCollapsedGroup(), null)
+  assert.equal(app.getScrollbackContent(), before)
   const joined = out.chunks.join('')
-  assert.ok(joined.includes('Read 2 files'), 'scrollback 应有展开组卡片')
+  assert.ok(joined.includes('Read 2 files'), 'pager 应显示展开组内容')
 })

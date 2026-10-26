@@ -14,7 +14,10 @@ import type {
   ForkDestination,
   PlanModeState,
   RuntimeCapabilities,
+  SessionEvent,
   SessionEventType,
+  SessionRecord,
+  SessionStatus,
   ZenPhaseMirror,
 } from '../../../src/server/protocol.js'
 
@@ -26,11 +29,12 @@ export type {
   ForkDestination,
   PlanModeState,
   RuntimeCapabilities,
+  SessionEvent,
   SessionEventType,
+  SessionRecord,
+  SessionStatus,
   ZenPhaseMirror,
 }
-
-export type SessionStatus = 'idle' | 'running' | 'completed' | 'failed' | 'aborted'
 
 export type ApprovalMode = CanonicalApprovalMode
 
@@ -40,6 +44,7 @@ export type KnownEventType =
   | 'text_delta'
   | 'thinking_delta'
   | 'tool_use'
+  | 'tool_input_progress'
   | 'tool_result'
   | 'turn_complete'
   | 'phase'
@@ -72,33 +77,6 @@ export type KnownEventType =
 type _AssertKnownEventTypesInCanonicalProtocol = KnownEventType extends SessionEventType ? true : never
 const _protocolDriftGuard: _AssertKnownEventTypesInCanonicalProtocol = true
 void _protocolDriftGuard
-
-export interface SessionEvent {
-  seq: number
-  ts: number
-  type: string
-  data: Record<string, unknown>
-}
-
-export interface SessionRecord {
-  id: string
-  status: SessionStatus
-  createdAt: number
-  updatedAt: number
-  cwd: string
-  title?: string
-  currentPhase?: string
-  lastSeq: number
-  error?: string
-  pendingApprovals: number
-  approvalMode?: ApprovalMode
-  archived?: boolean
-  /** 上下文占用（enrichRecord 活填充，桌面端 header 进度条数据源；旧内核缺省）。 */
-  contextTokens?: number
-  contextWindow?: number
-  /** 会话推理强度覆盖（enrichRecord；off|low|medium|high|max|auto）。 */
-  reasoningEffort?: string
-}
 
 /** turn_complete SSE 事件的 usage 载荷 — dev 仓 src/api/types.ts::Usage 镜像。 */
 export interface TurnUsage {

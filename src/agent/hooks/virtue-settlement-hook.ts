@@ -28,6 +28,7 @@ import { virtueEncouragementEntry } from '../advisory-bus.js'
 import type { CognitiveSeason } from '../cognitive-season.js'
 import type { PheromoneDeposit } from '../../context/stigmergy.js'
 import { detectEvidenceGate } from '../evidence-gate.js'
+import { resolve } from 'node:path'
 
 /** 效用转正阈值——低于此值的美德信号不记录（走过场） */
 const UTILITY_THRESHOLD = 0.5
@@ -127,7 +128,8 @@ export function createVirtueSettlementHook(
             entry.detectedTurn + 1,
             currentTurn,
           )
-          const utility = reappeared ? 0.2 : 1.0
+          const evidenced = !!entry.probeTarget && deps.readback.hasUsefulFileEvidence(resolve(ctx.snapshot.cwd ?? '.', entry.probeTarget), entry.detectedTurn + 1, currentTurn)
+          const utility = !reappeared && evidenced ? 1.0 : 0.2
           if (utility < UTILITY_THRESHOLD) continue
           const zhiWeights = getWeights('strategic-awareness')
           deps.recordStance(entry.signal)

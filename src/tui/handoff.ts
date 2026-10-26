@@ -12,11 +12,16 @@ import { existsSync, lstatSync, readFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { writeFileAtomicSync } from '../fs-atomic.js'
+import { publishFactHandoff, renderFactHandoff, type HandoffLiveInput } from '../agent/fact-handoff.js'
+import { writeHandoffCoverage } from '../agent/handoff-coverage.js'
 
 export interface HandoffRequest {
   requestId: string
   sourcePath: string
   destinationPath: string
+  projectRoot?: string
+  sessionId?: string
+  liveInput?: HandoffLiveInput
 }
 
 export type HandoffArchiveStatus = 'archived' | 'updated' | 'not-generated' | 'invalid-source' | 'archive-exists' | 'copy-failed'
@@ -35,7 +40,7 @@ export function createHandoffRequest(
 ): HandoffRequest {
   const sourcePath = join(projectRoot, '.rivet', `HANDOFF-${encodeURIComponent(sessionId)}-${requestId}.md`)
   if (existsSync(sourcePath)) throw new Error(`交接源文件已存在，拒绝覆盖：${sourcePath}`)
-  return { requestId, sourcePath, destinationPath }
+  return { requestId, sourcePath, destinationPath, projectRoot, sessionId }
 }
 
 /** 校验本次专属源文件并原子归档；失败时保留项目源文件与既有归档。 */
@@ -68,7 +73,10 @@ export function completeHandoffRequest(request: HandoffRequest): HandoffArchiveR
       writeFileAtomicSync(backup, readFileSync(destination))
     }
 
-    writeFileAtomicSync(destination, readFileSync(request.sourcePath))
+    const snapshot = request.projectRoot && request.sessionId ? publishFactHandoff(request.projectRoot, request.sessionId, { ...request.liveInput, turnCount: undefined, narrative: readFileSync(request.sourcePath, 'utf8') }, undefined, true) : undefined
+    const text = snapshot ? renderFactHandoff(snapshot) : readFileSync(request.sourcePath, 'utf8')
+    writeFileAtomicSync(destination, text)
+    if (snapshot) writeHandoffCoverage(destination, snapshot.sessionId, text, snapshot.turnCount ?? 0)
     return {
       status: destinationExists ? 'updated' : 'archived',
       message: destinationExists
@@ -96,6 +104,7 @@ export function buildHandoffPrompt(absPath: string, note?: string): string {
     '',
     '交接文档写给一个完全没有上下文的新会话（agent 和人类）看——读者看不到本会话的任何消息，',
     '所以文档必须自包含：不许引用「上文」「之前说过」「刚才的讨论」，关键事实全部落字。',
+    '只整理已有记录并写入本次专属文件；不要修改源码或计划，不运行测试、审查、提交，也不要为填补未知而重跑命令。叙述不能替代真实执行回执。',
     '',
     '固定章节（标题照用）：',
     '## 任务目标 — 我们在做什么：用户原话级的一句话目标 + 明确的非目标',

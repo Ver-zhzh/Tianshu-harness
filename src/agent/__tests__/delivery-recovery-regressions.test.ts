@@ -75,7 +75,8 @@ it('real run_tests isolated failure skips integration and never claims isolation
     writeFileSync(join(root, 'package.json'), JSON.stringify({ scripts: { test: 'node --test test/example.test.js' } }))
     writeFileSync(join(root, 'test/example.test.js'), "require('node:test')('failure', () => { throw new Error('actual failure') })")
   }
-  const result = await RUN_TESTS_TOOL.execute({ cwd, toolUseId: 'two-phase', input: {}, verificationSnapshot: { path: isolated, snapshotRef: 'version' } })
+  // a571e2d12 起空 scope 只回预览；显式 filter 才进入隔离/集成阶段。
+  const result = await RUN_TESTS_TOOL.execute({ cwd, toolUseId: 'two-phase', input: { filter: 'example', environment: 'compare' }, verificationSnapshot: { path: isolated, snapshotRef: 'version' } })
   assert.equal(result.isError, true); assert.doesNotMatch(result.content, /隔离环境已通过/)
   assert.equal(result.verification?.status, 'failed')
   assert.equal(result.extraVerifications, undefined)

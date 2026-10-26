@@ -13,7 +13,7 @@
  * VIRTUAL_ENV/CONDA_* 等会污染 Python 环境的变量一律不进子进程），只保留
  * 系统运行必需的变量，再由调用方显式注入覆盖（如镜像两个 PIP_* 变量）。
  */
-import { execFileSync } from 'node:child_process'
+import { ownedProcessTreeAliveAsync } from './process-group-state.js'
 import { StringDecoder } from 'node:string_decoder'
 import { killProcessTree, killProcessTreeAsync } from './process-kill.js'
 import { track } from './process-tracker.js'
@@ -113,7 +113,7 @@ export async function execProcess(options: ProcessExecOptions): Promise<ProcessE
     let gradient: ReturnType<typeof setTimeout> | undefined
     let cleanupDeadline: ReturnType<typeof setTimeout> | undefined
     let poll: ReturnType<typeof setInterval> | undefined
-    let windowsCleaned = false
+    let windowsCleaned = false, checking = false
     const spawnFn = options.spawn ?? spawnHidden
     let child: ReturnType<typeof spawnHidden>
     try {
@@ -137,10 +137,12 @@ export async function execProcess(options: ProcessExecOptions): Promise<ProcessE
         durationMs: Date.now() - startTime,
       })
     }
-    const treeAlive = () => child.pid ? ownedProcessTreeAlive(child.pid) : false
-    const maybeFinish = () => {
-      if (!closed) return
-      if (process.platform === 'win32' ? (!stopped || windowsCleaned) : !treeAlive()) finish(true)
+    const treeAlive = () => child.pid ? ownedProcessTreeAliveAsync(child.pid) : Promise.resolve(false)
+    const maybeFinish = async () => {
+      if (!closed || checking || settled) return
+      checking = true
+      try { if (process.platform === 'win32' ? (!stopped || windowsCleaned) : !await treeAlive()) finish(true) }
+      finally { checking = false }
     }
     const stop = () => {
       if (stopped || settled) return
@@ -171,9 +173,9 @@ export async function execProcess(options: ProcessExecOptions): Promise<ProcessE
       stderr += text; try { options.onStderr?.(text) } catch (error) { stderr += String(error); stop() }
       if (stderr.length > maxBuffer) { stderrOmitted += stderr.length - maxBuffer / 2; stderr = stderr.slice(-maxBuffer / 2) }
     })
-    child.on('exit', () => {
+    child.on('exit', async () => {
       // A parent can exit before descendants release inherited pipes.
-      if (process.platform !== 'win32' && treeAlive()) stop()
+      if (process.platform !== 'win32' && await treeAlive()) stop()
     })
     child.on('close', (exitCode, signal) => {
       closed = true; code = exitCode ?? -1; exitSignal = signal ?? undefined
@@ -195,17 +197,8 @@ export async function execProcess(options: ProcessExecOptions): Promise<ProcessE
   })
 }
 
-/** Only probe the group created for this invocation; uncertainty keeps its lease. */
+/** Synchronous callers can conservatively check existence without spawning ps. */
 export function ownedProcessTreeAlive(pid: number): boolean {
-  try {
-    process.kill(process.platform === 'win32' ? pid : -pid, 0)
-    if (process.platform !== 'win32') {
-      try {
-        const states = execFileSync('ps', ['-o', 'stat=', '-g', String(pid)], { encoding: 'utf8', timeout: 1000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }).trim().split(/\s+/).filter(Boolean)
-        if (states.length && states.every(state => state.startsWith('Z'))) return false
-      } catch { /* The group may still exist; keep its protection on uncertainty. */ }
-    }
-    return true
-  }
+  try { process.kill(process.platform === 'win32' ? pid : -pid, 0); return true }
   catch (error) { return (error as NodeJS.ErrnoException).code !== 'ESRCH' }
 }

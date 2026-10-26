@@ -1,3 +1,4 @@
+import type { HookRpcRequest, HookRpcResponse } from '../../hooks/hook-host-rpc.js'
 import type { ContinuationPrefixProof } from '../../api/continuation-prefix.js'
 /**
  * worker-process 协议 — worker 子进程隔离 v1 的 stdio NDJSON 消息面。
@@ -23,11 +24,13 @@ import type { WorkerActivityKind, WorkerTranscript, WorkerRuntimeDecision, Worke
 /** ── Parent → Child ───────────────────────────────────────────── */
 
 export interface SerializedWorkerConfig {
+  hookRpc?: boolean
   order: WorkOrder
   cwd: string
   workspaceRoots?: string[]
   maxTurns: number
   contextWindow: number
+  readConcurrency?: number
   compact: { enabled: boolean; model: string }
   /** runtimeFactory 三分支的路由决策投影——子进程据此忠实重建 client/promptEngine。 */
   runtimeDecision: WorkerRuntimeDecision
@@ -66,6 +69,7 @@ export interface WorkerChildInitPayload {
 }
 
 export type ParentMessage =
+  | HookRpcResponse
   | { t: 'pro-deny'; id: string }
   | { t: 'init'; payload: WorkerChildInitPayload }
   | { t: 'steer'; text: string }
@@ -105,6 +109,7 @@ export interface SerializedWorkerRun {
 }
 
 export type ChildMessage =
+  | HookRpcRequest
   | { t: 'pro-denied'; id: string }
   | { t: 'pro-drained' }
   | ChildActivityMessage

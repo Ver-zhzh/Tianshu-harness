@@ -100,7 +100,10 @@ test('attachPageTracker: request ids are unique across pages (shared counter)', 
   ctx.openPage(popup)
   popup.emit('request', fakeReq('/b'))
 
-  assert.deepEqual(ids, ['r1', 'r2'])
+  assert.equal(ids.length, 2)
+  assert.match(ids[0]!, /:r1$/)
+  assert.match(ids[1]!, /:r2$/)
+  assert.notEqual(ids[0], ids[1])
 })
 
 test('attachPageTracker: resolvePage returns the live active page without creating one', async () => {

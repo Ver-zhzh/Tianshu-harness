@@ -1,3 +1,5 @@
+import { HookRpcClient } from '../../hooks/hook-host-rpc.js'
+import { clampReadConcurrency } from '../../config/read-concurrency.js'
 import { ModelBindingUnavailable, resolveModelBinding } from '../../model/model-binding.js'
 import { isLocalWorkerPolicyError } from '../../api/continuation-prefix.js'
 import { withWorkspaceRoots } from '../../tools/workspace-context.js'
@@ -50,6 +52,8 @@ import {
 function writeFrame(msg: Parameters<typeof encodeFrame>[0]): void {
   process.stdout.write(encodeFrame(msg))
 }
+
+const hookClient = new HookRpcClient(request => writeFrame(request))
 
 function childLog(line: string): void {
   writeFrame({ t: 'log', line })
@@ -114,6 +118,7 @@ async function runChild(): Promise<void> {
   const stdin = createInterface({ input: process.stdin })
   stdin.on('line', (line: string) => {
     for (const msg of decoder.feed(`${line}\n`)) {
+      if (msg.t === 'hook-response' || msg.t === 'hook-reaped') { hookClient.receive(msg); continue }
       if (msg.t === 'pro-deny') {
         void acknowledgeManagedProDenial(() => writeFrame({ t: 'pro-denied', id: msg.id })).catch(error => childLog(String(error)))
       } else if (msg.t === 'init') {
@@ -129,6 +134,7 @@ async function runChild(): Promise<void> {
   })
   // stdin 关闭（父进程死了）而 init 未到——无事可做，退出。
   stdin.on('close', () => {
+    hookClient.disconnect()
     void acknowledgeManagedProDenial(() => {}).finally(() => process.exit(initPayload ? 1 : 0))
   })
 
@@ -162,6 +168,7 @@ async function bootAndRunInWorkspace(
     const domainKnowledgeStore = new DomainKnowledgeStore(join(cwd, '.rivet', 'knowledge'))
 
     const deps = {
+      externalHookHost: cfg.hookRpc ? hookClient : undefined,
       getUserInstructions: () => workerConfig.promptEngine.getUserInstructionsForDispatch(),
       config,
       cwd,
@@ -250,6 +257,7 @@ async function bootAndRunInWorkspace(
       cwd,
       maxTurns: cfg.maxTurns,
       contextWindow: cfg.contextWindow,
+      readConcurrency: clampReadConcurrency(cfg.readConcurrency),
       compact: cfg.compact,
       runtimeDecision: decision,
       providerName: cfg.providerName,

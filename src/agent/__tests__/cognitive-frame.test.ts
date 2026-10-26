@@ -155,6 +155,9 @@ describe('projectStructureFlowInputs', () => {
       palStalled: false,
       hasVerificationDebt: false,
       consecutiveFailures: 0,
+      // work 观测缺省时投影显式给 undefined（cognitive-frame.ts:209 可选链）——
+      // 消费方 structure-flow-controller 以 `=== true` 判定，undefined ≡ 缺席。
+      repairActive: undefined,
       userIntervened: false,
     })
   })

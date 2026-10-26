@@ -27,7 +27,7 @@ export interface ContinuationPrefixProof {
 
 export interface RewindGenerationAuthorization {
   version: 1
-  reason: 'explicit_user_rewind' | 'context_limit' | 'explicit_user_compact' | 'explicit_projection_recovery'
+  reason: 'explicit_user_rewind' | 'context_limit' | 'explicit_user_compact' | 'explicit_projection_recovery' | 'image_budget'
   cacheGenerationId: string
   model: string
   history: ContinuationPrefixProof['messages']
@@ -37,7 +37,7 @@ export interface RewindGenerationAuthorization {
 export function isRewindGenerationAuthorization(value: unknown): value is RewindGenerationAuthorization {
   if (!value || typeof value !== 'object') return false
   const authorization = value as RewindGenerationAuthorization
-  return authorization.version === 1 && ['explicit_user_rewind', 'context_limit', 'explicit_user_compact', 'explicit_projection_recovery'].includes(authorization.reason)
+  return authorization.version === 1 && ['explicit_user_rewind', 'context_limit', 'explicit_user_compact', 'explicit_projection_recovery', 'image_budget'].includes(authorization.reason)
     && typeof authorization.cacheGenerationId === 'string' && authorization.cacheGenerationId.length > 0
     && typeof authorization.model === 'string' && authorization.model.length > 0
     && isCompleteExecutionSnapshot(authorization.prior)

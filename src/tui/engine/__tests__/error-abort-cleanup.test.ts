@@ -89,7 +89,7 @@ test('handleError 与 handleAbort 收尾同口径——agentBusy 均复位', asy
 })
 
 test('handleError 后旧累加器不跨 run 泄露——终态提交不含上轮数据', async () => {
-  const { app, out } = makeApp()
+  const { app } = makeApp()
   app.setStreamingState(true)
 
   // 第一轮：注入工具 + 流式输出，然后 error
@@ -109,9 +109,14 @@ test('handleError 后旧累加器不跨 run 泄露——终态提交不含上轮
   app.callbacks.onTurnComplete({}, 1, true)
   await tick()
 
-  const committed = stripAnsi(app.getScrollbackContent())
-  // 终态结果应提交，旧数据不应泄露
-  assert.ok(committed.includes('NEW_FINAL_RESULT'), '新终态结果应提交到 scrollback')
-  assert.ok(!committed.includes('OLD_DATA_LEAK_MARKER_X9Y8'),
-    'error 清理后旧累加器不应泄露到新 run 的终态提交')
+  const before = app.getScrollbackContent()
+  assert.ok(!stripAnsi(before).includes('OLD_DATA_LEAK_MARKER_X9Y8'),
+    'error 清理后旧累加器不应泄露到新 run 的主屏')
+  app.registerOverlays({})
+  ;(app as any).expandLastTruncatedTool()
+  const detail = stripAnsi((app as any).detailPager.content)
+  assert.ok(detail.includes('NEW_FINAL_RESULT'), '新终态结果应完整保留在只读详情中')
+  assert.ok(!detail.includes('OLD_DATA_LEAK_MARKER_X9Y8'),
+    'error 清理后旧累加器不应泄露到新 run 的终态详情')
+  assert.equal(app.getScrollbackContent(), before, '读取终态详情不再追加主屏历史')
 })

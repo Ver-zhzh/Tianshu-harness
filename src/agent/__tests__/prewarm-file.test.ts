@@ -1,7 +1,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { PrewarmCache } from '../prewarm.js'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, utimesSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { buildPrewarmValue, canUsePrewarmForRead, batchPrewarm, consumePrewarm } from '../prewarm-file.js'
@@ -88,6 +88,16 @@ describe('consumePrewarm', () => {
   })
   afterEach(() => {
     rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('does not return changed bytes when both size and mtime are preserved', async () => {
+    const path = join(dir, 'same.ts'), time = new Date('2026-10-01T00:00:00Z')
+    writeFileSync(path, 'old content\n'); utimesSync(path, time, time)
+    const cache = new PrewarmCache(), value = await buildPrewarmValue(dir, 'same.ts')
+    assert.ok(value); cache.set(path, value)
+    writeFileSync(path, 'new content\n'); utimesSync(path, time, time)
+    assert.equal(consumePrewarm(cache, path), null)
+    assert.equal(cache.has(path), false)
   })
 
   it('returns cached full content when mtime matches', async () => {

@@ -1,6 +1,8 @@
+import { sanitizeEnv } from './sanitize-env.js'
 import { prepareCompletionCaptureAsync, type AsyncCompletionCapture } from './test-completion-async.js'
 import { completionPreparationBlocked } from './completion-preparation-result.js'
-import { inferBashVerificationScope } from '../agent/bash-verification.js'
+import { verificationLifecycle } from '../agent/verification-runs.js'
+import { buildBashVerification, isVerificationCommand, inferBashVerificationScope } from '../agent/bash-verification.js'
 import { prepareBackgroundVerification } from './background-verification.js'
 import { execFileSync } from 'child_process'
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
@@ -13,6 +15,7 @@ import {
   interruptHintMessage,
   matchesAvailabilityHazard,
   maybeYieldForUserActivity,
+  resolveInlineYieldMs,
   resolveYieldWatchMs,
   shouldWatchExecution,
   startInterruptHint,
@@ -33,6 +36,10 @@ import { grantPath } from './path-grants.js'
 import { rivetHome } from '../config/paths.js'
 import { isTypecheckCommand, resolveCallerTimeoutBudget, TYPECHECK_TIMEOUT_HINT, runAdhocTypecheckShared, tryAcquireAdhocLock, resolveWatchdogTimeout } from '../lsp/typecheck-cache.js'
 import { lowDiskWarning } from '../utils/disk-space.js'
+import { executeScriptTransaction } from './script-edit-transaction.js'
+import { confirmScriptStopped } from './script-process-stop.js'
+import { reuseVerification } from './verification-reuse.js'
+import { unwrapVerification } from './verification-invocation.js'
 
 /**
  * ToolResult plus the sandbox attribution that the learn-mode retry inspects.
@@ -81,9 +88,12 @@ const RAW_SPOOL_CAP_BYTES = 8 * 1024 * 1024
 class BoundedRawSpool {
   private chunks: string[] = []
   private bytes = 0
+  private seenBytes = 0
+  get omittedBytes(): number { return Math.max(0, this.seenBytes - this.bytes) }
   capped = false
 
   append(text: string): void {
+    this.seenBytes += Buffer.byteLength(text)
     if (this.capped || text.length === 0) return
     this.chunks.push(text)
     this.bytes += Buffer.byteLength(text)
@@ -98,46 +108,7 @@ class BoundedRawSpool {
 /** 一次性 flag：shell 降级警告只在 session 首次 bash 执行时注入一次。 */
 let _shellFallbackWarned = false
 
-/** Environment variable prefixes that should be preserved for child processes. */
-const SAFE_ENV_PREFIXES = [
-  'PATH', 'HOME', 'PWD', 'NODE_ENV', 'TERM', 'LANG', 'LC_', 'XDG_', 'EDITOR', 'VISUAL', 'PAGER', 'SHELL', 'USER', 'LOGNAME', 'TMPDIR', 'TEMP', 'TMP', 'COLOR', 'COLORTERM', 'NO_COLOR', 'FORCE_COLOR',
-  // Windows-critical: without SystemRoot the child process cannot load system
-  // DLLs, causing cmd.exe / powershell.exe to exit(0) with zero output.
-  'COMSPEC', 'SYSTEMROOT', 'SYSTEMDRIVE', 'WINDIR', 'APPDATA', 'LOCALAPPDATA', 'PROGRAMFILES', 'PROGRAMDATA', 'PUBLIC', 'HOMEDRIVE', 'ALLUSERSPROFILE', 'PROCESSOR_',
-  // Toolchain vars: builds (maven/gradle/java/go/rust/android) and version
-  // managers rely on these; stripping them broke `mvn`/`java` when launched from
-  // a GUI with a minimal env. None contain sensitive keywords, so the KEY/TOKEN/
-  // SECRET filter below still removes anything genuinely secret.
-  'JAVA_HOME', 'JDK_HOME', 'JRE_HOME', 'CLASSPATH',
-  'MAVEN_', 'M2_', 'M2', 'GRADLE_', 'ANT_HOME',
-  'GOPATH', 'GOROOT', 'GOBIN', 'GO111MODULE', 'GOFLAGS', 'GOPROXY',
-  'CARGO_HOME', 'RUSTUP_HOME',
-  'ANDROID_', 'NVM_DIR', 'PYENV', 'SDKMAN_DIR',
-  'DOTNET_', 'PYTHONPATH', 'VIRTUAL_ENV', 'CONDA_',
-  'PNPM_HOME', 'VOLTA_HOME', 'FNM_DIR', 'MISE_', 'ASDF_', 'RBENV_ROOT', 'GEM_',
-  // 注意：NODE_OPTIONS / JAVA_TOOL_OPTIONS 刻意排除（issue #137）——
-  // 它们可在子进程启动时注入 --require/-javaagent 任意代码，构成环境污染
-  // 攻击面；不含 KEY/TOKEN/SECRET 关键词，敏感过滤兜不住，必须显式剥离。
-  'NODE_PATH', 'KUBECONFIG', 'DOCKER_HOST',
-] as const
-
-/** Keywords that indicate a sensitive env var — vars containing these substrings are stripped. */
-const SENSITIVE_ENV_KEYWORDS = ['KEY', 'TOKEN', 'SECRET', 'PASSWORD', 'CREDENTIAL', 'AUTH', 'PRIVATE'] as const
-
-/** Strip sensitive environment variables before passing to child processes. */
-export function sanitizeEnv(env: NodeJS.ProcessEnv): Record<string, string | undefined> {
-  const clean: Record<string, string | undefined> = {}
-  for (const [key, value] of Object.entries(env)) {
-    const upper = key.toUpperCase()
-    const isSensitive = SENSITIVE_ENV_KEYWORDS.some(kw => upper.includes(kw))
-    if (isSensitive) continue
-    const isSafe = SAFE_ENV_PREFIXES.some(prefix => upper.startsWith(prefix))
-    if (isSafe) {
-      clean[key] = value
-    }
-  }
-  return clean
-}
+export { sanitizeEnv } from './sanitize-env.js'
 
 /**
  * 退出码 → 是否真执行失败。
@@ -476,7 +447,8 @@ async function executeBashOnce(params: ToolCallParams): Promise<BashExecResult> 
   const rewrittenWithMirrors = rewritten // issue #524: no blind URL text rewrite — git mirrors now flow through insteadOf env (buildGitMirrorEnv), so echo/remote-add/push keep original URLs
   let sandbox = wrapSandboxCommand(rewrittenWithMirrors, params.cwd)
   let command = sandbox.command
-  const timeout = resolveCallerTimeoutBudget(rawCommand, Number(params.input.timeout), 120_000) // 非正数/NaN → 默认（#187）；typecheck 形态按闸门预算只抬不压
+  const timeout = params.input.write_files !== undefined ? Number(params.input.timeout ?? 120_000)
+    : resolveCallerTimeoutBudget(rawCommand, Number(params.input.timeout), 120_000)
   const startTime = Date.now()
 
   // Background execution requires a session registry; otherwise run in foreground.
@@ -502,7 +474,9 @@ async function executeBashOnce(params: ToolCallParams): Promise<BashExecResult> 
       ? tryAcquireAdhocLock(params.cwd ?? process.cwd())
       : undefined
     let snap
-    try { snap = params.jobs.spawn({ command: wrapSandboxCommand(verificationRun.command, params.cwd).command, rawCommand, cwd: params.cwd, env, onCompleted: verificationRun.onCompleted }) }
+    const backgroundCommand = wrapSandboxCommand(verificationRun.command, params.cwd).command
+    verificationRun.actual(backgroundCommand)
+    try { snap = params.jobs.spawn({ command: backgroundCommand, rawCommand, cwd: params.cwd, env, onCompleted: verificationRun.onCompleted, onStarted: verificationRun.onStarted, verificationId: verificationRun.executionId }) }
     catch (error) { verificationRun.dispose(); tcLock?.release(); throw error }
     params.jobs.recordVerificationMeta(snap.id, verificationRun.intent, params.input)
     if (tcLock) {
@@ -547,7 +521,23 @@ async function executeBashOnce(params: ToolCallParams): Promise<BashExecResult> 
   if (completion?.preparationError || !executionTimeout) { completion?.dispose(); return completionPreparationBlocked(rawCommand, completion?.preparationError ?? 'budget exhausted', !executionTimeout) }
   if (completion) { sandbox = wrapSandboxCommand(completion.command, params.cwd); command = sandbox.command }
   if (params.abortSignal?.aborted) { completion?.dispose(); return abortedBeforeSpawn(rawCommand) }
-  return new Promise((resolve) => {
+  const receipt = isVerificationCommand(rawCommand, params.cwd) ? verificationLifecycle(params, rawCommand, params.cwd, { ...inferBashVerificationScope(rawCommand, params.cwd), attribution: unwrapVerification(rawCommand, params.cwd) ? 'known' : 'opaque' }, 'bash') : undefined
+  return new Promise<BashExecResult>((settle) => {
+    let failedToStart = false
+    const resolve = async (result: BashExecResult) => {
+      if (params.input.write_files !== undefined) {
+        let state: 'exited' | 'unknown' = 'unknown'
+        try { state = await confirmScriptStopped(child) } catch { /* no unsafe restoration */ }
+        params.onProcessExit?.(state)
+      }
+      if (receipt) {
+        const v = buildBashVerification(rawCommand, result, { content: String(result.content), isError: !!result.isError }, params.cwd)
+        v.omittedBytes = rawSpool.omittedBytes
+        result.verification = receipt.finish(v, failedToStart ? 'failed_to_start' : params.abortSignal?.aborted ? 'cancelled' : result.errorClass === 'timeout' || result.exitCode === -1 ? 'timed_out' : 'exited', result.rawPath)
+        result.content += `\n执行回执：${receipt.executionId}（run_tests action=get 查询，不会重跑）`
+      }
+      settle(result)
+    }
     const shell = getShellCommand()
     // Wrap by shell FAMILY (not fragile cmd-string matching): Git Bash needs
     // no encoding prefix (UTF-8 native) but must not emit literal `nul` files;
@@ -571,6 +561,7 @@ async function executeBashOnce(params: ToolCallParams): Promise<BashExecResult> 
     const mirrorEnv = { ...buildMirrorEnv(mirrorConfig), ...buildGitMirrorEnv(mirrorConfig) }
     const earlyFailEnv = gitCloneEarlyFailEnv(rawCommand, mirrorConfig)
     debugLog(`[bash-spawn] kind=${shell.kind} shell=${shell.cmd} args=${JSON.stringify(shell.args)} cwd=${params.cwd ?? process.cwd()}`)
+    receipt?.actual(commandToRun)
     const child = track(spawnShell(shell, commandToRun, {
       // Hide the transient console window on Windows (no-op elsewhere) — also
       // avoids stdio handoff quirks；置于首行以落在 architecture-guards 的 ±10 行窗口内。
@@ -584,6 +575,7 @@ async function executeBashOnce(params: ToolCallParams): Promise<BashExecResult> 
       detached: process.platform !== 'win32',
     }))
 
+    child.on('spawn', () => receipt?.started())
     let stdout = ''
     let stderr = ''
     let timedOut = false
@@ -968,7 +960,7 @@ async function executeBashOnce(params: ToolCallParams): Promise<BashExecResult> 
         onHint: () => { uiOutput.push(`\n${interruptHintMessage()}\n\n`) },
       })
     }
-    const yieldMs = resolveYieldMs()
+    const yieldMs = resolveInlineYieldMs(rawCommand) ?? resolveYieldMs()
     // 有效间隔在解析处被 clamp 到 ≥ yieldMs（见 resolveYieldWatchMs 的注释）——
     // 否则批准点击会落进首个探测窗口，刚批准的命令开跑即被误判「用户接管」杀掉。
     const watchMs = yieldMs > 0 && shouldWatchExecution(rawCommand) ? resolveYieldWatchMs(yieldMs) : 0
@@ -1016,6 +1008,7 @@ async function executeBashOnce(params: ToolCallParams): Promise<BashExecResult> 
     })
 
     child.on('error', (err) => {
+      failedToStart = true
       if (settled) return
       settled = true
       if (timer) clearTimeout(timer)
@@ -1101,6 +1094,8 @@ export const BASH_TOOL: Tool = {
         command: { type: 'string', description: '要执行的 shell 命令' },
         timeout: { type: 'integer', minimum: 1, description: '超时毫秒数（默认 120000；非正数按默认值处理；typecheck 形态自动抬到闸门预算，传更小值无效）' },
         run_in_background: { type: 'boolean', description: '设为 true 转入后台并返回 job id。自动检测已知长跑命令。' },
+        write_files: { type: 'array', items: { type: 'string' }, description: '可选显式文件事务：1–50 个仓内普通文件；前台且 timeout≤120000ms。只备份/检查这些文件，失败后仅在进程停止、claim 和版本均匹配时恢复；不覆盖未声明副作用。' },
+        rerun: { type: 'boolean', description: '仅用户明确要求重复已有相同验证时 true；默认返回已有执行回执' },
       },
       required: ['command'],
     },
@@ -1111,6 +1106,9 @@ export const BASH_TOOL: Tool = {
     resolveWatchdogTimeout(String(params?.input?.command ?? ''), Number(params?.input?.timeout), 120_000),
 
   async execute(params: ToolCallParams) {
+    if (params.input.write_files !== undefined) return executeScriptTransaction({ params, run: executeBashOnce })
+    const reused = isVerificationCommand(String(params.input.command ?? ''), params.cwd) && reuseVerification(params, 'bash')
+    if (reused) return reused
     // issue #235 Wave 2 —「用户接管即让出」：命中可用性危害签名（合成键鼠 / 前台抢占）
     // 的命令，在用户刚操作过键鼠时不执行——这类命令一旦开跑就持续抢输入，中途没有
     // 检查点，用户唯一恢复路径是杀进程。未命中签名的命令不触发探测（零开销）；「用户刚点过批准」也不算「正在用本机」（批准豁免窗见 bash-yield.ts）。
@@ -1118,6 +1116,7 @@ export const BASH_TOOL: Tool = {
     if (yieldResult) return yieldResult
 
     const first = await executeBashMaybeSerialized(params)
+    if (isVerificationCommand(String(params.input.command ?? ''), params.cwd)) return first
 
     // learn mode / 全自动档：a boundary denial should teach, not block. Grant the
     // refused path for this session, retry ONCE, and log the observation so the

@@ -1,3 +1,6 @@
+import { currentFileVersion } from '../agent/file-version.js'
+import { noteMutationSyntax } from '../agent/mutation-facts.js'
+import { executeEditOperations } from './edit-operations.js'
 import { readFile, stat } from 'node:fs/promises'
 import { relative } from 'node:path'
 import type { Tool, ToolCallParams, ToolResult } from './types.js'
@@ -29,7 +32,7 @@ import { detectEol, chooseEol, toLf, applyEol, type Eol } from './line-endings.j
 import { getTargetEol } from '../platform.js'
 import { detectPointerPlaceholder, pointerPlaceholderError, resolveIdempotentPointer } from './pointer-guard.js'
 import { asBool } from './write-tool-helpers.js'
-import { withFileChangeTracking, restoreFileChange, type FileChangeRecord } from '../agent/recovery-stack.js'
+import { withFileChangeTracking, restoreFileChange, expectFileChange, type FileChangeRecord } from '../agent/recovery-stack.js'
 import { formatActivePlanDraftReceipt } from '../agent/plan-mode.js'
 
 // Large files are common (generated code, lockfiles, big modules). 100KB was
@@ -97,14 +100,16 @@ export const EDIT_FILE_TOOL: Tool = {
 - old_string 必须唯一——必要时带上周边上下文
 - 严格保留文件原有的缩进（tabs/spaces）
 - replace_all 替换所有出现处；expected_count 数量不符时给出警告
-- 大编辑后消息历史只保留短指针——看到指针说明编辑已成功，不要重做；用 read_file 回看
+- 大编辑后历史参数可能只保留短指针；指针不能证明落盘，成功／失败／回滚以执行回执为准。成功项不要重做，按需 read_file 回看
 
-唯一字符串替换优先用 edit_file；空白字符有歧义的编辑用 hash_edit；单文件多处改动、超过约 20 行的编辑或结构性重构，用 apply_patch 加 unified diff。`,
+单文件多处修改用 operations + expected_version 一次预检、一次落盘；operations 必须同时提供 expected_version，复制 read_file／写入回执或 ast_grep 返回的 version。每项使用精确文本或 match_ref。结构块裁剪先做 ast_grep 定位，避免手写括号计数器。旧单项调用保持兼容。`,
 
     input_schema: {
       type: 'object',
       properties: {
         file_path: { type: 'string', description: '要编辑文件的绝对路径。先提供此参数。' },
+        expected_version: { type: 'string', description: 'operations 必填：已观察文件的 SHA-256，复制文件回执或 ast_grep 的 version；不可猜测或省略。' },
+        operations: { type: 'array', minItems: 1, maxItems: 200, description: '必须同时提供 expected_version（复制已有文件回执）；同文件原子批量修改，与旧 old_string/new_string 互斥。每项精确文本或 AST match_ref，删除用空 new_string。', items: { type: 'object', properties: { old_string: { type: 'string' }, match_ref: { type: 'string' }, new_string: { type: 'string' }, expected_count: { type: 'integer', minimum: 1 } }, required: ['new_string'] } },
         old_string: { type: 'string', description: '要替换的原始文本（必须在文件中唯一）' },
         new_string: { type: 'string', description: '替换后的文本' },
         replace_all: { type: 'boolean', description: '替换 old_string 的所有出现处（默认：false）' },
@@ -117,14 +122,17 @@ export const EDIT_FILE_TOOL: Tool = {
           description: '为 true 时，计算并返回将要应用的 diff，但不写盘。',
         },
       },
-      required: ['file_path', 'old_string', 'new_string'],
+      required: ['file_path'],
     },
   },
 
   execute: withFileChangeTracking(async (params: ToolCallParams, trackFileChange): Promise<ToolResult> => {
+    if (params.input.operations !== undefined) return executeEditOperations(params)
+    if (typeof params.input.old_string !== 'string' || typeof params.input.new_string !== 'string') return { content: 'edit_file 需要 old_string/new_string，或 operations 与 expected_version。', isError: true, errorKind: 'format_error' }
     let filePath: string
     try {
       filePath = validatePath(params.cwd, params.input.file_path as string, 'write')
+      if (params.input.expected_version !== undefined && params.input.expected_version !== currentFileVersion(filePath)) return { content: 'expected_version 不符，未写入；请读取当前版本。', isError: true, errorKind: 'refused' }
     } catch (e) {
       return { content: `错误：${e instanceof Error ? e.message : '路径逃逸出项目目录'}`, isError: true }
     }
@@ -191,12 +199,13 @@ export const EDIT_FILE_TOOL: Tool = {
             }
             const capture = await trackFileChange(params.cwd, { filePath: relative(params.cwd, filePath), action: 'edit', toolCallId: params.toolUseId ?? 'edit_file' })
             {
+              expectFileChange(capture, applyEol(newContent, freshEol), () => params.hasWriteClaim?.(relative(params.cwd, filePath)) ?? true)
               const land = await writeEditLanding(params, filePath, freshContent, newContent, freshEol)
               if ('delegatedRejectOrError' in land) return land.delegatedRejectOrError
             }
             const occurrences = (freshContent.match(new RegExp(escapeRegExp(oldString), 'g')) || []).length
             const expectedCount = params.input.expected_count as number | undefined
-            return await finalizeEdit(params.cwd, filePath, freshContent, newContent, params.sessionId, capture, (warn, ui, changedRanges) => {
+            return await finalizeEdit(params.cwd, filePath, freshContent, newContent, params.sessionId, capture, freshEol, (warn, ui, changedRanges) => {
               if (expectedCount !== undefined && occurrences !== expectedCount) {
                 const base = `文件已被外部修改，但 old_string 仍能匹配。警告：预期替换 ${expectedCount} 处，实际只替换了 ${occurrences} 处（${filePath}）。请用 grep 核实是否有遗漏——缩进或空白差异可能导致 replace_all 只部分匹配。`
                 return { content: base + (warn ? '\n\n' + warn : ''), uiContent: ui, changedRanges }
@@ -216,10 +225,11 @@ export const EDIT_FILE_TOOL: Tool = {
           }
           const capture = await trackFileChange(params.cwd, { filePath: relative(params.cwd, filePath), action: 'edit', toolCallId: params.toolUseId ?? 'edit_file' })
           {
+            expectFileChange(capture, applyEol(recovered, freshEol), () => params.hasWriteClaim?.(relative(params.cwd, filePath)) ?? true)
             const land = await writeEditLanding(params, filePath, freshContent, recovered, freshEol)
             if ('delegatedRejectOrError' in land) return land.delegatedRejectOrError
           }
-          return await finalizeEdit(params.cwd, filePath, freshContent, recovered, params.sessionId, capture, (warn, ui, changedRanges) => ({
+          return await finalizeEdit(params.cwd, filePath, freshContent, recovered, params.sessionId, capture, freshEol, (warn, ui, changedRanges) => ({
             content: `已编辑 ${filePath}（文件已被外部修改，但内容仍能匹配）${warn ? '\n\n' + warn : ''}`,
             uiContent: ui,
             changedRanges,
@@ -304,12 +314,13 @@ export const EDIT_FILE_TOOL: Tool = {
       }
       const capture = await trackFileChange(params.cwd, { filePath: relative(params.cwd, filePath), action: 'edit', toolCallId: params.toolUseId ?? 'edit_file' })
       {
+        expectFileChange(capture, applyEol(newContent, eol), () => params.hasWriteClaim?.(relative(params.cwd, filePath)) ?? true)
         const land = await writeEditLanding(params, filePath, content, newContent, eol)
         if ('delegatedRejectOrError' in land) return land.delegatedRejectOrError
       }
       const occurrences = (content.match(new RegExp(escapeRegExp(oldString), 'g')) || []).length
       const expectedCount = params.input.expected_count as number | undefined
-      return await finalizeEdit(params.cwd, filePath, content, newContent, params.sessionId, capture, (warn, ui, changedRanges) => {
+      return await finalizeEdit(params.cwd, filePath, content, newContent, params.sessionId, capture, eol, (warn, ui, changedRanges) => {
         if (expectedCount !== undefined && occurrences !== expectedCount) {
           const base = `警告：预期替换 ${expectedCount} 处，实际只替换了 ${occurrences} 处（${filePath}）。文件已修改。请用 grep 核实是否有遗漏——缩进或空白差异可能导致 replace_all 只部分匹配。`
           return { content: base + (warn ? '\n\n' + warn : ''), uiContent: ui, changedRanges }
@@ -334,10 +345,11 @@ export const EDIT_FILE_TOOL: Tool = {
         }
         const capture = await trackFileChange(params.cwd, { filePath: relative(params.cwd, filePath), action: 'edit', toolCallId: params.toolUseId ?? 'edit_file' })
         {
+          expectFileChange(capture, applyEol(recovered, eol), () => params.hasWriteClaim?.(relative(params.cwd, filePath)) ?? true)
           const land = await writeEditLanding(params, filePath, content, recovered, eol)
           if ('delegatedRejectOrError' in land) return land.delegatedRejectOrError
         }
-        return await finalizeEdit(params.cwd, filePath, content, recovered, params.sessionId, capture, (warn, ui, changedRanges) => {
+        return await finalizeEdit(params.cwd, filePath, content, recovered, params.sessionId, capture, eol, (warn, ui, changedRanges) => {
           // Surface the whitespace drift so the model can self-correct in
           // subsequent edits — without this, error accumulates across calls.
           const diff = diffBlock(oldString, fuzzy.matchedText)
@@ -374,10 +386,11 @@ export const EDIT_FILE_TOOL: Tool = {
     }
     const capture = await trackFileChange(params.cwd, { filePath: relative(params.cwd, filePath), action: 'edit', toolCallId: params.toolUseId ?? 'edit_file' })
     {
+      expectFileChange(capture, applyEol(newContent, eol), () => params.hasWriteClaim?.(relative(params.cwd, filePath)) ?? true)
       const land = await writeEditLanding(params, filePath, content, newContent, eol)
       if ('delegatedRejectOrError' in land) return land.delegatedRejectOrError
     }
-    return await finalizeEdit(params.cwd, filePath, content, newContent, params.sessionId, capture, (warn, ui, changedRanges) => {
+    return await finalizeEdit(params.cwd, filePath, content, newContent, params.sessionId, capture, eol, (warn, ui, changedRanges) => {
       const draftReceipt = formatActivePlanDraftReceipt(params.cwd, filePath, params.activePlanFilePath, newContent.length)
       const base = draftReceipt ?? `已编辑 ${filePath}`
       return {
@@ -492,22 +505,13 @@ async function finalizeEdit(
   after: string,
   sessionId: string | undefined,
   capture: FileChangeRecord,
+  eol: Eol,
   buildSuccessResult: (warn: string, uiContent: string | undefined, changedRanges: LineRange[]) => { content: string; uiContent?: string; changedRanges: LineRange[] },
 ): Promise<{ content: string; uiContent?: string; changedRanges: LineRange[]; isError?: boolean; errorKind?: 'syntax_error' }> {
   const check = await checkSyntax(filePath, after)
+  noteMutationSyntax(capture, check)
   if (check.fatal) {
     const restored = await restoreFileChange(cwd, capture, sessionId)
-    // 回滚后 mtime 会变（copyFileSync 不保留原始时间戳），但内容已恢复。
-    // 刷新读文件 mtime 追踪器——否则后续 hash_edit 的仅位置锚点检查会误报
-    // "文件已变化，请重新 read_file"，主控白费一轮重读。
-    if (restored) {
-      try {
-        const s = await stat(filePath)
-        // 回滚恢复的就是编辑前内容：带上 before 重建内容哈希基线——否则
-        // hash_edit 的位置锚点检查（要求完整观察且内容未变）会因 mtime 变化误报。
-        noteFileObserved(filePath, s.mtimeMs, s.size, sessionId, before)
-      } catch { /* stat 失败不影响主流程 */ }
-    }
     const fails = incrementEditFailCount(filePath)
     const gatePrefix = fails >= 3 ? `此文件已连续编辑失败 ${fails} 次，再次编辑前必须先重新 read_file。\n\n` : ''
     const rollbackMsg = restored ? '更改已自动回滚。' : '自动回滚失败。'
@@ -518,7 +522,7 @@ async function finalizeEdit(
       changedRanges: [],
     }
   }
-  await recordSuccessfulEdit(filePath, sessionId)
+  await recordSuccessfulEdit(filePath, sessionId, applyEol(after, eol), false)
   resetEditFailCount(filePath)
   const { warn, uiContent, changedRanges } = await buildEditSuccessResult(cwd, filePath, before, after, check.warning)
   return buildSuccessResult(warn, uiContent, changedRanges)

@@ -11,6 +11,7 @@
 
 import { appendMemoryEntry, type MemoryKind, type MemorySource } from './unified-memory.js'
 import { scrubMemoryText } from './memory-scrub.js'
+import { memoryFormationEnabled } from './formation-policy.js'
 
 export interface ConsolidationInput {
   sessionId?: string
@@ -145,8 +146,7 @@ export function applyConsolidation(
   return written
 }
 
-/** 巩固默认开启（env 可关）。 */
-export function consolidationEnabled(value = process.env.RIVET_MEMORY_CONSOLIDATION): boolean {
-  const v = value?.trim().toLowerCase()
-  return !(v === '0' || v === 'off' || v === 'false')
+/** Explicit opt-in; an environment override takes precedence over saved settings. */
+export function consolidationEnabled(value = process.env.RIVET_MEMORY_CONSOLIDATION, configured = false): boolean {
+  return memoryFormationEnabled(value, configured)
 }

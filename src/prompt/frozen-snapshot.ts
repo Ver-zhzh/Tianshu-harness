@@ -59,7 +59,7 @@ export function parseFrozenSnapshotData(raw: unknown): FrozenSnapshotData | unde
   if (d.pendingCompaction !== undefined) {
     const pending = d.pendingCompaction as PendingCompaction | null
     if (!pending || pending.version !== 1 || !isRewindGenerationAuthorization(pending.authorization)
-      || !['context_limit', 'explicit_user_compact'].includes(pending.authorization.reason)
+      || !['context_limit', 'explicit_user_compact', 'image_budget'].includes(pending.authorization.reason)
       || !isHistorySeal(pending.priorHistory) || !isHistorySeal(pending.authorization.history)) return undefined
   }
   if (d['v'] !== 1 && d['v'] !== 2) return undefined

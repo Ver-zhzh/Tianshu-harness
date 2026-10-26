@@ -50,7 +50,9 @@ describe('neighbor hint (P2-3)', () => {
       const result = await READ_FILE_TOOL.execute({ input: { file_path: 'src/a.ts' }, toolUseId: 'test', cwd: dir, sessionId: 'hint-on' })
       assert.ok(!result.isError)
       assert.match(result.content, /结构邻居: src\/b\.ts, src\/c\.ts/, '已读（本次读的 a.ts）必须被过滤，只列未读出的出边')
-      assert.doesNotMatch(result.content, /src\/a\.ts/, '提示不得包含当前正在读的文件')
+      // 21a49c50d 起 read_file 结果尾带「文件回执：src/a.ts; …」——断言收窄到提示行本身。
+      const hintLine = result.content.split('\n').find(l => l.includes('结构邻居')) ?? ''
+      assert.doesNotMatch(hintLine, /src\/a\.ts/, '提示不得包含当前正在读的文件')
     } finally {
       delete process.env['RIVET_NEIGHBOR_HINT']
       setNeighborHintProvider(undefined)

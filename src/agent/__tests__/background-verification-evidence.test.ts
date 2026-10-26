@@ -14,11 +14,12 @@ it('background queries with test/build words do not become blocked verification 
   }
 })
 
-it('background compound-shell launch returns the suggested command to the model', async () => {
+it('background compound-shell launch returns receipt-query guidance to the model', async () => {
   const result = await runVerification('node --test good.test.mjs | tail -5', false, false, { background: true })
   assert.equal(result.pipelineResult.toolResult.type, 'tool_result')
   if (result.pipelineResult.toolResult.type !== 'tool_result') assert.fail('expected tool result')
-  assert.match(result.pipelineResult.toolResult.content, /可复制的单条命令：node --test good\.test\.mjs/)
+  // d3aa136bf：指引从「建议重跑单条命令」改为「查询已持久化的执行回执」。
+  assert.match(result.pipelineResult.toolResult.content, /可查询已有执行回执，不自动重跑/)
   assert.equal(result.verification.status, 'blocked')
   assert.equal(result.verification.coverage?.complete ?? false, false)
 })

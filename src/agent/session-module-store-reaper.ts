@@ -26,6 +26,7 @@ import { clearWaveResults } from './wave-results-store.js'
 import { clearWaveGate } from './wave-gate.js'
 import { clearPlan } from './plan-store.js'
 import { clearPendingReview } from './post-commit-review-pending.js'
+import { clearSessionReviewResults } from './post-commit-review-queue.js'
 import { clearSkillGate } from './skill-gate.js'
 
 /**
@@ -39,6 +40,7 @@ export function reapSessionModuleStores(sessionId: string, terminal = false): vo
   try { clearPlan(sessionId) } catch { /* best-effort */ }
   try { clearPendingReview(sessionId) } catch { /* best-effort */ }
   if (!terminal) return
+  try { clearSessionReviewResults(sessionId) } catch { /* best-effort */ }
   try { clearWaveGate(sessionId) } catch { /* best-effort */ }
   try { clearSkillGate(sessionId) } catch { /* best-effort */ }
 }

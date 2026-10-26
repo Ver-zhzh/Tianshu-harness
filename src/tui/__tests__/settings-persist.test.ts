@@ -261,6 +261,14 @@ describe('settings persist', () => {
     assert.match(rejected.errors[0]!, /approval/)
   })
 
+  it('saves and reads orchestration without changing unrelated settings', () => {
+    const before = loadSettingsDraft()
+    const result = saveSettings({ draft: { ...before, basics: { ...before.basics, toolPreset: 'orchestration' } }, blocks: ['toolPreset'] })
+    assert.deepEqual(result.errors, []); assert.deepEqual(result.saved, ['toolPreset'])
+    const after = loadSettingsDraft()
+    assert.equal(after.basics.toolPreset, 'orchestration'); assert.equal(after.basics.approval, before.basics.approval)
+  })
+
   it('无 hook 时审批模式仍直接落盘', () => {
     const before = loadSettingsDraft()
     const draft: SettingsDraft = { ...before, basics: { ...before.basics, approval: 'manual' } }

@@ -172,7 +172,9 @@ related: [../reference/observability-harness.md, ../user-guide-sandbox-permissio
 
 **现象 D：连接超时 / `ECONNRESET` / 连不上 443。** 多为防火墙的应用程序规则拦了出站（新装的"未知发布者"默认询问或阻止；当前宿主 `tianshu-runtime.exe` 常需单独放行；旧包为 `node.exe`）。放行后仍不通，就走代理：`rivet config set-proxy http://127.0.0.1:7890`（或设置 → 网络），也可在 provider 上单配 `proxy`。
 
-**现象 E：界面能打开、但 agent 完全不可用（发消息没反应），sidecar 日志刷 `integrity-blocked: file_count_mismatch`。** 这是杀毒软件**行为检测**（卡巴斯基 PDM）拦在了 sidecar 的宿主形态上：它把「`node.exe` 执行 `rivet-runtime\cli\entry.js`」判为 `PDM:Trojan.Win32.Generic`，动作是结束进程**并隔离那个脚本文件**。文件没了，壳启动前的完整性自检就会拒绝拉起 sidecar——所以表现是"界面正常但什么都不干"，而且手动把文件还原也没用（sidecar 一执行又会在约 1 秒内被删）。先试 受信任应用程序 里放行安装目录下的 `node-runtime\win-x64\tianshu-runtime.exe`（旧包为 `node.exe`）；企业策略不允许加白时，见 [`docs/known-issues/2026-09-26-windows-kaspersky-sidecar-pdm.md`](../known-issues/2026-09-26-windows-kaspersky-sidecar-pdm.md) 的用户侧规避方案（把 sidecar 宿主换成 electron）——**那是社区用户自建的规避路径、非官方支持**，照做前先读该篇第 5 节的代价（原生模块 ABI 降级等）。
+**现象 E：界面能打开、但 agent 完全不可用，运行时状态为 `integrity-blocked`。** 这是壳在启动 sidecar 前发现签名运行时的文件与安装清单不符；差异文件和原因可在失败横幅与「导出诊断」里查看。先退出天枢，从[官方下载页](https://tianshuharness.com/download)重新安装；即使已经是最新版，同版本可信安装包也能重铺程序文件，数据目录无需删除。安装器若报告旧文件仍被占用，应先结束占用后再安装，不要手工删除清单或让校验忽略 `.bak` 文件。
+
+差异形态决定下一步排查方向：`-cli/entry.js` 且杀毒软件隔离区有对应记录时，参看[卡巴斯基行为检测案例](../known-issues/2026-09-26-windows-kaspersky-sidecar-pdm.md)；`~chunk-*.js` 加 `+chunk-*.js.bak-*` 表示安装后的 JS 被改写并留下备份，需要检查当时运行的编辑器、脚本和安全软件记录，不能只凭文件名认定写入者。诊断包只含限长的相对文件名与摘要前缀，不包含原始进程日志、凭据或会话正文。
 
 **现象 F：`web_fetch` 报 `Access denied`，地址是 `198.18.x.x` 或 `198.19.x.x`，浏览器却能访问。** 可能是 Clash / mihomo 的 fake-IP DNS 模式：本机 DNS 返回代理的虚拟地址，HTTP 抓取守卫按保留段拒绝。确认使用可信代理后，可在用户配置 `config.json` 的 `network` 段合并以下配置（代理端口按本机实际值填写），重启会话生效：
 
@@ -257,6 +259,40 @@ npm error Error: EACCES: permission denied, mkdir '/usr/local/lib/node_modules/t
 > 一键安装脚本（`scripts/install-tui.sh` / `scripts/install-tui.ps1`）已内置这项预检：全局目录不可写时会在**动手安装之前**直接给出原因与上面的修法，不会再把权限失败说成网络问题。
 
 > 安装时若出现 `N packages have install scripts not yet covered by allowScripts` 的警告，可以忽略：天枢的原生依赖（`esbuild` / `better-sqlite3` / `@ast-grep/*`）都随包附带各平台预编译产物，跳过安装脚本不影响功能（`tianshu --version` 能打印版本即为通过）。
+
+## 14. `Update available` 后 `/update` 不生效，或新版本 CLI 起不来
+
+**先查 Node 版本**：
+
+```bash
+node -v
+```
+
+v3.36.0 起，CLI 只接受：
+
+- Node **24.22.1+**（24.x 线）
+- Node **26.12.1+**（26.x 线）
+
+Node 22 / 23 / 25 / 27、24.x < 24.22.1、26.x < 26.12.1 都会被启动时的安全闸门拒绝。此时可能出现：
+
+- 启动横幅提示 `Update available: 3.35.0 → 3.36.1`；
+- `/update` 实际已经装上新包；
+- 但重启后的新 CLI 立即退出，用户看起来像“没更新成功”。
+
+**怎么修**：先升级 Node，再重装同一版本：
+
+```bash
+node -v   # 确认 v24.22.1+ 或 v26.12.1+
+nvm install 24.22.1 && nvm use 24.22.1   # 或 fnm / Volta / nodejs.org
+npm install -g tianshu-harness@3.36.1
+tianshu --version
+```
+
+如果 Node 已满足要求，再看 `/update` 的完整输出：
+
+- `原因：安装位置在 node_modules 里，被当成项目依赖`：CLI 可能由 pnpm / yarn / bun 或另一套 npm prefix 安装。用 `which tianshu`、`npm root -g`、`npm prefix -g` 对齐安装位置，再用同一个 npm 重新全局安装。
+- `EACCES` / `EPERM`：全局目录不可写，见第 13 节。
+- Windows 后台更新失败：看 `%LOCALAPPDATA%\.rivet\update.log`；常见原因是仍有其他 `tianshu`/`rivet` 进程占用原生模块。
 
 ## 还有问题
 

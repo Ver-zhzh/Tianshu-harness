@@ -160,6 +160,8 @@ import type { ChangeClassification } from './change-classification.js'
 export type ReviewScale = 'L1' | 'L2' | 'L3'
 
 export interface ChangeSet {
+  /** Immutable host-owned execution root for an independent read-only review. */
+  reviewSnapshot?: { cwd: string; ref: string; baseRef?: string; headRef: string; diffFile: string }
   files: readonly string[]
   crossModule: boolean
   isFix: boolean

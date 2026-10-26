@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { createCoordinatorReviewDeps, formatFinding, type ReviewCoordinator } from '../review-coordinator-deps.js'
 import type { CoordinatorRun, DelegationRequest } from '../coordinator.js'
 import type { WorkerResult } from '../work-order.js'
+import { workerFindingSchema } from '../work-order.js'
 
 function worker(overrides: Partial<WorkerResult> = {}): WorkerResult {
   return {
@@ -28,6 +29,22 @@ function run(results: WorkerResult[], status: CoordinatorRun['status'] = 'comple
 }
 
 describe('createCoordinatorReviewDeps', () => {
+  it('keeps one critical and three low findings separate through the real review mapper', async () => {
+    let calls = 0
+    const deps = createCoordinatorReviewDeps({ delegate: async () => ++calls > 1 ? run([]) : run([worker({
+      summary: '1 CRITICAL and 3 LOW; unrelated HIGH in summary',
+      findings: [
+        { claim: '[CRITICAL] desktop blocked', confidence: 'high', evidence: 'src/a.ts:1' },
+        { claim: '[LOW] stale comment', confidence: 'high', evidence: 'CRITICAL mentioned by the old comment' },
+        { claim: '【LOW】 guidance mismatch', confidence: 'high', evidence: 'src/b.ts:2' },
+        { claim: 'ordinary claim', severity: 'LOW', confidence: 'high', evidence: 'src/c.ts:3' },
+        { claim: 'H1 layout heading', confidence: 'high', evidence: 'CRITICAL HIGH C1' },
+      ].map(f => workerFindingSchema.parse(f)),
+    })]) })
+    const result = await deps.spawnWiringReviewer!({ files: ['src/a.ts'], crossModule: false, isFix: true })
+    assert.deepEqual(result.findings.map(f => f.severity), ['CRITICAL', 'LOW', 'LOW', 'LOW', undefined])
+  })
+
   it('spawns adversarial verifier with review-depth guard and maps verified evidence', async () => {
     let captured: DelegationRequest | undefined
     const coordinator: ReviewCoordinator = {
@@ -198,7 +215,8 @@ describe('createCoordinatorReviewDeps', () => {
     assert.equal(result.findings[0]?.severity, 'HIGH')
     assert.match(result.findings[0]?.claim ?? '', /race/)
     assert.equal(result.findings[0]?.polarity, undefined, 'worker 未上报 polarity 时缺席（blocking 判定 fail-closed 按 defect）')
-    assert.deepEqual(result.infraFailures, [])
+    assert.equal(result.infraFailures?.length, 1)
+    assert.match(result.infraFailures![0]!.claim, /1\/5/)
   })
 
   it('threads worker-reported finding polarity through to SquadronResult', async () => {

@@ -41,6 +41,21 @@ function makeController(
 }
 
 describe('TurnStreamController', () => {
+  it('records elapsed time from run admission to first prose, separately from API TTFT', async () => {
+    const client: StreamClient = { stream: async (_request, cb) => {
+      cb.onThinkingDelta('reasoning')
+      cb.onTextDelta('visible answer')
+      cb.onStopReason('end_turn', { input_tokens: 10, output_tokens: 2, cache_read_input_tokens: 0 })
+    } }
+    const caches: Array<import('../cache-log-observability.js').StreamCacheObservability | undefined> = []
+    const { controller } = makeController(client, { recordTurnCache: (_turn, _usage, observation) => caches.push(observation) })
+    await controller.streamTurn({ request, turn: 0, runStartedAt: Date.now() - 500, preRequestMs: 100,
+      lastTurnTextFingerprint: '', callbacks: { onTextDelta() {}, onThinkingDelta() {}, onToolUse() {}, onError() {} } })
+    assert.ok(caches[0]!.runFirstTextMs! >= 500)
+    assert.ok(caches[0]!.firstTextMs! < caches[0]!.runFirstTextMs!)
+    assert.equal(caches[0]!.preRequestMs, 100)
+  })
+
   it('collects text, thinking, tool uses, usage, and cache counters', async () => {
     const client: StreamClient = {
       stream: mock.fn(async (_request: OaiChatRequest, cb: StreamCallbacks) => {

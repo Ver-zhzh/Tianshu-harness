@@ -352,14 +352,14 @@ describe('formatThinking', () => {
     assert.ok(stripAnsi(lines[0]!).includes('Ctrl+C'))
   })
 
-  it('produces output for committed thinking (no isStreaming gate)', () => {
+  it('produces expanded detail output without an isStreaming gate', () => {
     // 核心回归：isStreaming 不存在了，只要有 text + expanded 就应该输出
     const lines = formatThinking({
-      text: 'committed thinking text',
+      text: 'review thinking text',
       elapsedMs: 10000,
       expanded: true,
     }, theme)
-    assert.ok(lines.length > 0, 'committed thinking produces output')
+    assert.ok(lines.length > 0, 'expanded thinking detail produces output')
     assert.ok(stripAnsi(lines[0]!).includes('凝思中…'), 'has status header')
   })
 
@@ -383,7 +383,7 @@ describe('formatThinking', () => {
     assert.ok(plain[0]!.includes('凝思中…'))
   })
 
-  it('done: header uses past-tense 已推理 for committed scrollback', () => {
+  it('done: header uses past-tense 已推理 for a completed detail', () => {
     const lines = formatThinking({
       text: 'reasoning\nanalysis\nconclusion',
       elapsedMs: 8000,
@@ -391,7 +391,7 @@ describe('formatThinking', () => {
       expanded: false,
     }, theme)
     const plain = lines.map(stripAnsi)
-    assert.equal(plain.length, 1, 'collapsed commit is a single summary line')
+    assert.equal(plain.length, 1, 'collapsed detail is a single summary line')
     assert.ok(plain[0]!.includes('已推理'), 'past-tense header')
     assert.ok(plain[0]!.includes('8s'), 'elapsed in summary')
     assert.ok(plain[0]!.includes('3 行'), 'line count in summary')
@@ -399,7 +399,7 @@ describe('formatThinking', () => {
     assert.ok(!plain.some(l => l.includes('reasoning')), 'body not written when expanded:false')
   })
 
-  it('header + expanded produce full block for scrollback', () => {
+  it('header + expanded produce a full detail block', () => {
     const lines = formatThinking({
       text: 'reasoning\nanalysis\nconclusion',
       elapsedMs: 5000,

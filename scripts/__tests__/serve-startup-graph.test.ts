@@ -59,8 +59,19 @@ const FORBIDDEN_HEAVY = [
  * 2026-10-21：525→560（代为登记，对齐实测 550）——10-10 后新增 chatgpt MCP bridge
  * 与 server 面路由演进，+25 条可达模块；FORBIDDEN_HEAVY 8 模块仍全绿、无 agent/tui
  * 回流，属正当增长。若后续把新边改动态 import，应回调本值。
+ * 2026-10-26：560→640（v3.37.0 发版登记，对齐实测 614，+58）——本周期（10-24~26）
+ * 四组正当增长：① 提交/验证/审查契约分离（session-manager → continuity-records →
+ * completion-evidence → verification-runs → verification-attribution 链，~20 模块）；
+ * ② verification-attribution 静态引用 test-completion 带入 test-* 叶子工具族（~25，
+ * 均小型工具模块，非 agent 内核）；③ 外部 hooks 体系（serve.ts → external-hook-host，
+ * user-hooks-runner → hook-process → windows-hook-process 等，~9）；④ 新 server 路由
+ * （handoff-routes / tool-surface-routes / routing-diagnostics / open-file-route，
+ * ~7）。父链逐条核对（why）确认无 FORBIDDEN_HEAVY 回流（8/8 全绿）、无 tui 边；
+ * compact/context-collapse → run-tests 仅为 3 条正则常量共享。若后续把
+ * verification-attribution → test-completion 改动态 import 或抽取正则叶子模块，
+ * 应回调本值。
  */
-const REACHABLE_LIMIT = 560
+const REACHABLE_LIMIT = 640
 
 /**
  * 启动图允许静态出现的 bare 包（tsup 会按入口可达性把它们打进 chunk）。

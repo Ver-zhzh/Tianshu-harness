@@ -2,6 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   resolveInitialDomainName,
+  resolveInitialEffortDisplay,
   resolveInitialModelName,
 } from '../initial-status.js'
 
@@ -90,4 +91,19 @@ test('星域：未钉定 + 无 defaultDomain → undefined', () => {
 test('星域：defaultDomain 指向不存在的域 → undefined', () => {
   const r = resolveInitialDomainName({ defaultDomain: 'ghost', resolve: () => undefined })
   assert.equal(r, undefined)
+})
+
+test('effort：当前生效值优先于显式配置和模型 floor', () => {
+  assert.equal(resolveInitialEffortDisplay({ current: 'max', configured: 'high', floor: 'low' }), 'max')
+  assert.equal(resolveInitialEffortDisplay({ configured: 'high', floor: 'low' }), 'high')
+})
+
+test('effort：current/configured 都未赋值时回退模型初始 floor', () => {
+  assert.equal(resolveInitialEffortDisplay({ floor: 'high' }), 'high')
+})
+
+test('effort：floor 同样经过 normalize，全部缺失时保持 undefined', () => {
+  const normalized = resolveInitialEffortDisplay({ floor: 'medium', normalize: effort => effort === 'medium' ? 'high' : effort })
+  assert.equal(normalized, 'high')
+  assert.equal(resolveInitialEffortDisplay({}), undefined)
 })

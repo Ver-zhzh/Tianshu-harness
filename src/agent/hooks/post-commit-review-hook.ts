@@ -17,15 +17,25 @@
 import type { PreTurnRuntimeHook, PostToolRuntimeHook } from '../runtime-hooks.js'
 import type { AdvisoryBus } from '../advisory-bus.js'
 import { consumePostCommitReviewOutcomes } from '../post-commit-review-queue.js'
+import { createReviewInbox, type ReviewInbox } from '../review-inbox.js'
 
 export interface PostCommitReviewHookOptions {
   advisoryBus: Pick<AdvisoryBus, 'submit'>
+  sessionId?: string
+  reviewInbox?: ReviewInbox
+}
+
+export function createPostCommitReviewHooks(options: { advisoryBus: Pick<AdvisoryBus, 'submit'>; sessionId?: string; cwd?: string }) {
+  const bound = { ...options, reviewInbox: options.cwd && options.sessionId ? createReviewInbox(options.cwd, options.sessionId) : undefined }
+  return [createPostCommitReviewPreTurnHook(bound), createPostCommitReviewPostToolHook(bound)]
 }
 
 let submitSeq = 0
 
-function drain(bus: Pick<AdvisoryBus, 'submit'>): void {
-  for (const entry of consumePostCommitReviewOutcomes()) {
+function drain(options: PostCommitReviewHookOptions): void {
+  const { advisoryBus: bus, sessionId } = options
+  const entries = consumePostCommitReviewOutcomes(sessionId)
+  for (const entry of entries) {
     const urgent = entry.verdict === 'rejected'
     const inconclusive = entry.verdict === 'inconclusive'
     bus.submit({
@@ -33,12 +43,12 @@ function drain(bus: Pick<AdvisoryBus, 'submit'>): void {
       key: `post-commit-review:${entry.enqueuedAt}:${submitSeq++}`,
       priority: urgent ? 0.75 : inconclusive ? 0.55 : 0.3,
       category: 'discipline',
-      tier: urgent || inconclusive ? 'operational' : 'informational',
+      tier: 'informational',
       content: entry.lines.join('\n'),
       ttl: 2,
-      ...(urgent ? { immediate: true } : {}),
     })
   }
+
 }
 
 /** preTurn 相：审查在轮间完成时，下一轮开始前投递。 */
@@ -47,7 +57,7 @@ export function createPostCommitReviewPreTurnHook(options: PostCommitReviewHookO
     phase: 'preTurn',
     name: 'post-commit-review',
     run() {
-      drain(options.advisoryBus)
+      drain(options)
     },
   }
 }
@@ -58,7 +68,7 @@ export function createPostCommitReviewPostToolHook(options: PostCommitReviewHook
     phase: 'postTool',
     name: 'post-commit-review',
     run() {
-      drain(options.advisoryBus)
+      drain(options)
     },
   }
 }

@@ -82,6 +82,17 @@ export function crossSessionEventsAppendixEnabled(value = process.env.RIVET_CROS
 
 /** Merge stable, adaptive, and opt-in memory blocks in deterministic order. */
 export function combineMemoryBlocks(...blocks: Array<string | null>): string | null {
+  return combineMemoryBlocksForSession(process.env.RIVET_LATENCY_PROMPT_EXPERIMENT === '1', ...blocks)
+}
+
+export function combineMemoryBlocksForSession(experimental: boolean, ...blocks: Array<string | null>): string | null {
   const present = blocks.filter((block): block is string => Boolean(block))
-  return present.length > 0 ? present.join('\n') : null
+  if (!experimental) return present.length > 0 ? present.join('\n') : null
+  const ids = new Set<string>()
+  const unique = present.map(block => block.replace(/<m\s[^>]*id="([^"]+)"[^>]*>[\s\S]*?<\/m>|^- \[([^\]]+)\][^\n]*/gm, (entry, xmlId, listId) => {
+    const id = xmlId ?? listId
+    if (ids.has(id)) return ''
+    ids.add(id); return entry
+  }))
+  return unique.length > 0 ? unique.join('\n') : null
 }

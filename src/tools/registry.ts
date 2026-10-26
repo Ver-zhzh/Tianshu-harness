@@ -1,3 +1,4 @@
+import type { ToolPreset } from './tool-preset-names.js'
 import type { Tool, ToolCallParams, ToolResult } from './types.js'
 import type { ToolDefinition } from '../api/types.js'
 import { didYouMeanHint } from './did-you-mean.js'
@@ -67,7 +68,10 @@ export class ToolRegistry {
   private extraRegistrationPending = 0
   private extraRegistrationWaiters: Array<() => void> = []
 
-  constructor(opts: { onToolOverwrite?: (name: string) => void } = {}) {
+  readonly preset?: ToolPreset
+
+  constructor(opts: { onToolOverwrite?: (name: string) => void; preset?: ToolPreset } = {}) {
+    this.preset = opts.preset
     this.onToolOverwrite = opts.onToolOverwrite
   }
 

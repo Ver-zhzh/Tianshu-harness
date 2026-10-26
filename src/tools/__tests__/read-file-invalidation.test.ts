@@ -38,7 +38,7 @@ describe('read history invalidation after edits', () => {
   })
 
   afterEach(() => {
-    if (existsSync(dir)) rmSync(dir, { recursive: true, force: true })
+    if (existsSync(dir)) rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 })
     if (savedReadRef === undefined) delete process.env['RIVET_READ_REF']
     else process.env['RIVET_READ_REF'] = savedReadRef
   })
@@ -226,7 +226,7 @@ describe('in-process concurrent session isolation', () => {
   })
 
   afterEach(() => {
-    if (existsSync(dir)) rmSync(dir, { recursive: true, force: true })
+    if (existsSync(dir)) rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 })
     if (savedReadRef === undefined) delete process.env['RIVET_READ_REF']
     else process.env['RIVET_READ_REF'] = savedReadRef
   })
@@ -348,7 +348,7 @@ describe('cross-session file_changed event invalidation', () => {
   })
 
   afterEach(() => {
-    if (existsSync(dir)) rmSync(dir, { recursive: true, force: true })
+    if (existsSync(dir)) rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 })
     if (savedReadRef === undefined) delete process.env['RIVET_READ_REF']
     else process.env['RIVET_READ_REF'] = savedReadRef
   })

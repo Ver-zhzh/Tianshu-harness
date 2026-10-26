@@ -150,10 +150,10 @@ export const APPROVAL_OPTIONS: readonly SettingsOption[] = [
 ]
 
 export const TOOL_PRESET_OPTIONS: readonly SettingsOption[] = [
-  // 「可用」= 主控可调用件数（token 成本口径）；「装配」= kernel + bootstrap 完整体量。见 tool-preset.ts 文件头。
-  { id: 'minimal', label: 'minimal — 30 可用 / 33 装配，省 token（默认）' },
-  { id: 'frontend', label: 'frontend — 31 可用 / 34 装配，含 browser_debug' },
-  { id: 'full', label: 'full — 42 可用 / 54 装配（全集，含办公工具）' },
+  { id: 'minimal', label: 'minimal — 精简（默认），保留基本委派与 team' },
+  { id: 'frontend', label: 'frontend — 前端，增加 browser_debug' },
+  { id: 'orchestration', label: 'orchestration — 编排，仅增加星河、星流、计划分解、议事会' },
+  { id: 'full', label: 'full — 全功能及完整编排' },
   { id: 'taiyi', label: 'taiyi — 13 可用 / 14 装配（评测档；太一域钉定默认此档）' },
 ]
 
@@ -696,7 +696,7 @@ function basicsCategory(): SettingsCategory {
       label: '工具档位',
       block: 'toolPreset',
       effect: 'next-session',
-      hint: '装配工具集：minimal 30 日常全能力；frontend 31（默认）+ browser_debug；full 51 全集（编排/semantic/computer_use/办公族，system prompt 更贵）；taiyi 14 最小评测档——太一域钉定自动落此档。某域专属档位用「最小集绑定星域」或 runtime.domains 按域覆盖',
+      hint: 'minimal 默认保留基本委派、team 与助手能力；orchestration 单独增加高级编排；frontend 增加浏览器验证；full 全功能；taiyi 保持评测基线。新会话生效，/tools 查看当前实际装配数、可见数与工具状态。',
       options: TOOL_PRESET_OPTIONS,
       get: d => d.basics.toolPreset,
       set: (d, value) => withBasics(d, { toolPreset: value }),

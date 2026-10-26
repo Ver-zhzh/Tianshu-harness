@@ -43,8 +43,8 @@ export const editFileArgProcessor: ToolArgProcessor = {
     const preview = oldStr.slice(0, 80).replace(/\s+/g, ' ').trim()
     return JSON.stringify({
       ...parsed,
-      old_string: `${EDIT_FILE_POINTER_PREFIX} ${filePath}: replaced ${oldStr.length}-char block, preview: "${preview}". 已成功落盘，勿重做——历史正常截断，查看用 read_file。${POINTER_INTERNAL_TAG} display-only pointer]`,
-      new_string: `[new block ${filePath}: ${newStr.length} chars — 已落盘，勿重做。${POINTER_INTERNAL_TAG} display-only pointer]`,
+      old_string: `${EDIT_FILE_POINTER_PREFIX} ${filePath}: replaced ${oldStr.length}-char block, preview: "${preview}". 请求内容已折叠；执行状态以工具结果为准，按需 read_file。${POINTER_INTERNAL_TAG} display-only pointer]`,
+      new_string: `[new block ${filePath}: ${newStr.length} chars — 仅请求；见执行回执。${POINTER_INTERNAL_TAG}]`,
     })
   },
 }

@@ -5,15 +5,20 @@ export { createSidePathUsageRecorder } from './side-path-usage-recorder.js'
 import { sessionStateAdvice } from './runtime-advice-facts.js'
 import { cacheDiagnosticClass } from '../cache/cache-diagnostic-class.js'
 import type { AgentLoop } from './loop.js'
+import { readonlyFactTask } from './readonly-advice.js'
 import { TurnStreamController } from './turn-stream.js'
 import { persistStrippedImagesIfUnambiguous } from './persisted-image-strip.js'
 import { describeImages, visionCacheKey } from './vision-service.js'
 import { loadContextImage } from './context-image-archive.js'
+import { prepareVisionImages } from './vision-image-preparation.js'
+import { latencyExperimentEffort } from './latency-experiments.js'
 import { TurnCompletionController } from './turn-completion.js'
 import { ToolExecutionController } from './tool-execution.js'
 import { tagLatestWriteOutcome } from './tool-history-recorder.js'
 import type { RuntimeHookSnapshot } from './runtime-hooks.js'
 import { createRuntimeHookContext, RuntimeHookPipeline } from './runtime-hooks.js'
+import { postSessionInput, postSessionCandidates, postSessionRetrospect, addPostSessionCandidates } from './post-session-inputs.js'
+import { resolveMemoryFormation } from '../memory/formation-policy.js'
 import { createDefaultRuntimeHooks } from './create-runtime-hooks.js'
 import { runOnErrorHooks } from './hooks/user-hooks-bridge.js'
 import { recordSkillInvoked } from './skill-gate.js'
@@ -172,6 +177,7 @@ export function createTurnStreamController(self: AgentLoop): TurnStreamControlle
         const entry: Record<string, unknown> = {
           ...info.usage?.observation,
           event: 'stream_attempt_aborted',
+          ...info.measurements,
           turn: info.turn,
           requestId: info.requestId, attemptId: info.attemptId,
           usageFields: info.usage?.observation?.fields,
@@ -344,10 +350,11 @@ export function createTurnCompletionController(self: AgentLoop, callbacks?: Agen
       setDecisions: decisions => { self.decisions = decisions },
       refreshLedger: () => { self.contextInjection.refreshLedger() },
       refreshCacheDiagnostic: turn => { self.refreshCacheDiagnostic(turn) },
-      runPostTurn: async () => {
+      getRunSignal: () => self.getRunSignal(),
+      runPostTurn: async signal => {
         await self.runtimeHooks.runPostTurn(createRuntimeHookContext(self.buildRuntimeSnapshot(), {
           emitPhaseChange: (phase, detail) => { callbacks?.onPhaseChange?.(phase, detail) },
-        }))
+        }, signal))
       },
       runBeforeComplete: async () => {
         if (callbacks) await self.runPostSession(callbacks)
@@ -403,17 +410,24 @@ export function createToolExecutionController(self: AgentLoop): ToolExecutionCon
       // the active model. Injection is tail-append via addUserMessage (multimodal
       // parts) — the same append-only boundary the steer path uses.
       getSupportsVision: () => self.config.supportsVision ?? false,
-      addUserMessageWithImages: (text, images) => { self.session.addUserMessage(text, images, 'hook') },
+      addUserMessageWithImages: async (text, images, original) => {
+        const prepared = await prepareVisionImages(self.artifactStore, images, { original, signal: self.getRunSignal() })
+        self.session.addUserMessage(`${text}${prepared.notice ? `\n${prepared.notice}` : ''}`, prepared.images, 'hook', original ? 'original' : undefined)
+      },
       // Bridge for text-only primaries: the same vision model that describes
       // user-attached images also describes screenshots the agent took itself,
       // so `browser_debug screenshot` is worth calling on any model.
       describeToolImages: self.config.visionClient
-        ? (images, signal) => describeImages(self.config.visionClient!, images, {
+        ? async (images, signal) => {
+          const prepared = await prepareVisionImages(self.artifactStore, images, { signal })
+          const description = await describeImages(self.config.visionClient!, prepared.images, {
             prompt: self.config.visionModelPrompt,
             recordUsage: usage => self.recordSidePathUsage('vision-description', usage, self.config.visionBridge?.detail ?? 'unknown'),
             maxTokens: self.config.visionModelMaxTokens,
             signal,
           })
+          return description ? `${description}${prepared.notice ? `\n${prepared.notice}` : ''}` : description
+        }
         : undefined,
       // 工具截图寄存：agent 自己截的图也进 registry，ask_image 才问得到它。
       registerImages: images => self.imageRegistry.register(images),
@@ -530,7 +544,8 @@ export function createToolExecutionController(self: AgentLoop): ToolExecutionCon
     })
 }
 export function buildRuntimeSnapshot(self: AgentLoop, extra?: Partial<RuntimeHookSnapshot>): RuntimeHookSnapshot {
-return {
+  return {
+      runId: self.getRunId(),
       cwd: self.cwd,
       turn: self.session.getTurnCount(),
       modelTurn: self.modelObservationTurn,
@@ -615,10 +630,16 @@ export function resolveDisabledHookIds(config: { hookAssembly?: { disabled?: str
 }
 
 export function createRuntimeHooksPipeline(self: AgentLoop): RuntimeHookPipeline {
+  const memoryFormation = resolveMemoryFormation(self.config.memoryFormation)
   // 将星账本遥测（Y8）：读/写事件落 sensorium.jsonl 同通道，让「账本是否在被
   // 使用、哪个星在生长」可观测。模块级 sink——worker prompt 合并与工具读写共用。
   setGeneralLedgerTelemetrySink(event => self.telemetryWriter.write({ ...event }))
-  const userBridgeDeps = {    cwd: self.cwd,
+  const userBridgeDeps = {
+    cwd: self.cwd,
+    runtime: self.config.externalHookRuntime,
+    getRunId: () => self.getRunId(),
+    getSignal: () => self.getRunSignal(),
+    budgetMs: self.config.hookAssembly?.timeoutMs,
     sessionId: self.config.sessionId,
     getTurn: () => self.session.getTurnCount(),
     emitHookResult: self.config.emitHookResult,
@@ -628,8 +649,11 @@ export function createRuntimeHooksPipeline(self: AgentLoop): RuntimeHookPipeline
   const hooks = createDefaultRuntimeHooks({
     stigmergyDeposit: deposit => self.stigmergyStore.deposit(deposit),
     stigmergyQuery: () => self.stigmergyStore.query(),
-    getEvidenceState: () => self.evidence.getState(),
+    getEvidenceState: () => postSessionInput(self, 'evidence', () => self.evidence.getState()),
     getVerificationDebt: () => self.evidence.hasVerificationDebt(),
+    getReadonlyTaskConstraint: () => readonlyFactTask(self.workFacts.explicitNoMutation,
+      self._lastRetrievalRoute && self._lastRetrievalRoute.confidence >= 0.6 ? self._lastRetrievalRoute.taskKinds : undefined),
+    hasActiveRepair: () => self.workFacts.hasActiveRepair(),
     obligations: self.obligations,
     // 证据防火墙 Phase 2：external-claim tracker 回写 AgentLoop 公开属性，
     // bootstrap 经 ref 转交 deliver_task ctx（hook 未装配时不回调 → undefined）。
@@ -653,16 +677,8 @@ export function createRuntimeHooksPipeline(self: AgentLoop): RuntimeHookPipeline
     playbookStore: self.config.playbookStore,
     sessionRegistry: self.config.sessionRegistry,
     cwd: self.cwd,
-    buildRetrospectInput: () => {
-      const es = self.evidence.getState()
-      return {
-        sensoriumEntries: self.sensoriumSnapshots, gitLog: [],
-        toolEvents: self.traceStore.events.filter(e => e.kind === 'tool').map(e => ({ turn: e.turn, name: e.name, status: e.status === 'passed' ? 'passed' : 'failed' })),
-        evidenceSummary: { filesModified: es.filesModified.size, verifiedCount: es.verifications.filter(v => v.status === 'passed').length },
-        pheromoneSignals: self.loadedPheromones.map(p => ({ signal: p.signal, path: p.path, strength: p.strength })),
-      }
-    },
-    getDoomLoopLevel: () => self.getDoomLoopLevel(),
+    buildRetrospectInput: () => postSessionRetrospect(self),
+    getDoomLoopLevel: () => postSessionInput(self, 'doomLevel', () => self.getDoomLoopLevel()),
     // 让位判据解耦：shouldKick 在卡住期间恒 true 但发射被冷却节流——只有
     // convergence 真实发射过（相邻轮）才压制 CCR/kick，避免冷却静默期陪葬。
     wasConvergenceTriggered: () =>
@@ -710,7 +726,7 @@ export function createRuntimeHooksPipeline(self: AgentLoop): RuntimeHookPipeline
       complete: buildLazyCopilotCompletion(self),
     },
     getPhysarumShadowStats: () => self.getPhysarumShadowStats(),
-    getDomainId: () => self.sessionDomain?.id ?? null,
+    getDomainId: () => postSessionInput(self, 'domainId', () => self.sessionDomain?.id ?? null),
     getCourageThreshold: () => self.sessionDomain?.courageThreshold ?? 0.5,
     getFileObservations: () => self.config.contextClaimStore?.listClaims({ kind: ['file_observation'] }) ?? [],
     antiAnchoring: normalizeAntiAnchoringConfig(self.config.antiAnchoring),
@@ -718,14 +734,14 @@ export function createRuntimeHooksPipeline(self: AgentLoop): RuntimeHookPipeline
     callAntiAnchoringSeedModel: (prompt, signal) => self.antiAnchoring.callSeedModel(prompt, signal),
     songlineEnabled: self.config.songlineEnabled,
     securityGuidance: self.config.securityGuidance,
-    getTaskSummary: self.config.taskLedger ? () => self.config.taskLedger!.getSummary() : undefined,
+    getTaskSummary: self.config.taskLedger ? () => postSessionInput(self, 'taskSummary', () => self.config.taskLedger!.getSummary())! : undefined,
     setCycleClose: self.config.sessionRegistry
       ? (sessionId, closeHash) => self.config.sessionRegistry!.setCycleClose(sessionId, closeHash)
       : undefined,
     // True opt-in (config defaults false). Lean forces off even if config opts in.
     constellationEnabled: !self.config.runtimeLean && self.config.constellationEnabled === true,
     constellationCwd: self.cwd,
-    getConstellationPendingMark: () => self.pendingLeaveMark,
+    getConstellationPendingMark: () => postSessionInput(self, 'pendingMark', () => self.pendingLeaveMark),
     getConstellationNumericId: () => self._sessionNumericId,
     companionPresenceEnabled: !self.config.runtimeLean && self.config.companionPresenceEnabled === true,
     companionPresenceCwd: self.cwd,
@@ -739,7 +755,7 @@ export function createRuntimeHooksPipeline(self: AgentLoop): RuntimeHookPipeline
         outputEfficiency: self.latestConvergenceResult?.signals.tokenEfficiency,
       }
     },
-    getObjective: () => self.taskContract?.objective ?? self.initialUserMessage?.slice(0, 120) ?? null,
+    getObjective: () => postSessionInput(self, 'objective', () => self.taskContract?.objective ?? self.initialUserMessage?.slice(0, 120) ?? null),
     // 缺口 C/D:run 轮数 / 用户输入轮 / 意图复合源 / maxTurns 预算
     getRunTurn: () => self.runLoopTurn,
     getLastUserInputRunTurn: () => self.lastUserInputRunTurn,
@@ -756,7 +772,7 @@ export function createRuntimeHooksPipeline(self: AgentLoop): RuntimeHookPipeline
     // computer_use 任务感知自动挂载（2026-07-15）：会话早期检测桌面 GUI 意图。
     computerUseMount: {
       getUserIntent: () => self.taskContract?.objective ?? self.initialUserMessage?.slice(0, 500) ?? null,
-      enableTool: (name: string) => self.enableTool(name),
+      enableTool: (name: string) => self.enableTool(name, { runtimeBoundary: true }),
     },
     hearthObserveEnabled: self.config.hearthObserveEnabled,
     getAnchorGraph: () => self.antiAnchoring.buildAnchorGraph(),
@@ -775,18 +791,13 @@ export function createRuntimeHooksPipeline(self: AgentLoop): RuntimeHookPipeline
       dream: {
         cwd: self.cwd,
         sessionId: self.config.sessionId,
-        getDecisions: () => self.decisions,
-        getTrajectory: () => self.trajectory.getEntries(),
-        getFailureJournal: () => self.failureJournal,
+        getDecisions: () => postSessionInput(self, 'decisions', () => self.decisions),
+        getTrajectory: () => postSessionInput(self, 'trajectory', () => self.trajectory.getEntries()),
+        getFailureJournal: () => postSessionInput(self, 'failureJournal', () => self.failureJournal),
         // Wave 5（反馈闭环）：dream 候选推入 essence-gate 素材缓冲。
         // create-runtime-hooks 只在 gate 真实装配时转发此回调；gate 缺席时
         // dream-hook 走直写分支，缓冲不会积压无消费者的候选。
-        onKnowledgeCandidates: candidates => {
-          self.knowledgeCandidates.push(...candidates)
-          if (self.knowledgeCandidates.length > 60) {
-            self.knowledgeCandidates.splice(0, self.knowledgeCandidates.length - 60)
-          }
-        },
+        onKnowledgeCandidates: candidates => { addPostSessionCandidates(self, candidates) },
       },
       getRegisteredSkills: () => skillRegistry.list().map(s => ({ name: s.name, triggers: s.triggers })),
     } : {}),
@@ -877,20 +888,8 @@ export function createRuntimeHooksPipeline(self: AgentLoop): RuntimeHookPipeline
         sessionId: self.config.sessionId,
         // 三路素材收口：① 正则观察缓冲 ② agent 手动 remember（scope=project 的
         // 本会话 claims——memory 工具已停直写，项目级持久化由闸门裁决）③ 失败模式
-        getCandidates: () => {
-          const manualRemembers = (self.config.contextClaimStore?.listClaims({ scope: ['project'] }) ?? [])
-            .filter(c => c.source.sessionId === self.config.sessionId && c.source.eventId.startsWith('memory:'))
-            .map(c => ({
-              text: c.text,
-              kind: c.kind,
-              confidence: c.confidence,
-              origin: 'manual' as const,
-              tags: c.tags,
-              sessionId: self.config.sessionId,
-            }))
-          return [...self.knowledgeCandidates, ...manualRemembers]
-        },
-        getFailureJournal: () => self.failureJournal,
+        getCandidates: () => postSessionCandidates(self),
+        getFailureJournal: () => postSessionInput(self, 'failureJournal', () => self.failureJournal),
         complete: async (prompt: string, timeoutMs: number) => {
           return runGateCompletion(gateClient, recordSidePath, prompt, timeoutMs)
         },
@@ -901,10 +900,10 @@ export function createRuntimeHooksPipeline(self: AgentLoop): RuntimeHookPipeline
     recallEfficacy: self.config.sessionId ? {
       cwd: self.cwd,
       sessionId: self.config.sessionId,
-      getAssistantText: () => self.session.getMessages()
+      getAssistantText: () => postSessionInput(self, 'assistantText', () => self.session.getMessages()
         .filter(m => m.role === 'assistant' && typeof m.content === 'string')
         .map(m => m.content as string)
-        .join('\n'),
+        .join('\n')),
     } : undefined,
     // 记忆形成侧：重要操作后模型判断 + 写入 LTM。复用 essence-gate 的廉价
     // LLM 通道（side-path 记账）与 session id。无 client 时不装配（fail-closed）。
@@ -912,13 +911,14 @@ export function createRuntimeHooksPipeline(self: AgentLoop): RuntimeHookPipeline
       const captureClient = self.config.compactClient ?? self.config.primaryClient ?? self.config.client
       // worker 子会话不写主项目 LTM（隔离边界，防 worker 观察污染）。
       const isWorker = self.config.sessionId?.startsWith('worker-') ?? false
-      if (!captureClient || !self.config.sessionId || isWorker) return undefined
+      if (!memoryFormation.autoCapture || !captureClient || !self.config.sessionId || isWorker || self.config.inputOrigin === 'worker_task') return undefined
       const recordSidePath = createSidePathUsageRecorder(self)
       return {
         cwd: self.cwd,
         sessionId: self.config.sessionId,
-        complete: async (prompt: string, timeoutMs: number) => {
-          return runGateCompletion(captureClient, recordSidePath, prompt, timeoutMs)
+        enabled: true,
+        complete: async (prompt: string, timeoutMs: number, signal?: AbortSignal) => {
+          return runGateCompletion(captureClient, recordSidePath, prompt, timeoutMs, signal)
         },
       }
     })(),
@@ -927,18 +927,19 @@ export function createRuntimeHooksPipeline(self: AgentLoop): RuntimeHookPipeline
       const consolidateClient = self.config.compactClient ?? self.config.primaryClient ?? self.config.client
       // worker 子会话不做会话级巩固（隔离边界）。
       const isWorker = self.config.sessionId?.startsWith('worker-') ?? false
-      if (!consolidateClient || !self.config.sessionId || isWorker) return undefined
+      if (!memoryFormation.consolidation || !consolidateClient || !self.config.sessionId || isWorker || self.config.inputOrigin === 'worker_task') return undefined
       const recordSidePath = createSidePathUsageRecorder(self)
       return {
         cwd: self.cwd,
         sessionId: self.config.sessionId,
-        getTranscript: () => self.session.getMessages()
+        enabled: true,
+        getTranscript: () => postSessionInput(self, 'transcript', () => self.session.getMessages()
           .filter(m => m.role === 'user' || m.role === 'assistant')
           .map(m => typeof m.content === 'string' ? m.content : '')
-          .join('\n'),
-        getObjective: () => self.taskContract?.objective ?? self.initialUserMessage ?? null,
-        complete: async (prompt: string, timeoutMs: number) => {
-          return runGateCompletion(consolidateClient, recordSidePath, prompt, timeoutMs)
+          .join('\n')),
+        getObjective: () => postSessionInput(self, 'objective', () => self.taskContract?.objective ?? self.initialUserMessage ?? null),
+        complete: async (prompt: string, timeoutMs: number, signal?: AbortSignal) => {
+          return runGateCompletion(consolidateClient, recordSidePath, prompt, timeoutMs, signal)
         },
       }
     })(),
@@ -1002,7 +1003,7 @@ export function createRuntimeHooksPipeline(self: AgentLoop): RuntimeHookPipeline
     hookTimeoutMs: self.config.hookAssembly?.timeoutMs,
     hookSlowMs: self.config.hookAssembly?.slowMs,
     onError: (err) => {
-      runOnErrorHooks(userBridgeDeps, err.message)
+      if (!err.late) runOnErrorHooks(userBridgeDeps, err.message, err)
     },
     onRun: event => {
       if (event.outcome === 'completed' && !event.slow) return
@@ -1014,7 +1015,8 @@ export function createRuntimeHooksPipeline(self: AgentLoop): RuntimeHookPipeline
         durationMs: event.durationMs,
         slow: event.slow,
         message: event.message,
-        turn: self.session.getTurnCount(),
+        turn: event.turn,
+        runId: event.runId,
       })
     },
   })
@@ -1221,6 +1223,7 @@ export function createTurnOrchestrator(self: AgentLoop): TurnOrchestrator {
     ...(speculateDuringBatch ? { speculateDuringBatch } : {}),
     // === Lifecycle ===
     initializeRun: (userInput, callbacks, images) => self.turnStepProducer.initializeRun(userInput, callbacks, images),
+    getRunStartedAt: () => self.getRunStartedAt(),
     stopFsWatcher: () => { self.stopFsWatcher() },
 
     // === Config ===
@@ -1485,6 +1488,8 @@ export function createTurnOrchestrator(self: AgentLoop): TurnOrchestrator {
 
 export function createReasoningEffortController(self: AgentLoop): ReasoningEffortController {
   return new ReasoningEffortController({
+    adjustAutomaticEffort: effort => self.config.latencyReasoningSupported && self.config.autoReasoning && !self.userReasoningOverride && self.planModeState !== 'planning'
+      && !self.config.promptEngine.getExecutionSnapshot() ? latencyExperimentEffort(self.initialUserMessage ?? '', effort) : effort,
     getReasoningFloor: () => self.config.reasoningFloor,
     getConfigReasoningEffort: () => self.config.reasoningEffort,
     setConfigReasoningEffort: effort => { self.config.reasoningEffort = effort },

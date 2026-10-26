@@ -239,14 +239,19 @@ Settings → 外观 提供 26 套内置主题（含暗色/亮色各半，如 `da
 
 **最小集绑定星域**（Settings → System，默认星域卡旁）：一键组合「钉定默认星域 + taiyi 14 件最小工具档」——新会话启动即该域的最小集形态，**不含 lean 资源减配**。清空 = 恢复默认域启明（该域工具档覆盖会保留，可在 Settings → Behavior → Lean 资源档 → 按域覆盖中删除）。
 
-**工具档位**（Settings → Behavior → 工具档位）控制每个会话装配的工具集，四档：
+**工具档位**（Settings → Behavior → 工具档位）提供五档。以下为无 MCP/LSP、无调度器及强制扩展的基线：
 
-| 档位 | 工具数 | 适用 |
+| 档位 | 装配／主控可见 | 适用 |
 |---|---|---|
-| minimal（默认） | 30 | 日常开发全能力，省 token |
-| frontend | 31 | + `browser_debug` 浏览器验证 |
-| full | 51 | 全集（编排 / semantic_search / computer_use / 办公工具族），system prompt 开销更大 |
-| taiyi | 14 | 最小评测档——钉定太一域时自动落此档，无需手选 |
+| minimal（默认） | 36／26 | 日常开发、基本委派与 team，保留记忆、胶囊和图像追问 |
+| frontend | 37／27 | + `browser_debug` 浏览器验证 |
+| orchestration（编排） | 36／30 | + 星河、星流、计划分解、议事会，无需开启 full |
+| full | 56／43 | 全功能及高级编排；冷工具仍按需挂载 |
+| taiyi | 14／13 | 太一评测基线 |
+
+桌面端真实调度器会额外注册三个定时任务工具，minimal/frontend/orchestration 中默认隐藏。设置页另外查询**当前会话**的实际装配／可见数量及每个工具的状态；不会为查询启动会话。未初始化或旧 sidecar 无该接口时如实显示。当前会话统计与下一会话设置分开，不能把保存档位当作已改变当前工具面。
+
+明确使用 `/galaxy`、`/starflow`、`/council` 可临时挂载所需工具，显示缓存影响，保持原白名单和禁用项；`/tools enable <name>` 仍可使用。默认 team 直接消费计划，不需要先启用高级编排。
 
 > 生效时机：档位与绑定都在**新会话**装配（会话中途 `/domain` 切换不换工具——改工具指纹会重建前缀缓存）。想给某个星域单独配档位/lean/阈值：Settings → Behavior → Lean 资源档 → 按域覆盖（`runtime.domains.<域>`，域列表随新增星域自动扩展）。
 

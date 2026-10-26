@@ -107,7 +107,7 @@ export function buildVerificationGapProjection(ledger: CognitiveLedger): string 
   if (!ledger.eligibility) noteEligibilityMissing('cognitive-ledger:verification-gap')
   const requiresVerification = ledger.eligibility?.requiresEngineeringDiscipline ?? true
   if (!requiresVerification) return ''
-  return `<verification-gap status="unverified" modified="${modifiedCount}">Run relevant verification before claiming done.</verification-gap>`
+  return `<verification-gap status="unverified" modified="${modifiedCount}">验证尚未执行，请如实披露；单独审查或扩大验证由用户决定，不阻止安全提交或收尾。</verification-gap>`
 }
 
 /**

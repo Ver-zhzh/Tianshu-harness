@@ -54,6 +54,13 @@ export class GoalRolloverCoordinator {
   private stopping = false
   constructor(private host: GoalRolloverHost) {}
 
+  /** A failed checkpoint cannot hide a pause from the live UI or trigger an implicit retry. */
+  pauseOnFailure(id: string, error: string): void {
+    this.epochs.set(id, (this.epochs.get(id) ?? 0) + 1)
+    const view = this.host.record(id)?.goalRollover
+    if (view?.from === id && !['complete', 'cancelled'].includes(view.phase)) this.host.publish(id, { ...view, phase: 'paused', error })
+  }
+
   /** Synchronous invalidation wins even while an agent/storage operation is awaiting. */
   cancel(id: string): void {
     const incoming = this.host.record(id)?.goalRollover
@@ -121,6 +128,7 @@ export class GoalRolloverCoordinator {
 
   private async advance(id: string, retry: boolean): Promise<boolean> {
     if (this.stopping) return false
+    if (!retry && this.host.record(id)?.goalRollover?.phase === 'paused') return false
     const epoch = this.epochs.get(id) ?? 0
     let s = await this.host.load(id)
     const current = this.host.tracker(id)

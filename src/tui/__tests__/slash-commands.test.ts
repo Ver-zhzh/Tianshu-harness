@@ -236,28 +236,16 @@ describe('/review off|on|status — 会话级审查门开关', () => {
     assert.match(captured, /待终审：无/)
   })
 
-  it('/review 有待终审累积时审查累积范围并消费——「敲 /review 立即审查」不再是死胡同', async () => {
-    __resetPostCommitReviewPending()
-    addPendingReviewFiles('sess-consume', ['src/b.ts'])
-    addPendingReviewFiles('sess-consume', ['src/a.ts', 'src/b.ts'])
-    let captured = ''
-    let reviewed: string[] | null = null
-    const ctx = makeCtx({
-      parts: ['/review'],
-      currentSessionId: 'sess-consume',
-      runReview: (async (change: { files: string[] }) => {
-        reviewed = change.files
-        return { verdict: 'verified', tier: 'L1', rounds: 1 }
-      }) as any,
-      pushStatic: (entry: LogEntry) => { captured += `${entry.content}\n` },
+  it('/review uses the independent service with no dirty-scope or pending-review expansion', async () => {
+    let input: Record<string, unknown> | undefined
+    const ctx = makeCtx({ parts: ['/review', 'max', 'focus'],
+      runReview: async () => { throw new Error('legacy review router must not run') },
+      runIndependentReview: async value => { input = value; return { content: 'review done' } },
     })
-    const handled = await handleSlashCommand(ctx)
-    assert.equal(handled, true)
-    // makeCtx 的 agent.cwd='/cwd' 不存在 → collectDirtyFiles 返回 []，
-    // 审查范围完全来自 pending 累积（修复前此场景直接报「没有未提交的改动」）。
-    assert.deepEqual(reviewed, ['src/a.ts', 'src/b.ts'])
-    assert.match(captured, /已并入待终审累积：2 个提交、2 个文件/)
-    assert.equal(peekPendingReview('sess-consume'), null, 'pending 已消费——收尾终审不再二审同批文件')
+    assert.equal(await handleSlashCommand(ctx), true)
+    assert.deepEqual(input, { action: 'start', depth: 'max', focus: 'focus' })
+    assert.deepEqual(resolveAppPromptInput('/review', '/cwd')!.requiredTools, ['review_changes'])
+    assert.match(resolveAppPromptInput('/test all', '/cwd')!.prompt, /full=true/)
   })
 
   it('无 reviewGateRef 注入时明确提示，不静默丢输入', async () => {
@@ -274,22 +262,22 @@ describe('/review off|on|status — 会话级审查门开关', () => {
   it('/review off 不再被 resolveAppPromptInput 误映射为 focus 审查', () => {
     const resolved = resolveAppPromptInput('/review off', '/cwd')
     assert.ok(resolved !== null)
-    assert.match(resolved!.prompt, /TUI-local session toggle/)
+    assert.match(resolved!.prompt, /compatibility no-op/)
     assert.doesNotMatch(resolved!.prompt, /call deliver_task/)
   })
 
   it('/review l1 映射为 L1 轻量审查（nudge，零 worker）', () => {
     const resolved = resolveAppPromptInput('/review l1', '/cwd')
     assert.ok(resolved !== null)
-    assert.match(resolved!.prompt, /review_level="L1"/)
-    assert.match(resolved!.prompt, /zero review workers/)
+    assert.match(resolved!.prompt, /未执行独立代码审查或测试/)
+    assert.equal(resolved!.requiredTools, undefined)
   })
 
   it('/review l2 / 无关键词 / max 的档位映射回归', () => {
-    assert.match(resolveAppPromptInput('/review l2', '/cwd')!.prompt, /review_level="L2"/)
-    assert.match(resolveAppPromptInput('/review', '/cwd')!.prompt, /review_level="L2"/)
-    assert.match(resolveAppPromptInput('/review max', '/cwd')!.prompt, /review_level="L3"/)
-    assert.match(resolveAppPromptInput('/review l3', '/cwd')!.prompt, /review_level="L3"/)
+    assert.match(resolveAppPromptInput('/review l2', '/cwd')!.prompt, /depth="default"/)
+    assert.match(resolveAppPromptInput('/review', '/cwd')!.prompt, /depth="default"/)
+    assert.match(resolveAppPromptInput('/review max', '/cwd')!.prompt, /depth="max"/)
+    assert.match(resolveAppPromptInput('/review l3', '/cwd')!.prompt, /depth="max"/)
     // focus 描述不与档位关键词混淆
     assert.match(resolveAppPromptInput('/review l2 检查锚点漂移', '/cwd')!.prompt, /Focus specifically on: 检查锚点漂移/)
   })
@@ -620,7 +608,7 @@ describe('resolveAppPromptInput', () => {
 
     assert.ok(resolved!.prompt.includes('团队模式核心骨架'))
     assert.ok(resolved!.prompt.includes('team_orchestrate'))
-    assert.ok(resolved!.prompt.includes('plan_task'))
+    assert.ok(resolved!.prompt.includes('planMarkdown'))
     assert.ok(resolved!.prompt.includes('patcher workers as 天梁 executors'))
     assert.ok(resolved!.prompt.includes('deliver_task'))
   })
@@ -847,8 +835,8 @@ describe('handleSlashCommand', () => {
     })
 
     assert.equal(await handleSlashCommand(ctx), true)
-    assert.ok(entries[0]!.includes('Context Payload'))
-    assert.ok(entries[0]!.includes('environment'))
+    assert.ok(entries.some(entry => entry.includes('Context Payload')))
+    assert.ok(entries.some(entry => entry.includes('environment')))
   })
 
   it('/verbose toggles and returns true', async () => {
@@ -2006,28 +1994,52 @@ describe('/btw 侧问派发', () => {
 
 
 describe('/handoff 命令', () => {
-  it('未注入 submitToAgent 时明确提示，不静默', async () => {
+  // 默认归档会真的落盘（事实快照 + 覆盖/尾文件），必须指向可写临时目录。
+  let dir: string, priorSessions: string | undefined
+  before(() => {
+    dir = makeTestDir('slash-handoff-')
+    priorSessions = process.env.RIVET_SESSION_DIR
+    process.env.RIVET_SESSION_DIR = join(dir, 'sessions')
+  })
+  after(() => {
+    if (priorSessions === undefined) delete process.env.RIVET_SESSION_DIR
+    else process.env.RIVET_SESSION_DIR = priorSessions
+    cleanupTestDir(dir)
+  })
+  /** partial agent double：isRunning/getTaskContract/session 由新契约要求，cwd 指向可写目录。 */
+  const agentAt = (cwd: string, running = false) => ({
+    ...(makeCtx().agent as unknown as Record<string, unknown>),
+    cwd,
+    isRunning: () => running,
+    getTaskContract: () => undefined,
+    session: { getTurnCount: () => 0 },
+  }) as SlashHandlerContext['agent']
+
+  it('默认归档事实快照，不要求 submitToAgent', async () => {
     let captured = ''
     const ctx = makeCtx({
       parts: ['/handoff'],
       pushStatic: (entry: LogEntry) => { captured += `${entry.content}\n` },
+      currentSessionId: 'sess-handoff-001',
+      agent: agentAt(dir),
     })
-    const handled = await handleSlashCommand(ctx)
-    assert.equal(handled, true)
-    assert.match(captured, /不支持 \/handoff/)
+    assert.equal(await handleSlashCommand(ctx), true)
+    assert.match(captured, /事实交接已归档/)
+    assert.match(captured, /零模型调用/)
+    assert.doesNotMatch(captured, /不支持/)
   })
 
-  it('注入 submitToAgent 时提交交接指令并登记归档任务', async () => {
+  it('--narrative 才提交模型叙述并登记归档任务', async () => {
     let submitted = ''
     let registered: { sourcePath: string; destinationPath: string } | undefined
     const ctx = makeCtx({
-      parts: ['/handoff', '重点记下缓存方案'],
+      parts: ['/handoff', '--narrative', '重点记下缓存方案'],
       submitToAgent: (prompt: string) => { submitted = prompt },
       onHandoffStart: (request) => { registered = request },
       currentSessionId: 'sess-handoff-001',
+      agent: agentAt(dir),
     })
-    const handled = await handleSlashCommand(ctx)
-    assert.equal(handled, true)
+    assert.equal(await handleSlashCommand(ctx), true)
     assert.match(submitted, /\.rivet\/HANDOFF-sess-handoff-001-[0-9a-f-]+\.md/i)
     assert.match(submitted, /绝不能覆盖/)
     assert.match(submitted, /## 任务目标/)
@@ -2037,14 +2049,40 @@ describe('/handoff 命令', () => {
     assert.ok(registered?.destinationPath.includes('sess-handoff-001.handoff.md'), `dest: ${registered?.destinationPath}`)
   })
 
-  it('两个交错会话的 handler 注册不同完整身份源文件', async () => {
+  it('--narrative 但界面不支持时保留事实交接并明确说明', async () => {
+    let captured = ''
+    const ctx = makeCtx({
+      parts: ['/handoff', '--narrative'],
+      pushStatic: (entry: LogEntry) => { captured += `${entry.content}\n` },
+      currentSessionId: 'sess-handoff-002',
+      agent: agentAt(dir),
+    })
+    assert.equal(await handleSlashCommand(ctx), true)
+    assert.match(captured, /事实交接已归档/)
+    assert.match(captured, /不支持模型叙述/)
+  })
+
+  it('任务运行中拒绝生成交接', async () => {
+    let captured = ''
+    const ctx = makeCtx({
+      parts: ['/handoff'],
+      pushStatic: (entry: LogEntry) => { captured += `${entry.content}\n` },
+      currentSessionId: 'sess-handoff-003',
+      agent: agentAt(dir, true),
+    })
+    assert.equal(await handleSlashCommand(ctx), true)
+    assert.match(captured, /当前任务仍在运行/)
+  })
+
+  it('两个交错会话的 --narrative 请求注册不同完整身份源文件', async () => {
     const requests: Array<{ sourcePath: string; destinationPath: string }> = []
     for (const sessionId of ['session-full-id-A', 'session-full-id-B']) {
       await handleSlashCommand(makeCtx({
-        parts: ['/handoff'],
+        parts: ['/handoff', '--narrative'],
         submitToAgent: () => {},
-        onHandoffStart: request => requests.push(request),
+        onHandoffStart: (request) => { requests.push(request) },
         currentSessionId: sessionId,
+        agent: agentAt(dir),
       }))
     }
     assert.equal(requests.length, 2)

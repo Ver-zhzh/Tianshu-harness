@@ -98,7 +98,12 @@ function ensureReplacementInPool(
     Array.isArray(models) && models.some(m =>
       !!m && typeof m === 'object' && (m as { id?: unknown }).id === replacementId)
 
+  // deepseek-spark 由 pro-registry 运行时注册，不在 PROVIDER_PRESETS 里
+  // （findPresetModel 只查后者）→ 借用官方 deepseek 的同名条目兜底：两条通道同
+  // 端点、同 wire id，条目只供选择器解析。计费另有 findUsagePricing 按
+  // api.deepseek.com 官方口径动态覆盖；tier/effort 的通道差异见 src/pro/spark/preset.ts。
   const preset = findPresetModel(providerName, replacementId)
+    ?? (providerName === 'deepseek-spark' ? findPresetModel('deepseek', replacementId) : undefined)
   if (!preset) return false // 查不到 preset 条目时无源可补——返回 true 会让每次加载都做无用写盘
   const appendPresetEntry = (models: unknown[]): void => {
     models.push({
@@ -233,6 +238,16 @@ export function migrateDeepseekVisionExpRetirement(raw: Record<string, unknown>)
  * 幂等。Mutates `raw` in place. Returns true if any value was changed.
  */
 export function migrateDeepseekV4FlashRetirement(raw: Record<string, unknown>): boolean {
+  // 官方两条通道（deepseek / deepseek-spark）同端点、各有独立 key 池与 preset。
+  // Spark 的池已登记 deepseek-flash、历史 worker 路由却仍写 deepseek-v4-flash 时，
+  // 主会话正常、子代理却在请求前报 model_deleted（2026-10-24 收编公开仓 PR #37）。
+  // 两遍都跑：迁移只看 provider 名精确匹配的引用，通道之间不会串。
+  const standard = migrateOfficialFlashRetirement(raw, 'deepseek')
+  const spark = migrateOfficialFlashRetirement(raw, 'deepseek-spark')
+  return standard || spark
+}
+
+function migrateOfficialFlashRetirement(raw: Record<string, unknown>, providerName: string): boolean {
   const RETIRED = 'deepseek-v4-flash'
   const RETIRED_ALIAS = 'v4-flash'
   const REPLACEMENT = 'deepseek-flash'
@@ -242,13 +257,17 @@ export function migrateDeepseekV4FlashRetirement(raw: Record<string, unknown>): 
 
   const provider = raw.provider as Record<string, unknown> | undefined
   const providers = provider?.providers as Record<string, unknown> | undefined
-  const ds = providers?.['deepseek'] as Record<string, unknown> | undefined
-  if (!isOfficialDeepseek(ds)) return false
-  if (retireProviderModel(ds, RETIRED, REPLACEMENT)) changed = true
+  const prov = providers?.[providerName] as Record<string, unknown> | undefined
+  // 通道不存在时不碰它名下的引用：`isOfficialDeepseek(undefined)` 返回 true
+  // （未配 baseUrl = 继承官方端点），早退避免把残留引用改成指向不存在的 provider。
+  // deepseek 那遍保持原有行为不变（存量配置里引用与 provider 可能已被剪开）。
+  if (providerName === 'deepseek-spark' && !prov) return false
+  if (!isOfficialDeepseek(prov)) return false
+  if (retireProviderModel(prov, RETIRED, REPLACEMENT)) changed = true
 
   const redirectRef = (value: string): { next: string; keyId?: string } | undefined => {
     const parts = value.split(':')
-    if (parts.length < 2 || parts[0] !== 'deepseek') return undefined
+    if (parts.length < 2 || parts[0] !== providerName) return undefined
     if (!isRetired(parts[parts.length - 1])) return undefined
     parts[parts.length - 1] = REPLACEMENT
     // 三段式钉 key：补池落点与被引用 key 对齐（key 不存在时 ensure 内落并集兜底）。
@@ -260,14 +279,16 @@ export function migrateDeepseekV4FlashRetirement(raw: Record<string, unknown>): 
   // 查重守卫，逐引用调用安全：钉不同 key 的引用各自需要本 key 池可达，不能用
   // 「只补一次」的 once 守卫合并。
   const ensurePool = (keyId?: string): void => {
-    if (ensureReplacementInPool(raw, 'deepseek', REPLACEMENT, keyId)) changed = true
+    if (ensureReplacementInPool(raw, providerName, REPLACEMENT, keyId)) changed = true
   }
 
   const redirectProfile = (profile: unknown): void => {
     if (!profile || typeof profile !== 'object') return
     const p = profile as Record<string, unknown>
-    if (p.provider === 'deepseek' && isRetired(p.model)) {
-      ensurePool()
+    if (p.provider === providerName && isRetired(p.model)) {
+      // 钉 key 的引用必须把替代档补进**被引用的那个 key** 池——契约层 keyId 分支
+      // 只认该 key 的池，并集可达不算数（与 defaultModel 三段式同一判据）。
+      ensurePool(typeof p.keyId === 'string' ? p.keyId : undefined)
       p.model = REPLACEMENT
       changed = true
     }
@@ -276,7 +297,7 @@ export function migrateDeepseekV4FlashRetirement(raw: Record<string, unknown>): 
   const agent = raw.agent as Record<string, unknown> | undefined
   if (agent) {
     const vm = agent.visionModel as Record<string, unknown> | undefined
-    if (vm && vm.provider === 'deepseek' && isRetired(vm.model)) {
+    if (vm && vm.provider === providerName && isRetired(vm.model)) {
       ensurePool()
       agent.visionModel = { ...vm, model: REPLACEMENT }
       changed = true
@@ -290,7 +311,9 @@ export function migrateDeepseekV4FlashRetirement(raw: Record<string, unknown>): 
       }
     }
     const greeting = agent.greeting as Record<string, unknown> | undefined
-    if (greeting && greeting.model === RETIRED) {
+    // greeting / compact 的 model 是裸 id、不带 provider 前缀：只在 deepseek 那遍改，
+    // 否则 spark 那遍会对同一个已改写的字段再走一次（字段归属无法区分）。
+    if (providerName === 'deepseek' && greeting && greeting.model === RETIRED) {
       ensurePool()
       greeting.model = REPLACEMENT
       changed = true
@@ -303,7 +326,7 @@ export function migrateDeepseekV4FlashRetirement(raw: Record<string, unknown>): 
   }
 
   const compact = raw.compact as Record<string, unknown> | undefined
-  if (compact && compact.model === RETIRED) {
+  if (providerName === 'deepseek' && compact && compact.model === RETIRED) {
     ensurePool()
     compact.model = REPLACEMENT
     changed = true
@@ -314,6 +337,13 @@ export function migrateDeepseekV4FlashRetirement(raw: Record<string, unknown>): 
   if (profiles) {
     for (const profile of Object.values(profiles)) redirectProfile(profile)
   }
+  // 任务路由与 council 席位同样是 ModelTarget（{provider, model, keyId}）：只修
+  // profiles 会留下「worker 档案已迁、任务路由仍指旧名」的半迁移状态，派发时依旧
+  // model_deleted。字符串路由（指向 profile 名）不是模型引用，redirectProfile 跳过。
+  const routing = workers?.routing as Record<string, unknown> | undefined
+  if (routing) for (const target of Object.values(routing)) redirectProfile(target)
+  const council = agent?.council as { seats?: unknown[] } | undefined
+  if (Array.isArray(council?.seats)) for (const seat of council.seats) redirectProfile(seat)
 
   // 悬空守卫（2026-10-08，3.28→3.29 已迁移用户缺口）：上面的补池只在「确有引用
   // 被重定向」时发生。已迁移用户（引用早已 = REPLACEMENT、池里却没有它——设置页
@@ -341,9 +371,9 @@ export function migrateDeepseekV4FlashRetirement(raw: Record<string, unknown>): 
   //                                     现存 key id 时按消歧语义整段是模型 id
   //                                     （≠ 本档），补哪都救不了，不判指向（少做
   //                                     侧——伪造 key 比悬空更难排查）。
-  const poolHoldsId = (prov: unknown, id: string): boolean => {
-    if (!prov || typeof prov !== 'object') return false
-    const p = prov as Record<string, unknown>
+  const poolHoldsId = (entry: unknown, id: string): boolean => {
+    if (!entry || typeof entry !== 'object') return false
+    const p = entry as Record<string, unknown>
     const has = (models: unknown): boolean =>
       Array.isArray(models) && models.some(m =>
         !!m && typeof m === 'object' && (m as { id?: unknown }).id === id)
@@ -353,22 +383,22 @@ export function migrateDeepseekV4FlashRetirement(raw: Record<string, unknown>): 
     }
     return has(p.models)
   }
-  const dsKeyIds = new Set(
-    (Array.isArray(ds?.keys) ? ds.keys : [])
+  const provKeyIds = new Set(
+    (Array.isArray(prov?.keys) ? prov.keys : [])
       .filter(k => !!k && typeof k === 'object')
       .map(k => (k as { id?: unknown }).id),
   )
   const pointsToReplacement = (ref: unknown): { referenced: boolean; keyId?: string } => {
     if (typeof ref !== 'string') return { referenced: false }
     if (ref === REPLACEMENT) {
-      const heldElsewhere = Object.entries(providers ?? {}).some(([name, prov]) =>
-        name !== 'deepseek' && poolHoldsId(prov, REPLACEMENT))
+      const heldElsewhere = Object.entries(providers ?? {}).some(([name, entry]) =>
+        name !== providerName && poolHoldsId(entry, REPLACEMENT))
       return { referenced: !heldElsewhere }
     }
     const parts = ref.split(':')
-    if (parts.length < 2 || parts[0] !== 'deepseek') return { referenced: false }
+    if (parts.length < 2 || parts[0] !== providerName) return { referenced: false }
     if (parts.length === 2) return { referenced: parts[1] === REPLACEMENT }
-    if (parts.length === 3 && parts[2] === REPLACEMENT && dsKeyIds.has(parts[1])) {
+    if (parts.length === 3 && parts[2] === REPLACEMENT && provKeyIds.has(parts[1])) {
       return { referenced: true, keyId: parts[1] }
     }
     return { referenced: false }
@@ -378,9 +408,9 @@ export function migrateDeepseekV4FlashRetirement(raw: Record<string, unknown>): 
   let referencedKeyId = dmRef.keyId
   if (!replacementReferenced && agent) {
     const vm = agent.visionModel as Record<string, unknown> | undefined
-    replacementReferenced = !!vm && vm.provider === 'deepseek' && vm.model === REPLACEMENT
+    replacementReferenced = !!vm && vm.provider === providerName && vm.model === REPLACEMENT
   }
-  if (replacementReferenced && ensureReplacementInPool(raw, 'deepseek', REPLACEMENT, referencedKeyId)) changed = true
+  if (replacementReferenced && ensureReplacementInPool(raw, providerName, REPLACEMENT, referencedKeyId)) changed = true
 
   return changed
 }

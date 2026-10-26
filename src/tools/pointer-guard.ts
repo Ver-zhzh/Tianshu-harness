@@ -113,7 +113,7 @@ export function pointerPlaceholderError(opts: {
 }): string {
   return (
     `❌ 写入被拦截：${opts.field} 的内容是历史消息里的显示指针（"${opts.matchedPrefix} …"），不是真实的文件内容。\n\n`
-    + `机制：大内容写入成功后，历史消息中的参数会被替换成这种显示指针（节省上下文 token）——你之前的写入已成功落盘，没有出错；这次是把历史里的指针误当正文传了回来。\n\n`
+    + `机制：大请求的历史参数会被折叠成显示指针以节省上下文；指针本身不能证明执行成功、失败或回滚。请以工具执行回执和磁盘当前内容为准，不要把指针当作正文。\n\n`
     + `修复：先 read_file ${opts.filePath} 看磁盘当前内容——它很可能已经是你要写的完整内容（若是，直接继续下一步，不要重写）；确认需要修改时，再用真实完整内容调用 ${opts.toolName}。\n\n`
     + `[${POINTER_GUARD_ERROR_MARKER}]`
   )
@@ -160,6 +160,7 @@ export interface IdempotentResolveInput {
 export async function resolveIdempotentPointer(
   input: IdempotentResolveInput,
 ): Promise<{ content: string; isError?: false } | null> {
+  if (input.value.includes('执行状态以工具结果为准') || input.value.includes('仅请求；见执行回执')) return null
   const ptrPath = parsePointerPath(input.value, input.matchedPrefix)
   if (!ptrPath) return null
   if (canonicalizePathForCompare(ptrPath) !== canonicalizePathForCompare(toPosixPath(input.filePath))) return null

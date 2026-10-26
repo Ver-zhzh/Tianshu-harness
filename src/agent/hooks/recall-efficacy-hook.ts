@@ -16,18 +16,18 @@ export interface RecallEfficacyHookDeps {
 }
 
 export function createRecallEfficacyHook(deps: RecallEfficacyHookDeps): PostSessionRuntimeHook {
+  const capture = (): PostSessionRuntimeHook['run'] => {
+    const tracker = getRecallTracker(deps.sessionId)
+    const assistantText = deps.getAssistantText()
+    releaseRecallTracker(deps.sessionId)
+    return () => {
+      if (tracker.recallCount > 0) tracker.finalize(deps.cwd, assistantText)
+    }
+  }
   return {
     phase: 'postSession',
     name: 'recall-efficacy',
-    run() {
-      const tracker = getRecallTracker(deps.sessionId)
-      try {
-        if (tracker.recallCount > 0) {
-          tracker.finalize(deps.cwd, deps.getAssistantText())
-        }
-      } finally {
-        releaseRecallTracker(deps.sessionId)
-      }
-    },
+    capture,
+    run: ctx => capture()(ctx),
   }
 }

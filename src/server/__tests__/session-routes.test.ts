@@ -677,7 +677,7 @@ test('Plan: approve an empty plan hard-fails with 422 and stays untouched', asyn
 
 // 桌面批准必须走完整分波闭环——kickoff 指示 read_file → plan_task/team_orchestrate
 // 逐波过审查门 → plan_close，否则 wave-gate 防线被绕过（旧版一句「开始执行」）。
-test('Plan: approve kickoff drives wave execution through the review gates', async () => {
+test('Plan: approve kickoff follows approved steps without mandatory review gates', async () => {
   const { manager, router, agents } = setup()
   const dir = mkdtempSync(join(tmpdir(), 'rivet-plans-'))
   const plansDir = join(dir, '.rivet', 'plans')
@@ -689,8 +689,9 @@ test('Plan: approve kickoff drives wave execution through the review gates', asy
   assert.equal(res.status, 200)
   const kickoff = agents[0]!.runPrompts[0]!
   assert.match(kickoff, /read_file/, 'kickoff instructs reading the plan file')
-  assert.match(kickoff, /plan_task\(execute=true\)|team_orchestrate/, 'kickoff instructs wave execution')
-  assert.match(kickoff, /plan_close/, 'kickoff instructs closing the plan when done')
+  assert.doesNotMatch(kickoff, /逐波过审查门|team_orchestrate|按波次并行执行/)
+  assert.match(kickoff, /仅执行计划明确包含且用户已批准的步骤/)
+  assert.match(kickoff, /plan\(action="close"/, 'kickoff instructs implementation closure')
 })
 
 // Wave 3 — plan editing (review → tweak → Build): only submitted plans are

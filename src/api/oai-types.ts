@@ -36,6 +36,8 @@ export type OaiContentPart = OaiTextPart | OaiImagePart
 
 /** User message — content is plain text or multimodal parts (vision). */
 export interface OaiUserMessage {
+  /** Local provenance: an explicit visual re-query must see the original once. */
+  imagePolicy?: 'original'
   role: 'user'
   content: string | OaiContentPart[]
   /** Local-only provenance, persisted but removed before transport. */
@@ -309,8 +311,8 @@ export interface OaiUsage {
 
 /** Provenance is local storage metadata, never a provider parameter. */
 export function wireOaiMessage(message: OaiMessage): OaiMessage {
-  if (message.role !== 'user' || !message.origin) return message
-  const { origin: _origin, ...wire } = message
+  if (message.role !== 'user' || (!message.origin && !message.imagePolicy)) return message
+  const { origin: _origin, imagePolicy: _policy, ...wire } = message
   return wire
 }
 
