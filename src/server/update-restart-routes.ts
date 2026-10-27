@@ -29,7 +29,10 @@ export function buildUpdateRestartRoutes(manager: UpdateRestartManager, apiToken
           : error instanceof Error && error.message === 'UPDATE_BUSY_TIMEOUT' ? 'UPDATE_BUSY_TIMEOUT'
           : 'UPDATE_SAVE_FAILED'
         const unavailable = error instanceof Error && error.message === 'UPDATE_PERSISTENCE_UNAVAILABLE'
-        return { status: code === 'UPDATE_SAVE_FAILED' ? 503 : 409, body: { error: code, stage: unavailable ? 'runtime_capability' : code === 'UPDATE_SAVE_FAILED' ? 'runtime_save' : 'activity', retryable: !unavailable, ...manager.updateRestartActivity() } }
+        // cause 透出真实抛出点（abort 超时 / 写链失败 / flush 超时等）——此前一律
+        // 显示「落盘核对失败」，0 失败 0 待保存的误拦因此无法诊断（3.36.x 发版实测）。
+        const cause = error instanceof Error ? error.message : String(error)
+        return { status: code === 'UPDATE_SAVE_FAILED' ? 503 : 409, body: { error: code, stage: unavailable ? 'runtime_capability' : code === 'UPDATE_SAVE_FAILED' ? 'runtime_save' : 'activity', retryable: !unavailable, cause, ...manager.updateRestartActivity() } }
       }
     }, apiToken),
     'POST /runtime/update-cancel': withAuth(() => { cancel(); return { status: 200, body: { cancelled: true } } }, apiToken),

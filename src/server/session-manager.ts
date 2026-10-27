@@ -5073,9 +5073,15 @@ export class RuntimeSessionManager {
       // allowUnsaved（用户在前端明示「仍然更新」）：逐会话落盘核对从硬门降级为
       // 尽力而为——写链已死的会话不更新也不会更安全（损失已经发生），但默认
       // 保持 fail-closed，未经同意绝不带未核对的缓冲重启。
+      // 2026-10-27：路由 30s deadline 烧穿在 flush 阶段抛 TimeoutError abort——
+      // allowUnsaved 下它同样降级（否则 0 失败 0 待保存也被误拦，3.36.x 实证）；
+      // 显式取消（reason 非 TimeoutError）不受降级保护，恒拦截。
+      const deadlineBurned = () =>
+        signal.aborted && (signal.reason as { name?: string } | undefined)?.name === 'TimeoutError'
+      const throwUnlessUserAborted = () => { if (signal.aborted && !(opts?.allowUnsaved && deadlineBurned())) signal.throwIfAborted() }
       let unsavedFailures = 0
       for (const s of this.sessions.values()) {
-        signal.throwIfAborted()
+        throwUnlessUserAborted()
         try {
           this.flushDeltaBuf(s)
           this.flushToolResultBuf(s)
@@ -5088,16 +5094,16 @@ export class RuntimeSessionManager {
           const watermark = await this.persistence.flushThrough(s.record.id, s.seq, signal)
           if (watermark < s.seq) throw new Error('UPDATE_PERSISTENCE_FAILED')
         } catch (error) {
-          if (!opts?.allowUnsaved || signal.aborted) throw error
+          if (!opts?.allowUnsaved || (signal.aborted && !deadlineBurned())) throw error
           unsavedFailures++
         }
       }
       if (unsavedFailures > 0) debugLog(`[update-restart] allowUnsaved: proceeded with ${unsavedFailures} session(s) failing persistence flush`)
-      signal.throwIfAborted()
+      throwUnlessUserAborted()
       if (!this.persistence?.flushAllAsync) throw new Error('UPDATE_PERSISTENCE_UNAVAILABLE')
       if (opts?.allowUnsaved) await this.persistence.flushAllAsync(5000).catch(() => {})
       else await this.persistence.flushAllAsync(5000)
-      signal.throwIfAborted()
+      throwUnlessUserAborted()
       const failedSessions = this.persistence.healthSnapshot?.().failedSessions ?? 0
       if (failedSessions > 0 && !opts?.allowUnsaved) throw new Error('UPDATE_PERSISTENCE_FAILED')
     } catch (error) { this.updateRestartPreparing = false; throw error }

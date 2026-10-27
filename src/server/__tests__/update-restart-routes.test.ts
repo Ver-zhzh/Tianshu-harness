@@ -13,5 +13,5 @@ test('save diagnostics carry the stage, retryability and pending event count', a
     prepareUpdateRestart: async () => { throw new Error('UPDATE_PERSISTENCE_FAILED') }, cancelUpdateRestart: () => {} }, 'test-update-token')
   const result = await routes['POST /runtime/update-prepare']!({}, {}, headers)
   assert.equal(result.status, 503)
-  assert.deepEqual(result.body, { error: 'UPDATE_SAVE_FAILED', stage: 'runtime_save', retryable: true, sessions: 0, tasks: 0, failedSessions: 2, pendingEvents: 7 })
+  assert.deepEqual(result.body, { error: 'UPDATE_SAVE_FAILED', stage: 'runtime_save', retryable: true, cause: 'UPDATE_PERSISTENCE_FAILED', sessions: 0, tasks: 0, failedSessions: 2, pendingEvents: 7 })
 })

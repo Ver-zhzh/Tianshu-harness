@@ -11,7 +11,12 @@
 
 <p align="center">
   <a href="https://github.com/huiliyi37/Tianshu-harness/releases/latest"><img src="https://img.shields.io/github/v/release/huiliyi37/Tianshu-harness?color=8B5CF6&label=Release&logo=github" alt="Release"></a>
+  <a href="https://github.com/huiliyi37/Tianshu-harness/releases"><img src="https://img.shields.io/github/downloads/huiliyi37/Tianshu-harness/total?color=181717&label=GitHub%20%E4%B8%8B%E8%BD%BD&logo=github" alt="GitHub Downloads"></a>
   <a href="https://www.npmjs.com/package/tianshu-harness"><img src="https://img.shields.io/npm/v/tianshu-harness?color=CB3837&label=npm&logo=npm" alt="npm"></a>
+  <a href="https://www.npmjs.com/package/tianshu-harness"><img src="https://img.shields.io/npm/d18m/tianshu-harness?color=CB3837&label=npm%20%E4%B8%8B%E8%BD%BD&logo=npm" alt="npm Downloads"></a>
+</p>
+
+<p align="center">
   <a href="https://tianshuharness.com"><img src="https://img.shields.io/badge/Website-tianshuharness.com-4285F4?logo=googlechrome&logoColor=white" alt="Website"></a>
   <a href="docs/user-guide.md"><img src="https://img.shields.io/badge/Docs-%E7%94%A8%E6%88%B7%E6%89%8B%E5%86%8C-FBBC04" alt="Docs"></a>
   <a href="https://discord.gg/XjWTATCHB"><img src="https://img.shields.io/badge/Discord-%E4%BA%A4%E6%B5%81%E7%BE%A4-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
