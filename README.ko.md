@@ -31,7 +31,7 @@
   <img src="https://img.shields.io/badge/License-Apache%202.0-3B5BDB?style=for-the-badge&logo=apache" alt="License">
   <img src="https://img.shields.io/badge/TypeScript-Strict-blue?style=for-the-badge&logo=typescript" alt="TypeScript">
   <img src="https://img.shields.io/badge/Tests-19%2C000%2B%20Passed-green?style=for-the-badge&logo=testinglibrary" alt="Tests">
-  <a href="https://discord.gg/XjWTATCHB"><img src="https://img.shields.io/badge/Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Discord"></a>
+  <a href="https://discord.gg/aNEPzPuYV"><img src="https://img.shields.io/badge/Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Discord"></a>
   <a href="https://atomgit.com/huiliyi37/Tianshu-harness"><img src="https://atomgit.com/huiliyi37/Tianshu-harness/star/badge.svg" alt="AtomGit Star"></a>
   <a href="https://github.com/huiliyi37/Tianshu-harness/releases"><img src="https://img.shields.io/github/downloads/huiliyi37/Tianshu-harness/total?logo=github&label=downloads" alt="GitHub downloads"></a>
   <a href="https://www.npmjs.com/package/tianshu-tui"><img src="https://img.shields.io/npm/dm/tianshu-tui?label=npm%20tianshu-tui" alt="npm tianshu-tui downloads"></a>
@@ -1171,7 +1171,7 @@ tianshu logs open desktop            # sidecar 로그 디렉터리 열기（GUI�
 ## 🤝 커뮤니티와 지원
 
 - **사용 문제 / 토론** → [GitHub Discussions](https://github.com/huiliyi37/Tianshu-harness/discussions)
-- **Discord 커뮤니티** → [Tianshu Harness Discord 참여](https://discord.gg/XjWTATCHB)
+- **Discord 커뮤니티** → [Tianshu Harness Discord 참여](https://discord.gg/aNEPzPuYV)
 - **버그 리포트 / 기능 요청** → [GitHub Issues](https://github.com/huiliyi37/Tianshu-harness/issues)
 - **보안 취약점** → [비공개 보고](https://github.com/huiliyi37/Tianshu-harness/security/advisories/new)（공개 issue를 열지 말 것）
 - **코드 기여** → [CONTRIBUTING.md](CONTRIBUTING.md) 참조

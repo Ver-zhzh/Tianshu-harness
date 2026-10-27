@@ -25,6 +25,15 @@
  */
 export const PROTOCOL_VERSION = 1
 
+/** Bump only when persistent data can no longer be read by the previous runtime. */
+export const DATA_FORMAT_VERSION = 1
+export const MOBILE_FEATURES = [
+  'sessions', 'chat', 'events', 'approvals', 'providers', 'schedule', 'tasks', 'files',
+  'skills', 'memory', 'git', 'mcp', 'missions', 'storage', 'config', 'insights',
+  'profile', 'speech', 'plugins', 'artifacts',
+] as const
+export type MobileFeature = typeof MOBILE_FEATURES[number]
+
 /**
  * 运行时能力表 —— `GET /health` 的 `capabilities` 字段（issue #266 的环境面）。
  *
@@ -38,6 +47,8 @@ export const PROTOCOL_VERSION = 1
  * SCHEDULE_PATCH_MIN_VERSION）。本文件同时被桌面端 type-only 引用，两侧不会漂移。
  */
 export interface RuntimeCapabilities {
+  /** Additive mobile feature declaration; clients disable missing/false features. */
+  mobileFeatures?: Partial<Record<MobileFeature, boolean>>
   /** `PATCH /schedule/:id` —— 自动化定义的原地更新（#236 起，见 3.24.0）。 */
   requestLookup?: boolean
   schedulePatch: boolean
@@ -45,6 +56,7 @@ export interface RuntimeCapabilities {
 
 /** 本构建实际具备的能力：加能力 = 这里加一行 `true`。 */
 export const RUNTIME_CAPABILITIES: RuntimeCapabilities = {
+  mobileFeatures: Object.fromEntries(MOBILE_FEATURES.map(feature => [feature, true])),
   schedulePatch: true,
   requestLookup: true,
 }

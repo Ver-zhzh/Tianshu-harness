@@ -12,7 +12,7 @@ import type { RuntimeSessionManager } from './session-manager.js'
 import type { LoopLagSnapshot } from './loop-health.js'
 import type { StoreLockHolder } from './store-lock.js'
 import { isAuthorizedRequest } from './auth.js'
-import { PROTOCOL_VERSION, RUNTIME_CAPABILITIES, type RuntimeCapabilities } from './protocol.js'
+import { PROTOCOL_VERSION, DATA_FORMAT_VERSION, RUNTIME_CAPABILITIES, type RuntimeCapabilities } from './protocol.js'
 import { DELIVERY_CONTRACT_VERSION } from '../agent/delivery-contract.js'
 import { recentRuntimeDiagnostics, RUNTIME_INSTANCE_ID, type RuntimeDiagnostic } from '../utils/runtime-diagnostics.js'
 import { RUNTIME_PROVENANCE } from '../utils/runtime-provenance.js'
@@ -35,6 +35,7 @@ export interface HealthBody {
   ok: boolean
   version: string
   protocolVersion: number
+  dataFormatVersion?: number
   /** 本运行时**自报**能处理哪些请求族（issue #266）——前端据此决定要不要禁用入口，
    *  而不是靠版本号猜。加性字段：老运行时缺它时前端回退版本比较。 */
   capabilities: RuntimeCapabilities
@@ -91,6 +92,7 @@ export function createHealthSnapshot(
       ok: registryOk && configuredOk,
       version,
       protocolVersion: PROTOCOL_VERSION,
+      dataFormatVersion: DATA_FORMAT_VERSION,
       capabilities: RUNTIME_CAPABILITIES,
       uptimeMs: Date.now() - startedAt,
       sessionCount,
