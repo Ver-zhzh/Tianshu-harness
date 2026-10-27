@@ -5,7 +5,7 @@
 <h1 align="center">天枢 Tianshu Harness</h1>
 
 <p align="center">
-  <b>面向编程智能体的认知运行时</b><br>
+  <b>面向编程智能体的终端运行时，把东方的星辰带给世界的每一个开发者。</b><br>
   <sub>目标不漂移 · 完成有证据 · 验证有闭环</sub>
 </p>
 
