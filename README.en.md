@@ -17,6 +17,10 @@
 </p>
 
 <p align="center">
+  <a href="https://trendshift.io/repositories/100440" target="_blank"><img src="https://trendshift.io/api/badge/trendshift/repositories/100440/daily?language=TypeScript" alt="Trendshift: TypeScript repository of the day" width="250" height="55"></a>
+</p>
+
+<p align="center">
   <a href="https://tianshuharness.com"><img src="https://img.shields.io/badge/Website-tianshuharness.com-4285F4?logo=googlechrome&logoColor=white" alt="Website"></a>
   <a href="docs/user-guide.md"><img src="https://img.shields.io/badge/Docs-User%20Guide-FBBC04" alt="Docs"></a>
   <a href="https://discord.gg/XjWTATCHB"><img src="https://img.shields.io/badge/Discord-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
