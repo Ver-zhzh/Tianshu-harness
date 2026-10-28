@@ -65,7 +65,7 @@
 
 <p align="center">
   <img src="docs/brand/assets/tianshu-harness-screenshot.png" alt="天枢终端 TUI：欢迎页与 GlanceBar 状态栏" width="49%">
-  <img src="docs/brand/assets/tianshu-gui-screenshot.jpg" alt="天枢桌面端：会话侧栏与星域速选" width="49%">
+  <img src="docs/brand/assets/tianshu-gui-screenshot.jpg" alt="天枢桌面端：首页与新任务面板" width="49%">
 </p>
 <p align="center"><sub>左：终端 TUI　·　右：桌面端　·　同一个 agent 内核</sub></p>
 

@@ -66,7 +66,7 @@ A model's **capability ceiling** is not its **runtime behaviour**. Put the same 
 
 <p align="center">
   <img src="docs/brand/assets/tianshu-harness-screenshot.png" alt="Tianshu terminal TUI: welcome screen and GlanceBar status line" width="49%">
-  <img src="docs/brand/assets/tianshu-gui-screenshot.jpg" alt="Tianshu desktop app: session sidebar and star-domain picker" width="49%">
+  <img src="docs/brand/assets/tianshu-gui-screenshot.jpg" alt="Tianshu desktop app: home and new-task panel" width="49%">
 </p>
 <p align="center"><sub>Left: terminal TUI · Right: desktop app · one agent kernel</sub></p>
 
