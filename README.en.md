@@ -52,7 +52,7 @@ A model's **capability ceiling** is not its **runtime behaviour**. Put the same 
 **Tianshu** is a coding-agent runtime written in TypeScript. The terminal TUI, the desktop app, and the VS Code extension share one agent kernel. Between the model and the real world it places a **Cognitive Virtual Machine (CVM)** that lifts goals, state, evidence, permissions, and termination conditions out of the conversation history and hands them to the runtime:
 
 * **Task contracts** — Every task gets a `TaskContract` recording goal, scope, constraints, and success criteria. Long sessions are held by the runtime, not by the model's memory.
-* **Evidence-gated delivery** — "Done" has to pass the `deliver_task` gate. Without tests, diffs, or verification commands as evidence, delivery is blocked.
+* **Separated commit, verification and review** — `deliver_task` performs only an ownership-scoped safe commit: it blocks on ownership, cross-session conflicts and version consistency; verification gaps are disclosed honestly, never blocked on and never turned into quality endorsement. Targeted verification uses `run_tests` (explicit scope), independent review uses `review_changes` or `/review`.
 * **A deterministic outer loop** — 75 runtime hook modules across five phases of a turn, together with Sensorium state awareness and stall detection, observe and correct between model output and real action.
 
 <table>
@@ -60,7 +60,7 @@ A model's **capability ceiling** is not its **runtime behaviour**. Put the same 
     <td align="center" width="25%"><b>99.3–99.6%</b><br><sub>prefix-cache hit rate<br>across 5 real long sessions</sub></td>
     <td align="center" width="25%"><b>¥880 → ¥20</b><br><sub>estimated input cost on the same<br>sessions at list price</sub></td>
     <td align="center" width="25%"><b>25</b><br><sub>built-in provider presets, plus any<br>OpenAI-compatible endpoint</sub></td>
-    <td align="center" width="25%"><b>22,000</b><br><sub>test cases, roughly<br>1:1 with source lines</sub></td>
+    <td align="center" width="25%"><b>23,000</b><br><sub>test cases, roughly<br>1:1 with source lines</sub></td>
   </tr>
 </table>
 
@@ -264,7 +264,7 @@ This is a small pilot: 5 tasks, a single model, LLM review. It also measured the
 
 ### Engineering
 
-As of 2026-10: `src/` holds roughly 1,600 source files and 330K lines; tests are about 1,900 files and 22,000 cases. TypeScript strict with `noUncheckedIndexedAccess`, and every incident fix ships with a regression test. Definitions and milestones: [Engineering Metrics](docs/engineering-metrics.md).
+As of 2026-10 (v3.37): `src/` holds roughly 1,700 source files and 350K lines; tests are about 2,100 files and 23,000 cases. TypeScript strict with `noUncheckedIndexedAccess`, and every incident fix ships with a regression test. Definitions and milestones: [Engineering Metrics](docs/engineering-metrics.md).
 
 <a id="star-domains"></a>
 ## Star Domains
@@ -301,15 +301,16 @@ New sessions default to **Qiming**. Switch with `/domain <name>`, auto-match fro
 | | |
 |---|---|
 | **Multi-agent orchestration** | `/scout` read-only parallel reconnaissance, `/team` wave-based parallel execution, `/council` multi-domain review that only produces a plan, `/galaxy` dimension-split attack with a global review. [Details](docs/user-guide.md#子代理编排) |
+| **Separated review & verification** | Commits never auto-verify or auto-review: targeted verification via `run_tests` (empty input previews the scope), independent review via `review_changes` (pinned snapshot, read-only reviewer, persisted findings); delivery receipts carry no quality endorsement |
 | **Prefix cache engine** | Frozen prefix, delta appendix, read deduplication, resume cache inheritance; `/debug cache` diagnoses hit rate and fragmentation. [Details](docs/user-guide.md#前缀缓存引擎) |
 | **Plan Mode & Goal** | Plan, approve, then execute; `/goal` holds a goal across many turns until it is met or the budget runs out. [Details](docs/user-guide.md#plan-mode计划模式) |
 | **Handoff & rewind** | `/handoff` writes a structured handoff document; double-tap `Esc` rewinds to any earlier point. [Details](docs/user-guide.md#会话交接与恢复handoff--resume) |
-| **Project memory** | Knowledge is written to `.rivet/knowledge/memory.jsonl`; auto-injection carries constraint memories only, older findings need explicit recall and never hijack a new task. [Details](docs/user-guide.md#跨会话记忆) |
+| **Project memory** | Knowledge is written to `.rivet/knowledge/memory.jsonl`; auto-injection carries constraint memories only, older findings need explicit recall and never hijack a new task; automatic memory formation is opt-in (off by default). [Details](docs/user-guide.md#跨会话记忆) |
 | **LSP integration** | 20+ language servers; go-to-definition and find-references become agent tools, and post-edit diagnostics flow back into the turn. Enabled only when installed locally |
 | **MCP & Skills** | External tool servers; reusable workflow playbooks with progressive disclosure, managed by `tianshu skills`. [Details](docs/user-guide.md#mcpmodel-context-protocol) |
 | **Cost control** | Automatic reasoning-effort downgrade, flash-model compaction, peak/off-peak pricing badge, `/usage` for the local token ledger. [Details](docs/user-guide.md#api-成本控制) |
 | **Pure-ANSI TUI** | Zero dependencies: GlanceBar status line, `/steer` mid-stream interrupt, command palette, inline images, plain-text mode for restricted terminals. [Details](docs/user-guide.md#终端-uitui) |
-| **Desktop app** | Integrated terminal, theme studio, offline local voice input, phone remote approval, concurrent sessions, WSL runtime on Windows. [Desktop Guide](docs/desktop-guide.md) |
+| **Desktop app** | Integrated terminal, theme studio, offline local voice input, phone remote approval, concurrent sessions, WSL runtime on Windows; auto-update with resumable downloads, verified sources and self-recovery. [Desktop Guide](docs/desktop-guide.md) |
 
 <a id="supported-models"></a>
 ## Supported Models

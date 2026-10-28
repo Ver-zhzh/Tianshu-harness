@@ -51,7 +51,7 @@
 **天枢**是一个 TypeScript 编写的编程 agent 运行时，终端 TUI、桌面端和 VS Code 插件共用同一个内核。它在模型和真实世界之间加了一层**认知执行环境 CVM**（Cognitive Virtual Machine），把目标、状态、证据、权限和终止条件从对话历史里拿出来，交给运行时持续管理：
 
 * **任务契约**：每个任务有独立的 `TaskContract`，记录目标、范围、约束和成功标准。长会话里的目标由运行时持有，不依赖模型「记得」。
-* **证据门控的交付**：「完成」要过 `deliver_task` 交付门。没有测试、diff 或验证命令作为证据，交付会被拦下。
+* **提交、验证、审查分离的交付**：`deliver_task` 只做归属限定的安全提交——所有权、跨会话冲突、版本一致性不合格就拦下；验证缺口如实披露但不阻断、也不冒充质量背书。定向验证用 `run_tests`（显式范围），独立审查用 `review_changes` 或 `/review`。
 * **确定性监督外环**：75 个运行时 hook 模块分布在一个回合的五个阶段，配合 Sensorium 状态感知与收敛、空转检测，在模型输出与真实动作之间做观测和纠偏。
 
 <table>
@@ -59,7 +59,7 @@
     <td align="center" width="25%"><b>99.3–99.6%</b><br><sub>5 个真实长会话的<br>前缀缓存命中率</sub></td>
     <td align="center" width="25%"><b>¥880 → ¥20</b><br><sub>同一批会话按刊例价<br>估算的 input 成本</sub></td>
     <td align="center" width="25%"><b>25 项</b><br><sub>模型服务商预设<br>另支持 OpenAI 兼容端点</sub></td>
-    <td align="center" width="25%"><b>2.2 万条</b><br><sub>测试用例<br>与源码规模约 1:1</sub></td>
+    <td align="center" width="25%"><b>2.3 万条</b><br><sub>测试用例<br>与源码规模约 1:1</sub></td>
   </tr>
 </table>
 
@@ -252,7 +252,7 @@ CVM 不改权重，也不把模型变成确定性程序，而是在概率认知�
 
 ### 工程
 
-截至 2026-10：`src/` 约 1,600 个源码文件、33 万行，测试约 1,900 个文件、2.2 万条用例。TypeScript strict，开启 `noUncheckedIndexedAccess`，事故修复必须附回归测试。口径与里程碑见 [工程质量指标](docs/engineering-metrics.md)。
+截至 2026-10（v3.37）：`src/` 约 1,700 个源码文件、35 万行，测试约 2,100 个文件、2.3 万条用例。TypeScript strict，开启 `noUncheckedIndexedAccess`，事故修复必须附回归测试。口径与里程碑见 [工程质量指标](docs/engineering-metrics.md)。
 
 ## 星域
 
@@ -269,15 +269,16 @@ CVM 不改权重，也不把模型变成确定性程序，而是在概率认知�
 | | |
 |---|---|
 | **多代理编排** | `/scout` 只读并行侦察，`/team` 按文件分波并行施工，`/council` 多星域会诊只出计划，`/galaxy` 按维度拆分并做全局审查。[详情](docs/user-guide.md#子代理编排) |
+| **审查与验证分离** | 提交不自动验证也不自动派审查：定向验证 `run_tests`（空参数只给范围预览），独立审查 `review_changes`（固定快照、只读 reviewer、发现持久化），交付回执不作质量背书 |
 | **前缀缓存引擎** | 冻结前缀、增量附录、Read 去重、resume 缓存继承，`/debug cache` 诊断命中率与碎裂原因。[详情](docs/user-guide.md#前缀缓存引擎) |
 | **Plan Mode 与 Goal** | 先计划、审批、再执行；`/goal` 设定跨多轮目标，持续迭代到达成或预算耗尽。[详情](docs/user-guide.md#plan-mode计划模式) |
 | **交接与倒带** | `/handoff` 生成结构化交接文档；双击 `Esc` 倒带到任一历史点。[详情](docs/user-guide.md#会话交接与恢复handoff--resume) |
-| **项目记忆** | 知识写入 `.rivet/knowledge/memory.jsonl`；自动注入只带约束类记忆，旧问题显式 recall，不劫持新任务。[详情](docs/user-guide.md#跨会话记忆) |
+| **项目记忆** | 知识写入 `.rivet/knowledge/memory.jsonl`；自动注入只带约束类记忆，旧问题显式 recall，不劫持新任务；自动记忆形成为 opt-in（默认关闭）。[详情](docs/user-guide.md#跨会话记忆) |
 | **LSP 集成** | 20+ 种语言服务器，跳转定义与查找引用作为 agent 工具，编辑后的诊断自动回注。本机装了才启用 |
 | **MCP 与 Skills** | 接入外部工具服务器；可复用的工作流剧本，渐进披露，`tianshu skills` 统一管理。[详情](docs/user-guide.md#mcpmodel-context-protocol) |
 | **成本控制** | 推理强度自动降档、压缩走轻量模型、峰谷计价提醒，`/usage` 查看本地 Token 账本。[详情](docs/user-guide.md#api-成本控制) |
 | **自研 TUI** | 纯 ANSI 零依赖：GlanceBar 状态栏、流式中 `/steer` 打断、命令面板、内联图片、受限终端纯文本模式。[详情](docs/user-guide.md#终端-uitui) |
-| **桌面端** | 集成终端、主题工作室、本地离线语音输入、手机遥控审批、多会话并发、Windows 下连接 WSL 运行时。[桌面端指南](docs/desktop-guide.md) |
+| **桌面端** | 集成终端、主题工作室、本地离线语音输入、手机遥控审批、多会话并发、Windows 下连接 WSL 运行时；自动更新断点续传、来源校验、损坏自恢复。[桌面端指南](docs/desktop-guide.md) |
 
 ## 支持的模型
 
