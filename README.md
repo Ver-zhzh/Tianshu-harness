@@ -14,6 +14,8 @@
   <a href="https://github.com/huiliyi37/Tianshu-harness/releases"><img src="https://img.shields.io/github/downloads/huiliyi37/Tianshu-harness/total?color=181717&label=GitHub%20%E4%B8%8B%E8%BD%BD&logo=github" alt="GitHub Downloads"></a>
   <a href="https://www.npmjs.com/package/tianshu-harness"><img src="https://img.shields.io/npm/v/tianshu-harness?color=CB3837&label=npm&logo=npm" alt="npm"></a>
   <a href="https://www.npmjs.com/package/tianshu-harness"><img src="https://img.shields.io/npm/d18m/tianshu-harness?color=CB3837&label=npm%20%E4%B8%8B%E8%BD%BD&logo=npm" alt="npm Downloads"></a>
+  <a href="https://atomgit.com/huiliyi37/Tianshu-harness"><img src="https://atomgit.com/huiliyi37/Tianshu-harness/star/badge.svg" alt="AtomGit Star"></a>
+  <a href="https://atomgit.com/huiliyi37/Tianshu-harness/releases"><img src="https://atomgit.com/huiliyi37/Tianshu-harness/download/badge.svg" alt="AtomGit Downloads"></a>
 </p>
 
 <p align="center">
