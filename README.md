@@ -20,6 +20,8 @@
 
 <p align="center">
   <a href="https://trendshift.io/repositories/100440" target="_blank"><img src="https://trendshift.io/api/badge/trendshift/repositories/100440/daily?language=TypeScript" alt="Trendshift: TypeScript repository of the day" width="250" height="55"></a>
+  &nbsp;
+  <a href="https://atomgit.com/huiliyi37/Tianshu-harness"><img src="https://atomgit.com/huiliyi37/Tianshu-harness/star/new_badge.svg" alt="G-Star Selected by AtomGit" width="250" height="55"></a>
 </p>
 
 <p align="center">
