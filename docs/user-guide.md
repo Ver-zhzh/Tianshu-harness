@@ -640,7 +640,7 @@ tianshu config set-approval auto-safe       # 持久化默认档位
 | `/logs [open [desktop]]` | 本会话日志落点（会话 / 缓存 / 六维 / 桌面 sidecar），含写入门控与回收说明；`open` 在文件管理器中打开 |
 | `/usage` `/token-ledger [status\|sync\|auto on\|auto off\|connect\|disconnect]` | 本地 Token 消耗累计台账与论坛同步设置 |
 | `/connect` | 连接模型服务商向导（选内置或自定义，填 API 密钥） |
-| `/config` `/settings` `/setup` | 设置面板：子代理路由 / 审查开关（`审查 → 关闭提交后自动审查`） / 识图模型 / 工具档位·审批·默认星域·默认模型 / 镜像·代理·搜索后端。`Tab` 切栏、`Enter` 编辑、`S` 保存，每项标注即时或下次会话生效 |
+| `/config` `/settings` `/setup` | 设置面板：子代理路由 / 审查子代理模型（`审查与子代理模型` 栏） / 识图模型 / 工具档位·审批·默认星域·默认模型 / 镜像·代理·搜索后端。`Tab` 切栏、`Enter` 编辑、`S` 保存，每项标注即时或下次会话生效 |
 | `/cd <path>` | 会话中途切换工作目录（保前缀缓存，会话归属迁往新项目） |
 | `/trust` | 项目信任管理——未授信项目不加载 hooks / 项目 MCP，剥离项目配置安全键 |
 | `/exit` `/quit` | 保存会话并退出 |
@@ -677,11 +677,13 @@ tianshu config set-approval auto-safe       # 持久化默认档位
 
 **审查模式**
 
-每次 `deliver_task` 提交代码时，天枢会自动运行提交后审查。审查分两级：文档/配置等机械变更自动跳过（L1 nudge），核心代码变更触发 L2 接线检查（wiring inspector）。审查结果出现在交付报告中，不会阻止提交（advisory）。
+提交、验证、审查三者独立：`deliver_task` 提交代码时不会自动审查，回执写明「本次未执行测试或审查」；测试用 `run_tests`，审查需要你发起。
 
-- **CLI（TUI）**：默认开启。设置面板 → `审查` → `关闭提交后自动审查` 可手动关闭（勾选即跳过审查）。也可用 `RIVET_REVIEW_DISCIPLINE=0` 环境变量全局关闭。
-- **桌面端（desktop）**：标准 DeepSeek 会话默认开启，Spark 会话默认开启且审查子代理用 spark-flash。在 `设置 → Routing → 审查子代理` 中可找到两个独立开关：`SkipAuto`（标准会话）、`SkipAutoSpark`（Spark 会话）。
-- 手动审查：任何时候可用 `/review`（L2 对抗审查）或 `/review max`（L3 五席审查 squad）对当前改动执行深度审查。这是显式请求，不受开关控制。
+- `/review [重点]`：1 个只读审查员（L2）审查本会话的未提交改动；没有未提交改动时审本会话最近一次提交。
+- `/review max [重点]`：5 人只读编队（L3：安全 / 生命周期 / 数据流 / 静默 / 接线）。
+- **桌面端（desktop）**：Plus 菜单 → ⚖ 审查 → L1 轻量 / L2 标准 / Max 深度，与上面是同一入口。
+- 审查只读：不跑测试、不改代码、不提交；发现保存在本会话里，处理时机由你决定。
+- 提交不会触发审查，所以没有需要关闭的开关。设置面板里的「关闭提交后自动审查」与 `/review off|on` 只为兼容旧配置保留，不改变行为。详见 [审查纪律](review-discipline.md)。
 
 **子代理与后台任务**
 

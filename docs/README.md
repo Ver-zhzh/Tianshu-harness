@@ -14,7 +14,7 @@
 |---|---|---|
 | [用户手册](user-guide.md) | CLI / TUI 完整参考：启动参数、星域切换、Plan/Goal/Council/Team、前缀缓存、斜杠命令、环境变量与配置 | Complete CLI/TUI reference: flags, star domains, Plan/Goal/Council/Team workflows, prefix cache, 90+ slash commands, and config |
 | [安装与平台说明](guides/installation.md) | 桌面端安装包、一键脚本、npm 全局安装、Android/Termux、源码构建与 Shell 补全 | Desktop installers (macOS/Windows/Linux), one-liner scripts, npm global install, Android/Termux, build from source, and shell completions |
-| [桌面端用户指南](desktop-guide.md) | Tauri 桌面端独有特性：三种会话模式、审查门、Cockpit 驾驶舱、SideChat、时间旅行、WSL 连接、主题与玻璃材质 | Tauri desktop app guide: Agent/Plan/Ask modes, review gate, 8-tab Cockpit, SideChat, Rewind time-travel, WSL runtime, and ThemeStudio |
+| [桌面端用户指南](desktop-guide.md) | Tauri 桌面端独有特性：三种会话模式、手动审查、Cockpit 驾驶舱、SideChat、时间旅行、WSL 连接、主题与玻璃材质 | Tauri desktop app guide: Agent/Plan/Ask modes, on-demand review, 8-tab Cockpit, SideChat, Rewind time-travel, WSL runtime, and ThemeStudio |
 | [Provider 配置手册](user-guide-provider-config.md) | 内置 Provider 预设（DeepSeek / GLM / MiMo / MiniMax / Codex 等）、多 Key 池、子代理与议事会异构路由、生图配置 | Built-in provider presets, multi-key pool, worker/review/compaction routing, heterogeneous Council seats, and text-to-image setup |
 | [权限与沙箱指南](user-guide-sandbox-permissions.md) | 三档审批模式（监督 / 自动 / 全自动）、操作系统级沙箱（macOS Seatbelt / Linux bwrap / Windows 回滚兜底）、路径授权与安全防线 | Three-tier permission modes, OS-level filesystem sandboxing, path grants, SSRF/sensitive-file guards, and rollback protection |
 | [识图能力手册](user-guide-vision.md) | 视觉通道诚实性、同/跨 Provider 自动识图桥、`/vision` 向导、`ask_image` 多轮追问与 `browser_debug` 截图闭环 | Vision channel modes, same-/cross-provider vision bridges, `/vision` wizard, `ask_image` follow-ups, and `browser_debug` screenshot verification |
