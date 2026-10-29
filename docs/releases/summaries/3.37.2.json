@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "version": "3.37.2",
+  "date": "2026-10-30",
+  "fullNotesUrl": "https://github.com/huiliyi37/Tianshu-harness/releases/tag/v3.37.2",
+  "locales": {
+    "zh": {
+      "title": "桌面无代理更新直连修复",
+      "highlights": [
+        "修复未配置代理时更新误走代理路由、在 0 字节处报 proxy_configuration 的问题；无代理下载恢复直连，代理回退行为不变。",
+        "v3.37.0 / v3.37.1 需手动覆盖安装 3.37.2 一次，之后恢复正常自动更新。"
+      ]
+    },
+    "en": {
+      "title": "Desktop direct-download fix without a proxy",
+      "highlights": [
+        "Fixed updates incorrectly selecting a proxy route without a configured proxy and failing at zero bytes with proxy_configuration; direct downloads now work while proxy fallback is unchanged.",
+        "Manually install 3.37.2 once over 3.37.0 / 3.37.1; subsequent automatic updates will work normally."
+      ]
+    }
+  }
+}
