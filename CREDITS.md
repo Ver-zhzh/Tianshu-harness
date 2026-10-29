@@ -501,3 +501,4 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 - #535 feat(ext): sidecar daemon lease survivability, protocol SSOT, and shared session reducer（MERGED）
 - #534 fix(probe): resolve write_file 0-byte, yield false-positive, bash watchdog timeout, and chat turn heartbeat timeout（MERGED）
 - #542 docs: 审查文档按 3.37 的提交/验证/审查分离重写（OPEN）
+- #541 feat: 按 4.0 标准适配官方模型、账号专属直连与目录同步（OPEN）
