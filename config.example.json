@@ -14,8 +14,6 @@
     "approval": "auto-safe",
     "maxTurns": 50,
     "review": {
-      "skipAuto": true,
-      "mechanicalFastPath": true,
       "profiles": {
         "reviewer": { "provider": "deepseek", "model": "deepseek-flash" },
         "adversarial_verifier": { "provider": "deepseek", "model": "deepseek-flash" },

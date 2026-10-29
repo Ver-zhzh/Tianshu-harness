@@ -846,13 +846,13 @@ rivet config providers  # 应该只显示内置 Provider
 
 主会话和子代理（review worker、探索 worker、补丁 worker 等）可以用**不同的 provider + model**。最典型的用途：主会话用重型模型（GLM-5.2 / DeepSeek Pro），子代理用便宜快的 Flash。
 
-> **为什么要分开路由**：GLM / Kimi / Codex 这类 `prefixCache: "none"` 的 provider 没有 Rivet 侧前缀缓存，缓存完全依赖服务端隐式匹配。当子代理用**同一个 provider + 同一个 API Key** 发请求时，它不同的 prompt 会淘汰主会话的服务端缓存，导致主会话下一轮 `cacheRead` 归零、整段重算（提交后审查阶段尤其明显，表现为长时间卡在「提交后审查启动中」）。把子代理路由到**另一个 provider** 即可让它的缓存足迹和主会话彻底解耦。
+> **为什么要分开路由**：GLM / Kimi / Codex 这类 `prefixCache: "none"` 的 provider 没有 Rivet 侧前缀缓存，缓存完全依赖服务端隐式匹配。当子代理用**同一个 provider + 同一个 API Key** 发请求时，它不同的 prompt 会淘汰主会话的服务端缓存，导致主会话下一轮 `cacheRead` 归零、整段重算。把子代理路由到**另一个 provider** 即可让它的缓存足迹和主会话彻底解耦。
 
 有两套独立的配置块，按用途选：
 
 | 配置块 | 作用对象 | 路由键 | 跨 provider |
 |--------|----------|--------|:-----------:|
-| `agent.review` | deliver_task 提交后审查 + 各级 review/verify/patch worker | worker profile 名（`reviewer` 等） | ✅ |
+| `agent.review` | 审查类 worker（`/review` / `review_changes`、议事会末波审查门）及其他携带同名 profile 的子代理 | worker profile 名（`reviewer` 等） | ✅ |
 | `workers` | 通用能力任务子代理（探索/编辑/诊断/重构等） | 能力任务名（`code_edit` 等） | ✅ |
 
 两者都遵循同一条**静默回退规则**：如果配置的 provider 不在 `provider.providers` 里、或 model 不在该 provider 的 `models` 列表里、或该 provider 的 API Key 解析不到，则该项**静默回退到主会话模型**（不会报错）。配 `RIVET_DEBUG=1` 启动可在日志看到 `[review-override]` / `[worker-model]` 的路由命中或跳过原因。
@@ -868,18 +868,16 @@ rivet config providers  # 应该只显示内置 Provider
         "adversarial_verifier": { "provider": "deepseek", "model": "deepseek-v4-flash" },
         "verifier":             { "provider": "deepseek", "model": "deepseek-v4-flash" },
         "patcher":              { "provider": "deepseek", "model": "deepseek-v4-flash" }
-      },
-      "skipAuto": true,
-      "mechanicalFastPath": true
+      }
     }
   }
 }
 ```
 
-- **`profiles`**：按 worker profile 名指定 `{ provider, model }`，命中**所有携带该 profile 的子代理**（不止提交后审查——见下文「council / team 覆盖」）。提交后自动审查（`deliver_task` commit）实际用的是 **`reviewer`** 这个 profile，所以只想让提交审查走 Flash，配 `reviewer` 一项即可；要把对抗验证（L2）、补丁建议也一并下放就把 `adversarial_verifier` / `verifier` / `patcher` 也配上。
+- **`profiles`**：按 worker profile 名指定 `{ provider, model }`，命中**所有携带该 profile 的子代理**（不止审查——见下文「council / team 覆盖」）。`/review`、`/review max`（`review_changes`）用的是 **`reviewer`** 这个 profile，所以只想让审查走 Flash，配 `reviewer` 一项即可；议事会 `autoExecute` 的末波审查门还会用到对抗验证（L2）和补丁建议，要一并下放就把 `adversarial_verifier` / `patcher` 也配上。
   - **键名不做注册表校验**：profile 名是自由字符串，写错（如把 `reviewer` 拼成 `reviewr`）**不会报错，也不会回退**——只是永远匹配不到任何 worker，等于**静默失效**。常用的有效 profile：`reviewer` / `adversarial_verifier` / `verifier` / `patcher` / `council_expert` / `code_scout` / `doc_scout`。配 `RIVET_DEBUG=1` 可在日志看 `[review-override] active` / `[worker-model] review-override` 确认是否真的命中。
-- **`skipAuto`**（schema 默认 `false`，即默认开启自动审查）：设为 `true` 时关闭 `deliver_task` 的提交后自动审查（等价于环境变量 `RIVET_REVIEW_DISCIPLINE=0`，但限本配置文件）。跳过后审查靠用户手动 `/review [max]` 或外部会话触发；恢复自动审查设为 `false`（或在设置面板取消勾选）。
-- **`mechanicalFastPath`**（默认 `true`）：纯文档 / 纯重命名变更跳过审查 worker 和未验证 RED 闸门。
+- **`skipAuto` / `skipAutoSpark`**：只为兼容旧配置保留。提交已不再触发审查，这两个键照常加载，但不改变任何行为；审查由用户用 `/review [max]` 发起。
+- **`mechanicalFastPath`**：同样只为兼容保留。它原来让纯文档 / 纯重命名变更跳过提交后的审查与验证闸门，这两道闸门都已从提交路径移除，现在没有效果。
 
 ### `workers` —— 通用子代理能力路由
 
@@ -925,7 +923,7 @@ rivet config providers  # 应该只显示内置 Provider
 
 两个务必知道的点：
 
-1. **路由按任务 / profile,不区分调用方。** `agent.review.profiles["patcher"]` 会**同时**影响 `deliver_task` 审查和 team 编码（都是 `patcher`）；`workers.routing["code_edit"]` 会**同时**影响议事会席位和 team 规划。无法只改其中一方——要单独控制某一类,用它**独有**的 profile 键（议事会用 `council_expert`,侦察用 `code_scout` / `doc_scout`）。
+1. **路由按任务 / profile,不区分调用方。** `agent.review.profiles["patcher"]` 会**同时**影响议事会末波审查门的补丁建议和 team 编码（都是 `patcher`）；`workers.routing["code_edit"]` 会**同时**影响议事会席位和 team 规划。无法只改其中一方——要单独控制某一类,用它**独有**的 profile 键（议事会用 `council_expert`,侦察用 `code_scout` / `doc_scout`）。
 2. **议事会的 tier 护栏不绑定真实派发。** 议事会内部 `routeCouncilSeat` 的「天府席位强制 strong」等护栏只写遥测,**不影响实际选型**。因此若你把 `workers.routing["code_edit"]` 指向 Flash 省缓存,**议事会席位也会一起掉到 Flash**。要「议事会保持强模型、其余子代理走 Flash」,就用 profile 覆盖（它优先级更高）：
 
 ```json

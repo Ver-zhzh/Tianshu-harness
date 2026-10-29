@@ -137,7 +137,7 @@ Design-first workflow (`/plan-mode` toggle, or automatic entry on complex tasks 
 | `/doctor` | Environment health check + active shell used by the `bash` tool |
 | `/logs [open [desktop]]` | Show session, cache, CVM (`sensorium.jsonl`), and desktop sidecar log locations |
 | `/connect` | Interactive provider connection wizard |
-| `/config` · `/settings` · `/setup` | Interactive settings panel (routing, auto-review, vision, tool preset, mirrors, search) |
+| `/config` · `/settings` · `/setup` | Interactive settings panel (routing, review models, vision, tool preset, mirrors, search) |
 | `/cd <path>` | Switch working directory mid-session while preserving prefix cache |
 | `/trust` | Manage project trust gate |
 | `/usage` · `/token-ledger` | View local cumulative token ledger (`status \| sync \| auto on \| auto off \| connect \| disconnect`) |

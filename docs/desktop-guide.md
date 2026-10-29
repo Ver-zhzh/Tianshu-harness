@@ -7,7 +7,7 @@
 ## 目录
 
 - [三种会话模式：Plan / Ask / Agent](#三种会话模式plan--ask--agent)
-- [审查门：自动审查与手动触发](#审查门自动审查与手动触发)
+- [审查：按需手动发起](#审查按需手动发起)
 - [招牌特性](#招牌特性)
   - [Cockpit 驾驶舱](#cockpit-驾驶舱)
   - [SideChat 旁路提问](#sidechat-旁路提问)
@@ -44,33 +44,28 @@
 
 ---
 
-## 审查门：自动审查与手动触发
+## 审查：按需手动发起
 
-天枢的审查门有三个层级，**桌面端用户最容易混淆的是"持久配置"和"会话级开关"的区别**。
+提交不会触发审查。`deliver_task` 只做安全提交，测试由 `run_tests` 单独执行，审查只在你发起时运行。
 
-### 三层开关对比
+### 发起入口
 
-| 层级 | 入口 | 作用域 | 持久？ |
-|---|---|---|---|
-| **持久配置** | Settings → Routing → 「关闭提交后自动审查（skipAuto）」复选框 | 所有新会话 | ✅ 写入配置文件，跨会话生效 |
-| **会话级覆盖** | Plus 菜单 → ⚖ 审查 → Auto / Off 单选 | 仅当前会话 | ❌ 会话结束即失效 |
-| **进程级硬关闭** | 环境变量 `RIVET_REVIEW_DISCIPLINE=0`（CI/headless 场景） | 整个进程 | — |
+| 入口 | 深度 | 做什么 |
+|---|---|---|
+| Plus 菜单 → ⚖ 审查 → L1 轻量 | L1 | 只做审查纪律提醒，不启动审查 worker |
+| Plus 菜单 → L2 标准，或 `/review [重点]` | L2 | 1 个只读审查员，报告代码证据 |
+| Plus 菜单 → Max 深度，或 `/review max [重点]` | L3 | 5 人只读编队：安全 / 生命周期 / 数据流 / 静默 / 接线 |
 
-### skipAuto 复选框 vs Plus 菜单 off —— 关键区别
+审查不提交、不改代码、不跑测试；发现保存在本会话里，由你决定什么时候处理。「代码审查未发现问题」不等于「测试已通过」。
 
-这是桌面端最易混淆的点：
+### 不需要关
 
-- **Settings → Routing 的 `skipAuto` 复选框**改的是**配置文件**（`~/.rivet/config.json` 的 `agent.review.skipAuto`）。**只对新会话生效**——改了之后，当前已开的会话不会变，下一次新建线程才会按新配置走。它是"全局默认"。
-- **Plus 菜单 → ⚖ 审查 → Off** 改的是**当前会话的内存状态**（`reviewGateOverride`）。**立即生效**，但只影响当前会话——会话关闭后失效，下次新会话仍按 `skipAuto` 配置走。它是"临时覆盖"。
+- Plus 菜单的 ⚖ 审查 只有上面三个手动入口，没有 Auto / Off；在输入框里敲 `/review off|on|status` 只会得到一条兼容说明。
+- Settings → 模型分工 →「审查开关」卡片写明「提交不会触发审查」。卡片里的「纯文档 / 重命名变更跳过审查」复选框，以及配置文件里的 `agent.review.skipAuto` / `skipAutoSpark`，都只为兼容旧配置保留，不改变行为。
+- 旧的进程级审查环境变量已不再读取，CI / headless 场景不需要再设。
+- 例外（都要显式开启）：议事会以 `autoExecute: true` 直接执行批准的计划时，最后一波结束后会自动跑一道审查门；`galaxy` / `starflow` 传 `autoReview: true` 时会追加一个审查维度。不传就没有。
 
-### 默认行为
-
-`skipAuto` 默认值为 **`false`**——即默认开启提交后自动审查（`deliver_task` 提交时自动触发审查）。需要跳过或手动控制时：
-
-- **关闭自动审查**：在 Settings → Routing 勾选 `skipAuto`（或配置 `"skipAuto": true`，对所有新会话生效），或在当前会话 Plus 菜单 → ⚖ 审查 切为 Off（仅当前会话）。
-- **手动触发**：Plus 菜单 → ⚖ 审查 → L1 / L2 / Max，或斜杠命令 `/review`、`/review max`。**显式触发的审查永远放行**，不受 `skipAuto` 影响。
-
-> 核心原则：一切"关闭"只抑制**系统自动审查**；用户显式 `review_level`（手动 `/review`）永远放行。off 模式下主控的测试/验证/提交环节完全不受影响。
+给审查子代理换模型仍然有效：Settings → 模型分工 →「角色覆盖」里给 `reviewer` 等 profile 指定模型（`/review` 与 Max 编队都用 `reviewer`），对应配置 `agent.review.profiles`。
 
 详见 [`docs/review-discipline.md`](./review-discipline.md)。
 
@@ -337,7 +332,7 @@ Settings → 外观 提供 26 套内置主题（含暗色/亮色各半，如 `da
 ## 参考
 
 - [Provider 配置手册](./user-guide-provider-config.md) —— 模型 Provider、API Key、子代理路由
-- [审查纪律规范](./review-discipline.md) —— 审查门的完整规范、三级开关、重入护栏
+- [审查纪律规范](./review-discipline.md) —— 审查入口与深度、只读审查流程、议事会末波审查门、重入护栏
 - [沙箱与权限](./user-guide-sandbox-permissions.md) —— `agent.permissions`、path-grants 详解
 - [README](../README.md) —— 项目总览
 - [用户手册](./user-guide.md) —— CLI 命令全表、TUI 键位、配置文件与环境变量、日志排查
