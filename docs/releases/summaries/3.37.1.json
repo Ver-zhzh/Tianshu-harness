@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "version": "3.37.1",
+  "date": "2026-10-29",
+  "fullNotesUrl": "https://github.com/huiliyi37/Tianshu-harness/releases/tag/v3.37.1",
+  "locales": {
+    "zh": {
+      "title": "桌面更新、会话收尾与 Android 协议兼容",
+      "highlights": [
+        "桌面更新：选择「仍然更新」后，30 秒落盘核对超时不再阻断重启；显式取消仍拦截，默认未授权路径继续 fail-closed。",
+        "更新失败显示真实原因；/health 与移动端契约补充数据格式版本和 Android 功能兼容声明。",
+        "修复 final turn_complete 后 Git 探针 close 不到导致 run 永不收尾的问题：observer 不再周期误报，abort 有界释放，后续输入与 queue 可继续。"
+      ]
+    },
+    "en": {
+      "title": "Desktop updates, session settlement, and Android protocol compatibility",
+      "highlights": [
+        "Desktop updates: after choosing “Update anyway”, a 30-second persistence-check timeout no longer blocks restart; explicit cancellation still blocks and the default path remains fail-closed.",
+        "Update errors now expose their real cause; /health and the exported mobile contract add the data-format version and Android feature compatibility declarations.",
+        "Fixed Git probes that could leave runs unsettled after the final turn_complete when close never arrived: observers stop repeating warnings, abort is bounded, and follow-up input and queues can continue."
+      ]
+    }
+  }
+}

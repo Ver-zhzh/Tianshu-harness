@@ -1,5 +1,9 @@
 import { spawnGit } from '../tools/spawn-git.js'
 import { track } from '../tools/process-tracker.js'
+import { killProcessTree } from '../tools/process-kill.js'
+
+const TERMINATION_GRACE_MS = 250
+const CLOSE_GRACE_MS = 1_000
 
 /**
  * Execute a short-lived git command and capture its stdout.
@@ -12,7 +16,7 @@ function gitSpawn(
   // 400ms：100ms 在 Windows（git 冷启动 80–150ms，实测裸启动 75–123ms）与
   // 负载机器上频繁超时，探针静默返回空 → changeRate 恒 0（信号失明，感知
   // 间隔永不按活跃度收缩）。本函数整体异步（turn-orchestrator 后台 .then
-  // 调用），最坏 6 次调用 2.4s 也不进主循环路径。
+  // 调用），每次调用都有独立的有界收尾，不进主循环路径。
   timeoutMs = 400,
 ): Promise<string> {
   if (signal?.aborted) return Promise.resolve('')
@@ -20,20 +24,69 @@ function gitSpawn(
     const child = track(spawnGit(args, {
       cwd,
       stdio: ['ignore', 'pipe', 'ignore'],
-      timeout: timeoutMs,
       signal,
     }))
 
     let stdout = ''
     let failed = false
-    child.stdout?.on('data', (chunk: Buffer) => {
+    let settled = false
+    let terminating = false
+    let timeoutTimer: ReturnType<typeof setTimeout> | undefined
+    let killTimer: ReturnType<typeof setTimeout> | undefined
+    let settleTimer: ReturnType<typeof setTimeout> | undefined
+    let closeTimer: ReturnType<typeof setTimeout> | undefined
+    const later = (fn: () => void, delayMs: number) => {
+      const timer = setTimeout(fn, delayMs)
+      timer.unref?.()
+      return timer
+    }
+    const clearTimers = () => {
+      for (const timer of [timeoutTimer, killTimer, settleTimer, closeTimer]) clearTimeout(timer)
+    }
+    const settle = () => {
+      if (settled) return
+      settled = true
+      clearTimers()
+      signal?.removeEventListener('abort', onAbort)
+      child.removeListener('error', onError)
+      child.removeListener('exit', onExit)
+      child.removeListener('close', onClose)
+      child.stdout?.removeListener('data', onData)
+      resolve(failed || signal?.aborted ? '' : stdout.trim())
+    }
+    const forceKill = () => {
+      if (settled) return
+      killProcessTree(child, 'SIGKILL')
+      settleTimer = later(settle, TERMINATION_GRACE_MS)
+    }
+    const terminate = (termAlreadySent = false) => {
+      if (settled || terminating) return
+      terminating = true
+      failed = true
+      if (!termAlreadySent) killProcessTree(child, 'SIGTERM')
+      killTimer = later(forceKill, TERMINATION_GRACE_MS)
+    }
+    const onAbort = () => terminate(true)
+    const onError = () => terminate()
+    const onExit = () => {
+      clearTimeout(timeoutTimer)
+      timeoutTimer = undefined
+      closeTimer ??= later(settle, CLOSE_GRACE_MS)
+    }
+    const onClose = () => settle()
+    const onData = (chunk: Buffer) => {
       stdout += chunk.toString()
       if (stdout.length > 200_000) stdout = stdout.slice(-100_000)
-    })
+    }
 
-    // Abort/error can precede close; only close permits cwd cleanup on Windows.
-    child.once('error', () => { failed = true })
-    child.once('close', () => resolve(failed || signal?.aborted ? '' : stdout.trim()))
+    child.stdout?.on('data', onData)
+    child.once('error', onError)
+    child.once('exit', onExit)
+    child.once('close', onClose)
+    signal?.addEventListener('abort', onAbort, { once: true })
+    timeoutTimer = later(terminate, timeoutMs)
+    // Normal exits still wait for close to flush stdout; a missing close is bounded.
+    if (signal?.aborted) terminate(true)
   })
 }
 

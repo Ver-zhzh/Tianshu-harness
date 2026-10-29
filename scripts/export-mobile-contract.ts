@@ -3,9 +3,9 @@ import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { PROTOCOL_VERSION, DATA_FORMAT_VERSION, MOBILE_FEATURES, RUNTIME_CAPABILITIES } from '../src/server/protocol.js'
 
-const revision = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
+const revision = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8', windowsHide: true }).trim()
 const dirty = execFileSync('git', ['status', '--porcelain', '--untracked-files=all', '--',
-  'src', 'scripts', 'package.json', 'package-lock.json', 'tsup.config.ts', 'tsconfig.json'], { encoding: 'utf8' }).trim().length > 0
+  'src', 'scripts', 'package.json', 'package-lock.json', 'tsup.config.ts', 'tsconfig.json'], { encoding: 'utf8', windowsHide: true }).trim().length > 0
 const protocolSource = readFileSync(new URL('../src/server/protocol.ts', import.meta.url), 'utf8')
 const eventBlock = protocolSource.split('export type SessionEventType =')[1]?.split('export interface SessionEvent')[0]
 if (!eventBlock) throw new Error('Session event union not found')
