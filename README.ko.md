@@ -1171,6 +1171,7 @@ tianshu logs open desktop            # sidecar 로그 디렉터리 열기（GUI�
 ## 🤝 커뮤니티와 지원
 
 - **사용 문제 / 토론** → [GitHub Discussions](https://github.com/huiliyi37/Tianshu-harness/discussions)
+- **Starport 포럼** → [tianshu.club](https://tianshu.club/)（자체 커뮤니티 「天枢星港」）
 - **Discord 커뮤니티** → [Tianshu Harness Discord 참여](https://discord.gg/aNEPzPuYV)
 - **버그 리포트 / 기능 요청** → [GitHub Issues](https://github.com/huiliyi37/Tianshu-harness/issues)
 - **보안 취약점** → [비공개 보고](https://github.com/huiliyi37/Tianshu-harness/security/advisories/new)（공개 issue를 열지 말 것）

@@ -26,6 +26,7 @@
 
 <p align="center">
   <a href="https://tianshuharness.com"><img src="https://img.shields.io/badge/Website-tianshuharness.com-4285F4?logo=googlechrome&logoColor=white" alt="Website"></a>
+  <a href="https://tianshu.club/"><img src="https://img.shields.io/badge/%E6%98%9F%E6%B8%AF%E8%AE%BA%E5%9D%9B-tianshu.club-F59E0B" alt="星港论坛"></a>
   <a href="docs/user-guide.md"><img src="https://img.shields.io/badge/Docs-%E7%94%A8%E6%88%B7%E6%89%8B%E5%86%8C-FBBC04" alt="Docs"></a>
   <a href="https://discord.gg/aNEPzPuYV"><img src="https://img.shields.io/badge/Discord-%E4%BA%A4%E6%B5%81%E7%BE%A4-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-34A853" alt="License"></a>
@@ -389,6 +390,7 @@ node dist/cli/entry.js
 
 - **讨论与提问**：[GitHub Discussions](https://github.com/huiliyi37/Tianshu-harness/discussions)
 - **Bug 与功能请求**：[GitHub Issues](https://github.com/huiliyi37/Tianshu-harness/issues)，附上 `tianshu logs --json` 的输出能更快定位
+- **星港论坛**：[tianshu.club](https://tianshu.club/) — 自建社区「天枢星港」，版本讨论、经验分享与长期话题的存档地（Token 台账可选同步展示）
 - **Discord**：[天枢 tianshu-harness 官方交流群](https://discord.gg/aNEPzPuYV) [![Discord](https://img.shields.io/badge/Discord-%E5%8A%A0%E5%85%A5%E4%BA%A4%E6%B5%81%E7%BE%A4-5865F2?logo=discord&logoColor=white)](https://discord.gg/aNEPzPuYV)
 - **QQ 群**：「TUI」，群号 `1017892942`
 - **微信群**：扫码加入，二维码 7 天有效，过期请在 Discussions 留言补码

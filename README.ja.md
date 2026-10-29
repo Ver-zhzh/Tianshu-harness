@@ -1166,6 +1166,7 @@ tianshu logs open desktop            # sidecar ログディレクトリを開く
 ## 🤝 コミュニティとサポート
 
 - **使い方の質問 / ディスカッション** → [GitHub Discussions](https://github.com/huiliyi37/Tianshu-harness/discussions)
+- **Starport フォーラム** → [tianshu.club](https://tianshu.club/)（自建コミュニティ「天枢星港」）
 - **Discord コミュニティ** → [「天枢 tianshu-harness 官方交流群」に参加](https://discord.gg/aNEPzPuYV)
 - **バグ報告 / 機能リクエスト** → [GitHub Issues](https://github.com/huiliyi37/Tianshu-harness/issues)
 - **セキュリティ脆弱性** → [プライベート報告](https://github.com/huiliyi37/Tianshu-harness/security/advisories/new)（公開 issue を開かないでください）

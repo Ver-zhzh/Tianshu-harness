@@ -26,6 +26,7 @@
 
 <p align="center">
   <a href="https://tianshuharness.com"><img src="https://img.shields.io/badge/Website-tianshuharness.com-4285F4?logo=googlechrome&logoColor=white" alt="Website"></a>
+  <a href="https://tianshu.club/"><img src="https://img.shields.io/badge/Forum-tianshu.club-F59E0B" alt="Starport Forum"></a>
   <a href="docs/user-guide.md"><img src="https://img.shields.io/badge/Docs-User%20Guide-FBBC04" alt="Docs"></a>
   <a href="https://discord.gg/aNEPzPuYV"><img src="https://img.shields.io/badge/Discord-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-34A853" alt="License"></a>
@@ -446,6 +447,7 @@ This repository is the sync projection of the development repo; the desktop app 
 
 - **Discussion** — [GitHub Discussions](https://github.com/huiliyi37/Tianshu-harness/discussions)
 - **Bugs and feature requests** — [GitHub Issues](https://github.com/huiliyi37/Tianshu-harness/issues); attaching `tianshu logs --json` speeds up triage
+- **Starport forum** — [tianshu.club](https://tianshu.club/): our self-hosted community for release discussion, tips and long-lived topics
 - **Discord** — [Tianshu Harness community](https://discord.gg/aNEPzPuYV) [![Discord](https://img.shields.io/badge/Discord-Join%20us-5865F2?logo=discord&logoColor=white)](https://discord.gg/aNEPzPuYV)
 - **QQ group** — "TUI", group ID `1017892942`
 - **WeChat group** — scan the QR code; valid for 7 days, ask in Discussions if expired
