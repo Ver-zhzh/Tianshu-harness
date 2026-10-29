@@ -1,19 +1,19 @@
 {
-  "version": "3.37.0",
+  "version": "3.37.1",
   "notes": "v3.36.1——子代理委派全灭热修：v3.35.0/3.36.0 全部子代理调用（delegate_task/delegate_batch/galaxy）必然失败的 parsePrompt 缺陷修复；工具调用协议加固（提示词只点名实际提供的工具、网关 functions. 归一）。",
-  "pub_date": "2026-10-26T16:15:26.111Z",
+  "pub_date": "2026-10-29T15:19:26.086Z",
   "platforms": {
     "darwin-aarch64": {
-      "url": "https://github.com/huiliyi37/Tianshu-harness/releases/download/v3.37.0/Tianshu_3.37.0_aarch64.app.tar.gz",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRaDZmcFdBUytLR1V4allmS3d5L0tDTS91cytqbHEzUU5qMmd4YWZmdGV2cEJ0RnltUHc2Y0gwcU1salowaHVNTDZOOFVTK08yNDA5TnAreGJBQUk0ZlhXSHpTZFBmZGd3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMDI5NTYxCWZpbGU6VGlhbnNodS5hcHAudGFyLmd6CndUUld0eDVSd1BkSVlFMTFta24reEVURGptZkcvbFhqNFRlWFVVNUduVFdSUzZTTnhvVFZjNGhzS2tsSldyaVFPU2Z4RkpCSnhFeXJMMlcva0k0MUR3PT0K"
+      "url": "https://github.com/huiliyi37/Tianshu-harness/releases/download/v3.37.1/Tianshu_3.37.1_aarch64.app.tar.gz",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRaDZmcFdBUytLR1JKS2V3L3l5VGlNVmFyT281T3QwZU1EaW5NNDJHOHFiTnlvWGtwbnN4bjdFVC9FOU5DWUFyTS9XWFF2VjBQTkxUNTREN0JyTnMxLzlJSXJpaHBkVFFjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMjg1MzU2CWZpbGU6VGlhbnNodS5hcHAudGFyLmd6CnJDTGt3eDRwTmdsaDVLZkNHTzhRY1FGYXNrTG9rbUtrQ3R3cUFLZUNlUVhNS0NERHJLSWt1R2NhZTlNSzFJT2VYdWU3Z0JIQ1pFZkc2MXJLWEpWeEN3PT0K"
     },
     "darwin-x86_64": {
-      "url": "https://github.com/huiliyi37/Tianshu-harness/releases/download/v3.37.0/Tianshu_3.37.0_x64.app.tar.gz",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRaDZmcFdBUytLR1cyWjFXWExOaVhiWFNENHg3K0NoUUQ3cVdkWTl1QlkveVdTZ3o0bHA5dXdvcy8valR6QnRhaURKNlBTZWNQUkpRbEwzODJwazZqZVp6eC82TkdsdUFrPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMDMwMDcwCWZpbGU6VGlhbnNodS5hcHAudGFyLmd6CjIrcS9WQVdjR1RWZ20rMXFwK1Y0L294anQ4K3RibzloWlVDdXJxM3hBS3BMdXBoVmVHcEJUNEVvUG5aRjQ4cTgvLzdPbjh2VUZpQWlqN3FsZW5LNkJnPT0K"
+      "url": "https://github.com/huiliyi37/Tianshu-harness/releases/download/v3.37.1/Tianshu_3.37.1_x64.app.tar.gz",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRaDZmcFdBUytLR1RnWnVod2hIME5YUDdFcU9BTFNXM2taNm15TDZjMmxyZlZMampaR1pCTHh0RzZoUU5YaHJBcGUxVldrQ1VxbzA1TTJMUDVDYzFzU0lHL2VISlp5Y0F3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMjg2MjM1CWZpbGU6VGlhbnNodS5hcHAudGFyLmd6CkZPd1E5UEkxa3hrb01pZmlPMm9CZGIrdnJWNGpudkV4eisrUzFpWFU4VWdyNG1pYTVka1J0bzk5ZGN4MnpXR1hxaGc1bEZzUWh2U2pjd3ozZFdQRkJBPT0K"
     },
     "windows-x86_64": {
-      "url": "https://github.com/huiliyi37/Tianshu-harness/releases/download/v3.37.0/Tianshu_3.37.0_x64-setup.exe",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRaDZmcFdBUytLR2FKeE1oZjlYTGt3SS84eXorYWk5aDArRnVhcHZ3M0s3TE0vbjhFRU1Rd3BzakNtbW9URVJ0VjZtR2JXdDN2bmtxSTYyQndTcTFlNXIxZDJGR1FXWXdrPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMDMxMzI1CWZpbGU6VGlhbnNodV8zLjM3LjBfeDY0LXNldHVwLmV4ZQowb1lpOEZqTWpEZzdlU1JYWXN0RWlzbHpId3o5cE1yOERzUWdrNnQyaVFqZXRWWWNiNS8zMGx2cVl2NXVhbXNteVBNSjJuSU9Ga0pxM04xaTJZUHdDdz09Cg=="
+      "url": "https://github.com/huiliyi37/Tianshu-harness/releases/download/v3.37.1/Tianshu_3.37.1_x64-setup.exe",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRaDZmcFdBUytLR1ZCTENtcGl2Z1lERlJ0MTBLSWJsV3B4ai9rbVF2VGJHQ25mak5xb0l6L3ZTaWhDakZDajc1QWdEdjFpQWlOTVczYmZRSk5KbGhMRENCVUJlemxta2d3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMjg3MTY1CWZpbGU6VGlhbnNodV8zLjM3LjFfeDY0LXNldHVwLmV4ZQprb0FjdjducFJON25waTZJYUY2N2tyRHM0QTd3eUx2Zjg1Y3NsVnpDNGJYMExUTzVRMmZJREEwWWF5MDQ5dnRQeE9nbzdrN0VkdGtxdkdaR2VHdjVCUT09Cg=="
     }
   }
 }
