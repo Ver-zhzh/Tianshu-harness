@@ -8,11 +8,12 @@
  * immediately (listSessions resolves sessions by .jsonl presence).
  */
 
-import { appendFileSync, copyFileSync, existsSync, readFileSync, statSync } from 'node:fs'
+import { appendFileSync, copyFileSync, existsSync, readFileSync, statSync, truncateSync, openSync, fsyncSync, closeSync } from 'node:fs'
 import { appendFile, open } from 'node:fs/promises'
 import { basename, join } from 'node:path'
-import { encodeBatch, isZstdFrameStream } from './session-transcript-codec.js'
+import { encodeBatch, decodeTranscriptText, isZstdFrameStream, scanZstdFrames } from './session-transcript-codec.js'
 import { writeFileAtomicSync } from '../fs-atomic.js'
+import { randomUUID } from 'node:crypto'
 
 export class SessionBatchWriter {
   /** Write-behind batch: JSONL text waiting for the next flush. */
@@ -22,6 +23,7 @@ export class SessionBatchWriter {
   private inFlight: { start: number; text: string } | null = null
   /** Set once the transcript file is known to be zstd-frame format. */
   private codecReady = false
+  private failedAppend?: { start: number; frame: Buffer }
 
   constructor(
     private readonly filePath: string,
@@ -90,18 +92,27 @@ export class SessionBatchWriter {
 
   /** Synchronous flush variant for the sync compaction paths. */
   flushSync(): void {
+    // A synchronous rewrite cannot overtake an append still owned by the OS.
+    if (this.flushPromise) throw Object.assign(new Error('Session transcript write is in progress'), { code: 'EBUSY' })
     if (this.flushTimer !== null) {
       clearTimeout(this.flushTimer)
       this.flushTimer = null
     }
     const text = this.pendingBuffer
     this.pendingBuffer = ''
-    if (text.length > 0) {
+    if (text.length > 0) try {
       this.ensureCodecFormat()
       const frame = encodeBatch(text)
+      this.failedAppend = { start: existsSync(this.filePath) ? statSync(this.filePath).size : 0, frame }
       // mode 仅在文件创建时生效——首次落盘即 0600（转录含未脱敏对话，
       // fs-atomic 的 0600 只覆盖后续重写路径）。
       if (frame.length > 0) appendFileSync(this.filePath, frame, { mode: 0o600 })
+      this.syncFile()
+      this.failedAppend = undefined
+    } catch (error) {
+      this.pendingBuffer = text + this.pendingBuffer
+      this.codecReady = false
+      throw error
     }
   }
 
@@ -126,9 +137,15 @@ export class SessionBatchWriter {
     const frame = encodeBatch(text)
     if (frame.length === 0) return
     this.inFlight = { start: existsSync(this.filePath) ? statSync(this.filePath).size : 0, text }
+    this.failedAppend = { start: this.inFlight.start, frame }
     try {
       await appendFile(this.filePath, frame, { mode: 0o600 })
-      await this.fdatasyncQuiet()
+      await this.syncFileAsync()
+      this.failedAppend = undefined
+    } catch (error) {
+      // A failed append may have written a partial frame. Inspect before retry.
+      this.codecReady = false
+      throw error
     } finally {
       this.inFlight = null
     }
@@ -140,11 +157,37 @@ export class SessionBatchWriter {
    * stay frame-aligned. New files and already-compressed files are untouched.
    */
   private ensureCodecFormat(): void {
+    if (this.failedAppend) {
+      const { start, frame } = this.failedAppend
+      const current = existsSync(this.filePath) ? readFileSync(this.filePath) : Buffer.alloc(0)
+      const tail = current.subarray(start)
+      if (current.length < start || tail.length > frame.length || !frame.subarray(0, tail.length).equals(tail)) {
+        throw new Error('Session transcript changed after a failed append; refusing to truncate unrelated history')
+      }
+      if (current.length > start) truncateSync(this.filePath, start)
+      if (existsSync(this.filePath)) this.syncFile()
+      this.failedAppend = undefined
+    }
     if (this.codecReady) return
-    this.codecReady = true
-    if (!existsSync(this.filePath)) return
+    if (!existsSync(this.filePath)) { this.codecReady = true; return }
     const head = readFileSync(this.filePath)
-    if (isZstdFrameStream(head)) return
+    const magic = Buffer.from([0x28, 0xb5, 0x2f, 0xfd])
+    if (isZstdFrameStream(head) || (head.length > 0 && head.length < magic.length && head.equals(magic.subarray(0, head.length)))) {
+      const { tornStart } = scanZstdFrames(head)
+      if (tornStart !== undefined) {
+        // Validate every complete frame before changing bytes; middle corruption
+        // must never be misclassified as a discardable tail.
+        decodeTranscriptText(head.subarray(0, tornStart))
+        const backup = join(this.backupDirProvider(), `${basename(this.filePath)}.torn-${randomUUID()}`)
+        copyFileSync(this.filePath, backup)
+        this.syncFile(backup)
+        truncateSync(this.filePath, tornStart)
+        this.syncFile()
+      }
+      else decodeTranscriptText(head)
+      this.codecReady = true
+      return
+    }
     try {
       // basename 而非 split('/')：Windows 的 filePath 是反斜杠路径，按 '/' 切
       // 得到整条路径——join 后成为非法目标，copyFileSync 抛错被下方 catch 静默
@@ -153,17 +196,16 @@ export class SessionBatchWriter {
     } catch { /* best-effort backup; transcode still proceeds */ }
     const frame = encodeBatch(head.toString('utf-8'))
     writeFileAtomicSync(this.filePath, frame.length > 0 ? frame : Buffer.alloc(0))
+    this.codecReady = true
   }
 
-  /** Force appended data to disk without blocking the event loop. */
-  private async fdatasyncQuiet(): Promise<void> {
-    try {
-      const fh = await open(this.filePath, 'a')
-      try {
-        await fh.datasync()
-      } finally {
-        await fh.close()
-      }
-    } catch { /* non-critical: in-memory state still authoritative */ }
+  private syncFile(path = this.filePath): void {
+    const fd = openSync(path, 'r+')
+    try { fsyncSync(fd) } finally { closeSync(fd) }
+  }
+
+  private async syncFileAsync(): Promise<void> {
+    const fh = await open(this.filePath, 'r+')
+    try { await fh.datasync() } finally { await fh.close() }
   }
 }

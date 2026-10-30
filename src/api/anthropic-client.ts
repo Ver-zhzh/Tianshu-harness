@@ -12,7 +12,7 @@ import { wireAbortToReaderCancel, wrapBodyTimeoutError } from './abort-reader.js
 import { parseJsonObjectWithEscapeRepair } from './json-escape-repair.js'
 import { normalizeBaseUrl } from './endpoint-map.js'
 import { resolveWireEffort } from './provider.js'
-import { ProxyAgent } from 'undici'
+import { providerDispatcher } from './provider-network.js'
 import { acquireRateLimitSlot } from './rate-limiter.js'
 import {
   createBodyGuardNotifyState,
@@ -55,6 +55,7 @@ export interface AnthropicClientConfig {
   maxBodyBytes?: number
   /** Per-provider HTTP proxy（优先于全局 network.proxy）。 */
   proxy?: string
+  noProxy?: string
   /** Custom User-Agent — providers that verify caller identity (OpenCode Go
    *  rejects generic SDK/HTTP-library names) declare it via catalog wire. */
   userAgent?: string
@@ -159,15 +160,15 @@ function foldConsecutiveSameRole(messages: AnthropicMessage[], onUserBoundary?: 
 }
 
 export class AnthropicClient implements StreamClient {
-  /** undici ProxyAgent for config.proxy (undefined = no per-provider proxy). */
-  private readonly proxyDispatcher: ProxyAgent | undefined
+  /** Resolve provider, environment and bypass settings through the shared route. */
+  private readonly proxyDispatcher: ReturnType<typeof providerDispatcher>
   /** 体积护栏上报节律（跨请求保持；语义与节流见 notifyBodyGuard）。 */
   private readonly bodyGuardNotify = createBodyGuardNotifyState()
   /** 运行时档位（output_config 通道消费；传统 budget 路径不读）。 */
   private reasoningEffort: string | undefined
 
   constructor(private config: AnthropicClientConfig) {
-    this.proxyDispatcher = config.proxy ? new ProxyAgent(config.proxy) : undefined
+    this.proxyDispatcher = providerDispatcher(config.baseUrl, config)
     this.reasoningEffort = config.reasoningEffort
   }
 

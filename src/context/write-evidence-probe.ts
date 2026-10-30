@@ -83,20 +83,18 @@ export function formatWriteRecoveryContent(
 
   const target = filePath ? `\`${filePath}\`` : '目标文件'
 
-  // 磁盘证据已确认成功 → 平静确认优先（去惊吓化，采纳自公开仓库 PR #4）：
-  // 开头给结论而非事故。marker 以括注保留在正文——countPriorRecoveries 靠
-  // includes() 计数，证据确认的恢复同样是一次宿主中断，不能漏计。
+  // File existence is an observation, not proof that this particular edit ran.
   if (evidence?.exists && evidence.bytes > 0) {
-    return `[auto-recovered] 写入已确认——磁盘证据：${target} 已存在（${formatBytes(evidence.bytes)}），写入已生效。`
-      + '直接继续下一步，切勿重写。'
-      + `\n（合成占位：${WRITE_RECOVERY_MARKER}，已由磁盘证据确认写入生效。）` + suffix
+    return `[auto-recovered] 磁盘证据：${target} 已存在（${formatBytes(evidence.bytes)}），但本次调用结果仍未知。`
+      + '先 read_file 核实是否已包含目标改动；若已是目标状态请直接继续，不要重写。'
+      + `\n（合成占位：${WRITE_RECOVERY_MARKER}，文件可能在调用前就已存在。）` + suffix
   }
 
   if (evidence && !evidence.exists) {
-    return `${WRITE_RECOVERY_MARKER}——磁盘证据：${target} 当前不存在，写入未生效。可安全重试该写入。` + suffix
+    return `${WRITE_RECOVERY_MARKER}——磁盘证据：${target} 当前不存在。本次调用结果仍未知；请核实目标路径及其他可能的改动，再补做确实缺失的部分。` + suffix
   }
 
-  return `${WRITE_RECOVERY_MARKER}——对 ${target} 的写入很可能已经成功执行，文件已保存到磁盘。`
+  return `${WRITE_RECOVERY_MARKER}——对 ${target} 的调用结果未知，尚无足够磁盘证据确认是否完成。`
     + `不要盲目重写：先 read_file ${target} 确认当前内容，若已包含目标改动直接继续下一步；仅当确实缺失时才补写。` + suffix
 }
 
@@ -266,6 +264,10 @@ export async function findRecentUnrecordedWritesAsync(
   return { writes: writes.sort((a, b) => b.mtimeMs - a.mtimeMs), complete }
 }
 
+const DISK_RECONCILIATION_NOTE_PREFIX = '<system-reminder>\n【磁盘对账】以下文件在会话记录之外被近期修改，可能属于中断前已经完成的工作：\n'
+const DISK_RECONCILIATION_NOTE_SUFFIX = '\n请先 read_file 核实是否已包含目标改动；若已是目标状态请直接继续，不要重写。</system-reminder>'
+const DISK_RECONCILIATION_INCOMPLETE_WARNING = 'Disk reconciliation is incomplete; verify existing work before repeating any external operation.'
+
 /** Render the reconciliation note, or null when there is nothing to disclose. */
 export function formatDiskReconciliationNote(writes: RecentUnrecordedWrite[], now = Date.now()): string | null {
   if (writes.length === 0) return null
@@ -273,5 +275,18 @@ export function formatDiskReconciliationNote(writes: RecentUnrecordedWrite[], no
     const ageMin = Math.max(0, Math.round((now - w.mtimeMs) / 60_000))
     return `- ${w.path}（${formatBytes(w.bytes)}，约 ${ageMin} 分钟前修改）`
   }).join('\n')
-  return `<system-reminder>\n【磁盘对账】以下文件在会话记录之外被近期修改，可能属于中断前已经完成的工作：\n${lines}\n请先 read_file 核实是否已包含目标改动；若已是目标状态请直接继续，不要重写。</system-reminder>`
+  return DISK_RECONCILIATION_NOTE_PREFIX + lines + DISK_RECONCILIATION_NOTE_SUFFIX
+}
+
+export function reconcileDiskReconciliationMessages(
+  messages: readonly OaiMessage[], update: { note: string | null; incomplete: boolean },
+): OaiMessage[] {
+  // Recovery cannot rewrite even synthetic messages: they may already be sealed
+  // in the published prefix. Only deduplicate an identical recovery suffix.
+  const suffix: OaiMessage[] = []
+  if (update.note) suffix.push({ role: 'user', origin: 'hook', content: update.note })
+  if (update.incomplete) suffix.push({ role: 'system', content: DISK_RECONCILIATION_INCOMPLETE_WARNING })
+  const duplicate = suffix.length > 0 && messages.length >= suffix.length
+    && suffix.every((message, index) => JSON.stringify(message) === JSON.stringify(messages[messages.length - suffix.length + index]))
+  return duplicate ? [...messages] : [...messages, ...suffix]
 }

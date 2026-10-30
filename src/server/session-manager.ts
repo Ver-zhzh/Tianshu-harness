@@ -1,6 +1,8 @@
 import { toolMountNotice } from '../workflows/required-tools.js'
+import { UpdateRestartPreparation } from './update-restart-preparation.js'
 import { cleanupArchivedWorktree } from './archive-worktree.js'
 import { manageContinuityRecovery } from './session-continuity-recovery.js'
+import { manageHistoryRescue } from './history-rescue-service.js'
 import { buildWorkerLog, type WorkerLogOptions, type WorkerLog } from './worker-log.js'
 import { SessionTitleCoordinator, titleInput, loadTitleInput, canGenerateTitle, type buildTitleCompletion } from './session-title.js'
 import { legacyReadSkill, legacyWriteSkill, legacyRemoveSkill } from '../skills/skill-management-compat.js'
@@ -2824,6 +2826,15 @@ export class RuntimeSessionManager {
     const session = this.sessions.get(id)
     return session ? manageContinuityRecovery(session, () => this.ensureAgentAsync(session), () => this.sessions.get(id) === session, recoveryId) : undefined
   }
+
+  async historyRescue(id: string, sourceHash?: string) {
+    const source = this.sessions.get(id)
+    return manageHistoryRescue(this, source?.record, !!source && !source.running && !source.pendingDelegations.size && !source.backgroundAborts?.size && !this.updateRestartPreparing, sourceHash, (input, handoff) => {
+      const record = this.createSession(input), child = this.sessions.get(record.id)!
+      this.append(child, 'user', { text: handoff }); this.persistRecord(child)
+      return record
+    })
+  }
   /** 阶段 2 — 读取会话恢复检查点（诊断 / 恢复入口用）；无台账时 undefined。 */
   getRecoveryCheckpoint(id: string): Promise<import('./recovery-journal.js').RecoveryCheckpoint | undefined> {
     return this.recoveryJournal?.load(id) ?? Promise.resolve(undefined)
@@ -5022,10 +5033,11 @@ export class RuntimeSessionManager {
     return !s.running
   }
 
-  private updateRestartPreparing = false
+  private updateRestartPreparation?: UpdateRestartPreparation
+  private get updateRestartPreparing(): boolean { return this.updateRestartPreparation !== undefined }
 
   isUpdateRestartPreparing(): boolean { return this.updateRestartPreparing }
-  cancelUpdateRestart(): void { this.updateRestartPreparing = false }
+  cancelUpdateRestart(): void { this.updateRestartPreparation?.cancel(); this.updateRestartPreparation = undefined }
   updateRestartActivity(): { sessions: number; tasks: number; failedSessions: number; pendingEvents: number } {
     let sessions = 0, tasks = 0
     for (const s of this.sessions.values()) {
@@ -5039,27 +5051,25 @@ export class RuntimeSessionManager {
   }
   async prepareUpdateRestart(force: boolean, signal: AbortSignal, opts?: { allowUnsaved?: boolean }): Promise<void> {
     if (this.updateRestartPreparing) throw new Error('UPDATE_PREPARING')
-    this.updateRestartPreparing = true
+    const attempt = this.updateRestartPreparation = new UpdateRestartPreparation(signal)
+    signal = attempt.signal
     try {
       const activity = this.updateRestartActivity()
       if (!force && activity.sessions + activity.tasks > 0) throw new Error('UPDATE_BUSY')
       if (force) {
-        this.abortAll()
-        const jobCleanups: Promise<void>[] = []
-        for (const s of this.sessions.values()) {
-          for (const controller of s.backgroundAborts?.values() ?? []) controller.abort()
-          for (const workerId of s.pendingDelegations.keys()) this.killWorker(s.record.id, workerId)
-          // 更新重启随即替换二进制/数据文件（Windows 要求句柄全关）——必须等
-          // job 子进程 close + 日志流关闭，只发信号（killAll）句柄仍在。
-          // killAllAsync 内部先同步发信号再等待，时序语义与 killAll 一致；
-          // 拒绝吞掉：句柄晚关优于挡住更新链。
-          if (s.jobs) jobCleanups.push(s.jobs.killAllAsync().catch(() => undefined))
-        }
-        await Promise.all(jobCleanups)
+        await attempt.wait(async () => {
+          this.abortAll()
+          const jobCleanups: Promise<void>[] = []
+          for (const s of this.sessions.values()) {
+            for (const controller of s.backgroundAborts?.values() ?? []) controller.abort()
+            for (const workerId of s.pendingDelegations.keys()) this.killWorker(s.record.id, workerId)
+            // Installation requires closed child handles; cleanup failure is fatal.
+            if (s.jobs) jobCleanups.push(s.jobs.killAllAsync())
+          }
+          await Promise.all(jobCleanups)
+        }).catch(error => { if (signal.aborted) throw new Error('UPDATE_BUSY_TIMEOUT'); throw error })
       }
-      // 「等清零超时」与「此刻忙」分开：UPDATE_BUSY 是点一下就重试的瞬态；
-      // 等到 deadline 仍有会话/任务没收尾（多为僵尸 running）是 UPDATE_BUSY_TIMEOUT——
-      // 前端据此给「停止任务并更新」逃生门，而不是误报成数据保存失败。
+      // Busy cleanup never inherits permission to skip unsaved data.
       try {
         while (true) {
           signal.throwIfAborted()
@@ -5071,7 +5081,7 @@ export class RuntimeSessionManager {
         throw new Error('UPDATE_BUSY_TIMEOUT')
       }
       const deadlineBurned = () => signal.aborted && (signal.reason as { name?: string } | undefined)?.name === 'TimeoutError'
-      const throwUnlessUserAborted = () => { if (signal.aborted && !(opts?.allowUnsaved && deadlineBurned())) signal.throwIfAborted() }
+      const throwUnlessUserAborted = () => { attempt.throwIfCancelled(); if (signal.aborted && !(opts?.allowUnsaved && deadlineBurned())) signal.throwIfAborted() }
       let unsavedFailures = 0
       for (const s of this.sessions.values()) {
         throwUnlessUserAborted()
@@ -5080,11 +5090,11 @@ export class RuntimeSessionManager {
           this.flushToolResultBuf(s)
           if (s.agent) {
             if (typeof s.agent.flushPersistence !== 'function') throw new Error('UPDATE_PERSISTENCE_UNAVAILABLE')
-            await s.agent.flushPersistence()
+            await attempt.wait(() => s.agent!.flushPersistence!())
           }
           this.persistRecord(s)
           if (!this.persistence?.flushThrough) throw new Error('UPDATE_PERSISTENCE_UNAVAILABLE')
-          const watermark = await this.persistence.flushThrough(s.record.id, s.seq, signal)
+          const watermark = await attempt.wait(() => this.persistence!.flushThrough!(s.record.id, s.seq, signal))
           if (watermark < s.seq) throw new Error('UPDATE_PERSISTENCE_FAILED')
         } catch (error) {
           if (!opts?.allowUnsaved || (signal.aborted && !deadlineBurned())) throw error
@@ -5094,12 +5104,13 @@ export class RuntimeSessionManager {
       if (unsavedFailures > 0) debugLog(`[update-restart] allowUnsaved: proceeded with ${unsavedFailures} session(s) failing persistence flush`)
       throwUnlessUserAborted()
       if (!this.persistence?.flushAllAsync) throw new Error('UPDATE_PERSISTENCE_UNAVAILABLE')
-      if (opts?.allowUnsaved) await this.persistence.flushAllAsync(5000).catch(() => {})
-      else await this.persistence.flushAllAsync(5000)
+      const flush = () => attempt.wait(() => this.persistence!.flushAllAsync!(5000))
+      if (opts?.allowUnsaved) await flush().catch(() => {})
+      else await flush()
       throwUnlessUserAborted()
       const failedSessions = this.persistence.healthSnapshot?.().failedSessions ?? 0
       if (failedSessions > 0 && !opts?.allowUnsaved) throw new Error('UPDATE_PERSISTENCE_FAILED')
-    } catch (error) { this.updateRestartPreparing = false; throw error }
+    } catch (error) { if (this.updateRestartPreparation === attempt) this.updateRestartPreparation = undefined; throw error }
   }
 
   abortAll(): void {

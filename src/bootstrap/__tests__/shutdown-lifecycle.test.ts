@@ -21,6 +21,9 @@ function makeFixture(workerSettled: boolean, mainRunning = false): ShutdownFixtu
       updateMetadata: () => {},
       writeFrozenSnapshot: () => {},
       compactOai: () => {},
+      queueFrozenSnapshot: () => {},
+      drainFrozenSnapshots: async () => {},
+      flushSessionBuffer: async () => {},
     },
     session: { getMessages: () => [] },
     fileHistory: null,
@@ -29,6 +32,7 @@ function makeFixture(workerSettled: boolean, mainRunning = false): ShutdownFixtu
       flushStigmergySync: () => {},
       abort: () => {},
       isRunning: () => mainRunning,
+      drainPersistWrites: async () => {},
     },
     refs: {
       coordinator: { shutdownAndWait: async () => workerSettled },
@@ -36,6 +40,7 @@ function makeFixture(workerSettled: boolean, mainRunning = false): ShutdownFixtu
       lspManager: null,
       mcpManager: null,
     },
+    claimStore: { flushWrites: async () => {} },
   } as unknown as BootstrapContext
   return { ctx, unregistered }
 }
@@ -44,6 +49,25 @@ test('shutdown unregisters a TUI session after all work has settled', async () =
   const fixture = makeFixture(true)
   await createShutdownHandler(fixture.ctx)()
   assert.deepEqual(fixture.unregistered, ['tui-main'])
+})
+
+test('shutdown drains source history before sealing, rewriting, or acknowledging a clean exit', async () => {
+  const fixture = makeFixture(true), events: string[] = []
+  let release!: () => void
+  const pending = new Promise<void>(resolve => { release = resolve })
+  Object.assign(fixture.ctx.agent, { drainPersistWrites: async () => { events.push('drain'); await pending } })
+  Object.assign(fixture.ctx.persist, {
+    queueFrozenSnapshot: () => { events.push('seal') },
+    compactOai: () => { events.push('rewrite') },
+    updateMetadata: (patch: { cleanExit?: boolean }) => { if (patch.cleanExit) events.push('clean') },
+  })
+  const shuttingDown = createShutdownHandler(fixture.ctx)()
+  try {
+    await new Promise(resolve => setImmediate(resolve))
+    assert.deepEqual(events, ['drain'])
+  } finally { release() }
+  await shuttingDown
+  assert.deepEqual(events, ['drain', 'seal', 'rewrite', 'clean'])
 })
 
 test('shutdown keeps the registry row when a worker shutdown times out', async () => {

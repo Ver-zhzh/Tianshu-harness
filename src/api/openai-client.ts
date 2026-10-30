@@ -37,7 +37,7 @@ import { ToolCallName, ToolNameVocabulary, ToolNameProtocolError } from './tool-
 import { resolveToolCallIndex, type ToolCallChunk, type ToolCallBuffer, type ToolStreamEvent } from './openai-tool-call-buffer.js'
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { ProxyAgent } from 'undici'
+import { providerDispatcher } from './provider-network.js'
 import { acquireRateLimitSlot } from './rate-limiter.js'
 import type { ProviderRetryConfig } from '../config/retry-schema.js'
 
@@ -249,6 +249,7 @@ export interface OpenAIClientConfig {
   /** Per-provider HTTP proxy（优先于全局 network.proxy）。构造时物化为
    *  undici ProxyAgent，经 fetchWithTimeout 的 dispatcher 槽位透传。 */
   proxy?: string
+  noProxy?: string
 }
 
 const FIRST_BYTE_TIMEOUT_MS = 45_000
@@ -444,14 +445,14 @@ export class OpenAIClient implements StreamClient {
    * 换缓存命名空间）被误判为违规，把一次优雅降级变成硬错误。
    */
   private readonly requestInvariant = new RequestInvariantMonitor()
-  /** undici ProxyAgent for config.proxy (undefined = no per-provider proxy). */
-  private readonly proxyDispatcher: ProxyAgent | undefined
+  /** Resolve provider, environment and bypass settings through the shared route. */
+  private readonly proxyDispatcher: ReturnType<typeof providerDispatcher>
 
   constructor(private config: OpenAIClientConfig) {
     this.systemSuffix = Boolean(config.preservedThinkingProtocol) && config.thinking === 'enabled'
       ? '\n\n请在内部思考链中使用中文进行推理。不要在回复中输出你的推理过程，只输出最终答案或工具调用。'
       : ''
-    this.proxyDispatcher = config.proxy ? new ProxyAgent(config.proxy) : undefined
+    this.proxyDispatcher = providerDispatcher(config.baseUrl, config)
   }
 
   /** 慢思考端点判定（名称/URL/显式配置三级，见 isSlowThinkingProvider）。 */

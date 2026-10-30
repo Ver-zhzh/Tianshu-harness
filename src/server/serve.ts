@@ -92,7 +92,7 @@ import { resolveApiKey, resolveCredentialKey } from '../api/factory.js'
 import { findModelInKey, findModelOwner, resolveModelRef } from '../config/provider-keys.js'
 import { contractModels } from '../config/contract-models.js'
 import type { OaiMessage } from '../api/oai-types.js'
-import { findRecentUnrecordedWrites, formatDiskReconciliationNote, shouldReconcileDisk } from '../context/write-evidence-probe.js'
+import { findRecentUnrecordedWrites, formatDiskReconciliationNote, reconcileDiskReconciliationMessages, shouldReconcileDisk } from '../context/write-evidence-probe.js'
 import { createAuthProvider } from '../auth/registry.js'
 import type { AuthProvider } from '../auth/types.js'
 import type { SessionPersist } from '../agent/session-persist.js'
@@ -519,7 +519,9 @@ export function restoreHistoryMessages(
     const sinceMs = meta.updatedAt ? meta.updatedAt - 10 * 60 * 1000 : undefined
     const recent = findRecentUnrecordedWrites(cwd, messages, { sinceMs })
     const note = formatDiskReconciliationNote(recent)
-    if (note) messages = [...messages, { role: 'user', content: note }]
+    const recovered = reconcileDiskReconciliationMessages(messages, { note, incomplete: false })
+    for (const message of recovered.slice(messages.length)) persist.appendOaiWithChecksumSync(message)
+    messages = recovered
   }
   if (messages.length > 0) {
     session.replaceMessages(messages)

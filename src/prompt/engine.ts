@@ -1,3 +1,4 @@
+import { assertPublishedSourceHistory } from './published-history-integrity.js'
 import { appendExplicitTool } from './tool-catalog.js'
 import { buildOaiToolDefinitions } from './oai-tool-definitions.js'
 import { wireOaiMessage } from '../api/oai-types.js'
@@ -136,6 +137,7 @@ export class PromptEngine {
   private publishedHistory?: ContinuationPrefixProof['messages']
   private rewindAuthorization?: RewindGenerationAuthorization
   private commitExecutionSnapshot?: (snapshot: FrozenSnapshotData) => Promise<void>
+  setHistoryDurabilityBarrier(barrier: () => Promise<void>): void { this.renderState.setHistoryDurabilityBarrier(barrier) }
   setExecutionSnapshotCommit(commit: (snapshot: FrozenSnapshotData) => Promise<void>): void { this.commitExecutionSnapshot = commit }
   private toolCatalogPublished = false
   getExecutionSnapshot(): import('../api/continuation-prefix.js').ContinuationPrefixProof | undefined { return this.executionSnapshot }
@@ -146,8 +148,7 @@ export class PromptEngine {
   assertPublishedHistory(messages: readonly OaiMessage[]): boolean {
     const published = this.rewindAuthorization?.history ?? (this.executionSnapshot ? this.publishedHistory : undefined)
     if (!published) return false
-    const current = proveRewindHistory(messages)
-    if (published.some((message, index) => current[index]?.hash !== message.hash)) throw new LocalWorkerPolicyError('已发布的源历史发生变化；禁止通过压缩授权改写')
+    assertPublishedSourceHistory(published, messages)
     return true
   }
   getRewindAuthorization(): RewindGenerationAuthorization | undefined { return this.rewindAuthorization }

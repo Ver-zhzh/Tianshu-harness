@@ -164,10 +164,12 @@ function createRawProviderClient(
   const proFactory = proRegistry.getClientFactory(provider.name)
   if (proFactory) return proFactory(provider, capabilities, params)
 
+  const network = { ...params.network, proxy: provider.proxy?.trim() || params.network?.proxy }
+
   // Codex OAuth uses the Responses API, not chat/completions
   if (provider.auth?.type === 'oauth' && provider.auth.provider === 'codex') {
     return new CodexClient({
-      network: { ...params.network, proxy: provider.proxy ?? params.network?.proxy },
+      network,
       sessionId: params.sessionId, providerName: provider.name,
     retryBudget: params.retryBudget,
       baseUrl: provider.baseUrl,
@@ -204,7 +206,8 @@ function createRawProviderClient(
       requestTimeoutMs: provider.requestTimeoutMs,
       maxRetries: provider.maxRetries,
       retry: provider.retry,
-      proxy: provider.proxy,
+      proxy: network.proxy,
+      noProxy: network.noProxy,
       providerName: provider.name,
     })
   }
@@ -239,7 +242,8 @@ function createRawProviderClient(
       temperature: provider.temperature,
       // 发送前体积护栏（未配置 = 不限制）：与 OpenAI 兼容客户端同一护栏，见 request-body-guard。
       maxBodyBytes: provider.maxBodyBytes,
-      proxy: provider.proxy,
+      proxy: network.proxy,
+      noProxy: network.noProxy,
       userAgent: wire?.userAgent,
       sessionId,
       sessionHeader: wire?.sessionHeader,
@@ -273,7 +277,8 @@ function createRawProviderClient(
       requestTimeoutMs: provider.requestTimeoutMs,
       maxRetries: provider.maxRetries,
       retry: provider.retry,
-      proxy: provider.proxy,
+      proxy: network.proxy,
+      noProxy: network.noProxy,
       providerName: provider.name,
     })
   }
@@ -307,7 +312,8 @@ function createRawProviderClient(
     maxRetries: provider.maxRetries,
     retry: provider.retry,
     temperature: provider.temperature,
-    proxy: provider.proxy,
+    proxy: network.proxy,
+    noProxy: network.noProxy,
     slowThinking: provider.slowThinking,
     thinkingBlockType: capabilities.thinkingBlockType,
     reasoningSplit: capabilities.reasoningSplit,

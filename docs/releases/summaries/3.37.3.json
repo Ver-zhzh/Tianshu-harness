@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "version": "3.37.3",
+  "date": "2026-10-30",
+  "fullNotesUrl": "https://github.com/huiliyi37/Tianshu-harness/releases/tag/v3.37.3",
+  "locales": {
+    "zh": {
+      "title": "会话恢复、桌面稳定性与网络修复",
+      "highlights": [
+        "会话历史改为执行前持久化，补齐崩溃后的历史抢救与恢复前缀；桌面反复启动崩溃可进入安全模式。",
+        "修复阅读滚动被锚点回拉、折叠工作组高度估值错位及代理绕过边界；更新下载按 URL 选择路线并避免重复直连。",
+        "MiniMax 默认模型升级为 M3.1 Flash，提供 1M 上下文与图片、视频输入，并区分全球和国内端点。"
+      ]
+    },
+    "en": {
+      "title": "Session recovery, desktop stability, and network fixes",
+      "highlights": [
+        "Session history is now persisted before execution, with crash rescue and recovery-prefix preservation; repeated desktop startup crashes can enter safe mode.",
+        "Fixed reading-position pullbacks, collapsed work-group size estimates, and proxy-bypass edge cases; updates now route per URL without duplicate direct attempts.",
+        "MiniMax now defaults to M3.1 Flash with a 1M context window and image/video input, with separate global and China endpoints."
+      ]
+    }
+  }
+}

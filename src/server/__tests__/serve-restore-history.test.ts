@@ -19,9 +19,10 @@ import { join } from 'node:path'
 import { SessionPersist } from '../../agent/session-persist.js'
 import { SessionContext } from '../../agent/context.js'
 import { describeRestore, restoreHistoryMessages } from '../serve.js'
-import { resolveHistoryRestore } from '../serve-agent.js'
+import { prepareRecoveredMessagesAsync, resolveHistoryRestore } from '../serve-agent.js'
 import { appendChecksum } from '../../agent/checksum.js'
 import { isAssistantWithTools, type OaiMessage } from '../../api/oai-types.js'
+import { formatDiskReconciliationNote } from '../../context/write-evidence-probe.js'
 
 let tmpDir: string
 const ORIG_SESSION_DIR = process.env.RIVET_SESSION_DIR
@@ -132,6 +133,82 @@ test('restoreHistoryMessages: appends disk reconciliation note after a crash', (
   assert.equal(last.role, 'user')
   assert.match(String(last.content), /fresh-product\.ts/)
   assert.match(String(last.content), /read_file/)
+})
+
+test('restoreHistoryMessages: a second crash recovery appends without changing the persisted reconciliation note', async () => {
+  const sessionId = 'disk-reconcile-repeat'
+  const cwd = join(tmpDir, 'work-repeat')
+  mkdirSync(cwd, { recursive: true })
+  writeFileSync(join(cwd, 'first-product.ts'), 'first\n')
+  const persist = new SessionPersist(sessionId, cwd)
+  persist.initMetadata({ cleanExit: false, updatedAt: Date.now() - 1_000 })
+  writeFileSync(persist.getFilePath(), [
+    { role: 'user', content: 'do work' },
+    { role: 'assistant', content: 'doing work' },
+  ].map(m => appendChecksum(JSON.stringify(m)) + '\n').join(''), 'utf8')
+
+  const first = new SessionContext()
+  restoreHistoryMessages(persist, first, cwd)
+  await persist.compactOaiAsync(first.getMessages(), true)
+  writeFileSync(join(cwd, 'second-product.ts'), 'second\n')
+
+  const second = new SessionContext()
+  restoreHistoryMessages(persist, second, cwd)
+  const notes = second.getMessages().filter((message): message is Extract<OaiMessage, { role: 'user' }> => message.role === 'user'
+    && typeof message.content === 'string' && message.content.startsWith('<system-reminder>\n【磁盘对账】以下文件在会话记录之外被近期修改'))
+  assert.equal(notes.length, 2)
+  assert.deepEqual(second.getMessages().slice(0, first.getMessages().length), first.getMessages())
+  assert.match(String(notes[1]!.content), /first-product\.ts/)
+  assert.match(String(notes[1]!.content), /second-product\.ts/)
+  assert.equal(notes[1]!.origin, 'hook')
+})
+
+test('restoreHistoryMessages: preserves stale reconciliation notes and normal user messages', () => {
+  const sessionId = 'disk-reconcile-stale'
+  const cwd = join(tmpDir, 'work-stale')
+  mkdirSync(cwd, { recursive: true })
+  const oldNote = formatDiskReconciliationNote([{ path: 'gone.ts', bytes: 4, mtimeMs: Date.now() - 60_000 }])!
+  const ordinary: OaiMessage[] = [
+    { role: 'user', content: 'Keep this ordinary mention of 【磁盘对账】.' },
+    { role: 'user', content: '<system-reminder>\n【磁盘对账】user-authored text</system-reminder>' },
+    { role: 'assistant', content: 'preserve this answer' },
+  ]
+  const persist = new SessionPersist(sessionId, cwd)
+  persist.initMetadata({ cleanExit: false, updatedAt: Date.now() - 1_000 })
+  writeFileSync(persist.getFilePath(), [ordinary[0]!, { role: 'user', content: oldNote }, ...ordinary.slice(1)]
+    .map(m => appendChecksum(JSON.stringify(m)) + '\n').join(''), 'utf8')
+
+  const session = new SessionContext()
+  restoreHistoryMessages(persist, session, cwd)
+  assert.deepEqual(session.getMessages(), [ordinary[0]!, { role: 'user', content: oldNote }, ...ordinary.slice(1)])
+})
+
+test('prepareRecoveredMessagesAsync: repeated recovery appends the current note and incomplete warning', async () => {
+  const sessionId = 'async-disk-reconcile-repeat'
+  const cwd = join(tmpDir, 'work-async-repeat')
+  mkdirSync(cwd, { recursive: true })
+  for (let index = 0; index < 9; index++) writeFileSync(join(cwd, `product-${index}.ts`), `${index}\n`)
+  const warning = 'Disk reconciliation is incomplete; verify existing work before repeating any external operation.'
+  const oldNote = formatDiskReconciliationNote([{ path: 'old-product.ts', bytes: 4, mtimeMs: Date.now() - 60_000 }])!
+  const persist = new SessionPersist(sessionId, cwd)
+  persist.initMetadata({ cleanExit: false, updatedAt: Date.now() - 1_000 })
+  writeFileSync(persist.getFilePath(), [
+    { role: 'user', content: 'keep this human message' },
+    { role: 'user', content: oldNote },
+    { role: 'assistant', content: 'preserve this answer' },
+    { role: 'system', content: warning },
+  ].map(m => appendChecksum(JSON.stringify(m)) + '\n').join(''), 'utf8')
+
+  const messages = await prepareRecoveredMessagesAsync(persist, cwd)
+  const notes = messages.filter(message => message.role === 'user' && typeof message.content === 'string'
+    && message.content.startsWith('<system-reminder>\n【磁盘对账】以下文件在会话记录之外被近期修改'))
+  assert.equal(notes.length, 2)
+  assert.equal(notes[0]!.content, oldNote)
+  assert.match(String(notes[1]!.content), /product-7\.ts/)
+  assert.doesNotMatch(String(notes[1]!.content), /old-product\.ts/)
+  assert.equal(messages.filter(message => message.role === 'system' && message.content === warning).length, 2)
+  assert.ok(messages.some(message => message.role === 'user' && message.content === 'keep this human message'))
+  assert.ok(messages.some(message => message.role === 'assistant' && message.content === 'preserve this answer'))
 })
 
 test('restoreHistoryMessages: handles tool_call/tool_result pairs correctly', () => {

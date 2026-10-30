@@ -15,7 +15,7 @@ import type { DelegateWorkerInput, DelegateActivityUpdate, ManagedAgent, Runtime
 import { SessionPersist, getSessionDir } from '../agent/session-persist.js'
 import { captureGitBaselineAsync } from '../agent/git-baseline-async.js'
 import type { BaselineSnapshot } from '../agent/worktree-baseline.js'
-import { findRecentUnrecordedWritesAsync, formatDiskReconciliationNote, shouldReconcileDisk } from '../context/write-evidence-probe.js'
+import { findRecentUnrecordedWritesAsync, formatDiskReconciliationNote, reconcileDiskReconciliationMessages, shouldReconcileDisk } from '../context/write-evidence-probe.js'
 import { runGateCompletion, rewindAgentSession, waitForAgentRewind } from '../agent/loop-factory.js'
 import { memoryBackfillEnabled, runMemoryBackfill } from '../memory/backfill.js'
 import { restoreGoalTracker } from '../agent/goal-persist.js'
@@ -296,6 +296,24 @@ interface PreparedSession {
   baseline: BaselineSnapshot
 }
 
+export async function prepareRecoveredMessagesAsync(
+  persist: SessionPersist, cwd: string, signal?: AbortSignal,
+): Promise<import('../api/oai-types.js').OaiMessage[]> {
+  let messages = await persist.loadOaiAsync(signal)
+  const meta = persist.loadMetadata()
+  if (messages.length && shouldReconcileDisk(meta)) {
+    const { writes, complete } = await findRecentUnrecordedWritesAsync(cwd, messages, {
+      sinceMs: meta.updatedAt ? meta.updatedAt - 600_000 : undefined, signal,
+    })
+    const note = formatDiskReconciliationNote(writes)
+    const recovered = reconcileDiskReconciliationMessages(messages, { note, incomplete: !complete })
+    signal?.throwIfAborted()
+    for (const message of recovered.slice(messages.length)) await persist.appendOaiWithChecksum(message, { flush: true })
+    messages = recovered
+  }
+  return messages
+}
+
 export async function buildManagedAgentAsync(
   args: Parameters<typeof buildManagedAgent>, signal?: AbortSignal, expectedTranscriptWatermark?: number,
 ): Promise<import('./session-manager.js').ManagedAgent> {
@@ -304,16 +322,7 @@ export async function buildManagedAgentAsync(
   const persist = new SessionPersist(sessionId, cwd, {
     recoveryStructuredTools: ctx.config.agent.recovery?.structuredTools,
   })
-  const [messages, baseline] = await Promise.all([persist.loadOaiAsync(signal), captureGitBaselineAsync(cwd, signal)])
-  const meta = persist.loadMetadata()
-  if (messages.length && shouldReconcileDisk(meta)) {
-    const { writes, complete } = await findRecentUnrecordedWritesAsync(cwd, messages, {
-      sinceMs: meta.updatedAt ? meta.updatedAt - 600_000 : undefined, signal,
-    })
-    const note = formatDiskReconciliationNote(writes)
-    if (note) messages.push({ role: 'user', content: note })
-    if (!complete) messages.push({ role: 'system', content: 'Disk reconciliation is incomplete; verify existing work before repeating any external operation.' })
-  }
+  const [messages, baseline] = await Promise.all([prepareRecoveredMessagesAsync(persist, cwd, signal), captureGitBaselineAsync(cwd, signal)])
   signal?.throwIfAborted()
   return buildManagedAgent(ctx, cwd, sessionId, registry, approval, shared, reload, model, allowed, { persist, messages, baseline }, expectedTranscriptWatermark)
 }

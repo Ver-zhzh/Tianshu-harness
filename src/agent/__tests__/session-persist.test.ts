@@ -74,9 +74,22 @@ describe('SessionPersist', () => {
       assert.equal(persist.loadOai().length, 1, 'ordinary crash recovery must retain its permissive complete-frame behavior')
       assert.equal(persist.matchesOaiSessionProjection(messages, MAX_SESSION_MESSAGE_JSON_CHARS), false,
         'repair authorization must cover physical bytes, not silently discard a partial frame')
+      assert.equal(persist.canRepairOaiSessionProjection(messages, MAX_SESSION_MESSAGE_JSON_CHARS), false)
     }
     writeFileSync(persist.getFilePath(), complete)
     assert.equal(persist.matchesOaiSessionProjection(messages, MAX_SESSION_MESSAGE_JSON_CHARS), true)
+    assert.equal(persist.canRepairOaiSessionProjection(messages, MAX_SESSION_MESSAGE_JSON_CHARS), true)
+  })
+
+  it('repair projection matching preserves duplicate message multiplicity', async () => {
+    const persist = new SessionPersist('duplicate-repair-projection', tempDir)
+    const repeated: OaiMessage = { role: 'user', content: 'repeat me' }
+    const messages: OaiMessage[] = [repeated, { role: 'assistant', content: 'acknowledged' }, repeated]
+    await persist.compactOaiAsync(messages.slice(0, 2), true)
+    assert.equal(persist.matchesOaiSessionProjection(messages, MAX_SESSION_MESSAGE_JSON_CHARS), false)
+    assert.equal(persist.canRepairOaiSessionProjection(messages, MAX_SESSION_MESSAGE_JSON_CHARS), true)
+    await persist.compactOaiAsync([...messages, repeated], true)
+    assert.equal(persist.canRepairOaiSessionProjection(messages, MAX_SESSION_MESSAGE_JSON_CHARS), false)
   })
 
   it('落盘上限必须容得下内存侧允许的单条工具结果（不二次削小）', () => {

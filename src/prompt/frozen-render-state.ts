@@ -19,6 +19,8 @@ export class FrozenRenderState {
   private epoch = 0
   get buildRevision(): number { return this.revision }
   private commits: Promise<void> = Promise.resolve()
+  private historyDurabilityBarrier?: () => Promise<void>
+  setHistoryDurabilityBarrier(barrier: () => Promise<void>): void { this.historyDurabilityBarrier = barrier }
   restore(snapshot: FrozenSnapshotData): void {
     this.committed = structuredClone(snapshot)
     this.anchors = new FrozenAnchors(this.committed.anchors)
@@ -52,10 +54,11 @@ export class FrozenRenderState {
   }
   commit(candidate: FrozenRenderCandidate, snapshot: FrozenSnapshotData, durable: ((snapshot: FrozenSnapshotData) => Promise<void>) | undefined, finish: () => void): void | Promise<void> {
     const publish = () => { this.publish(candidate, snapshot); finish() }
-    if (!durable) { publish(); return }
+    if (!durable && !this.historyDurabilityBarrier) { publish(); return }
     const commit = this.commits.then(async () => {
       this.validate(candidate)
-      await durable(snapshot)
+      await this.historyDurabilityBarrier?.()
+      await durable?.(snapshot)
       publish()
     })
     this.commits = commit.catch(() => {})

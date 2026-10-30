@@ -20,11 +20,12 @@ export function buildUpdateRestartRoutes(manager: UpdateRestartManager, apiToken
       try {
         const payload = (body as { force?: unknown; allowUnsaved?: unknown } | undefined)
         await manager.prepareUpdateRestart(payload?.force === true, deadline, payload?.allowUnsaved === true ? { allowUnsaved: true } : undefined)
+        controller.signal.throwIfAborted()
         // An abandoned client must not leave the runtime permanently frozen.
         expiry = setTimeout(cancel, 120000); expiry.unref()
         return { status: 200, body: { prepared: true } }
       } catch (error) {
-        cancel()
+        if (cancellation === controller) cancel()
         const code = error instanceof Error && error.message === 'UPDATE_BUSY' ? 'UPDATE_BUSY'
           : error instanceof Error && error.message === 'UPDATE_BUSY_TIMEOUT' ? 'UPDATE_BUSY_TIMEOUT'
           : 'UPDATE_SAVE_FAILED'

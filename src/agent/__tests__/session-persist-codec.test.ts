@@ -235,13 +235,13 @@ describe('SessionPersist write-behind codec (P1)', () => {
   it('loads never double-count an appended frame while datasync is still pending', async () => {
     const persist = new SessionPersist('codec-datasync-pending', tempDir)
     const writer = (persist as unknown as { batchWriter: SessionBatchWriter }).batchWriter
-    const gateWriter = writer as unknown as { fdatasyncQuiet: () => Promise<void> }
-    const original = gateWriter.fdatasyncQuiet.bind(writer)
+    const gateWriter = writer as unknown as { syncFileAsync: () => Promise<void> }
+    const original = gateWriter.syncFileAsync.bind(writer)
     let entered!: () => void
     let release!: () => void
     const started = new Promise<void>(resolve => { entered = resolve })
     const gate = new Promise<void>(resolve => { release = resolve })
-    gateWriter.fdatasyncQuiet = async () => { entered(); await gate; await original() }
+    gateWriter.syncFileAsync = async () => { entered(); await gate; await original() }
     await persist.appendOaiWithChecksum({ role: 'user', content: 'identical' })
     await persist.appendOaiWithChecksum({ role: 'user', content: 'identical' })
     const flushing = persist.flushSessionBuffer()
@@ -253,7 +253,7 @@ describe('SessionPersist write-behind codec (P1)', () => {
     } finally {
       release()
       await flushing
-      gateWriter.fdatasyncQuiet = original
+      gateWriter.syncFileAsync = original
     }
   })
 

@@ -5,6 +5,7 @@ import { mkdir as mkdirAsync } from 'node:fs/promises'
 import { validHookTimeout } from '../hooks/hooks-config.js'
 import { writeFileAtomicDurableAsync } from '../fs-atomic.js'
 import { buildContinuityRecoveryRoutes } from './continuity-recovery-routes.js'
+import { buildHistoryRescueRoutes } from './history-rescue-routes.js'
 import { withWorkspaceRoots } from '../tools/workspace-context.js'
 import { NonRepositoryError } from '../agent/repository-capability.js'
 import { validateWorkspaceRoots } from './workspace-roots.js'
@@ -313,6 +314,7 @@ export function buildSessionRoutes(
     ...buildSkillCreationRoutes(manager, apiToken),
     ...buildApprovalRoutes(manager, apiToken),
     ...buildContinuityRecoveryRoutes(manager, apiToken),
+    ...buildHistoryRescueRoutes(manager, apiToken),
     ...buildToolSurfaceRoutes(manager, apiToken),
     ...buildGitWorkbenchRoutes(manager, apiToken),
     ...buildGitPrRoutes(manager, apiToken),

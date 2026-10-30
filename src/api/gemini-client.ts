@@ -35,7 +35,7 @@ import { requestAuditContext } from './call-audit.js'
  * missing metadata in older legacy history does not imply a new user turn fails.
  */
 
-import { ProxyAgent } from 'undici'
+import { providerDispatcher } from './provider-network.js'
 import type { StreamClient, StreamCallbacks } from './stream-client.js'
 import type { OaiAssistantMessage, OaiChatRequest, OaiToolCall, OaiUserMessage } from './oai-types.js'
 import type { ContentBlock, Usage } from './types.js'
@@ -68,6 +68,7 @@ export interface GeminiClientConfig {
   maxRetries?: number
   retry?: ProviderRetryConfig
   proxy?: string
+  noProxy?: string
   providerName?: string
 }
 
@@ -158,7 +159,7 @@ function toGeminiParts(content: OaiUserMessage['content']): GeminiPart[] {
 }
 
 export class GeminiClient implements StreamClient {
-  private readonly proxyDispatcher: ProxyAgent | undefined
+  private readonly proxyDispatcher: ReturnType<typeof providerDispatcher>
   private reasoningEffort: string | undefined
   private thinking: 'enabled' | 'disabled'
   private restoredThinking?: { thinkingBudget?: number; includeThoughts?: boolean }
@@ -169,7 +170,7 @@ export class GeminiClient implements StreamClient {
   }
 
   constructor(private config: GeminiClientConfig) {
-    this.proxyDispatcher = config.proxy ? new ProxyAgent(config.proxy) : undefined
+    this.proxyDispatcher = providerDispatcher(config.baseUrl, config)
     this.reasoningEffort = config.reasoningEffort
     this.thinking = config.thinking ?? 'enabled'
   }

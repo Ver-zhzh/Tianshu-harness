@@ -603,6 +603,9 @@ export const CHANNEL_SURFACES: readonly InjectionSurface[] = [
 
 /** 全表。 */
 export const INJECTION_SURFACES: readonly InjectionSurface[] = [
+  { id: 'user.history-rescue-explicit', channel: 'user-explicit', cost: 'prefix-replace', volatility: 'transition',
+    producer: 'buildHistoryRescue() → seedHistoryRescue()', anchor: { file: 'src/agent/history-rescue.ts', symbol: 'seedHistoryRescue' },
+    note: '仅显式预览并确认后写入独立救援会话；限 60K 字符的可读历史尾部，标记缺失，不继承工具调用或旧封印，原会话前缀不改。新会话重建缓存。' },
   { id: 'user.handoff-explicit', channel: 'user-explicit', cost: 'append-tail', volatility: 'transition',
     producer: 'queryHandoffCommand()', anchor: { file: 'src/agent/handoff-command.ts', symbol: 'queryHandoffCommand' },
     note: '仅用户显式指定源会话及快照时进入当前 user 边界；默认速览，不改冻结前缀，不自动选最近会话。' },

@@ -16,6 +16,8 @@ import { SessionPersist } from '../session-persist.js'
 import { serializeOaiSessionMessage } from '../session-message-serialization.js'
 import { MAX_SESSION_MESSAGE_JSON_CHARS } from '../../compact/constants.js'
 import { DISABLED_USER_INSTRUCTIONS } from '../../prompt/user-instructions.js'
+import { HistoryIntegrityError } from '../../api/continuation-prefix.js'
+import { sessionFailureFields } from '../../server/session-failure-fields.js'
 import type { FrozenSnapshotData } from '../../prompt/frozen-snapshot.js'
 
 const summary = JSON.stringify({ version: 1, summary: 'Prior project inspection is complete; preserve the current human request.', facts: [], requirements: [], pendingApprovals: [] })
@@ -316,5 +318,162 @@ for (const kind of ['text', 'thinking', 'tool block'] as const) {
     assert.equal(summaries, 0)
     assert.deepEqual(session.getMessages().slice(0, original.length), original)
     assert.equal(session.getMessages().some(message => message.role === 'tool'), false)
+  })
+}
+
+test('compaction repairs a mixed legacy prefix and lossless continuation tail', async context => {
+  const { agent, session, persist } = await fixture(context, 'https://api.deepseek.com/v1')
+  const published: OaiMessage[] = []
+  for (let group = 0; group < 35; group++) {
+    published.push({ role: 'user', origin: 'human', content: `Inspect group ${group}.` })
+    for (let call = 0; call < 4; call++) {
+      const id = `read-${group}-${call}`
+      published.push(
+        { role: 'assistant', content: null, tool_calls: [{ id, type: 'function', function: { name: 'read_file', arguments: '{}' } }] },
+        { role: 'tool', tool_call_id: id, content: `Group ${group} section ${call}.` },
+      )
+    }
+    if (group >= 29) published.push({ role: 'assistant', content: `Group ${group} inspected.`,
+      ...(group === 29 ? { reasoning_content: 'Published reasoning. '.repeat(15_000) } : {}) })
+  }
+  published.push({ role: 'user', origin: 'human', content: 'Publish the final inspection boundary.' })
+  assert.equal(published.length, 322)
+  assert.equal(published.filter(message => message.role === 'user').length, 36)
+  session.replaceMessages(published)
+  context.mock.method(globalThis, 'fetch', async (_url: unknown, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body)) as OaiChatRequest
+    return response(body.response_format ? summary : 'Continuation accepted.')
+  })
+  await agent.config.client.stream(agent.config.promptEngine.buildOaiRequest(session.getMessages()), {
+    onTextDelta() {}, onThinkingDelta() {}, onContentBlock() {}, onStopReason() {}, onError: error => { throw error },
+  })
+  await persist.commitFrozenSnapshot(agent.config.promptEngine.exportFrozenSnapshot())
+  const frozen = persist.readFrozenSnapshot()!
+  assert.equal(frozen.publishedHistory?.length, 322)
+  assert.equal(frozen.renderedHistory?.length, 323)
+  assert.equal(frozen.publishedUserCount, 36)
+  session.addAssistantBlocks([{ type: 'thinking', thinking: 'Preserved reasoning. '.repeat(15_000) }, { type: 'text', text: 'Prior inspection completed.' }])
+  session.appendSystemReminder('Preserve the next human continuation.', 'functional', { mergeTail: false })
+  session.addUserMessage('继续')
+  agent.requestContext.activeUserMessage = session.getMessages().at(-1)
+  await agent.drainPersistWrites()
+  assert.equal(persist.loadOai().length, 325)
+  assert.deepEqual(persist.loadOai().slice(-2).map(message => ({ role: message.role, origin: message.role === 'user' ? message.origin : undefined })), [
+    { role: 'user', origin: 'hook' }, { role: 'user', origin: 'human' },
+  ])
+  const legacyIndex = published.findIndex(message => message.role === 'assistant' && message.reasoning_content?.startsWith('Published reasoning.'))
+  assert.ok(legacyIndex >= 0)
+  const mixed = session.getMessages().map((message, index) => index === legacyIndex
+    ? JSON.parse(serializeOaiSessionMessage(message, MAX_SESSION_MESSAGE_JSON_CHARS)) as OaiMessage : message)
+  assert.notEqual(JSON.stringify(mixed), JSON.stringify(session.getMessages()))
+  await persist.compactOaiAsync(mixed, true)
+  const complete = session.getMessages()
+  assert.equal(complete.filter(message => message.role === 'user' && message.origin === 'human').length, 37)
+  assert.equal(agent.config.promptEngine.assertPublishedHistory(complete), true)
+  assert.notEqual(JSON.stringify(persist.loadOai()), JSON.stringify(complete))
+  assert.equal(persist.matchesOaiSessionProjection(complete, MAX_SESSION_MESSAGE_JSON_CHARS), false)
+  assert.equal(await agent.compactContext(), true)
+  await agent.drainPersistWrites()
+  assert.deepEqual(persist.loadOai(), session.getMessages())
+  assert.ok(session.getMessages().some(message => message.content === '继续'))
+})
+
+test('compaction repairs a memory-only reconciliation reminder before consecutive user messages', async context => {
+  const { agent, session, persist } = await fixture(context, 'https://api.deepseek.com/v1')
+  session.replaceMessages(history(8))
+  await agent.drainPersistWrites()
+  context.mock.method(globalThis, 'fetch', async (_url: unknown, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body)) as OaiChatRequest
+    return response(body.response_format ? summary : 'Continuation accepted.')
+  })
+  await agent.config.client.stream(agent.config.promptEngine.buildOaiRequest(session.getMessages()), {
+    onTextDelta() {}, onThinkingDelta() {}, onContentBlock() {}, onStopReason() {}, onError: error => { throw error },
+  })
+  await persist.commitFrozenSnapshot(agent.config.promptEngine.exportFrozenSnapshot())
+  const reminder: OaiMessage = { role: 'user', content: '<system-reminder>\n【磁盘对账】以下文件在会话记录之外被近期修改，请先 read_file 核实。</system-reminder>' }
+  session.replaceMessages([...session.getMessages(), reminder])
+  session.addUserMessage('继续')
+  agent.requestContext.activeUserMessage = session.getMessages().at(-1)
+  await agent.drainPersistWrites()
+  const complete = session.getMessages()
+  const reminderIndex = complete.length - 2
+  const disk = complete.filter((_message, index) => index !== reminderIndex)
+  await persist.compactOaiAsync(disk, true)
+  assert.equal(persist.loadOai().length + 1, complete.length)
+  assert.deepEqual(complete.at(-2), reminder)
+  assert.equal(Object.hasOwn(complete.at(-2)!, 'origin'), false)
+  assert.deepEqual(complete.slice(-2).map(message => ({ role: message.role, origin: message.role === 'user' ? message.origin : undefined })), [
+    { role: 'user', origin: undefined }, { role: 'user', origin: 'human' },
+  ])
+  assert.equal(agent.config.promptEngine.assertPublishedHistory(complete), true)
+  assert.equal(persist.matchesOaiSessionProjection(complete, MAX_SESSION_MESSAGE_JSON_CHARS), false)
+  assert.equal(persist.canRepairOaiSessionProjection(complete, MAX_SESSION_MESSAGE_JSON_CHARS), true)
+  const operations: string[] = []
+  let repairs = 0
+  const commitBudgetHistory = agent.commitBudgetHistory.bind(agent)
+  context.mock.method(agent, 'commitBudgetHistory', async (expected: OaiMessage[], candidate: OaiMessage[]) => {
+    const repair = expected === candidate
+    if (repair) {
+      repairs++
+      assert.deepEqual(expected, complete)
+    }
+    await commitBudgetHistory(expected, candidate)
+    if (repair) operations.push('repair')
+  })
+  const commitFrozenSnapshot = persist.commitFrozenSnapshot.bind(persist)
+  context.mock.method(persist, 'commitFrozenSnapshot', async (snapshot: FrozenSnapshotData, cancel?: string) => {
+    if (snapshot.pendingCompaction) operations.push('pendingCompaction')
+    await commitFrozenSnapshot(snapshot, cancel)
+  })
+  assert.equal(await agent.compactContext(), true)
+  await agent.drainPersistWrites()
+  assert.equal(repairs, 1)
+  assert.deepEqual(operations, ['repair', 'pendingCompaction'])
+  assert.deepEqual(persist.loadOai(), session.getMessages())
+  assert.ok(session.getMessages().some(message => message.content === '继续'))
+})
+
+for (const kind of ['extra-message', 'empty', 'reordered', 'unverified-subsequence'] as const) {
+  test(`compaction repair rejects ${kind} disk history without rewriting either history`, async context => {
+    const { agent, session, persist } = await fixture(context, 'https://api.deepseek.com/v1')
+    session.replaceMessages(history(6))
+    await agent.drainPersistWrites()
+    context.mock.method(globalThis, 'fetch', async (_url: unknown, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as OaiChatRequest
+      return response(body.response_format ? summary : 'Continuation accepted.')
+    })
+    await agent.config.client.stream(agent.config.promptEngine.buildOaiRequest(session.getMessages()), {
+      onTextDelta() {}, onThinkingDelta() {}, onContentBlock() {}, onStopReason() {}, onError: error => { throw error },
+    })
+    const frozen = agent.config.promptEngine.exportFrozenSnapshot()
+    await persist.commitFrozenSnapshot(frozen)
+    const before = session.getMessages()
+    const proof = structuredClone(agent.config.client.getMainPrefixProof!())
+    const damaged: OaiMessage[] = kind === 'extra-message'
+      ? [...before, { role: 'user', origin: 'human', content: 'Disk-only message.' }]
+      : kind === 'empty' ? []
+        : kind === 'reordered' ? [before[1]!, before[0]!, ...before.slice(2)] : before.slice(1)
+    await persist.compactOaiAsync(damaged, true)
+    if (kind === 'unverified-subsequence') context.mock.method(agent.config.promptEngine, 'assertPublishedHistory', () => false)
+    const rejectedDisk = persist.loadOai()
+    const { readFileSync } = await import('node:fs')
+    const rejectedBytes = readFileSync(persist.getFilePath())
+    assert.equal(agent.config.promptEngine.assertPublishedHistory(before), kind !== 'unverified-subsequence')
+    assert.equal(persist.canRepairOaiSessionProjection(before, MAX_SESSION_MESSAGE_JSON_CHARS), kind === 'unverified-subsequence')
+    await assert.rejects(agent.compactContext(), (error: unknown) => {
+      assert.ok(error instanceof HistoryIntegrityError)
+      const fields = sessionFailureFields(error)
+      assert.equal(fields.kind, 'continuity_projection')
+      assert.equal(fields.continuity?.recovery, 'blocked')
+      assert.equal(fields.continuity?.historyIntegrity?.memoryCount, before.length)
+      assert.equal(fields.continuity?.historyIntegrity?.persistedCount, rejectedDisk.length)
+      assert.doesNotMatch(JSON.stringify(fields.continuity), /Disk-only message/)
+      return true
+    })
+    assert.deepEqual(session.getMessages(), before)
+    assert.deepEqual(persist.loadOai(), rejectedDisk)
+    assert.deepEqual(readFileSync(persist.getFilePath()), rejectedBytes)
+    assert.deepEqual(agent.config.client.getMainPrefixProof!(), proof)
+    assert.deepEqual(persist.readFrozenSnapshot(), frozen)
   })
 }

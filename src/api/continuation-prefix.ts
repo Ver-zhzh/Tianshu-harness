@@ -75,6 +75,21 @@ export class LocalWorkerPolicyError extends Error {
   constructor(message: string, public continuityEvidence?: ContinuityDiagnosticEvidence) { super(message); this.name = 'LocalWorkerPolicyError' }
 }
 
+export interface HistoryIntegrityDetails {
+  reason: 'missing' | 'extra' | 'changed' | 'checksum' | 'incomplete_frame' | 'unreadable' | 'published_source' | 'none'
+  memoryCount: number
+  persistedCount: number | null
+  publishedCount?: number
+  firstMismatch?: number
+  legacyTruncation?: boolean
+}
+
+export class HistoryIntegrityError extends LocalWorkerPolicyError {
+  constructor(message: string, readonly historyIntegrity: HistoryIntegrityDetails) {
+    super(`${message}（内存=${historyIntegrity.memoryCount}，磁盘=${historyIntegrity.persistedCount ?? '未知'}${historyIntegrity.firstMismatch === undefined ? '' : `，首差异下标=${historyIntegrity.firstMismatch}`}）`)
+  }
+}
+
 export class ContinuationPrefixError extends LocalWorkerPolicyError {
   constructor(readonly changed: string | number, readonly previous: ContinuationPrefixProof, readonly next: ContinuationPrefixProof, evidence?: ContinuityDiagnosticEvidence) {
     super(`worker continuation prefix diverged at ${changed}; request not sent`, evidence)
@@ -96,8 +111,10 @@ export interface ContinuityFailureDetails extends ContinuityDiagnosticEvidence {
   afterChars?: number
   deltaChars?: number
   recovery: 'preview' | 'blocked'
+  historyIntegrity?: HistoryIntegrityDetails
 }
 export function continuityFailureDetails(error: unknown): ContinuityFailureDetails | undefined {
+  if (error instanceof HistoryIntegrityError) return { kind: 'source_history', stage: 'source', sourcePrefix: 'changed', renderPrefix: 'unknown', recovery: 'blocked', historyIntegrity: error.historyIntegrity }
   if (error instanceof ContinuationPrefixError) {
     const kind = typeof error.changed === 'number' ? 'projection' : error.changed === 'source' ? 'source_history'
       : error.changed === 'tools' ? 'tools' : error.changed === 'options' ? 'options' : 'binding'
@@ -110,6 +127,9 @@ export function continuityFailureDetails(error: unknown): ContinuityFailureDetai
       recovery: kind === 'projection' ? 'preview' : 'blocked' }
   }
   if (!(error instanceof Error)) return undefined
+  if (/持久化历史不完整|源历史与持久化封印不一致|历史与压缩提交|回退授权对应的保留历史/.test(error.message)) {
+    return { kind: 'source_history', stage: 'source', sourcePrefix: 'changed', renderPrefix: 'unknown', recovery: 'blocked' }
+  }
   const kind = /已发布锚点缺失/.test(error.message) ? 'anchor_missing' : /已发布锚点与冻结投影/.test(error.message) ? 'anchor_mismatch'
     : /冻结构建已过期/.test(error.message) ? 'snapshot_stale' : /耐久提交失败/.test(error.message) ? 'persistence' : undefined
   return kind ? { kind, stage: kind === 'anchor_missing' || kind === 'anchor_mismatch' ? 'render' : 'unknown',

@@ -1,6 +1,6 @@
 import { ProxyAgent, fetch as undiciFetch } from 'undici'
 import type { ProxyResolverOptions } from '../../tools/net/proxy-resolver.js'
-import { resolveProxyForUrl, shouldBypassProxy } from '../../tools/net/proxy-resolver.js'
+import { effectiveUrlPort, resolveProxyForUrl, shouldBypassProxy } from '../../tools/net/proxy-resolver.js'
 import { boundedSearchFetch } from './bounded-fetch.js'
 import type { SearchFetch } from './types.js'
 
@@ -33,7 +33,8 @@ export function createProxyAwareFetch(
 ): SearchFetch {
   const bounded = boundedSearchFetch(fetchImpl)
   return async (url, init) => {
-    if (shouldBypassProxy(new URL(url).hostname, BUILTIN_DIRECT_HOSTS)) return bounded(url, init)
+    const parsed = new URL(url)
+    if (shouldBypassProxy(parsed.hostname, BUILTIN_DIRECT_HOSTS, effectiveUrlPort(parsed))) return bounded(url, init)
     const proxyUrl = resolveProxyForUrl(url, proxyOpts)
     if (!proxyUrl) return bounded(url, init)
     // Merge dispatcher without clobbering caller-supplied init (e.g. headers,

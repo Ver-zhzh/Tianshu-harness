@@ -28,6 +28,7 @@ import { decodeTranscriptText, encodeBatch, isZstdFrameStream, scanZstdFrames } 
 import { serializeSessionMessage, serializeOaiSessionMessage } from './session-message-serialization.js'
 import { SessionBatchWriter } from './session-batch-writer.js'
 import { SessionMetadataStore, FrozenSnapshotWriter, compactEventKey, mergeCompactEvent } from './session-metadata.js'
+import { SESSION_AUDIT_LINE_TYPES, canonicalOrphanOutcomes, describePersistedHistory, matchesOaiSessionProjection as matchesOaiProjection, canRepairOaiSessionProjection as canRepairOaiProjection } from './session-oai-projection.js'
 
 export { serializeSessionMessage, serializeOaiSessionMessage } from './session-message-serialization.js'
 
@@ -44,7 +45,7 @@ function ensureDir(dir: string): void {
   }
 }
 
-function isOaiMessage(value: unknown): value is OaiMessage {
+export function isOaiMessage(value: unknown): value is OaiMessage {
   if (!value || typeof value !== 'object') return false
   const msg = value as Record<string, unknown>
   if (msg.role === 'system') return typeof msg.content === 'string'
@@ -56,7 +57,7 @@ function isOaiMessage(value: unknown): value is OaiMessage {
   return false
 }
 
-function parseSessionLine(line: string): unknown | null {
+export function parseSessionLine(line: string): unknown | null {
   const parsed = JSON.parse(line) as { type?: string }
   if (parsed.type === 'compact_start' || parsed.type === 'compact_end' || parsed.type === 'model_switch') {
     return null
@@ -173,12 +174,22 @@ export class SessionPersist {
    * cannot lose a completed tool result while its disk side effect survives.
    */
   async appendOaiWithChecksum(message: OaiMessage, options?: { flush?: boolean }): Promise<void> {
+    this.enqueueOaiWithChecksum(message)
+    if (options?.flush) await this.batchWriter.flush()
+  }
+
+  /** Boot-time recovery must persist new reminders before publishing their prefix. */
+  appendOaiWithChecksumSync(message: OaiMessage): void {
+    this.enqueueOaiWithChecksum(message)
+    this.batchWriter.flushSync()
+  }
+
+  private enqueueOaiWithChecksum(message: OaiMessage): void {
     const json = serializeOaiSessionMessage(message)
     const line = appendChecksum(json) + '\n'
     this.batchWriter.enqueueLine(line)
     this.transcriptWatermark += 1
     this.appendedCount += 1
-    if (options?.flush) await this.batchWriter.flush()
   }
 
   /**
@@ -238,17 +249,13 @@ export class SessionPersist {
   }
 
   matchesOaiSessionProjection(messages: readonly OaiMessage[], maxChars?: number): boolean {
-    try {
-      const lines = this.readTranscriptText(true).trim().split('\n').filter(Boolean)
-      const { validLines, invalidCount } = verifyLines(lines)
-      if (invalidCount > 0) return false
-      const rows = validLines.filter(line => {
-        const parsed = JSON.parse(line) as { type?: string }
-        return !parsed.type || !SessionPersist.AUDIT_LINE_TYPES.has(parsed.type)
-      })
-      return rows.length === messages.length && rows.every((line, index) => line === serializeOaiSessionMessage(messages[index]!, maxChars))
-    } catch { return false }
+    try { return matchesOaiProjection(this.readTranscriptText(true), messages, maxChars) } catch { return false }
   }
+
+  canRepairOaiSessionProjection(messages: readonly OaiMessage[], maxChars?: number): boolean {
+    try { return canRepairOaiProjection(this.readTranscriptText(true), messages, maxChars) } catch { return false }
+  }
+  describeHistoryIntegrity(messages: readonly OaiMessage[]) { return describePersistedHistory(() => this.readTranscriptText(true), messages) }
 
   async loadOaiAsync(signal?: AbortSignal): Promise<OaiMessage[]> {
     signal?.throwIfAborted()
@@ -313,6 +320,9 @@ export class SessionPersist {
     // particular, an empty `tool_calls` array must not be mistaken for an
     // orphan batch (and must never reach the provider on resume).
     const normalized = normalizeOaiMessages(messages)
+    // Sealed source bytes stay intact; preflight owns unknown tail outcomes.
+    const uncertain = canonicalOrphanOutcomes(this.frozenPath, normalized)
+    if (uncertain) { this.lastInjectedUncertain = uncertain; return normalized }
     const { messages: repaired, hadOrphans, strippedWriteTool, injectedUncertain } = this.repairOrphanToolCalls(normalized)
     this.lastInjectedUncertain = injectedUncertain
     if (hadOrphans && !(this.recoveryStructuredTools ?? (process.env.RIVET_RECOVERY_STRUCTURED_TOOLS === '1'))) {
@@ -366,16 +376,8 @@ export class SessionPersist {
         + '外部系统的记录），再决定是否需要补做；仍不确定就问用户。'
   }
 
-  /** 压#7: Remove orphan tool_use/tool_result pairs left by corrupted/missing lines.
-   *
-   * Orphan tool_use entries occur when the stream delivered a complete
-   * tool_calls block but the process was killed before the tool executed
-   * (force-kill, power loss, or stream error after tool_use commit). The tool
-   * was NEVER run — any files it would have created/modified do NOT exist.
-   * Returns whether any orphans were stripped so the caller can warn the model
-   * not to assume side effects from the removed tools, plus whether any stripped
-   * orphan was a write/edit tool (so the warning can be non-destructive: the
-   * file may already hold the change, verify before re-running). */
+  /** Legacy unsealed transcripts retain compatibility repair. A missing result
+   * never proves that the tool did not run; side effects may already exist. */
   private repairOrphanToolCalls(messages: OaiMessage[]): {
     messages: OaiMessage[]
     hadOrphans: boolean
@@ -456,7 +458,7 @@ export class SessionPersist {
   }
 
   /** Audit breadcrumb types: skipped on replay (parseSessionLine), preserved across rewrites. */
-  private static readonly AUDIT_LINE_TYPES = new Set(['compact_start', 'compact_end', 'model_switch'])
+  private static readonly AUDIT_LINE_TYPES = SESSION_AUDIT_LINE_TYPES
 
   /**
    * Collect audit breadcrumb lines from the current file, re-checksummed for a

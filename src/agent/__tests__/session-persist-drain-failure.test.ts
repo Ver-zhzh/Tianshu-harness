@@ -12,6 +12,7 @@ for (const mutation of ['append', 'rewrite']) {
       appendOaiWithChecksum: async () => { throw error },
       compactOaiAsync: async () => { throw error },
       flushSessionBuffer: async () => {},
+      matchesOaiSessionProjection: () => false,
     } as unknown as SessionPersist
     const listener = attachSessionPersistListener({ session, persist })
     if (mutation === 'append') session.addUserMessage('test')

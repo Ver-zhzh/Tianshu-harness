@@ -50,6 +50,7 @@ import {
   createWriteEvidenceProbe,
   findRecentUnrecordedWrites,
   formatDiskReconciliationNote,
+  reconcileDiskReconciliationMessages,
   shouldReconcileDisk,
 } from './context/write-evidence-probe.js'
 import { FileHistory } from './agent/file-history.js'
@@ -1426,14 +1427,13 @@ export function createShutdownHandler(ctx: BootstrapContext): () => Promise<void
       const hookDrain = ctx.refs.externalHookHost?.shutdown()
       try {
         await waitForAgentRewind(ctx.agent)
-        // Mark a clean exit. Next startup mints a fresh session by default;
-        // returning here requires explicit --continue / --resume <id> (R1).
-        try { ctx.persist.updateMetadata({ cleanExit: true }) } catch { /* best-effort */ }
+        await ctx.agent.drainPersistWrites()
         // resume 缓存继承的 shutdown flush：覆盖 collapse watermark 等不经
         // commit 钩子的漂移（边界写由 wireFrozenSnapshotPersist 已覆盖）。
         ctx.persist.queueFrozenSnapshot(ctx.agent.config.promptEngine.exportFrozenSnapshot())
         await ctx.persist.drainFrozenSnapshots()
         ctx.persist.compactOai(ctx.session.getMessages())
+        try { ctx.persist.updateMetadata({ cleanExit: true }); await ctx.persist.flushSessionBuffer() } catch { /* best-effort */ }
         if (ctx.fileHistory) {
           persistFileHistory(
             join(getSessionDir(ctx.cwd), ctx.sessionId, 'file-history.json'),
@@ -1702,9 +1702,8 @@ export function switchAgentSession(ctx: BootstrapContext, targetId: string): Swi
     const recentSinceMs = resumeMeta?.updatedAt ? resumeMeta.updatedAt - 10 * 60 * 1000 : undefined
     const recentWrites = findRecentUnrecordedWrites(ctx.cwd, preflight.messages, { sinceMs: recentSinceMs })
     const diskNote = formatDiskReconciliationNote(recentWrites)
-    if (diskNote) {
-      messagesToRestore = [...preflight.messages, { role: 'user' as const, content: diskNote }]
-    }
+    messagesToRestore = reconcileDiskReconciliationMessages(preflight.messages, { note: diskNote, incomplete: false })
+    for (const message of messagesToRestore.slice(preflight.messages.length)) targetPersist.appendOaiWithChecksumSync(message)
   }
 
   // 目标会话无 model 记录（旧会话）时保留当前模型。

@@ -1,4 +1,5 @@
 import { createSidePathUsageRecorder } from './side-path-usage-recorder.js'
+import { waitForHistoryDurability, settleInterruptedHistory } from './history-durability.js'
 import { getCompactionTaskContract, getCompactionGoalAnchor, rollbackActiveUserInput } from './human-input-boundary.js'
 export { rollbackActiveUserInput } from './human-input-boundary.js'
 export { createSidePathUsageRecorder } from './side-path-usage-recorder.js'
@@ -1292,19 +1293,19 @@ export function createTurnOrchestrator(self: AgentLoop): TurnOrchestrator {
       self.turnStepProducer.buildTurnRequest(turn, strategy, sensorium, pressureResult, assistantResponded, userMessageConsumed, callbacks),
     prewarmRecentReads: () => self.prewarmController.prewarmRecentReads(),
     runPostSession: (callbacks) => self.runPostSession(callbacks),
-    drainPersist: () => self.drainPersistWrites(),
+    drainPersist: () => settleInterruptedHistory(self.drainPersistWrites(), self.getRunSignal()),
     schedulePostSessionDetached: (callbacks) => { self.schedulePostSessionDetached(callbacks) },
     recordProviderOutcome: (ok) => { self.recordProviderOutcome(ok) },
 
     // === Sub-controllers ===
     streamTurn: async params => {
-      if (self.persist) await self.persist.flushSessionBuffer().catch(() => {})
+      await waitForHistoryDurability(() => self.drainPersistWrites(), self.getRunSignal())
       const result = await self.turnStream!.streamTurn(params)
       if (!self.abortController?.signal.aborted && !result.streamError && !result.triggeredRule) self.advisoryReadback.markResponseComplete(self.modelObservationTurn)
       return result
     },
-    executeBatch: (params) => self.toolExecution.executeBatch(params),
-    completeTurn: (params) => self.turnCompletion.complete(params),
+    executeBatch: async (params) => { await waitForHistoryDurability(() => self.drainPersistWrites(), params.abortSignal); return self.toolExecution.executeBatch(params) },
+    completeTurn: async (params) => { await waitForHistoryDurability(() => self.drainPersistWrites(), self.getRunSignal()); return self.turnCompletion.complete(params) },
     appendTurnResult: (turn) => { self.planTraceCoordinator.appendTurnResult(turn) },
     onCacheAdvisorTurnEnd: (params) => { self.cacheAdvisor.onTurnEnd(params) },
 

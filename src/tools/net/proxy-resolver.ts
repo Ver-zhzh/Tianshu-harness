@@ -155,18 +155,88 @@ function normalizeProxyUrl(raw: string): string | undefined {
  *  - 精确域名匹配（大小写不敏感）
  *  - `.example.com` 后缀匹配：`api.example.com` 和 `example.com` 都命中
  */
-export function shouldBypassProxy(hostname: string, noProxy?: string): boolean {
-  const raw = noProxy ?? envCaseInsensitive('NO_PROXY')
-  if (!raw) return false
-  const h = hostname.toLowerCase()
-  for (const entry of raw.split(',')) {
-    const p = entry.trim().toLowerCase()
-    if (!p) continue
-    if (p === '*') return true
-    if (h === p) return true
-    if (p.startsWith('.') && (h.endsWith(p) || h === p.slice(1))) return true
+function splitHostPort(entry: string): { name: string; port: number } | undefined {
+  if (entry.startsWith('[') || entry.includes('://')) return undefined
+  const index = entry.lastIndexOf(':')
+  if (index <= 0) return undefined
+  const name = entry.slice(0, index)
+  if (!name || name.includes(':')) return undefined
+  const port = Number(entry.slice(index + 1))
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return undefined
+  return { name, port }
+}
+
+function ipv4ToInt(value: string): number | undefined {
+  const parts = value.split('.')
+  if (parts.length !== 4) return undefined
+  let result = 0
+  for (const part of parts) {
+    if (!/^\d{1,3}$/.test(part)) return undefined
+    const octet = Number(part)
+    if (octet > 255) return undefined
+    result = (result * 256 + octet) >>> 0
   }
-  return false
+  return result >>> 0
+}
+
+/** Returns undefined when the entry is not an IPv4 CIDR, so callers keep looking. */
+function ipv4CidrMatch(host: string, entry: string): boolean | undefined {
+  const [network, bitsRaw] = entry.split('/')
+  if (!network || bitsRaw === undefined || !/^\d{1,2}$/.test(bitsRaw)) return undefined
+  const bits = Number(bitsRaw)
+  if (bits > 32) return undefined
+  const base = ipv4ToInt(network)
+  const target = ipv4ToInt(host)
+  if (base === undefined || target === undefined) return undefined
+  const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0
+  return ((base & mask) >>> 0) === ((target & mask) >>> 0)
+}
+
+/** Entry forms: `*`, `host`, `.domain`, `host:port`, IPv4 CIDR (`10.0.0.0/8`). */
+function matchesBypassEntry(hostname: string, entry: string, port?: number): boolean {
+  const p = entry.trim().toLowerCase()
+  if (!p) return false
+  if (p === '*') return true
+  const hostPort = splitHostPort(p)
+  if (hostPort) {
+    return (
+      port === hostPort.port
+      && (hostname === hostPort.name
+        || (hostPort.name.startsWith('.')
+          && (hostname === hostPort.name.slice(1) || hostname.endsWith(hostPort.name))))
+    )
+  }
+  const cidr = ipv4CidrMatch(hostname, p)
+  if (cidr !== undefined) return cidr
+  return hostname === p || (p.startsWith('.') && (hostname === p.slice(1) || hostname.endsWith(p)))
+}
+
+/**
+ * hostname 是否命中 NO_PROXY 绕过列表。
+ *
+ * 列表来源叠加生效：`config.network.noProxy` 与 `NO_PROXY` 环境变量取并集
+ * （与桌面端 Rust 侧一致；任一侧写了 bypass 都不该被另一侧覆盖）。
+ *
+ * 匹配规则（与 curl/wget 语义对齐）：
+ *  - `*` 绕过所有
+ *  - 精确域名匹配（大小写不敏感）
+ *  - `.example.com` 后缀匹配：`api.example.com` 和 `example.com` 都命中
+ *  - `host:port` 仅在该端口上命中
+ *  - IPv4 CIDR（`10.0.0.0/8`），IPv6 网段暂不支持
+ */
+export function shouldBypassProxy(hostname: string, noProxy?: string, port?: number): boolean {
+  const lists = [noProxy?.trim(), envCaseInsensitive('NO_PROXY')?.trim()]
+    .filter((list): list is string => !!list)
+  if (!lists.length) return false
+  const host = hostname.toLowerCase()
+  return lists.some(list => list.split(',').some(entry => matchesBypassEntry(host, entry, port)))
+}
+
+export function effectiveUrlPort(url: URL): number | undefined {
+  if (url.port) return Number(url.port)
+  if (url.protocol === 'https:') return 443
+  if (url.protocol === 'http:') return 80
+  return undefined
 }
 
 /**
@@ -193,7 +263,7 @@ function resolveRawProxyForUrl(url: string, opts?: ProxyResolverOptions): string
   } catch {
     return undefined
   }
-  if (shouldBypassProxy(parsed.hostname, opts?.noProxy)) return undefined
+  if (shouldBypassProxy(parsed.hostname, opts?.noProxy, effectiveUrlPort(parsed))) return undefined
 
   // config 显式配置优先
   if (opts?.proxyUrl) return opts.proxyUrl

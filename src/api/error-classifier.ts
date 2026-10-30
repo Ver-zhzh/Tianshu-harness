@@ -1,3 +1,4 @@
+import { continuityGuidance } from './continuity-guidance.js'
 /**
  * API Error Classifier — maps raw exceptions to structured recovery strategies.
  *
@@ -740,15 +741,7 @@ export type GuidanceSurface = 'tui' | 'desktop'
 export function errorRecoveryGuidance(error: unknown, surface: GuidanceSurface = 'tui'): string {
   const c = classifyApiError(error)
   switch (c.category) {
-    case 'request_invariant': {
-      const details = continuityFailureDetails(error)
-      const stage = details?.stage === 'transport' ? '源历史与冻结投影未变，发送层字节发生变化。'
-        : details?.stage === 'render' ? '冻结投影无法与已发布字节核对。' : ''
-      if (surface === 'desktop') {
-        return stage + '本地连续性校验受阻，重复发送不会修复；请到 设置 → 关于与许可 →「检查运行环境」查看运行时状态，或新建会话保留历史。执行绑定或源历史异常时禁止重建。'
-      }
-      return stage + '本地连续性校验受阻，重复发送不会修复；请用 /repair-prefix 检查恢复资格，或保留原会话并用 /logs 导出诊断。执行绑定或源历史异常时禁止重建。'
-    }
+    case 'request_invariant': return continuityGuidance(continuityFailureDetails(error), surface)
     case 'rate_limit':
       return '限流/额度不足：稍等片刻再发，或 /model 切轻量档（如 deepseek-v4-flash）；持续 429 先查余额（桌面端 Insights 面板）'
     case 'overloaded':

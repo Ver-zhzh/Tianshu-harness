@@ -2,6 +2,12 @@ import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { resolveProxyForUrl, shouldBypassProxy, parseWindowsProxyOutput, parseScutilProxy } from '../proxy-resolver.js'
 
+/** Bypass lists read NO_PROXY from the process; isolate cases from a polluted runner env. */
+function restoreEnv(key: string, value: string | undefined): void {
+  if (value === undefined) delete process.env[key]
+  else process.env[key] = value
+}
+
 describe('shouldBypassProxy', () => {
   it('returns false when NO_PROXY unset', () => {
     assert.equal(shouldBypassProxy('example.com', undefined), false)
@@ -29,6 +35,53 @@ describe('shouldBypassProxy', () => {
     assert.equal(shouldBypassProxy('a.com', 'a.com, b.com , c.com'), true)
     assert.equal(shouldBypassProxy('b.com', 'a.com, b.com , c.com'), true)
     assert.equal(shouldBypassProxy('d.com', 'a.com, b.com , c.com'), false)
+  })
+
+  it('matches IPv4 CIDR entries', () => {
+    const saved = [process.env.NO_PROXY, process.env.no_proxy]
+    delete process.env.NO_PROXY
+    delete process.env.no_proxy
+    try {
+      assert.equal(shouldBypassProxy('10.1.2.3', '10.0.0.0/8'), true)
+      assert.equal(shouldBypassProxy('11.1.2.3', '10.0.0.0/8'), false)
+      assert.equal(shouldBypassProxy('192.168.1.20', '192.168.1.0/24'), true)
+      assert.equal(shouldBypassProxy('192.168.2.20', '192.168.1.0/24'), false)
+      assert.equal(shouldBypassProxy('127.0.0.1', '0.0.0.0/0'), true)
+    } finally {
+      restoreEnv('NO_PROXY', saved[0])
+      restoreEnv('no_proxy', saved[1])
+    }
+  })
+
+  it('matches host:port entries only on the same port', () => {
+    const saved = [process.env.NO_PROXY, process.env.no_proxy]
+    delete process.env.NO_PROXY
+    delete process.env.no_proxy
+    try {
+      assert.equal(shouldBypassProxy('localhost', 'localhost:8787', 8787), true)
+      assert.equal(shouldBypassProxy('localhost', 'localhost:8787', 9999), false)
+      assert.equal(shouldBypassProxy('localhost', 'localhost:8787'), false)
+    } finally {
+      restoreEnv('NO_PROXY', saved[0])
+      restoreEnv('no_proxy', saved[1])
+    }
+  })
+
+  it('config and env bypass lists are cumulative', () => {
+    const saved = process.env.NO_PROXY
+    process.env.NO_PROXY = '.internal'
+    try {
+      assert.equal(
+        shouldBypassProxy('api.internal', 'localhost'),
+        true,
+        'env NO_PROXY must still apply when config sets its own list',
+      )
+      assert.equal(shouldBypassProxy('localhost', 'localhost'), true)
+      assert.equal(shouldBypassProxy('other.example', 'localhost'), false)
+    } finally {
+      if (saved === undefined) delete process.env.NO_PROXY
+      else process.env.NO_PROXY = saved
+    }
   })
 })
 
@@ -95,6 +148,22 @@ describe('resolveProxyForUrl', () => {
     assert.equal(
       resolveProxyForUrl('https://api.internal.example.com'),
       undefined,
+    )
+  })
+
+  it('matches host:port entries on default HTTP and HTTPS ports', () => {
+    const proxyUrl = 'http://127.0.0.1:7890'
+    assert.equal(
+      resolveProxyForUrl('https://default-port.fixture.invalid/', { proxyUrl, noProxy: 'default-port.fixture.invalid:443' }),
+      undefined,
+    )
+    assert.equal(
+      resolveProxyForUrl('http://default-port.fixture.invalid/', { proxyUrl, noProxy: 'default-port.fixture.invalid:80' }),
+      undefined,
+    )
+    assert.equal(
+      resolveProxyForUrl('https://default-port.fixture.invalid/', { proxyUrl, noProxy: 'default-port.fixture.invalid:8443' }),
+      proxyUrl,
     )
   })
 

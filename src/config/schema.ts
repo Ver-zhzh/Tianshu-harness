@@ -246,7 +246,8 @@ export const providerBaseSchema = z.object({
   temperature: z.number().min(0).max(2).optional(),
   /**
    * Per-provider HTTP proxy override; takes precedence over the global
-   * network.proxy. 消费点：客户端构造 undici ProxyAgent 经 fetch dispatcher 透传。
+   * network.proxy. 留空 = 继承全局代理；需要单个 provider 直连请用
+   * network.noProxy 按 host 绕过——空串表示「未设置」，不等于直连。
    */
   proxy: z.string().optional(),
   /** Explicit slow-thinking override; undefined keeps name/baseUrl heuristics. */
@@ -693,10 +694,10 @@ export type FetchConfig = z.infer<typeof fetchSchema>
 
 export const networkSchema = z.object({
   /** HTTP/HTTPS 代理地址（如 http://127.0.0.1:7890）。
-   *  优先于环境变量 HTTPS_PROXY/HTTP_PROXY。留空则跟随系统环境变量。 */
+   *  优先于环境变量 HTTPS_PROXY/HTTP_PROXY。留空则跟随环境变量，其次跟随 OS 系统代理。 */
   proxy: z.string().optional(),
-  /** 不走代理的域名列表（逗号分隔，支持 * 通配和 . 前缀）。
-   *  匹配语义对齐 curl/wget 的 NO_PROXY。留空则跟随 NO_PROXY 环境变量。 */
+  /** 不走代理的域名列表（逗号分隔）：*、host、.domain、host:port、IPv4 CIDR（如 10.0.0.0/8）。
+   *  与 NO_PROXY 环境变量叠加生效（取并集，不是覆盖）。留空时仅跟随 NO_PROXY。 */
   noProxy: z.string().optional(),
   /** 仅实际 HTTP/HTTPS 代理路径可信任域名的 198.18.0.0/15 fake-IP；不适用于纯 TUN。 */
   trustProxyFakeIp: z.boolean().default(false),

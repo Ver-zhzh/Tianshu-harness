@@ -33,6 +33,7 @@ import { gateToolDefinitions, isExtendedTool, toolMountRestriction } from './too
 import { applyDescriptionMode } from '../tools/description-compact.js'
 import { resolvePromptBlocks } from '../prompt/block-policy.js'
 import { wireUserInstructionsPersistence, agentPrefixBudget } from './user-instructions-runtime.js'
+import { waitForHistoryDurability } from './history-durability.js'
 import type { CompactCircuitBreakerState, ContextAnchor } from '../context/types.js'
 import type { ToolErrorClass } from '../tools/types.js'
 import type { FailureClass } from './failure-classifier.js'
@@ -1187,6 +1188,7 @@ export class AgentLoop {
       const listener = attachSessionPersistListener({ session: this.session, persist: this.persist })
       this._persistDrain = listener.drain
       this._persistCommitCompaction = listener.commitCompaction
+      this.config.promptEngine.setHistoryDurabilityBarrier(() => waitForHistoryDurability(() => listener.drain(), this.getRunSignal()))
 
       // S3 压缩事件持久化：把内存压缩台账接到 meta 的唯一落盘口。绑在这里
       // （而非各调用点）是刻意的——自动压缩 / 手动 /compact / rewind / TUI /

@@ -5,7 +5,7 @@ import { debugLog } from '../utils/debug.js'
 import { isHumanInput } from './input-origin.js'
 import type { AgentLoop } from './loop.js'
 import { randomUUID } from 'node:crypto'
-import { proveRewindHistory, LocalWorkerPolicyError, type ContinuationPrefixProof, type RewindGenerationAuthorization } from '../api/continuation-prefix.js'
+import { proveRewindHistory, HistoryIntegrityError, LocalWorkerPolicyError, type ContinuationPrefixProof, type RewindGenerationAuthorization } from '../api/continuation-prefix.js'
 import { invalidateSessionReadDedup } from '../tools/read-file.js'
 import { matchesCompactionHistory } from '../prompt/compaction-recovery.js'
 import { validateExecutionHistory } from '../api/execution-continuity.js'
@@ -65,8 +65,9 @@ export async function commitCompactedHistory(agent: AgentLoop, expected: OaiMess
     engine.authorizeCacheGeneration()
   } else if (prior) {
     if (JSON.stringify(persist.loadOai()) !== source) {
-      if (!known || !persist.matchesOaiSessionProjection(expected, MAX_SESSION_MESSAGE_JSON_CHARS)) {
-        throw new LocalWorkerPolicyError('压缩前的持久化历史不完整；禁止提交')
+      if (!known || (!persist.matchesOaiSessionProjection(expected, MAX_SESSION_MESSAGE_JSON_CHARS)
+        && !persist.canRepairOaiSessionProjection(expected, MAX_SESSION_MESSAGE_JSON_CHARS))) {
+        throw new HistoryIntegrityError('压缩前的持久化历史不完整；禁止提交', persist.describeHistoryIntegrity(expected))
       }
       await agent.commitBudgetHistory(expected, expected)
       expected = agent.session.getMessages().slice()
@@ -341,7 +342,12 @@ export function attachSessionPersistListener(deps: {
     await persist.flushSessionBuffer()
     // Background writes stay handled, but an explicit durability barrier must
     // never acknowledge history that failed to reach disk.
-    if (writeFailure) throw writeFailure
+    if (writeFailure) {
+      // Only clear a transient failure after the physical transcript proves that
+      // every queued mutation is durable; no rewrite or guessed rollback.
+      if (!persist.matchesOaiSessionProjection(session.getMessages())) throw writeFailure
+      writeFailure = undefined
+    }
   } }
   persistenceListeners.set(session, { persist, listener })
   return listener

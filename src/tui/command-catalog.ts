@@ -76,7 +76,7 @@ export const COMMAND_CATALOG: readonly CommandMeta[] = [
   { name: '/rollback', description: '检查点回滚（两阶段）：无参预览将还原/删除的文件，再 /rollback confirm 执行。与 /undo 不同——/undo 按本会话快照撤销，/rollback 回到 git 检查点', argsHint: '[confirm|cancel]' },
   { name: '/evidence', description: '显示上一轮的证据链——agent 的结论是基于哪些文件/命令得出的' },
   { name: '/context', description: '显示上下文账本（当前占用多少、哪些被压缩了、pinned anchors）' },
-  { name: '/repair-prefix', description: '连续性前缀证据检查与冻结投影修复（两阶段，需会话空闲）：无参预览并给出 recoveryId，再用 --confirm <recoveryId> 执行；保留聊天，不重放已完成工具，缓存重建一次', argsHint: '[--confirm <recoveryId>]' },
+  { name: '/repair-prefix', description: '连续性前缀证据检查与冻结投影修复（两阶段，需会话空闲）：--confirm 确认投影修复；--rescue 导出历史救援副本，--rescue-confirm 确认建立独立续接会话；不自动重放工具', argsHint: '[--confirm <recoveryId> | --rescue | --rescue-confirm <hash>]' },
   { name: '/memory', description: '显示会话记忆——session 条目/项目信息素/知识文件，长会话后查 agent 记住了什么' },
   { name: '/skill list', displayOnly: true, description: '列出可用技能（.rivet/skills/ 下已安装的）' },
   { name: '/skill install', displayOnly: true, description: '从 .claude/skills 安装技能到 .rivet/skills（需新开会话生效）' },

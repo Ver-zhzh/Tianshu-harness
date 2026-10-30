@@ -22,7 +22,7 @@ import { requestAuditContext } from './call-audit.js'
  * tables are intentionally duplicated — change one, check the other.
  */
 
-import { ProxyAgent } from 'undici'
+import { providerDispatcher } from './provider-network.js'
 import type { StreamClient, StreamCallbacks } from './stream-client.js'
 import type { OaiChatRequest, OaiUserMessage } from './oai-types.js'
 import type { ContentBlock, Usage } from './types.js'
@@ -72,6 +72,7 @@ export interface ResponsesClientConfig {
   maxRetries?: number
   retry?: ProviderRetryConfig
   proxy?: string
+  noProxy?: string
   providerName?: string
 }
 
@@ -106,12 +107,12 @@ function toResponsesUserContent(content: OaiUserMessage['content']): Record<stri
 }
 
 export class ResponsesClient implements StreamClient {
-  private readonly proxyDispatcher: ProxyAgent | undefined
+  private readonly proxyDispatcher: ReturnType<typeof providerDispatcher>
   private reasoningEffort: string | undefined
   private thinking: 'enabled' | 'disabled'
 
   constructor(private config: ResponsesClientConfig) {
-    this.proxyDispatcher = config.proxy ? new ProxyAgent(config.proxy) : undefined
+    this.proxyDispatcher = providerDispatcher(config.baseUrl, config)
     this.reasoningEffort = config.reasoningEffort
     this.thinking = config.thinking ?? 'enabled'
   }
