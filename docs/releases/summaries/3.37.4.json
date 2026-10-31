@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "version": "3.37.4",
+  "date": "2026-10-31",
+  "fullNotesUrl": "https://github.com/huiliyi37/Tianshu-harness/releases/tag/v3.37.4",
+  "locales": {
+    "zh": {
+      "title": "Windows 覆盖安装隔离修复",
+      "highlights": [
+        "修复 v3.37.3 覆盖安装时旧运行时目录清理失败、安装被阻断的问题。",
+        "旧运行时改为移入唯一隔离目录，不再以直接删除作为安装前提；隔离目录保留回滚材料。",
+        "只有改名失败才中止，日志记录真实源路径与目标路径；账号、配置和会话数据不参与隔离。"
+      ]
+    },
+    "en": {
+      "title": "Windows reinstall quarantine fix",
+      "highlights": [
+        "Fixed v3.37.3 reinstalls being blocked when the previous runtime directory could not be purged.",
+        "Previous runtimes are moved into unique quarantine directories instead of being deleted, preserving rollback data.",
+        "Only a failed rename aborts installation, with exact source and destination paths logged; accounts, settings, and sessions are not quarantined."
+      ]
+    }
+  }
+}
