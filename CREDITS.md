@@ -510,3 +510,4 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 - #543 feat: refresh MiniMax provider configuration（OPEN）
 - #546 fix(skills): 技能包总字节上限从 32MB 放宽到 100MB（OPEN）
 - #548 fix(security): worktree-scope 收容：相对穿越与 repo 外软链不再落进 worker 工作树（OPEN）
+- #547 fix(balance): 余额与平台查询走配置代理（OPEN）
