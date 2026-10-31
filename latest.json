@@ -1,11 +1,19 @@
 {
   "version": "3.37.4",
   "notes": "v3.36.1——子代理委派全灭热修：v3.35.0/3.36.0 全部子代理调用（delegate_task/delegate_batch/galaxy）必然失败的 parsePrompt 缺陷修复；工具调用协议加固（提示词只点名实际提供的工具、网关 functions. 归一）。",
-  "pub_date": "2026-10-31T03:57:51.005Z",
+  "pub_date": "2026-10-31T04:26:04.768Z",
   "platforms": {
     "windows-x86_64": {
       "url": "https://github.com/huiliyi37/Tianshu-harness/releases/download/v3.37.4/Tianshu_3.37.4_x64-setup.exe",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRaDZmcFdBUytLR2QwTlFTdGNmYlZyUHRQLzBSVk9UUndhcVdhRHdqa2NORTN1QVlSOHRsb1lNVmIzbC84TkU0ZkdscmRuZHdxbW9iTmZDK2tjYVlHL0ZVdU93QVhYY2c4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzNDE5MDcwCWZpbGU6VGlhbnNodV8zLjM3LjRfeDY0LXNldHVwLmV4ZQp4YUJsVnRLeFBNSmdlMEV4WGR3bkZkK0hpUFI4ZE9MSnZPK1B5a1pleWZrQ2pQZ2R3YmZOMW1SdDNDZFNqbXY2WDdLdlFCc2x3NTJvc3ZXTDNNS1pBQT09Cg=="
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRaDZmcFdBUytLR1RSeGMxOFJhNitSQ0FWUWZPUGM3ajFic3ZYREtiQTlsamlQaFpkeGphSFBYQ3M5cGpSbVZKWHpFNFJtZ1hRNWlIdU9ZOVZJeEdnQ2FFYkl4UXYyb1FBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzNDE5OTUyCWZpbGU6VGlhbnNodV8zLjM3LjRfeDY0LXNldHVwLmV4ZQoyajFBQmQvK2EwSldrSWtBdFMxcXlid3IrcWhlU3lWRUlxdmtTbFJoQnhzWXNSY28xUGNuZmFvMWZXQU11UHV3NGJEQlJYU21IWE45Nit3d0NIdmRCQT09Cg=="
+    },
+    "darwin-aarch64": {
+      "url": "https://github.com/huiliyi37/Tianshu-harness/releases/download/v3.37.4/Tianshu_3.37.4_aarch64.app.tar.gz",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRaDZmcFdBUytLR1I3cnhwcWxDdCs2NnpIbEorMDJBRFJWVU45aWVQdnpxNjdvQyswTkl2ZkNBVzRZNUk2V01zNXlNTTNPeE5NVkYxcHFPM29PbW1CWnljazFQTjRmcmdFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzNDIwMzU1CWZpbGU6VGlhbnNodS5hcHAudGFyLmd6CldZeENQRlV1RkQzTVNKTk41YUlGUTdmRUZya3JNS0V4cmZWbVA2OFMvczFlRzlhdGxPaFB4MlFSbTZWeG96RVNvaVVjRGxoZnhoamRaT2NWK2R5Y0NBPT0K"
+    },
+    "darwin-x86_64": {
+      "url": "https://github.com/huiliyi37/Tianshu-harness/releases/download/v3.37.4/Tianshu_3.37.4_x64.app.tar.gz",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRaDZmcFdBUytLR1pTN3h6cDgxL1VWU0tZZ3RLaHVISDJabjdGQ2VGS3ZVK2taMzNUczNKZEVvNmdkdmpRSjBGNUlYVmxwSlUyRC91N0d4d0pCVXB6aFpZL1Nwa1V1cnc0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzNDIwNzYyCWZpbGU6VGlhbnNodS5hcHAudGFyLmd6CkNjNlBpRW1HV0h1a1h1SXdlL3FmcmhqTlNaaXllZW1YZmU1ek44eldMSGRSSUxPY3dtTHJnalNxWXFwTHY5YjZqWmYxUDdnbEM5eU9zbjVTcUpQcERRPT0K"
     }
   }
 }
