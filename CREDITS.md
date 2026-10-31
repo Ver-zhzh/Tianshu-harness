@@ -508,3 +508,4 @@ contributions for this graph`；`including commit co-authors` 仅 GHES 版本成
 署名：octo-patch <266937838+octo-patch@users.noreply.github.com>
 
 - #543 feat: refresh MiniMax provider configuration（OPEN）
+- #546 fix(skills): 技能包总字节上限从 32MB 放宽到 100MB（OPEN）
